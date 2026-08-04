@@ -33,6 +33,7 @@ the program to print the offending file + token and exit 1.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -128,9 +129,30 @@ def run(repo_root: Path, scanner_input: Path) -> int:
                 continue
             try:
                 content = p.read_bytes()
-                text = content.decode("utf-8", errors="replace")
-            except Exception:
+            except OSError as exc:
+                # Fail closed: an unreadable committed file
+                # is recorded as a violation. The scanner
+                # does not silently skip unreadable files
+                # because a real secret could be hiding
+                # behind a permission error.
+                violations.append((rel, f"unreadable: {exc!r}"))
                 continue
+            # Decode: detect UTF-16LE / UTF-16BE BOMs before
+            # falling back to UTF-8. UTF-8 decoding with
+            # errors="replace" would otherwise insert NUL
+            # bytes between every byte of a UTF-16-encoded
+            # file and the scanner would miss the forbidden
+            # tokens in such a file.
+            if content.startswith(b"\xff\xfe"):
+                encoding = "utf-16-le"
+            elif content.startswith(b"\xfe\xff"):
+                encoding = "utf-16-be"
+            else:
+                encoding = "utf-8"
+            try:
+                text = content.decode(encoding, errors="replace")
+            except (LookupError, UnicodeDecodeError):
+                text = content.decode("utf-8", errors="replace")
             for token in forbidden:
                 if token not in text:
                     continue
@@ -147,10 +169,86 @@ def run(repo_root: Path, scanner_input: Path) -> int:
     return 0
 
 
+def _git_ls_files(repo_root: Path) -> set:
+    """Return the set of paths tracked by git, using
+    ``git ls-files -z`` to handle any unusual filenames.
+
+    Used by the tracked-runtime-state check: a runtime-state
+    path is forbidden to be tracked even if ``.gitignore``
+    is bypassed by ``git add -f``. The scanner reads the
+    tracked path set and rejects any tracked runtime-state
+    path.
+    """
+    import subprocess as _subprocess
+    proc = _subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        capture_output=True, timeout=30,
+    )
+    if proc.returncode != 0:
+        # If git is not available we cannot verify tracked
+        # paths; surface that as a scan failure.
+        raise RuntimeError(
+            f"git ls-files failed: {proc.stderr.decode()!r}"
+        )
+    # NUL-separated paths.
+    return {
+        p.decode()
+        for p in proc.stdout.split(b"\x00")
+        if p
+    }
+
+
+RUNTIME_STATE_TRACKED_PATTERNS = (
+    re.compile(r"(^|/)state(/|$)"),
+    re.compile(r"(^|/)logs(/|$)"),
+    re.compile(r"(^|/)(lock|heartbeat)$"),
+    re.compile(r"(^|/)worker_lease\.json$"),
+    re.compile(r"(^|/)quota_state\.json$"),
+    re.compile(r"(^|/)unconsumed_events\.json$"),
+    re.compile(r"(^|/)launched_events\.json$"),
+    re.compile(r"(^|/)snapshot_[ab]\.json$"),
+    re.compile(r"(^|/)readiness_state\.json$"),
+    re.compile(r"(^|/)run_state\.json$"),
+    re.compile(r"(^|/)review_requests(/|$)"),
+    re.compile(r"MERGE_TERMINAL_EVIDENCE\.json$"),
+    re.compile(r"PAUSED_CONTEXT_HANDOFF\.json$"),
+    re.compile(r"supervisor\.log$"),
+)
+
+
+def _check_no_tracked_runtime_state(repo_root: Path) -> list:
+    """Reject any tracked path that matches a runtime-state
+    pattern. This catches ``git add -f`` bypassing the
+    ``.gitignore``.
+    """
+    try:
+        tracked = _git_ls_files(repo_root)
+    except RuntimeError as exc:
+        return [(Path("__git__"), str(exc))]
+    bad = []
+    for p in sorted(tracked):
+        for pat in RUNTIME_STATE_TRACKED_PATTERNS:
+            if pat.search(p):
+                bad.append(Path(p))
+                break
+    return bad
+
+
 def main() -> int:
     repo_root = Path(os.getcwd()).resolve()
     scanner_input = repo_root / SCANNER_INPUT_REL
-    return run(repo_root, scanner_input)
+    rc = run(repo_root, scanner_input)
+    if rc != 0:
+        return rc
+    # Tracked-runtime-state enforcement.
+    bad = _check_no_tracked_runtime_state(repo_root)
+    if bad:
+        print("FAIL: tracked-runtime-state paths in repository:")
+        for p in bad:
+            print(f"  {p}: matches runtime-state pattern")
+        return 1
+    print("OK: committed-state-scan")
+    return 0
 
 
 if __name__ == "__main__":

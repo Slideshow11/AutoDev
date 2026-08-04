@@ -359,3 +359,110 @@ def test_no_broad_internal_compatibility_rename_occurred():
     assert "autocoder_supervisor" in pkg_init
     pyproject = (REPO_ROOT / "pyproject.toml").read_text()
     assert 'autocoder_supervisor*' in pyproject
+
+
+def test_canonical_scanner_detects_utf16le_bom(tmp_path):
+    """A forbidden token in a UTF-16LE BOM-encoded file
+    must be detected by the canonical scanner.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import run, SCANNER_INPUT_REL
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("gho_\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    # Construct a UTF-16LE file containing the forbidden token.
+    payload = "REAL = 'g" + "ho_" + "REALSEC'\n"
+    (src / "le.py").write_bytes(
+        b"\xff\xfe" + payload.encode("utf-16-le")
+    )
+    rc = run(tmp_path, scanner_input)
+    assert rc == 1
+
+
+def test_canonical_scanner_detects_utf16be_bom(tmp_path):
+    """A forbidden token in a UTF-16BE BOM-encoded file
+    must be detected by the canonical scanner.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import run, SCANNER_INPUT_REL
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("gho_\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    payload = "REAL = 'g" + "ho_" + "REALSEC'\n"
+    (src / "be.py").write_bytes(
+        b"\xfe\xff" + payload.encode("utf-16-be")
+    )
+    rc = run(tmp_path, scanner_input)
+    assert rc == 1
+
+
+def test_canonical_scanner_fails_closed_on_unreadable_file(tmp_path):
+    """An unreadable committed file fails the scanner (does
+    NOT silently continue).
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import run, SCANNER_INPUT_REL
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("gho_\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    leak = src / "leak.py"
+    leak.write_text("no forbidden token here\n")
+    # Make the file unreadable to the current user.
+    import os as _os
+    _os.chmod(leak, 0o000)
+    try:
+        rc = run(tmp_path, scanner_input)
+    finally:
+        _os.chmod(leak, 0o644)
+    assert rc == 1
+
+
+def test_canonical_scanner_rejects_tracked_runtime_state(tmp_path, monkeypatch):
+    """A runtime-state path that is ``git add -f``'d into
+    the repository (bypassing ``.gitignore``) is rejected by
+    the tracked-runtime-state enforcement.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import (
+        main as scanner_main,
+        SCANNER_INPUT_REL,
+    )
+    repo = tmp_path
+    # The scanner's main() uses os.getcwd() to locate the
+    # repository. Switch into the test repo so the
+    # git ls-files call walks our staged tree, not the
+    # AutoDev repo containing this test file.
+    monkeypatch.chdir(repo)
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email",
+         "x@example.com"], check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "x"],
+        check=True,
+    )
+    scanner_input = repo / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("gho_\n", encoding="utf-8")
+    (repo / "src").write_text("# placeholder\n")
+    subprocess.run(["git", "-C", str(repo), "add", "src"],
+                   check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m",
+                   "init"], check=True)
+    # Force-add a runtime-state path (bypasses .gitignore).
+    (repo / "heartbeat").write_text("stale heartbeat\n")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "-f", "heartbeat"],
+        check=True,
+    )
+    rc = scanner_main()
+    assert rc == 1, "tracked runtime-state path must fail the scan"
+

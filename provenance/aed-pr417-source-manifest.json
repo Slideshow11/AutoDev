@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-04T19:49:17Z",
+  "captured_utc": "2026-08-04T20:01:28Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -189,8 +189,8 @@
       "source_path": null,
       "destination_path": ".github/workflows/ci.yml",
       "source_sha256": null,
-      "destination_sha256": "43d2639d2ecb748057b845b944ddc7312df946adc61eafe37f83e6e606338595",
-      "destination_size_bytes": 4020,
+      "destination_sha256": "c5e021ef16fa22727b5f222a51d79817b305baeacb057b7efa46d92d587e551f",
+      "destination_size_bytes": 4392,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -252,8 +252,8 @@
       "source_path": null,
       "destination_path": "scripts/canonical_scanner.py",
       "source_sha256": null,
-      "destination_sha256": "ce48be52899cc2dd0709eb713833e7ba7bf369317adcc7090aabfdc104ea67c4",
-      "destination_size_bytes": 5516,
+      "destination_sha256": "a71db21634153bc47e52e9c8b608a52ccd80349056f0de17cb25669e3edf0b92",
+      "destination_size_bytes": 9054,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -270,8 +270,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "8e4283b20b5d170e31236d90b7c65813c8edd1333f16a746da47e9a8fe0f3618",
-      "destination_size_bytes": 13617,
+      "destination_sha256": "4b1ff1eb589decc73d72db07d5121df7c0979adc36f7812f94ce3ccba1f7016a",
+      "destination_size_bytes": 17527,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }
