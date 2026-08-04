@@ -1,0 +1,65 @@
+[Unit]
+Description=AED Autocoder Supervisor (source-controlled)
+Documentation=https://github.com/Slideshow11/Automated-Edge-Discovery
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# All paths below are absolute. The systemd template unit
+# is copied to /etc/systemd/system/aed-supervisor@.service
+# and instantiated as aed-supervisor@<instance>.service.
+#
+# The supervisor package is installed at /opt/aed-supervisor
+# (via the documented procedure in docs/INSTALL.md). The
+# install root contains:
+#
+#     /opt/aed-supervisor/
+#     ├── pyproject.toml
+#     └── autocoder_supervisor/   <- the Python package
+#
+# ``pip install /opt/aed-supervisor`` registers the package
+# in the active Python environment's site-packages, so no
+# PYTHONPATH override is needed.
+#
+# ExecStart selection:
+#
+#   * SYSTEM-WIDE install (default):
+#       ExecStart uses /usr/bin/env python3 which resolves
+#       to the system Python where the package is installed.
+#
+#   * VIRTUALENV install:
+#       Replace the ExecStart line with the venv Python,
+#       e.g. /opt/aed-supervisor/venv/bin/python3. The
+#       venv install keeps the supervisor's interpreter
+#       pinned to a known-good Python.
+#
+# Pick the ExecStart that matches your install and comment
+# out the other before enabling the service.
+WorkingDirectory=/var/lib/aed-supervisor/%i
+Environment=HOME=/var/lib/aed-supervisor/%i
+Environment=PYTHONPATH=
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=AED_SUPERVISOR_CONFIG=/etc/aed-supervisor/%i/aed-supervisor.toml
+Environment=AED_PR_NUMBER=__SET_ME__
+Environment=AED_REPO_OWNER=__SET_ME__
+Environment=AED_REPO_NAME=__SET_ME__
+Environment=AED_AUTHORITATIVE_HEAD=__SET_ME__
+# SYSTEM-WIDE: leave this ExecStart uncommented.
+ExecStart=/usr/bin/env python3 -m autocoder_supervisor.supervisor --config /etc/aed-supervisor/%i/aed-supervisor.toml
+# VIRTUALENV: comment out the line above and uncomment the one below.
+#ExecStart=/opt/aed-supervisor/venv/bin/python3 -m autocoder_supervisor.supervisor --config /etc/aed-supervisor/%i/aed-supervisor.toml
+Restart=always
+RestartSec=10
+# KillMode=control-group: when the service is stopped, the
+# entire control group (including the worker and its
+# descendants) is terminated. This prevents orphaned workers
+# that linger after the supervisor dies.
+KillMode=control-group
+TimeoutStopSec=30
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=default.target
+

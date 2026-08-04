@@ -1,0 +1,12 @@
+/home/max/
+/root/
+/Users/
+/~/.hermes/
+gho_
+ghp_
+ghs_
+sk-
+-----BEGIN
+aws_access_key_id
+aws_secret_access_key
+oauth_token:

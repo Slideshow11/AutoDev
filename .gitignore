@@ -1,0 +1,24 @@
+# Python build and cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Virtualenvs
+.venv/
+venv/
+
+# Test artefacts
+.pytest_cache/
+
+# Autocoder supervisor runtime state (never committed).
+# These files are generated when the supervisor runs;
+# committing them would leak runtime state, PIDs, lease
+# evidence, or user-specific paths.
+autocoder_supervisor/state/
+autocoder_supervisor/logs/
+autocoder_supervisor/lock
+autocoder_supervisor/heartbeat
+autocoder_supervisor/supervisor.log

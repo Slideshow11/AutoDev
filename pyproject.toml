@@ -1,0 +1,36 @@
+# Autocoder supervisor — install metadata.
+#
+# This manifest sits at the install root alongside the
+# ``autocoder_supervisor/`` package directory so that
+# ``pip install /opt/aed-supervisor`` (or any other install
+# root) finds both the package and its manifest together.
+# The documented install procedure is:
+#
+#     sudo cp -r autocoder_supervisor /opt/aed-supervisor
+#     sudo cp pyproject.toml /opt/aed-supervisor/pyproject.toml
+#     sudo python3 -m pip install /opt/aed-supervisor
+#
+# ``[tool.setuptools.packages.find]`` searches ``where = ["."]``
+# relative to the manifest (i.e. the install root) for a
+# subdirectory named ``autocoder_supervisor`` and packages it.
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aed-supervisor"
+version = "1.0.0"
+description = "AutoDev supervisor (autocoder_supervisor package) v1"
+requires-python = ">=3.10"
+# Python <3.11 does not have the tomllib stdlib module.
+# The supervisor's config.py falls back to ``tomli`` on those
+# versions, so we declare the dependency conditionally.
+dependencies = [
+    'tomli>=1.1; python_version<"3.11"',
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["autocoder_supervisor*"]
+exclude = ["tests*", "provenance*", "docs*", "examples*", "service*"]

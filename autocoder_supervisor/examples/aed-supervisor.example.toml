@@ -1,0 +1,88 @@
+# Example configuration for the source-controlled Autocoder
+# supervisor. Copy this file to e.g. /etc/aed-supervisor.toml
+# and edit it for your environment.
+#
+# The validator (``autocoder_supervisor.validate``) rejects
+# credential-shaped values and absolute user-specific paths,
+# so this template is safe to commit.
+
+schema_version = "aed.autocoder_supervisor.v1"
+
+# A unique identifier for THIS supervisor instance. Two
+# supervisors monitoring the same PR must use different
+# instance_ids, and their state directories must be disjoint.
+instance_id = "aed-supervisor-canary"
+
+# Where the supervisor keeps its durable state. The validator
+# enforces non-user-specific absolute paths so the committed
+# tree cannot leak an operator's home directory.
+state_dir = "/var/lib/aed-supervisor/state"
+
+# The git working tree the supervisor will inspect (and in which
+# it will spawn its child worker). Must be a non-user-specific
+# absolute path.
+working_checkout = "/opt/Automated-Edge-Discovery"
+
+# Plaintext log + heartbeat + lock paths. The state directory's
+# parent (e.g. /var/lib/aed-supervisor) is the supervisor home.
+log_path = "/var/log/aed-supervisor/supervisor.log"
+heartbeat_path = "/var/lib/aed-supervisor/heartbeat"
+lock_path = "/var/lib/aed-supervisor/lock"
+
+# The worker command. The supervisor substitutes {prompt} and
+# {session_id} at launch time. Do NOT embed credentials here.
+worker_command = [
+    "/usr/local/bin/hermes",
+    "chat",
+    "-q",
+    "{prompt}",
+    "--resume",
+    "{session_id}",
+    "--no-restore-cwd",
+    "--accept-hooks",
+    "--yolo",
+    "-Q",
+]
+worker_session_id = "aed-supervisor-canary-session"
+worker_session_name = "AED-Autocoder-Supervisor"
+
+# Minimum seconds between consecutive worker launches.
+cooldown_seconds = 900
+
+# Resume-prompt template. Use {pr_number}, {repo_owner},
+# {repo_name}, {branch}, {head}, {session_id}.
+resume_prompt_template = '[AED-AUTOCODER RESUME — standing authorization] Continue the repair cycle for PR {pr_number} ({repo_owner}/{repo_name}, branch {branch}). Authoritative head: {head}. Inspect every applicable review surface. Apply every valid-current repair autonomously. Verify by re-running the focused suite and the gate. Never post a duplicate review request for an unchanged head. Stop only when the run reaches a terminal classification. Standing authorization is already recorded in run_state.json.'
+
+# Policy. human_boundary is locked to "merge_only" by the
+# stabilization contract.
+human_boundary = "merge_only"
+
+required_review_providers = ["coderabbit"]
+optional_review_providers = ["codex"]
+
+# Required and optional providers must remain independent: a
+# paused optional provider must never globally pause the run.
+provider_states_are_independent = true
+
+# When Codex is rate-limited, do NOT post Codex recovery
+# review requests. Codex is OPTIONAL and the supervisor will
+# wait for its quota reset (or for the operator's standing
+# direction) before resuming.
+post_codex_recovery_request = false
+
+# Cadence.
+heartbeat_seconds = 120
+quiet_window_seconds = 180
+
+# Quota retry cadence.
+quota_retry_initial_seconds = 3600
+quota_retry_backoff_seconds = 21600
+quota_backoff_after_retry_count = 2
+
+# Optional: per-provider known quota reset times (ISO 8601 UTC).
+# Leave empty if you don't have a known reset time. When a
+# reset time is absent, the supervisor relies on
+# post_codex_recovery_request = false above to suppress Codex
+# recovery review requests.
+[provider_quota_reset]
+# codex = "2026-08-08T14:09:00Z"
