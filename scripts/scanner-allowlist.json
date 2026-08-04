@@ -2,7 +2,7 @@
   "_note": "Files in this allow-list may contain the corresponding forbidden tokens as part of their documented purpose (validator regexes, test fixtures, invariants ledger, scanner data input). The scanner reads this file rather than embedding the mappings in its own source. Adding a file here without a clear documentary purpose is grounds for reviewer rejection.",
   "files": {
     "scripts/scanner-allowlist.json": [
-      "/home/max/",
+      "/home/<user>/",
       "/root/",
       "/Users/",
       "gho_",
@@ -24,16 +24,17 @@
       "ghp_",
       "ghs_",
       "oauth_token:",
-      "sk-"
+      "sk-",
+      "/home/<user>/"
     ],
     "autocoder_supervisor/supervisor.py": [
-      "/home/max/",
+      "/home/<user>/",
       "/root/",
       "sk-",
       "oauth_token:"
     ],
     "autocoder_supervisor/contracts.py": [
-      "/home/max/",
+      "/home/<user>/",
       "/root/"
     ],
     "INVARIANTS.md": [
@@ -43,11 +44,11 @@
       "oauth_token:"
     ],
     "tests/test_autocoder_supervisor.py": [
-      "/home/max/",
+      "/home/<user>/",
       "ghp_"
     ],
     "tests/test_extraction_provenance.py": [
-      "/home/max/",
+      "/home/<user>/",
       "/root/",
       "/Users/",
       "gho_",

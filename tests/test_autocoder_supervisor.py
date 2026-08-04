@@ -1447,3 +1447,102 @@ def test_required_checks_green_only_accepts_completed_status(
             "must pass"
         )
 
+
+def test_correlate_provider_review_fails_closed_on_missing_timestamps():
+    """correlate_provider_review must fail closed when
+    either the request timestamp or the comment / review
+    timestamp is missing. A missing timestamp MUST NOT
+    cause a comment or review to be counted as a response
+    to the request.
+    """
+    # request_record with a parseable timestamp.
+    request_record = {
+        "head_sha": "012156d4286893f6728da1026429166d26dfb155",
+        "requested_at": "2026-08-04T00:00:00Z",
+    }
+    # Comments with diverse timestamps.
+    surfaces = {
+        "issue_comments": [
+            # Good timestamp, after request: counts.
+            {"id": 1, "created_at": "2026-08-04T01:00:00Z",
+             "body": "walkthrough", "login": "coderabbitai[bot]"},
+            # Missing timestamp: MUST NOT count.
+            {"id": 2, "created_at": None,
+             "body": "walkthrough", "login": "coderabbitai[bot]"},
+            # Empty timestamp: MUST NOT count.
+            {"id": 3, "created_at": "",
+             "body": "walkthrough", "login": "coderabbitai[bot]"},
+        ],
+        "reviews": [
+            {"id": 10, "submitted_at": None, "state": "APPROVED"},
+            {"id": 11, "submitted_at": "", "state": "APPROVED"},
+        ],
+    }
+    corr = supervisor.correlate_provider_review(
+        "coderabbit", "012156d4286893f6728da1026429166d26dfb155",
+        surfaces, request_record, token="",
+    )
+    # Only the comment with id=1 counts; the rest are
+    # excluded because of missing/empty timestamps.
+    assert corr["responses_after_request"] == 1, corr
+    assert corr["walkthrough_present"] is True, corr
+    # `review_present` is False because the only reviews
+    # have missing/empty timestamps.
+    assert corr["review_present"] is False, corr
+
+
+def test_correlate_provider_review_fails_closed_on_missing_request_ts():
+    """If the request_record has an unparseable timestamp,
+    NO comment or review should be counted as covered.
+    """
+    request_record = {
+        "head_sha": "012156d4286893f6728da1026429166d26dfb155",
+        "requested_at": "not-a-valid-timestamp",
+    }
+    surfaces = {
+        "issue_comments": [
+            {"id": 1, "created_at": "2026-08-04T01:00:00Z",
+             "body": "walkthrough", "login": "coderabbitai[bot]"},
+        ],
+        "reviews": [
+            {"id": 10, "submitted_at": "2026-08-04T01:00:00Z",
+             "state": "APPROVED"},
+        ],
+    }
+    corr = supervisor.correlate_provider_review(
+        "coderabbit", "012156d4286893f6728da1026429166d26dfb155",
+        surfaces, request_record, token="",
+    )
+    # None of the coverage is granted because the request
+    # timestamp is unparseable.
+    assert corr["responses_after_request"] == 0, corr
+    assert corr["walkthrough_present"] is False, corr
+    assert corr["review_present"] is False, corr
+
+
+def test_supervisor_config_dataclass_has_no_from_file_classmethod():
+    """SupervisorConfig does not have a ``from_file`` classmethod.
+    The docstring previously referenced one that does not exist.
+    """
+    assert not hasattr(supervisor_contracts.SupervisorConfig, "from_file")
+    # from_dict must still exist.
+    assert hasattr(supervisor_contracts.SupervisorConfig, "from_dict")
+    # The docstring must not mention ``from_file`` in
+    # the canonical sentence that described the loader.
+    src = inspect.getsource(supervisor_contracts.SupervisorConfig)
+    assert "``from_file`` reads a TOML file" not in src
+
+
+def test_exact_head_snapshot_contract_has_provider_issue_comments():
+    """ExactHeadSnapshotDict includes the persisted
+    ``_provider_issue_comments`` index produced by
+    capture_live_snapshot.
+    """
+    from autocoder_supervisor.contracts import ExactHeadSnapshotDict
+    # TypedDict annotations are stored in __annotations__.
+    annotations = ExactHeadSnapshotDict.__annotations__
+    assert "_provider_issue_comments" in annotations, (
+        "_provider_issue_comments must be declared in "
+        "ExactHeadSnapshotDict"
+    )
+

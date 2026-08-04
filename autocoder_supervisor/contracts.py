@@ -75,8 +75,9 @@ class SupervisorConfigDict(TypedDict, total=False):
 class SupervisorConfig:
     """Strongly-typed supervisor configuration object.
 
-    ``from_dict`` validates the input and constructs the object;
-    ``from_file`` reads a TOML file and calls ``from_dict``.
+    ``from_dict`` validates the input and constructs the
+    object. TOML files are loaded by ``config.load_config``,
+    which then calls ``from_dict``.
 
     The supervisor module populates its module-level globals
     from a ``SupervisorConfig`` instance at import time so that
@@ -273,7 +274,23 @@ class ReviewerThreadDict(TypedDict, total=False):
     outdated: bool
 
 
+class ReviewerProviderIssueCommentDict(TypedDict, total=False):
+    """A single issue comment limited to the fields used by
+    provider-in-progress and walkthrough detection."""
+    id: int
+    created_at: str
+    login: str
+    body: str
+
+
 class ReviewerProviderSnapshotDict(TypedDict, total=False):
+    """Per-provider snapshot entry persisted into the live
+    snapshot."""
+    paused: bool
+    in_progress: bool
+    latest_review_ts: Optional[str]
+    latest_comment_id: Optional[int]
+
     paused: bool
     in_progress: bool
     latest_review_ts: Optional[str]
@@ -292,6 +309,15 @@ class ExactHeadSnapshotDict(TypedDict, total=False):
     issue_comments: List[ReviewerCommentDict]
     required_checks: Dict[str, ReviewerCheckDict]
     providers: Dict[str, ReviewerProviderSnapshotDict]
+    # Per-provider issue-comment index. The supervisor
+    # filtered issue_comments so the in_progress and
+    # walkthrough detectors can scan only the comments
+    # authored by each provider's bot accounts. The
+    # field is part of the contract so callers and
+    # consumers can rely on the index existing.
+    _provider_issue_comments: Dict[
+        str, List[ReviewerProviderIssueCommentDict]
+    ]
     unconsumed_event_ids: List[str]
 
 

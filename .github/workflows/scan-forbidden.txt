@@ -1,4 +1,4 @@
-/home/max/
+/home/<user>/
 /root/
 /Users/
 /~/.hermes/

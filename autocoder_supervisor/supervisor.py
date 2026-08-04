@@ -1301,15 +1301,23 @@ def correlate_provider_review(
     request_head = request_record.get("head_sha")
     for c in surfaces["issue_comments"]:
         ts = parse_iso(c.get("created_at"))
-        within_request_window = (
-            request_ts is None
-            or ts is None
-            or ts >= request_ts
-            or (
-                abs((ts - request_ts).total_seconds()) <= 300
-                and "in progress" in (c.get("body") or "").lower()
+        # Fail closed: a missing or unparseable timestamp on
+        # either side of the comparison excludes the comment
+        # from response coverage. Treating a missing
+        # timestamp as "within the window" defeats the
+        # timestamp-based review-response coverage and
+        # lets stale comments or unparseable records count
+        # as responses to the request.
+        if request_ts is None or ts is None:
+            within_request_window = False
+        else:
+            within_request_window = (
+                ts >= request_ts
+                or (
+                    abs((ts - request_ts).total_seconds()) <= 300
+                    and "in progress" in (c.get("body") or "").lower()
+                )
             )
-        )
         if within_request_window:
             result["responses_after_request"] += 1
             if result["latest_response_timestamp"] is None or (
@@ -1333,7 +1341,9 @@ def correlate_provider_review(
                     result["walkthrough_present"] = True
     for r in surfaces["reviews"]:
         ts = parse_iso(r.get("submitted_at"))
-        if request_ts is None or ts is None or ts >= request_ts:
+        # Fail closed: a missing timestamp on either side
+        # excludes the review from response coverage.
+        if request_ts is not None and ts is not None and ts >= request_ts:
             result["review_present"] = True
             if result["latest_response_timestamp"] is None or (
                 ts and parse_iso(
