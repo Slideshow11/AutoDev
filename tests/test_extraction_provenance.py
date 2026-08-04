@@ -303,9 +303,8 @@ def test_extraction_narrative_does_not_claim_full_history_preserved():
 
 
 def test_extraction_manifest_records_distinct_fields():
-    """The terminal-evidence schema (mirrored in
-    ``aed-pr417-source-manifest.json``) keeps these fields
-    distinct:
+    """The persisted terminal-evidence object on the
+    manifest keeps these fields distinct:
 
     - ``authorized_head_sha`` (the PR head authorised to
       merge; not a parent of the squash commit);
@@ -316,25 +315,34 @@ def test_extraction_manifest_records_distinct_fields():
       the squash commit);
     - ``merge_method`` (always "squash" for this flow).
 
-    For a squash example,
-    ``merge_commit_parents == [base_sha_before_merge]``
-    must hold.
+    The test reads the persisted values from the manifest
+    rather than constructing a synthetic dictionary so it
+    detects an incorrect provenance record.
     """
-    base_sha = "9697b136f311b340e4794c8a20e2568fc2e2d08a"
-    squash_sha = "b57fcaad806c68b93668bcd318fa26ab15a8ab40"
-    authorized_head = "18ba0df49d2a19779e350d6df5a102b254cbeed7"
-    terminal_evidence = {
-        "schema": "autocoder.pr417.merge_terminal_evidence.v1",
-        "authorized_head_sha": authorized_head,
-        "base_sha_before_merge": base_sha,
-        "merge_commit_sha": squash_sha,
-        "merge_commit_parents": [base_sha],
-        "merge_method": "squash",
-    }
-    assert authorized_head != base_sha
-    assert terminal_evidence["merge_commit_parents"] == [base_sha]
-    assert authorized_head not in terminal_evidence["merge_commit_parents"]
-    assert squash_sha
+    data = _read_provenance()
+    terminal = data.get("terminal_evidence")
+    assert terminal is not None, (
+        "manifest is missing a terminal_evidence object"
+    )
+    required_fields = (
+        "authorized_head_sha",
+        "base_sha_before_merge",
+        "merge_commit_sha",
+        "merge_commit_parents",
+        "merge_method",
+    )
+    for name in required_fields:
+        assert name in terminal, (
+            f"terminal_evidence is missing field {name!r}"
+        )
+    assert terminal["merge_commit_parents"] == [
+        terminal["base_sha_before_merge"]
+    ]
+    assert (
+        terminal["authorized_head_sha"]
+        not in terminal["merge_commit_parents"]
+    )
+    assert terminal["merge_method"] == "squash"
 
 
 def test_distribution_name_is_autocoder_supervisor():

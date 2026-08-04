@@ -7,18 +7,34 @@ versions.
 
 ## In-place upgrade (same `v1` schema)
 
+The supervisor imports the package from `site-packages`
+(since `pip install /opt/aed-supervisor` registers it with
+the system Python or the venv Python). The source-tree swap
+alone does NOT update the installed distribution; the
+operator must reinstall.
+
 ```bash
 sudo systemctl stop aed-supervisor@<instance>.service
-# Remove any pre-existing staging dir from a previous
-# interrupted upgrade. Without this, `cp -r` would preserve
-# obsolete files inside the new staging tree.
+
+# Stage the new source tree in a temporary install root.
 sudo rm -rf /opt/aed-supervisor.new
 sudo install -d /opt/aed-supervisor.new
 sudo cp -r autocoder_supervisor /opt/aed-supervisor.new/
 sudo cp pyproject.toml /opt/aed-supervisor.new/pyproject.toml
-# Replace the old install atomically:
-sudo mv /opt/aed-supervisor /opt/aed-supervisor.old
-sudo mv /opt/aed-supervisor.new /opt/aed-supervisor
+
+# Reinstall the staged distribution with the runtime
+# interpreter. The supervisor's state files (lease,
+# snapshots, readiness) are unchanged.
+if [ -x /opt/aed-supervisor/venv/bin/python ]; then
+    # VIRTUALENV install
+    sudo /opt/aed-supervisor/venv/bin/pip install \
+        --upgrade /opt/aed-supervisor.new
+else
+    # SYSTEM-WIDE install
+    sudo python3 -m pip install --upgrade /opt/aed-supervisor.new
+fi
+
+sudo rm -rf /opt/aed-supervisor.new
 sudo systemctl start aed-supervisor@<instance>.service
 ```
 
@@ -52,4 +68,5 @@ Look for:
 - the absence of `lease_alive` failures
 
 If the upgrade went well, the readiness state and lease are
-preserved; only the source tree changes.
+preserved; only the source tree and the installed
+distribution change.

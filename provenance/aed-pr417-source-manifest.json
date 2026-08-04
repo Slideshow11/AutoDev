@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-04T20:01:28Z",
+  "captured_utc": "2026-08-04T20:15:18Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -8,10 +8,20 @@
   "destination_repository": "Slideshow11/AutoDev",
   "destination_product": "AutoDev",
   "destination_branch": "feat/extract-supervisor-v1",
+  "terminal_evidence": {
+    "schema": "autocoder.pr417.merge_terminal_evidence.v1",
+    "authorized_head_sha": "18ba0df49d2a19779e350d6df5a102b254cbeed7",
+    "base_sha_before_merge": "9697b136f311b340e4794c8a20e2568fc2e2d08a",
+    "merge_commit_sha": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
+    "merge_commit_parents": [
+      "9697b136f311b340e4794c8a20e2568fc2e2d08a"
+    ],
+    "merge_method": "squash"
+  },
   "summary": {
     "files_from_source": 17,
-    "byte_identical_files": 4,
-    "transformed_files": 13,
+    "byte_identical_files": 2,
+    "transformed_files": 15,
     "newly_added_files": 10
   },
   "files": [
@@ -39,9 +49,9 @@
       "source_path": "scripts/local/autocoder_supervisor/README.md",
       "destination_path": "autocoder_supervisor/README.md",
       "source_sha256": "c42932859a3778817404afcd896228fcaa894134ae1276fa1566893fafdcf593",
-      "destination_sha256": "490dd04dae0552b7d20cce32285c1594dbdf72fa9f7367a732b124553f5909d0",
+      "destination_sha256": "6eef90a3ba8cd6d8524c9ede5e5f7208231368c750d74332d4d953ab5f7e1c12",
       "source_size_bytes": 4207,
-      "destination_size_bytes": 4405,
+      "destination_size_bytes": 4395,
       "transformation_classification": "branding_only",
       "transformation_explanation": "Rewrote the package README to identify AutoDev as the public product identity while preserving the autocoder_supervisor Python package name as the internal compatibility identity. Updated source-tree path references to the standalone layout."
     },
@@ -79,9 +89,9 @@
       "source_path": "scripts/local/autocoder_supervisor/docs/INSTALL.md",
       "destination_path": "autocoder_supervisor/docs/INSTALL.md",
       "source_sha256": "df7c7811a65048412341580d0f8953456d7747051092b7de515d7540bdff1ca6",
-      "destination_sha256": "a00778e4180c4557a787ac7ce613b20e3a3b8108236146eec68d64c724485af8",
+      "destination_sha256": "0787b174904f1af3dcfd6ad49a9ae94445482433e305663d079ba50c7f864a9c",
       "source_size_bytes": 5345,
-      "destination_size_bytes": 5163,
+      "destination_size_bytes": 7113,
       "transformation_classification": "path_only",
       "transformation_explanation": "Replaced the source-tree layout snippet (which described the AED scripts/local/ layout) with the standalone layout. Re-pointed install paths."
     },
@@ -99,29 +109,29 @@
       "source_path": "scripts/local/autocoder_supervisor/docs/ROLLBACK.md",
       "destination_path": "autocoder_supervisor/docs/ROLLBACK.md",
       "source_sha256": "71d65ed2a096a4a6867160629e1f7e1a2019c1ea183504ac87b19d2bb6630c3c",
-      "destination_sha256": "71d65ed2a096a4a6867160629e1f7e1a2019c1ea183504ac87b19d2bb6630c3c",
+      "destination_sha256": "d036c7078a98e6df8c3db4bcb1906b0fc4c64244144f0b870db4650b58f6e26f",
       "source_size_bytes": 2363,
-      "destination_size_bytes": 2363,
-      "transformation_classification": "byte_identical",
-      "transformation_explanation": ""
+      "destination_size_bytes": 3110,
+      "transformation_classification": "path_only",
+      "transformation_explanation": "Path re-pointed to standalone layout."
     },
     {
       "source_path": "scripts/local/autocoder_supervisor/docs/STATE_MIGRATION.md",
       "destination_path": "autocoder_supervisor/docs/STATE_MIGRATION.md",
       "source_sha256": "f6179e149e20b764334ea61ac1900a8047e2119aa48794437979df37a84afa5f",
-      "destination_sha256": "f6179e149e20b764334ea61ac1900a8047e2119aa48794437979df37a84afa5f",
+      "destination_sha256": "0065791dd5e594f7944b7f7e924792c006eef7a21507bb1b5886e46f84960a62",
       "source_size_bytes": 3305,
-      "destination_size_bytes": 3305,
-      "transformation_classification": "byte_identical",
-      "transformation_explanation": ""
+      "destination_size_bytes": 4504,
+      "transformation_classification": "path_only",
+      "transformation_explanation": "Path re-pointed to standalone layout."
     },
     {
       "source_path": "scripts/local/autocoder_supervisor/docs/UPGRADE.md",
       "destination_path": "autocoder_supervisor/docs/UPGRADE.md",
       "source_sha256": "c90a8962bc90186adda1957ba1727dbb6831048aae4c303376283589ef691179",
-      "destination_sha256": "3e8669c42f4e466f5c82975984efe8d688063f524a1c54b40d08e1f168995845",
+      "destination_sha256": "d479ee050450ac60ec8d960d7c82799cfb87d76e69ea2b2be9c0ba38670886f1",
       "source_size_bytes": 1845,
-      "destination_size_bytes": 1817,
+      "destination_size_bytes": 2311,
       "transformation_classification": "path_only",
       "transformation_explanation": "Re-pointed upgrade commands to the standalone layout (the install root no longer has a scripts/local/ staging directory)."
     },
@@ -270,8 +280,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "4b1ff1eb589decc73d72db07d5121df7c0979adc36f7812f94ce3ccba1f7016a",
-      "destination_size_bytes": 17527,
+      "destination_sha256": "b128e43f4f59324b2114cc20c35a48cfeac95f4540034e2bb835386e513a1fcc",
+      "destination_size_bytes": 17611,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }

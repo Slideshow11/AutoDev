@@ -3,7 +3,8 @@
 The source-controlled supervisor is a Python package. It can
 be installed system-wide or into a virtualenv. The
 recommended production deployment uses a dedicated system
-user and a systemd user service.
+user and a per-instance layout that matches the
+`aed-supervisor@<instance>.service` systemd template unit.
 
 ## Source-tree layout
 
@@ -30,6 +31,24 @@ package directory side-by-side:
 The committed `pyproject.toml` is at `pyproject.toml`
 (NOT inside `autocoder_supervisor/`). It is moved to the
 install root alongside the package directory.
+
+## 0. Create the service account
+
+```bash
+# Create the unprivileged account the supervisor and any
+# launched worker run as.
+if ! getent group aed-supervisor > /dev/null; then
+    sudo groupadd --system aed-supervisor
+fi
+if ! getent passwd aed-supervisor > /dev/null; then
+    sudo useradd --system \
+        --gid aed-supervisor \
+        --home-dir /var/lib/aed-supervisor \
+        --shell /usr/sbin/nologin \
+        --comment "Autocoder supervisor service account" \
+        aed-supervisor
+fi
+```
 
 ## 1. Install the Python package
 
@@ -98,24 +117,61 @@ use the host `python3` for verification — the host interpreter
 does not have the package installed. Always use the venv
 interpreter.
 
-## 2. Prepare state + log directories
+## 2. Create the per-instance state and log directories
+
+The systemd template unit hard-codes
+`/var/lib/aed-supervisor/%i` and `/etc/aed-supervisor/%i/`
+as the per-instance layout. Create them before enabling the
+unit, with `aed-supervisor` as the owner.
 
 ```bash
+INSTANCE=canary  # whatever name the operator chooses
+
 sudo install -d -o aed-supervisor -g aed-supervisor -m 0700 \
-    /var/lib/aed-supervisor/state
+    /var/lib/aed-supervisor/$INSTANCE
 sudo install -d -o aed-supervisor -g aed-supervisor -m 0750 \
     /var/log/aed-supervisor
 ```
 
 ## 3. Configure
 
+The per-instance configuration path is
+`/etc/aed-supervisor/$INSTANCE/aed-supervisor.toml`. The
+template file is `examples/aed-supervisor.example.toml`.
+
 ```bash
-sudo install -d -o aed-supervisor -g aed-supervisor -m 0750 /etc/aed-supervisor
-sudo cp autocoder_supervisor/examples/aed-supervisor.example.toml \
-    /etc/aed-supervisor/aed-supervisor.toml
-sudo chown aed-supervisor:aed-supervisor /etc/aed-supervisor/aed-supervisor.toml
-sudo chmod 0640 /etc/aed-supervisor/aed-supervisor.toml
-sudo -u aed-supervisor $EDITOR /etc/aed-supervisor/aed-supervisor.toml
+INSTANCE=canary
+
+sudo install -d -o aed-supervisor -g aed-supervisor -m 0750 \
+    /etc/aed-supervisor/$INSTANCE
+sudo install -o aed-supervisor -g aed-supervisor -m 0644 \
+    autocoder_supervisor/examples/aed-supervisor.example.toml \
+    /etc/aed-supervisor/$INSTANCE/aed-supervisor.toml
+sudo -u aed-supervisor $EDITOR \
+    /etc/aed-supervisor/$INSTANCE/aed-supervisor.toml
+```
+
+The four `__SET_ME__` placeholders in the systemd template
+(`AED_PR_NUMBER`, `AED_REPO_OWNER`, `AED_REPO_NAME`,
+`AED_AUTHORITATIVE_HEAD`) are normally loaded from
+`/etc/aed-supervisor/$INSTANCE/supervisor.env` (an
+`EnvironmentFile=`-style file). The operator is expected to
+materialize that file before enabling the service.
+
+```bash
+sudo install -o aed-supervisor -g aed-supervisor -m 0640 /dev/null \
+    /etc/aed-supervisor/$INSTANCE/supervisor.env
+sudo -u aed-supervisor $EDITOR \
+    /etc/aed-supervisor/$INSTANCE/supervisor.env
+```
+
+A minimal `supervisor.env` content:
+
+```
+AED_PR_NUMBER=1
+AED_REPO_OWNER=Slideshow11
+AED_REPO_NAME=AutoDev
+AED_AUTHORITATIVE_HEAD=18ba0df49d2a19779e350d6df5a102b254cbeed7
 ```
 
 The validator (run with `python3 -m autocoder_supervisor.validate --config …`)
@@ -131,10 +187,11 @@ literal `@` in the filename (so `foo@.service` becomes
 `/etc/systemd/system/aed-supervisor@.service`:
 
 ```bash
-sudo cp autocoder_supervisor/service/aed-supervisor@.service.template \
+sudo install -o root -g root -m 0644 \
+    autocoder_supervisor/service/aed-supervisor@.service.template \
     /etc/systemd/system/aed-supervisor@.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now aed-supervisor@<instance>.service
+sudo systemctl enable --now aed-supervisor@canary.service
 ```
 
 The `<instance>` placeholder names the supervisor instance —
@@ -142,11 +199,17 @@ e.g. `aed-supervisor@canary.service`. `%i` inside the unit
 expands to `<instance>`, so different instances can coexist
 with different state directories and configurations.
 
+The unit's `User=` and `Group=` directives are set to
+`aed-supervisor`. The unit's `EnvironmentFile=`-style path
+is loaded from
+`/etc/aed-supervisor/%i/supervisor.env` so the per-instance
+secrets do not appear in the unit file.
+
 ## 5. Verify
 
 ```bash
-sudo systemctl status aed-supervisor@<instance>.service
-sudo journalctl -u aed-supervisor@<instance>.service -f
+sudo systemctl status aed-supervisor@canary.service
+sudo journalctl -u aed-supervisor@canary.service -f
 ```
 
 You should see the supervisor log "supervisor started

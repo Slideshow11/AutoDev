@@ -37,11 +37,11 @@ files may need to be reshaped (renamed, repacked, or have
 new required fields added). The supervisor refuses to start
 on the old layout and logs a `migration_required` line.
 
-## Migration command
+## Migration command (future schema versions only)
 
 ```bash
 # (When a future schema version introduces this command.)
-python3 -m autocoder_supervisor.migrate \
+sudo python3 -m autocoder_supervisor.migrate \
     --config /etc/aed-supervisor/aed-supervisor.toml \
     --from-schema aed.autocoder_supervisor.v1 \
     --to-schema aed.autocoder_supervisor.v2
@@ -70,19 +70,50 @@ stable. Adding a new field to a state file (e.g. an optional
 `last_verified_at` timestamp on the lease) is a backward-
 compatible change that does not require a migration.
 
-## Migration from the external supervisor
+## Migration from the historical external supervisor
 
 The historical external supervisor at
 `~/.hermes/aed-supervisor/` uses the same on-disk schema as
-this package's v1 (the port was shape-preserving). To
-migrate an existing external supervisor's state to this
-package:
+this package's v1 (the port was shape-preserving). The
+target directory `/var/lib/aed-supervisor/%i/state` is
+already created by the documented install procedure.
+Moving the legacy `state` directory onto that destination
+must therefore copy the **contents** of the legacy
+directory into the existing destination (not move the
+directory itself, which would produce
+`/var/lib/aed-supervisor/%i/state/state`).
 
-1. Stop the external supervisor: `systemctl --user stop aed-supervisor-legacy.service`.
-2. Move the state directory:
-   `mv ~/.hermes/aed-supervisor/state /var/lib/aed-supervisor/state`.
-3. Update the configuration to point at the new paths.
-4. Start the source-controlled supervisor.
+```bash
+# 1. Stop the legacy external supervisor.
+systemctl --user stop aed-supervisor-legacy.service
+
+# 2. Copy the LEGACY STATE CONTENTS into the existing
+#    destination, while the supervisor is stopped.
+sudo install -d -o aed-supervisor -g aed-supervisor -m 0700 \
+    /var/lib/aed-supervisor/%i/state
+sudo rsync -a \
+    --chown=aed-supervisor:aed-supervisor \
+    --chmod=D0700,F0600 \
+    ~/.hermes/aed-supervisor/state/ \
+    /var/lib/aed-supervisor/%i/state/
+
+# 3. Verify the resulting layout has NO
+#    /var/lib/aed-supervisor/%i/state/state/ directory.
+test ! -e /var/lib/aed-supervisor/%i/state/state
+
+# 4. Update the configuration to point at the new paths.
+sudo $EDITOR /etc/aed-supervisor/%i/aed-supervisor.toml
+
+# 5. Start the source-controlled supervisor.
+sudo systemctl start aed-supervisor@%i.service
+```
 
 The on-disk state is fully portable; the only thing that
 must change is the configuration's path entries.
+
+All operations are performed with `sudo`, against the
+already-created destination directory, with the service
+account as the owner and restrictive modes (`0700` for
+directories, `0600` for files). The legacy supervisor must
+be stopped before the copy; the new supervisor must be
+started only after the layout verification.

@@ -10,16 +10,36 @@ is:
 sudo systemctl stop aed-supervisor@<instance>.service
 ```
 
-## 2. Restore the previous source tree
+## 2. Restore the previous distribution
+
+The supervisor imports the package from `site-packages`,
+so rolling back the source tree alone does NOT roll back the
+installed distribution. The operator must reinstall the
+preserved previous distribution (or, for a venv install,
+recreate the venv from the preserved source tree).
 
 ```bash
-# Confirm a rollback target exists before touching the live tree.
+# Confirm a rollback target exists before touching the
+# installed distribution.
 test -d /opt/aed-supervisor.old || {
     echo "no /opt/aed-supervisor.old to roll back to" >&2
     exit 1
 }
-sudo mv /opt/aed-supervisor /opt/aed-supervisor.broken
-sudo mv /opt/aed-supervisor.old /opt/aed-supervisor
+
+if [ -x /opt/aed-supervisor/venv/bin/python ]; then
+    # VIRTUALENV install: rebuild the venv from the
+    # preserved previous source tree.
+    sudo rm -rf /opt/aed-supervisor/venv
+    sudo /opt/aed-supervisor.old/venv/bin/python -m venv \
+        /opt/aed-supervisor/venv
+    sudo /opt/aed-supervisor/venv/bin/pip install \
+        /opt/aed-supervisor.old
+else
+    # SYSTEM-WIDE install: reinstall the preserved
+    # previous distribution with the system Python.
+    sudo python3 -m pip install \
+        --force-reinstall /opt/aed-supervisor.old
+fi
 ```
 
 (The `.old` directory was created by the `UPGRADE.md` recipe.)

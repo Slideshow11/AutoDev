@@ -97,7 +97,7 @@ sudo cp pyproject.toml /opt/aed-supervisor-canary/pyproject.toml
 
 # 2. Install into a venv (no PYTHONPATH needed once installed).
 sudo python3 -m venv /opt/aed-supervisor-canary/venv
-sudo /opt/aed-supervisor-canary/venv/bin/pip install --no-deps \
+sudo /opt/aed-supervisor-canary/venv/bin/pip install \
     /opt/aed-supervisor-canary
 
 # 3. Copy the example config and edit it.
