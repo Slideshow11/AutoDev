@@ -474,3 +474,133 @@ def test_canonical_scanner_rejects_tracked_runtime_state(tmp_path, monkeypatch):
     rc = scanner_main()
     assert rc == 1, "tracked runtime-state path must fail the scan"
 
+
+def _read_service_template():
+    """Locate the committed service template and read it."""
+    from pathlib import Path as _P
+    # Tests run from the repository root.
+    candidates = [
+        _P(__file__).resolve().parent.parent
+        / "autocoder_supervisor"
+        / "service"
+        / "aed-supervisor@.service.template",
+        _P("/tmp/Autocoder/autocoder_supervisor/service/aed-supervisor@.service.template"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return p.read_text()
+    raise FileNotFoundError(
+        "service template not found in any candidate location"
+    )
+
+
+def test_service_template_has_environment_file():
+    """The systemd template loads the per-instance
+    supervisor.env file via ``EnvironmentFile=``.
+    """
+    text = _read_service_template()
+    assert "EnvironmentFile=/etc/aed-supervisor/%i/supervisor.env" in text
+
+
+def test_service_template_no_set_me_placeholders():
+    """The four ``__SET_ME__`` placeholder environment
+    assignments are removed from the template.
+    """
+    text = _read_service_template()
+    # None of the four AED_* placeholders are still in the
+    # template as inline Environment= lines.
+    for name in (
+        "AED_PR_NUMBER=__SET_ME__",
+        "AED_REPO_OWNER=__SET_ME__",
+        "AED_REPO_NAME=__SET_ME__",
+        "AED_AUTHORITATIVE_HEAD=__SET_ME__",
+    ):
+        assert name not in text, (
+            f"service template still contains the placeholder "
+            f"{name!r}"
+        )
+
+
+def test_service_template_uses_path_not_supervisor_path():
+    """The service template sets ``PATH=...`` and not
+    ``__SUPERVISOR_PATH=...``. The default bare ``hermes``
+    command and ``/usr/bin/env python3`` resolve through
+    the standard ``PATH``.
+    """
+    text = _read_service_template()
+    assert "Environment=__SUPERVISOR_PATH=" not in text
+    assert any(
+        line.startswith("Environment=PATH=")
+        for line in text.splitlines()
+    ), "service template must assign PATH"
+
+
+def test_service_template_uses_valid_restrict_realtime():
+    """``RestrictRealtime=`` is the correct systemd
+    directive; ``RestrictRealtimeScheduling=`` is invalid.
+    """
+    text = _read_service_template()
+    assert "RestrictRealtimeScheduling=" not in text, (
+        "RestrictRealtimeScheduling= is not a valid systemd "
+        "directive; the correct name is RestrictRealtime="
+    )
+    assert any(
+        line.startswith("RestrictRealtime=")
+        for line in text.splitlines()
+    ), "service template must declare RestrictRealtime="
+
+
+def test_service_template_read_write_paths_match_state():
+    """``ReadWritePaths=`` includes the state directory, the
+    log directory, and the working-checkout path documented
+    in the configuration and INSTALL.md.
+    """
+    text = _read_service_template()
+    # Extract the ReadWritePaths= line and its arguments.
+    rw = None
+    for line in text.splitlines():
+        if line.startswith("ReadWritePaths="):
+            rw = line.split("=", 1)[1]
+            break
+    assert rw is not None, "service template must declare ReadWritePaths="
+    paths = rw.split()
+    # All paths must be per-instance under
+    # /var/lib/aed-supervisor/%i, /var/log/aed-supervisor, or
+    # the operator-supplied working_checkout. None may be the
+    # bare /var/lib, /var/log, /opt, or the source repository.
+    for p in paths:
+        assert p.startswith("/var/lib/aed-supervisor/") \
+            or p.startswith("/var/log/aed-supervisor") \
+            or p.startswith("/opt/"), (
+            f"ReadWritePaths entry {p!r} is outside the "
+            "dedicated per-instance paths"
+        )
+        assert not p.rstrip("/").endswith(("/var", "/var/lib",
+                                          "/var/log", "/opt")), (
+            f"ReadWritePaths entry {p!r} is too broad; must be "
+            "the dedicated per-instance location"
+        )
+
+
+def test_service_template_uses_state_logs_directory():
+    """The template declares ``StateDirectory=`` and
+    ``LogsDirectory=`` for the per-instance layout.
+    """
+    text = _read_service_template()
+    state_directives = [
+        line for line in text.splitlines()
+        if line.startswith("StateDirectory=")
+    ]
+    logs_directives = [
+        line for line in text.splitlines()
+        if line.startswith("LogsDirectory=")
+    ]
+    assert state_directives, "service template must declare StateDirectory="
+    assert logs_directives, "service template must declare LogsDirectory="
+    # The StateDirectory value must include %i so the
+    # supervisor's per-instance path is recognized.
+    for line in state_directives:
+        assert "%i" in line, (
+            f"StateDirectory={line} must include %i"
+        )
+

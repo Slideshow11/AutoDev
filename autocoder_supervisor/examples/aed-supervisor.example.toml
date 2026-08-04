@@ -1,10 +1,20 @@
-# Example configuration for the source-controlled Autocoder
-# supervisor. Copy this file to e.g. /etc/aed-supervisor.toml
+# Example configuration for the source-controlled AutoDev
+# supervisor. Copy this file to e.g.
+# ``/etc/aed-supervisor/<instance>/aed-supervisor.toml``
 # and edit it for your environment.
 #
 # The validator (``autocoder_supervisor.validate``) rejects
 # credential-shaped values and absolute user-specific paths,
 # so this template is safe to commit.
+#
+# This example targets the per-instance layout documented
+# in ``docs/INSTALL.md``: state lives under
+# ``/var/lib/aed-supervisor/%i``, the supervisor's log file
+# under ``/var/log/aed-supervisor/%i``, the configuration
+# file at ``/etc/aed-supervisor/%i/aed-supervisor.toml``,
+# and the environment file at
+# ``/etc/aed-supervisor/%i/supervisor.env``. Substitute
+# ``<instance>`` (e.g. ``canary``) when copying to a host.
 
 schema_version = "aed.autocoder_supervisor.v1"
 
@@ -13,26 +23,33 @@ schema_version = "aed.autocoder_supervisor.v1"
 # instance_ids, and their state directories must be disjoint.
 instance_id = "aed-supervisor-canary"
 
-# Where the supervisor keeps its durable state. The validator
-# enforces non-user-specific absolute paths so the committed
-# tree cannot leak an operator's home directory.
-state_dir = "/var/lib/aed-supervisor/state"
+# Where the supervisor keeps its durable state. The
+# validator enforces non-user-specific absolute paths so
+# the committed tree cannot leak an operator's home
+# directory.
+state_dir = "/var/lib/aed-supervisor/canary/state"
 
-# The git working tree the supervisor will inspect (and in which
-# it will spawn its child worker). Must be a non-user-specific
-# absolute path.
+# The git working tree the supervisor will inspect (and in
+# which it will spawn its child worker). Must be a
+# non-user-specific absolute path. The worker may write to
+# this checkout (e.g. new commits).
 working_checkout = "/opt/Automated-Edge-Discovery"
 
-# Plaintext log + heartbeat + lock paths. The state directory's
-# parent (e.g. /var/lib/aed-supervisor) is the supervisor home.
-log_path = "/var/log/aed-supervisor/supervisor.log"
-heartbeat_path = "/var/lib/aed-supervisor/heartbeat"
-lock_path = "/var/lib/aed-supervisor/lock"
+# Plaintext log + heartbeat + lock paths. Per-instance log
+# file, parent /var/log/aed-supervisor is created with
+# restrictive mode by ``docs/INSTALL.md`` step 2.
+log_path = "/var/log/aed-supervisor/canary/supervisor.log"
+heartbeat_path = "/var/lib/aed-supervisor/canary/heartbeat"
+lock_path = "/var/lib/aed-supervisor/canary/lock"
 
-# The worker command. The supervisor substitutes {prompt} and
-# {session_id} at launch time. Do NOT embed credentials here.
+# The worker command. The supervisor substitutes {prompt}
+# and {session_id} at launch time. Do NOT embed credentials
+# here. The ``PATH`` environment variable provided by the
+# systemd unit template resolves ``hermes``; the
+# system-wide or venv python3 below resolves via the same
+# PATH.
 worker_command = [
-    "/usr/local/bin/hermes",
+    "hermes",
     "chat",
     "-q",
     "{prompt}",
@@ -69,6 +86,20 @@ provider_states_are_independent = true
 # wait for its quota reset (or for the operator's standing
 # direction) before resuming.
 post_codex_recovery_request = false
+
+# Operator-configured list of required GitHub Actions check
+# names (status contexts) that must reach a SUCCESS
+# conclusion for the PR to be considered ready. Empty by
+# default; set this to match the standalone AutoDev CI
+# workflow's ``jobs.*.name`` values.
+required_check_names = [
+    "test (3.10)",
+    "test (3.11)",
+    "test (3.12)",
+    "package-smoke",
+    "provenance",
+    "committed-state-scan",
+]
 
 # Cadence.
 heartbeat_seconds = 120

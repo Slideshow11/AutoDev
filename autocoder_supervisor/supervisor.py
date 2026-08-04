@@ -1971,14 +1971,13 @@ def required_checks_green(snap: dict) -> bool:
         if info is None:
             return False
         status = info.get("status")
-        # Pending checks (queued, in_progress, waiting,
-        # pending, requested) are not yet green. ``completed``
-        # is the canonical "conclusion is final" status
-        # emitted by GitHub once a check has reached its
-        # terminal state.
-        if status not in ("completed", "success", "skipped", "neutral"):
+        # GitHub check-run status must be exactly "completed".
+        # The other "success", "skipped", "neutral" tokens are
+        # check-run CONCLUSION values, not status values.
+        if status != "completed":
             return False
         c = info.get("conclusion")
+        # The conclusion may be success / skipped / neutral.
         if c not in ("success", "skipped", "neutral"):
             return False
     return True
@@ -2233,6 +2232,80 @@ def active_repair_quiet_window(
         )
 
 
+def handle_new_events(
+    rs: dict,
+    new_events: list,
+    token: str,
+    iteration: dict,
+) -> None:
+    """Filter actionable events, check the worker lease,
+    launch a single worker, and mark events only after a
+    successful launch.
+
+    This function is the testable extraction of the
+    event-to-launch path that lives in the supervisor's
+    main loop. The behaviour:
+
+    1. Subtract the durable ``launched_event_ids()`` set
+       from the new events. The result is the set of event
+       IDs that have NOT yet been launched for the current
+       head.
+    2. If the durable lease is alive (``lease_alive`` returns
+       non-None), skip launching: the existing worker is
+       still responsible for the events.
+    3. Otherwise call ``launch_worker`` (revoking readiness
+       first), and mark each fresh event ID only after the
+       worker has been launched successfully.
+
+    A failed launch is intentionally NOT marked: the next
+    heartbeat's fresh-IDs filter must see the events again
+    so the next attempt can succeed.
+    """
+    already = launched_event_ids()
+    fresh_ids = [
+        e["id"] for e in new_events
+        if e.get("id") and e["id"] not in already
+    ]
+    if not fresh_ids:
+        return
+    lease = read_lease()
+    if lease and lease_alive(lease) is not None:
+        # An existing worker is already responsible for
+        # these events. The next heartbeat will re-check.
+        return
+    revoke_readiness(
+        reason="new_actionable_event",
+        head_sha=iteration.get("head_sha"),
+    )
+    log(
+        "info",
+        "revoking readiness (new actionable "
+        "event); launching single worker",
+        events=[
+            e.get("kind") for e in new_events
+            if e.get("id") in fresh_ids
+        ],
+    )
+    live = (
+        inspect_live_state(token) if token else {}
+    )
+    new_lease = launch_worker(rs, live)
+    if new_lease:
+        for eid in fresh_ids:
+            mark_event_launched(eid)
+    else:
+        log(
+            "warning",
+            "worker launch failed; "
+            "events remain actionable so "
+            "the next heartbeat will retry",
+            events=[
+                e.get("kind") for e in new_events
+                if e.get("id") in fresh_ids
+            ],
+        )
+
+
 def capture_and_store_snapshot(
     slot: str, rs: dict, token: str,
 ) -> dict:
@@ -2405,54 +2478,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 time.sleep(heartbeat_seconds)
                 continue
             if new_events and not cooldown_active():
-                already = launched_event_ids()
-                fresh_ids = [
-                    e["id"] for e in new_events
-                    if e.get("id") and e["id"] not in already
-                ]
-                if fresh_ids:
-                    lease = read_lease()
-                    if not (
-                        lease and lease_alive(lease) is not None
-                    ):
-                        revoke_readiness(
-                            reason="new_actionable_event",
-                            head_sha=iteration.get("head_sha"),
-                        )
-                        log(
-                            "info",
-                            "revoking readiness (new actionable "
-                            "event); launching single worker",
-                            events=[
-                                e.get("kind") for e in new_events
-                                if e.get("id") in fresh_ids
-                            ],
-                        )
-                        live = (
-                            inspect_live_state(token) if token else {}
-                        )
-                        # Mark each event as launched only
-                        # AFTER the worker has actually been
-                        # launched successfully. A failed
-                        # launch must not permanently suppress
-                        # the event; the next heartbeat's
-                        # fresh_ids filter would otherwise
-                        # exclude it forever.
-                        new_lease = launch_worker(rs, live)
-                        if new_lease:
-                            for eid in fresh_ids:
-                                mark_event_launched(eid)
-                        else:
-                            log(
-                                "warning",
-                                "worker launch failed; "
-                                "events remain actionable so "
-                                "the next heartbeat will retry",
-                                events=[
-                                    e.get("kind") for e in new_events
-                                    if e.get("id") in fresh_ids
-                                ],
-                            )
+                handle_new_events(rs, new_events, token, iteration)
 
             if cur_state == STATE_ACTIVE_REPAIR:
                 pre_unconsumed_ids = {

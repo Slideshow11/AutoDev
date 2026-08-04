@@ -122,13 +122,22 @@ interpreter.
 The systemd template unit hard-codes
 `/var/lib/aed-supervisor/%i` and `/etc/aed-supervisor/%i/`
 as the per-instance layout. Create them before enabling the
-unit, with `aed-supervisor` as the owner.
+unit, with `aed-supervisor` as the owner. The unit template
+also writes to the working checkout (the worker may commit
+there); the operator must own that path too.
 
 ```bash
 INSTANCE=canary  # whatever name the operator chooses
 
+# Per-instance state directory (lease, snapshots, readiness)
 sudo install -d -o aed-supervisor -g aed-supervisor -m 0700 \
     /var/lib/aed-supervisor/$INSTANCE
+
+# Per-instance log directory
+sudo install -d -o aed-supervisor -g aed-supervisor -m 0750 \
+    /var/log/aed-supervisor/$INSTANCE
+
+# /var/log/aed-supervisor is the systemd LogsDirectory.
 sudo install -d -o aed-supervisor -g aed-supervisor -m 0750 \
     /var/log/aed-supervisor
 ```

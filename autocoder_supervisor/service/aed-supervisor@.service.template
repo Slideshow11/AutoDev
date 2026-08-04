@@ -45,19 +45,19 @@ Group=aed-supervisor
 # Pick the ExecStart that matches your install and comment
 # out the other before enabling the service.
 WorkingDirectory=/var/lib/aed-supervisor/%i
+
+# Per-instance environment file. The operator materializes
+# this file before enabling the service. It carries the four
+# AED_PR_NUMBER / AED_REPO_OWNER / AED_REPO_NAME /
+# AED_AUTHORITATIVE_HEAD variables plus any other runtime
+# configuration. See docs/INSTALL.md for a minimal example.
+EnvironmentFile=/etc/aed-supervisor/%i/supervisor.env
+
 Environment=HOME=/var/lib/aed-supervisor/%i
 Environment=PYTHONPATH=
-Environment=__SUPERVISOR_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=AED_SUPERVISOR_CONFIG=/etc/aed-supervisor/%i/aed-supervisor.toml
-# AED environment variables are normally provided by the
-# instance environment file at
-# /etc/aed-supervisor/%i/supervisor.env. They are listed here
-# only as documentation placeholders so an operator who
-# inspects the unit file can see the canonical names.
-Environment=AED_PR_NUMBER=__SET_ME__
-Environment=AED_REPO_OWNER=__SET_ME__
-Environment=AED_REPO_NAME=__SET_ME__
-Environment=AED_AUTHORITATIVE_HEAD=__SET_ME__
+
 # SYSTEM-WIDE: leave this ExecStart uncommented.
 ExecStart=/usr/bin/env python3 -m autocoder_supervisor.supervisor --config /etc/aed-supervisor/%i/aed-supervisor.toml
 # VIRTUALENV: comment out the line above and uncomment the one below.
@@ -72,18 +72,33 @@ KillMode=control-group
 TimeoutStopSec=30
 MemoryMax=512M
 CPUQuota=50%
+
 # Privilege / namespace hardening: the supervisor and any
 # launched worker run as the unprivileged aed-supervisor
 # account and have no write access to most of the host
 # filesystem.
 NoNewPrivileges=true
-ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=true
-RestrictRealtimeScheduling=true
+RestrictRealtime=true
 RestrictSUIDSGID=true
+
+# State directory is the supervisor's persistent state and
+# runtime writes (lease, snapshots, readiness state, log
+# file). LockPersonality + ProtectHome already block
+# /var/lib/aed-supervisor's siblings, but we also need
+# /var/log/aed-supervisor and /var/lib/aed-supervisor/%i
+# to be writable.
+StateDirectory=aed-supervisor/%i
+LogsDirectory=aed-supervisor
+# ReadWritePaths is set after StateDirectory / LogsDirectory
+# so the supervisor can write to the resolved directories.
+# Combined with ProtectSystem=full (below), the only
+# writable areas on the host are the dedicated paths.
+ProtectSystem=full
+ReadWritePaths=/var/lib/aed-supervisor/%i /var/log/aed-supervisor /opt/aed-supervisor/working_checkout/%i
 
 [Install]
 WantedBy=default.target

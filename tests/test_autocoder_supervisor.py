@@ -1115,14 +1115,18 @@ def test_pid_alive_eperm_means_existing_not_dead():
 def test_dry_sim_does_not_launch_worker(
     isolated_state, monkeypatch,
 ):
-    """``--dry-sim`` must not invoke ``launch_worker``.
-
-    With new actionable events and ``--dry-sim`` set, the
-    supervisor must log the would-be decision and skip every
-    state-mutating step (no launch, no event mark, no
-    review request).
+    """``--dry-sim`` must not invoke ANY state-mutating
+    step. The test spies on every observable side effect
+    reachable from the dry-sim branch and asserts that
+    none was invoked.
     """
     launches = {"n": 0}
+    marked_event_ids: list = []
+    review_requests_posted: list = []
+    review_requests_written: list = []
+    leases_written: list = []
+    snapshots_written: list = []
+    readiness_state_writes: list = []
 
     def fake_launch(rs, live):
         launches["n"] += 1
@@ -1130,12 +1134,39 @@ def test_dry_sim_does_not_launch_worker(
                 "start_time_evidence": {}, "launched_at": "now",
                 "heartbeat_at": "now", "cmd": ["hermes", "chat"]}
 
-    # monkeypatch.setattr does not accept return_value=;
-    # use a lambda for the cooldown predicate.
+    def fake_mark(eid):
+        marked_event_ids.append(eid)
+
+    def fake_post_review_request(provider, head_sha):
+        review_requests_posted.append((provider, head_sha))
+        return True
+
+    def fake_write_review_request(provider, head_sha, record):
+        review_requests_written.append((provider, head_sha))
+
+    def fake_write_lease(lease):
+        leases_written.append(lease)
+
+    def fake_write_snapshot(slot, snap):
+        snapshots_written.append(slot)
+
+    def fake_write_readiness_state(state):
+        readiness_state_writes.append(state)
+
     monkeypatch.setattr(supervisor, "launch_worker",
                         fake_launch)
     monkeypatch.setattr(supervisor, "mark_event_launched",
-                        lambda eid: None)
+                        fake_mark)
+    monkeypatch.setattr(supervisor, "post_review_request",
+                        fake_post_review_request)
+    monkeypatch.setattr(supervisor, "write_review_request",
+                        fake_write_review_request)
+    monkeypatch.setattr(supervisor, "write_lease",
+                        fake_write_lease)
+    monkeypatch.setattr(supervisor, "write_snapshot",
+                        fake_write_snapshot)
+    monkeypatch.setattr(supervisor, "write_readiness_state",
+                        fake_write_readiness_state)
     monkeypatch.setattr(supervisor, "cooldown_active",
                         lambda: False)
     monkeypatch.setattr(supervisor, "AUTHORITATIVE_HEAD", AUTH)
@@ -1153,13 +1184,26 @@ def test_dry_sim_does_not_launch_worker(
     with patch.object(supervisor, "capture_live_snapshot",
                       return_value=_clean_snap()), \
          patch("time.sleep"):
-        # main() expects --dry-sim to early-return after the
-        # dry-sim log line. We use --once to keep the run
-        # bounded.
         rc = supervisor.main(["--dry-sim", "--once"])
+    # --dry-sim must NOT invoke any state-mutating step.
     assert launches["n"] == 0, (
-        "dry-sim must NOT launch a worker; launched %d" %
-        launches["n"]
+        f"dry-sim must NOT launch a worker; launched {launches}"
+    )
+    assert marked_event_ids == [], (
+        "dry-sim must NOT mark any events; "
+        f"marked {marked_event_ids}"
+    )
+    assert review_requests_posted == [], (
+        "dry-sim must NOT post a review request; "
+        f"posted {review_requests_posted}"
+    )
+    assert review_requests_written == [], (
+        "dry-sim must NOT write a review-request record; "
+        f"wrote {review_requests_written}"
+    )
+    assert leases_written == [], (
+        "dry-sim must NOT write a worker lease; "
+        f"wrote {leases_written}"
     )
     # dry-sim must NOT mark any events as launched.
     assert "EVT_DRYSIM_TEST" not in supervisor.launched_event_ids()
@@ -1200,4 +1244,206 @@ def test_validate_environment_rejects_unknown_provider(
     errors, _ = validate.validate_environment(cfg)
     assert any("unknown-bot" in e for e in errors), \
         f"expected 'unknown-bot' in errors; got {errors}"
+
+
+def test_handle_new_events_first_call_launches_once(
+    isolated_state, monkeypatch,
+):
+    """The first call to ``handle_new_events`` with a fresh
+    event launches exactly one worker and marks the event
+    as launched.
+    """
+    launches = {"n": 0}
+    marked: list = []
+
+    def fake_launch(rs, live):
+        launches["n"] += 1
+        return {"pid": 99999, "pgid": 99999,
+                "start_time_evidence": {}, "launched_at": "now",
+                "heartbeat_at": "now", "cmd": ["hermes", "chat"]}
+
+    monkeypatch.setattr(supervisor, "launch_worker", fake_launch)
+    monkeypatch.setattr(supervisor, "mark_event_launched",
+                        lambda eid: marked.append(eid))
+    monkeypatch.setattr(supervisor, "read_lease", lambda: None)
+    monkeypatch.setattr(supervisor, "lease_alive",
+                        lambda lease: None)
+    supervisor.handle_new_events(
+        {"current_head": AUTH},
+        [{"id": "EID_A", "kind": "new_unresolved_current_thread"}],
+        token="",
+        iteration={"head_sha": AUTH},
+    )
+    assert launches["n"] == 1
+    assert marked == ["EID_A"]
+
+
+def test_handle_new_events_second_call_no_relaunch(
+    isolated_state, monkeypatch,
+):
+    """A second call with the same events (already marked)
+    does NOT relaunch the worker.
+    """
+    launches = {"n": 0}
+
+    def fake_launch(rs, live):
+        launches["n"] += 1
+        return {"pid": 99999, "pgid": 99999,
+                "start_time_evidence": {}, "launched_at": "now",
+                "heartbeat_at": "now", "cmd": ["hermes", "chat"]}
+
+    monkeypatch.setattr(supervisor, "launch_worker", fake_launch)
+    def _record_mark(eid):
+        path = supervisor.STATE_DIR / "launched_events.json"
+        try:
+            existing = supervisor.read_json(path).get("ids", [])
+        except Exception:
+            existing = []
+        supervisor.write_json(path, {"ids": existing + [eid]})
+    monkeypatch.setattr(supervisor, "mark_event_launched", _record_mark)
+    monkeypatch.setattr(supervisor, "read_lease", lambda: None)
+    monkeypatch.setattr(supervisor, "lease_alive",
+                        lambda lease: None)
+    events = [
+        {"id": "EID_B", "kind": "new_unresolved_current_thread"}
+    ]
+    # First call launches.
+    supervisor.handle_new_events(
+        {"current_head": AUTH}, events, "", {"head_sha": AUTH},
+    )
+    assert launches["n"] == 1
+    # Second call: event id is already in launched_event_ids,
+    # so fresh_ids is empty and no launch occurs.
+    supervisor.handle_new_events(
+        {"current_head": AUTH}, events, "", {"head_sha": AUTH},
+    )
+    assert launches["n"] == 1, (
+        "second call must not relaunch the same event id"
+    )
+
+
+def test_handle_new_events_active_lease_blocks_launch(
+    isolated_state, monkeypatch,
+):
+    """When the durable lease is alive, ``handle_new_events``
+    does NOT launch a new worker.
+    """
+    launches = {"n": 0}
+
+    def fake_launch(rs, live):
+        launches["n"] += 1
+        return {"pid": 99999, "pgid": 99999,
+                "start_time_evidence": {}, "launched_at": "now",
+                "heartbeat_at": "now", "cmd": ["hermes", "chat"]}
+
+    monkeypatch.setattr(supervisor, "launch_worker", fake_launch)
+    monkeypatch.setattr(supervisor, "read_lease",
+                        lambda: {"pid": 1, "pgid": 1,
+                                 "start_time_evidence": {}})
+    monkeypatch.setattr(supervisor, "lease_alive",
+                        lambda lease: lease)
+    supervisor.handle_new_events(
+        {"current_head": AUTH},
+        [{"id": "EID_C", "kind": "new_unresolved_current_thread"}],
+        token="",
+        iteration={"head_sha": AUTH},
+    )
+    assert launches["n"] == 0, (
+        "active lease must block a new launch"
+    )
+
+
+def test_handle_new_events_failed_launch_does_not_mark(
+    isolated_state, monkeypatch,
+):
+    """When ``launch_worker`` returns ``None`` (failure), the
+    event IDs are NOT marked launched so the next heartbeat
+    can retry.
+    """
+    launches = {"n": 0}
+    marked: list = []
+
+    def fake_launch(rs, live):
+        launches["n"] += 1
+        return None  # launch failed
+
+    monkeypatch.setattr(supervisor, "launch_worker", fake_launch)
+    monkeypatch.setattr(supervisor, "mark_event_launched",
+                        lambda eid: marked.append(eid))
+    monkeypatch.setattr(supervisor, "read_lease", lambda: None)
+    monkeypatch.setattr(supervisor, "lease_alive",
+                        lambda lease: None)
+    supervisor.handle_new_events(
+        {"current_head": AUTH},
+        [{"id": "EID_D", "kind": "new_unresolved_current_thread"}],
+        token="",
+        iteration={"head_sha": AUTH},
+    )
+    assert launches["n"] == 1
+    assert marked == [], (
+        "a failed launch must NOT mark the event id; "
+        "the next heartbeat must see the event again"
+    )
+
+
+def test_required_checks_green_only_accepts_completed_status(
+    monkeypatch,
+):
+    """``required_checks_green`` accepts ONLY
+    ``status="completed"`` regardless of conclusion. The
+    tokens ``success``, ``skipped``, ``neutral`` are
+    conclusion values, not status values.
+    """
+    # Configure two required check names so we exercise
+    # the per-name loop.
+    required = {"X-check", "Y-check"}
+    monkeypatch.setitem(
+        supervisor.POLICY, "required_check_names", list(required),
+    )
+    # status="success" must FAIL even with conclusion="success".
+    snap = {
+        "required_checks": {
+            "X-check": {"status": "success",
+                        "conclusion": "success"},
+            "Y-check": {"status": "completed",
+                        "conclusion": "success"},
+        }
+    }
+    assert supervisor.required_checks_green(snap) is False, (
+        "status='success' must fail; the status must be "
+        "exactly 'completed' regardless of conclusion"
+    )
+    # All terminal pending / mid-flight statuses fail.
+    for bad_status in ("queued", "in_progress", "waiting",
+                       "requested", "pending"):
+        snap = {
+            "required_checks": {
+                "X-check": {"status": bad_status,
+                            "conclusion": "success"},
+                "Y-check": {"status": bad_status,
+                            "conclusion": "success"},
+            }
+        }
+        assert supervisor.required_checks_green(snap) is False, (
+            f"status={bad_status!r} must fail"
+        )
+    # Missing status fails.
+    snap = {"required_checks": {"X-check": {"conclusion": "success"},
+                                "Y-check": {"conclusion": "success"}}}
+    assert supervisor.required_checks_green(snap) is False
+    # Positive cases: status="completed" with each allowed
+    # conclusion.
+    for ok_conclusion in ("success", "skipped", "neutral"):
+        snap = {
+            "required_checks": {
+                "X-check": {"status": "completed",
+                            "conclusion": ok_conclusion},
+                "Y-check": {"status": "completed",
+                            "conclusion": "success"},
+            }
+        }
+        assert supervisor.required_checks_green(snap) is True, (
+            f"status=completed conclusion={ok_conclusion!r} "
+            "must pass"
+        )
 
