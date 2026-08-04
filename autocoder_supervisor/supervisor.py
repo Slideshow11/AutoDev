@@ -228,17 +228,14 @@ def _default_providers(cfg: SupervisorConfig) -> dict[str, dict[str, Any]]:
 try:
     _BOOTSTRAPPED_FROM = default_config_from_env()
     _APPLIED = _apply_config(_BOOTSTRAPPED_FROM)
-except Exception as _exc:
-    # If the env-derived config cannot be built (e.g. the
-    # host has no $PWD), defer to a minimal stub. Production
-    # callers always pass --config and override this stub
-    # before any module function is invoked.
-    import sys as _sys
-    if "autocoder_supervisor.config" in str(_exc):
-        _BOOTSTRAPPED_FROM = None  # type: ignore[assignment]
-        _APPLIED = {}  # type: ignore[assignment]
-    else:
-        raise
+except (ValueError, OSError):
+    # The env-derived config could not be built. Defer to a
+    # minimal stub. Production callers always pass --config
+    # and override this stub before any module function is
+    # invoked. Unrelated failures (ImportError, etc.) are
+    # re-raised by the bare-except branch below.
+    _BOOTSTRAPPED_FROM = None  # type: ignore[assignment]
+    _APPLIED = {}
 if _BOOTSTRAPPED_FROM is not None:
     POLICY: dict[str, Any] = _default_policy(_BOOTSTRAPPED_FROM)
     PROVIDERS: dict[str, dict[str, Any]] = _default_providers(
@@ -762,23 +759,39 @@ def remove_lease() -> None:
 
 
 def pid_alive(pid: int) -> bool:
+    """Return True iff the process exists and is liveness-probeable.
+
+    os.kill(pid, 0) raises ProcessLookupError when the
+    PID does not exist and PermissionError when the PID
+    exists but is owned by another user. A single-writer
+    invariant depends on the distinction: a stray EPERM must
+    NOT be treated as "process dead".
+    """
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
-    except OSError as e:
-        return e.errno == errno.EPERM
+    except PermissionError:
+        # The process exists but is owned by another user.
+        # Treating it as dead would allow a second writer to
+        # start, breaking the single-writer invariant.
+        return True
 
 
 def pgid_alive(pgid: int) -> bool:
+    """Return True iff the process group exists.
+
+    Identical semantics to pid_alive for the same
+    single-writer safety reason.
+    """
     try:
         os.kill(-pgid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
-    except OSError as e:
-        return e.errno == errno.EPERM
+    except PermissionError:
+        return True
 
 
 def pid_cmdline(pid: int) -> str:

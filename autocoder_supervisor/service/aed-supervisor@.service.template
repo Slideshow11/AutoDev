@@ -1,11 +1,19 @@
 [Unit]
-Description=AED Autocoder Supervisor (source-controlled)
-Documentation=https://github.com/Slideshow11/Automated-Edge-Discovery
+Description=AutoDev supervisor (autocoder_supervisor package) v1
+Documentation=https://github.com/Slideshow11/AutoDev
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# The supervisor and any launched worker run as a dedicated,
+# unprivileged system account (``aed-supervisor``). The
+# account is created during installation (see
+# docs/INSTALL.md); if the account is missing systemd will
+# refuse to start the service.
+User=aed-supervisor
+Group=aed-supervisor
+
 # All paths below are absolute. The systemd template unit
 # is copied to /etc/systemd/system/aed-supervisor@.service
 # and instantiated as aed-supervisor@<instance>.service.
@@ -39,8 +47,13 @@ Type=simple
 WorkingDirectory=/var/lib/aed-supervisor/%i
 Environment=HOME=/var/lib/aed-supervisor/%i
 Environment=PYTHONPATH=
-Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=__SUPERVISOR_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=AED_SUPERVISOR_CONFIG=/etc/aed-supervisor/%i/aed-supervisor.toml
+# AED environment variables are normally provided by the
+# instance environment file at
+# /etc/aed-supervisor/%i/supervisor.env. They are listed here
+# only as documentation placeholders so an operator who
+# inspects the unit file can see the canonical names.
 Environment=AED_PR_NUMBER=__SET_ME__
 Environment=AED_REPO_OWNER=__SET_ME__
 Environment=AED_REPO_NAME=__SET_ME__
@@ -59,7 +72,18 @@ KillMode=control-group
 TimeoutStopSec=30
 MemoryMax=512M
 CPUQuota=50%
+# Privilege / namespace hardening: the supervisor and any
+# launched worker run as the unprivileged aed-supervisor
+# account and have no write access to most of the host
+# filesystem.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictRealtimeScheduling=true
+RestrictSUIDSGID=true
 
 [Install]
 WantedBy=default.target
-

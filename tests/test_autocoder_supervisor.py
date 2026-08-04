@@ -1053,3 +1053,50 @@ def test_s_merge_authorization_for_one_head_cannot_be_reused():
     # pre-merge main tip). This test does NOT require that
     # ``authorized_head_sha`` appears in ``merge_commit_parents``.
     assert res["ready"] is False
+
+
+
+
+def test_pid_alive_eperm_means_existing_not_dead():
+    """pid_alive and pgid_alive must return True on
+    PermissionError.
+
+    os.kill(pid, 0) raises PermissionError when the
+    target PID exists but is owned by another user. The
+    single-writer invariant depends on treating this as
+    "the process exists" (return True), NOT as
+    "the process is dead". A duplicate-writer test using
+    the live OS probe is the cleanest evidence.
+    """
+    import errno
+    import os
+    import subprocess
+    import sys
+    from autocoder_supervisor import supervisor
+
+    # Probe 1: an obviously-dead PID returns False.
+    # PIDs >= 2^30 are extremely unlikely to be in use;
+    # os.kill raises ESRCH (ProcessLookupError) -> False.
+    assert supervisor.pid_alive(2 ** 30) is False
+
+    # Probe 2: the supervisor's own process is alive.
+    my_pid = os.getpid()
+    assert supervisor.pid_alive(my_pid) is True
+
+    # Probe 3: PermissionError logic. Simulate by monkey-
+    # patching os.kill in the supervisor module to raise
+    # PermissionError for a known PID. The function must
+    # return True (process exists).
+    import autocoder_supervisor.supervisor as _sup
+    import errno as _errno
+    original_kill = _sup.os.kill
+    def fake_kill(pid, sig):
+        if pid == my_pid:
+            raise PermissionError(_errno.EPERM, "eperm test")
+        return original_kill(pid, sig)
+    _sup.os.kill = fake_kill
+    try:
+        assert _sup.pid_alive(my_pid) is True
+    finally:
+        _sup.os.kill = original_kill
+

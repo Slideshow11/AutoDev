@@ -326,14 +326,16 @@ def default_config_from_env() -> SupervisorConfig:
     lock_path = os.environ.get(
         "AED_SUPERVISOR_LOCK_PATH", os.path.join(runtime_root, "lock")
     )
-    # The working_checkout falls back to $PWD for the
-    # in-process default. This is acceptable because the
-    # result is never persisted; load_config (which reads
-    # TOML files) is what guards against committed user
-    # paths.
+    # The working_checkout falls back to $PWD, then to a
+    # private per-instance checkout derived from the
+    # already-created runtime_root. The shared
+    # /tmp/aed-supervisor-default/ working_checkout was
+    # removed because it is reachable by any user on the
+    # host and would have allowed Popen to launch the worker
+    # inside a shared, attacker-controllable directory.
     working_checkout = os.environ.get(
         "AED_SUPERVISOR_WORKING_CHECKOUT",
-        os.environ.get("PWD", "/tmp/aed-supervisor-default/working_checkout"),
+        os.environ.get("PWD", os.path.join(runtime_root, "working_checkout")),
     )
 
     data: SupervisorConfigDict = {
