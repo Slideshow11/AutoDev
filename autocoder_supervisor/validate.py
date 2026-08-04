@@ -134,6 +134,25 @@ def _check_provider_policy(
 ) -> None:
     required = set(cfg.required_review_providers)
     optional = set(cfg.optional_review_providers)
+    # The runtime provider registry is the supervisor
+    # module's PROVIDERS dict. The check ensures that
+    # configured providers exist in the registry so the
+    # supervisor never reaches readiness with an unknown
+    # name.
+    from . import supervisor as _supervisor
+    known = set(_supervisor.PROVIDERS.keys())
+    unknown_required = sorted(required - known)
+    if unknown_required:
+        errors.append(
+            f"required review providers not in the runtime registry: "
+            f"{unknown_required}"
+        )
+    unknown_optional = sorted(optional - known)
+    if unknown_optional:
+        errors.append(
+            f"optional review providers not in the runtime registry: "
+            f"{unknown_optional}"
+        )
     if required & optional:
         errors.append(
             f"required and optional providers overlap: "
@@ -228,15 +247,26 @@ def _check_runtime_file_mode(
 def _check_pr_head_match(
     cfg: SupervisorConfig, errors: list[str]
 ) -> None:
-    """Verify that the configured PR head matches the live PR head.
+    """Verify that the configured PR head matches the live PR
+    head.
 
-    This catches a stale checkout — the operator could have
-    a configuration pointing at one head while the live PR
-    has moved on. Validation must not silently report success
-    in that case.
+    This catches a stale checkout or a stale
+    AED_AUTHORITATIVE_HEAD: the operator could have a
+    configuration pointing at one head while the live PR
+    has moved on. Validation must not silently report
+    success in that case.
+
+    The live PR head is fetched via the GitHub REST API
+    (the same path used by the supervisor). The comparison
+    is between:
+
+    1. the configured authoritative head
+       (AED_AUTHORITATIVE_HEAD);
+    2. the live GitHub PR head;
+    3. the local checkout HEAD.
+
+    A difference in any pair is an error.
     """
-    import json as _json
-
     head = os.environ.get("AED_AUTHORITATIVE_HEAD", "").strip()
     if not head:
         # No head pinned in the environment — the operator
@@ -251,16 +281,57 @@ def _check_pr_head_match(
     ):
         # Already reported by _check_repo_accessible; skip.
         return
+
+    # Live PR head via GitHub.
+    from . import supervisor as _supervisor
+    repo_owner = os.environ.get("AED_REPO_OWNER", "")
+    repo_name = os.environ.get("AED_REPO_NAME", "")
+    pr_number = os.environ.get("AED_PR_NUMBER", "")
+    live_head = None
+    if repo_owner and repo_name and pr_number:
+        try:
+            pr_number_int = int(pr_number)
+        except ValueError:
+            pr_number_int = 0
+        token = _supervisor.get_github_token()
+        if token:
+            pr = _supervisor.github_get(
+                f"/repos/{repo_owner}/{repo_name}/pulls/{pr_number_int}",
+                token,
+            )
+            if pr:
+                live_head = (pr.get("head") or {}).get("sha")
+    if not live_head:
+        errors.append(
+            "could not determine the live GitHub PR head; "
+            "verify AED_REPO_OWNER / AED_REPO_NAME / AED_PR_NUMBER "
+            "and the GitHub token in TOKEN_FILE"
+        )
+        return
+
+    # Local checkout HEAD.
     try:
         out = subprocess.run(
             ["git", "-C", str(repo), "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return
-    if out.returncode != 0:
+        local_head = None
+        out = None
+    if out is None or out.returncode != 0 or not out.stdout.strip():
+        errors.append(
+            f"git rev-parse HEAD failed for {cfg.working_checkout!r}; "
+            "verify the working_checkout is a valid git checkout"
+        )
         return
     local_head = out.stdout.strip()
+
+    if live_head != head:
+        errors.append(
+            f"live GitHub PR head {live_head!r} does not match "
+            f"the configured authoritative head {head!r}; "
+            "the supervisor will refuse readiness until they match"
+        )
     if local_head != head:
         errors.append(
             f"working_checkout HEAD {local_head!r} does not match "

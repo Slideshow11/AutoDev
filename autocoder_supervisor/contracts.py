@@ -51,6 +51,14 @@ class SupervisorConfigDict(TypedDict, total=False):
     optional_review_providers: List[str]
     provider_states_are_independent: bool
     post_codex_recovery_request: bool
+    # Names of GitHub Actions checks (or status contexts)
+    # that must reach a SUCCESS conclusion for the PR to
+    # be considered ready. The list is operator-configured
+    # in the standalone AutoDev repository and is
+    # independent of the AED-embedded AED-required-check
+    # set. Default: empty (the operator is expected to set
+    # the list explicitly via the configuration file).
+    required_check_names: List[str]
 
     # Cadence
     heartbeat_seconds: int
@@ -95,6 +103,11 @@ class SupervisorConfig:
     optional_review_providers: List[str]
     provider_states_are_independent: bool
     post_codex_recovery_request: bool
+    # Names of GitHub Actions checks that must reach a SUCCESS
+    # conclusion for the PR to be considered ready. Empty
+    # list means "no required checks" — the operator must
+    # set this explicitly via the configuration file.
+    required_check_names: List[str]
 
     heartbeat_seconds: int
     quiet_window_seconds: int
@@ -155,6 +168,9 @@ class SupervisorConfig:
             ),
             post_codex_recovery_request=bool(
                 data["post_codex_recovery_request"]
+            ),
+            required_check_names=list(
+                data.get("required_check_names", [])
             ),
             heartbeat_seconds=int(data["heartbeat_seconds"]),
             quiet_window_seconds=int(data["quiet_window_seconds"]),

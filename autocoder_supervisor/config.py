@@ -393,5 +393,10 @@ def default_config_from_env() -> SupervisorConfig:
             )
         ),
         "provider_quota_reset": {},
+        # No required-check names by default; the operator
+        # is expected to set the list explicitly via the
+        # configuration file or environment variables
+        # specific to the deployment.
+        "required_check_names": [],
     }
     return SupervisorConfig.from_dict(data, reject_user_paths=False)  # type: ignore[arg-type]

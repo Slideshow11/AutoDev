@@ -463,7 +463,18 @@ def test_e_snapshot_differs_reports_check_conclusion_change():
     assert "check_conclusion_change" in reasons
 
 
-def test_e_check_failure_blocks_readiness():
+def test_e_check_failure_blocks_readiness(monkeypatch):
+    """A failed required check blocks readiness.
+
+    The required-check list is operator-configured in the
+    standalone AutoDev repository (via POLICY). This test
+    sets it explicitly via monkeypatch so the assertion
+    does not depend on any hardcoded check name.
+    """
+    required = {"test (3.11)", "validator"}
+    monkeypatch.setitem(
+        supervisor.POLICY, "required_check_names", list(required),
+    )
     snap = _clean_snap()
     snap["required_checks"]["test (3.11)"]["conclusion"] = "failure"
     res = supervisor.evaluate_readiness(snap, AUTH)
@@ -1099,4 +1110,94 @@ def test_pid_alive_eperm_means_existing_not_dead():
         assert _sup.pid_alive(my_pid) is True
     finally:
         _sup.os.kill = original_kill
+
+
+def test_dry_sim_does_not_launch_worker(
+    isolated_state, monkeypatch,
+):
+    """``--dry-sim`` must not invoke ``launch_worker``.
+
+    With new actionable events and ``--dry-sim`` set, the
+    supervisor must log the would-be decision and skip every
+    state-mutating step (no launch, no event mark, no
+    review request).
+    """
+    launches = {"n": 0}
+
+    def fake_launch(rs, live):
+        launches["n"] += 1
+        return {"pid": 99999, "pgid": 99999,
+                "start_time_evidence": {}, "launched_at": "now",
+                "heartbeat_at": "now", "cmd": ["hermes", "chat"]}
+
+    # monkeypatch.setattr does not accept return_value=;
+    # use a lambda for the cooldown predicate.
+    monkeypatch.setattr(supervisor, "launch_worker",
+                        fake_launch)
+    monkeypatch.setattr(supervisor, "mark_event_launched",
+                        lambda eid: None)
+    monkeypatch.setattr(supervisor, "cooldown_active",
+                        lambda: False)
+    monkeypatch.setattr(supervisor, "AUTHORITATIVE_HEAD", AUTH)
+    # Pre-populate an unconsumed event so the main loop
+    # observes an actionable event.
+    supervisor.write_unconsumed_event({
+        "id": "EVT_DRYSIM_TEST",
+        "kind": "new_unresolved_current_thread",
+    })
+    supervisor.enter_readiness(
+        supervisor.STATE_ACTIVE_REPAIR, head_sha=AUTH,
+    )
+    supervisor.write_snapshot("A", _clean_snap())
+    rs = {"current_head": AUTH}
+    with patch.object(supervisor, "capture_live_snapshot",
+                      return_value=_clean_snap()), \
+         patch("time.sleep"):
+        # main() expects --dry-sim to early-return after the
+        # dry-sim log line. We use --once to keep the run
+        # bounded.
+        rc = supervisor.main(["--dry-sim", "--once"])
+    assert launches["n"] == 0, (
+        "dry-sim must NOT launch a worker; launched %d" %
+        launches["n"]
+    )
+    # dry-sim must NOT mark any events as launched.
+    assert "EVT_DRYSIM_TEST" not in supervisor.launched_event_ids()
+
+
+def test_validate_environment_rejects_unknown_provider(
+    tmp_path,
+):
+    """Configured providers absent from the runtime
+    PROVIDERS registry must be rejected by validation.
+    """
+    from autocoder_supervisor import contracts, validate
+    bad = {
+        "schema_version": "aed.autocoder_supervisor.v1",
+        "instance_id": "t",
+        "state_dir": str(tmp_path / "state"),
+        "working_checkout": str(tmp_path / "wc"),
+        "log_path": str(tmp_path / "log"),
+        "heartbeat_path": str(tmp_path / "hb"),
+        "lock_path": str(tmp_path / "lock"),
+        "worker_command": ["/usr/bin/env", "true"],
+        "worker_session_id": "s",
+        "worker_session_name": "sn",
+        "cooldown_seconds": 900,
+        "resume_prompt_template": "go",
+        "human_boundary": "merge_only",
+        "required_review_providers": ["coderabbit", "unknown-bot"],
+        "optional_review_providers": ["codex"],
+        "provider_states_are_independent": True,
+        "post_codex_recovery_request": False,
+        "heartbeat_seconds": 30,
+        "quiet_window_seconds": 60,
+        "quota_retry_initial_seconds": 3600,
+        "quota_retry_backoff_seconds": 21600,
+        "quota_backoff_after_retry_count": 2,
+    }
+    cfg = contracts.SupervisorConfig.from_dict(bad)
+    errors, _ = validate.validate_environment(cfg)
+    assert any("unknown-bot" in e for e in errors), \
+        f"expected 'unknown-bot' in errors; got {errors}"
 

@@ -135,6 +135,7 @@ def _default_policy(cfg: SupervisorConfig) -> dict[str, Any]:
             cfg.post_codex_recovery_request,
         "quiet_window_seconds": cfg.quiet_window_seconds,
         "heartbeat_seconds": cfg.heartbeat_seconds,
+        "required_check_names": list(cfg.required_check_names),
     }
 
 
@@ -252,6 +253,7 @@ else:  # pragma: no cover — fallback only triggers on unusual
         "post_codex_recovery_request": False,
         "quiet_window_seconds": 180,
         "heartbeat_seconds": 120,
+        "required_check_names": [],
     }
     PROVIDERS = {  # type: ignore[assignment]
         "coderabbit": {
@@ -1961,13 +1963,7 @@ def required_checks_green(snap: dict) -> bool:
     green. The only green states are ``success``, ``skipped``,
     ``neutral``.
     """
-    required = {
-        "test (3.11)",
-        "validator",
-        "governance-validators",
-        "review-comment-gate",
-        "pr-gate-live-smoke",
-    }
+    required = set(POLICY.get("required_check_names") or [])
     for name in required:
         info = snap.get("required_checks", {}).get(name)
         # An absent entry means the check has not yet been
@@ -2382,6 +2378,32 @@ def main(argv: Optional[list[str]] = None) -> int:
                 paused_providers=paused,
             )
 
+            if args.dry_sim:
+                # --dry-sim: print the decision and skip every
+                # state-mutating step (no worker launch, no event
+                # mark, no review request). The flag is honoured
+                # before any lease / cooldown / launch_worker
+                # branch so a real worker is never produced.
+                log(
+                    "info",
+                    "dry-sim: would launch worker",
+                    events=[
+                        e.get("kind") for e in new_events
+                        if e.get("id") in (
+                            e.get("id") for e in new_events
+                            if e.get("id") and e.get("id")
+                            not in launched_event_ids()
+                        )
+                    ] if False else [
+                        e.get("kind") for e in new_events
+                    ],
+                    head=iteration.get("head_sha"),
+                    state=cur_state,
+                )
+                if args.once:
+                    return 0
+                time.sleep(heartbeat_seconds)
+                continue
             if new_events and not cooldown_active():
                 already = launched_event_ids()
                 fresh_ids = [
