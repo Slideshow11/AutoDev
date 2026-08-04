@@ -70,9 +70,19 @@ def _create_venv(staging: Path) -> Path:
 
 
 def _pip_install(venv_dir: Path, install_root: Path) -> None:
+    """Install the staged package into the venv via ``pip
+    install`` **without** ``--no-deps``.
+
+    The staged install is the real production install. The
+    conditional ``tomli`` dependency is declared in
+    ``pyproject.toml`` for Python <3.11 and is installed by
+    ``pip`` on those versions. Suppressing dependencies
+    here would mask the Python 3.10 failure mode the
+    package-install test is designed to catch.
+    """
     pip = venv_dir / "bin" / "pip"
     proc = subprocess.run(
-        [str(pip), "install", "--no-deps", str(install_root)],
+        [str(pip), "install", str(install_root)],
         capture_output=True,
         text=True,
     )
@@ -103,7 +113,7 @@ def _pip_build_wheel(venv_dir: Path, install_root: Path,
         f"pip wheel failed (exit {proc.returncode}):\n"
         f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
-    wheels = sorted(wheel_dir.glob("aed_supervisor-*.whl"))
+    wheels = sorted(wheel_dir.glob("autocoder_supervisor-*.whl"))
     assert len(wheels) == 1, (
         f"expected exactly one wheel in {wheel_dir}, "
         f"found {len(wheels)}: {[w.name for w in wheels]}"
@@ -323,3 +333,40 @@ def test_staging_layout_matches_documented_install(
             "no install-root/pyproject.toml found under tmp_path; "
             "the staging procedure did not produce the documented layout"
         )
+
+
+def test_python_3_10_install_includes_tomli_dependency(
+    installed_venv: Path,
+):
+    """On Python <3.11 the staged install (with declared
+    runtime dependencies) pulls in the conditional
+    ``tomli`` runtime dependency via the venv pip.
+
+    On Python 3.11+ the dependency is skipped because the
+    stdlib ``tomllib`` is used.
+    """
+    pip = installed_venv / "bin" / "pip"
+    proc = subprocess.run(
+        [str(pip), "show", "tomli"],
+        capture_output=True, text=True,
+    )
+    py = subprocess.run(
+        [str(installed_venv / "bin" / "python"), "-c",
+         "import sys; print(sys.version_info.major, sys.version_info.minor)"],
+        capture_output=True, text=True,
+    )
+    py_version = tuple(int(x) for x in py.stdout.strip().split())
+    if py_version < (3, 11):
+        assert proc.returncode == 0, (
+            f"tomli is required on Python <3.11 (this venv is Python "
+            f"{py_version}) but was not installed by pip:\n"
+            f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        )
+        assert "tomli" in proc.stdout
+    else:
+        # On 3.11+, tomli is intentionally not installed.
+        assert proc.returncode != 0, (
+            f"tomli should not be installed on Python "
+            f"{py_version} (tomllib is in stdlib)"
+        )
+

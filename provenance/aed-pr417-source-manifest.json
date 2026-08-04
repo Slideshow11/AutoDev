@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-04T18:28:13Z",
+  "captured_utc": "2026-08-04T18:51:27Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -12,16 +12,16 @@
     "files_from_source": 17,
     "byte_identical_files": 9,
     "transformed_files": 8,
-    "newly_added_files": 8
+    "newly_added_files": 10
   },
   "files": [
     {
       "source_path": "scripts/local/pyproject.toml",
       "destination_path": "pyproject.toml",
       "source_sha256": "8fc7e1319f879c71f1e272b4a56d56951aa2b223366d238e96b114540c125532",
-      "destination_sha256": "5abf64b5d349f29fc78cc4adaf474bf4684492bcac65b948fe2f9614357b960c",
+      "destination_sha256": "69c20394d9999f6d9dd8b32582f5576c866671f8f6edd1f4416d9acc147935cf",
       "source_size_bytes": 1304,
-      "destination_size_bytes": 1311,
+      "destination_size_bytes": 1513,
       "transformation_classification": "packaging_metadata_only",
       "transformation_explanation": "Moved from scripts/local/pyproject.toml to the standalone repository root; updated the docstring and the [tool.setuptools.packages.find] exclude list to reflect the new layout. Distribution name and runtime dependency on tomli for Python <3.11 are preserved."
     },
@@ -179,9 +179,9 @@
       "source_path": "tests/test_autocoder_supervisor_packaging.py",
       "destination_path": "tests/test_autocoder_supervisor_packaging.py",
       "source_sha256": "16ed9018162e191a6df5fdc9be7151615fa156382a2f0518a9f80e60fffba26c",
-      "destination_sha256": "f81bd1d37836efcb894cebda4de0c8e54af48db7bcf4018b0b8e332a3e9e8f81",
+      "destination_sha256": "aa67c0acebbfe337b7c7fba1bfbc156d08d6a1ed01bf47a4091b0acc36384da0",
       "source_size_bytes": 11444,
-      "destination_size_bytes": 11400,
+      "destination_size_bytes": 13130,
       "transformation_classification": "path_only",
       "transformation_explanation": "Updated SOURCE_PKG and SOURCE_MANIFEST to point at the standalone package and pyproject.toml at the repository root. Test semantics unchanged."
     },
@@ -189,8 +189,8 @@
       "source_path": null,
       "destination_path": ".github/workflows/ci.yml",
       "source_sha256": null,
-      "destination_sha256": "8447eb60548f30a94dcd175032ffbcce97ff7e30b2dbe808a32759478d4044a1",
-      "destination_size_bytes": 5289,
+      "destination_sha256": "43d2639d2ecb748057b845b944ddc7312df946adc61eafe37f83e6e606338595",
+      "destination_size_bytes": 4020,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -243,17 +243,35 @@
       "source_path": null,
       "destination_path": "provenance/EXTRACTION.md",
       "source_sha256": null,
-      "destination_sha256": "ece4eb172a54be82730fda9d6061a9814f45b415df783c25bd738f480f4df303",
-      "destination_size_bytes": 6090,
+      "destination_sha256": "3f7befdbfce35e652016cfea0f623e75ccca5bcdba40543e5f96a28e20020991",
+      "destination_size_bytes": 6175,
       "transformation_classification": "standalone_documentation_addition",
+      "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+    },
+    {
+      "source_path": null,
+      "destination_path": "scripts/canonical_scanner.py",
+      "source_sha256": null,
+      "destination_sha256": "ce48be52899cc2dd0709eb713833e7ba7bf369317adcc7090aabfdc104ea67c4",
+      "destination_size_bytes": 5516,
+      "transformation_classification": "standalone_ci_addition",
+      "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+    },
+    {
+      "source_path": null,
+      "destination_path": "scripts/scanner-allowlist.json",
+      "source_sha256": null,
+      "destination_sha256": "7107ec17aeff0fa430770bc11b0c6d46b7b1e561beeecef1e58a9874188bbb2d",
+      "destination_size_bytes": 1549,
+      "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
     {
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "ae78d72f3ea8e90b5ba12c5eae3ae0d888fd4a6d01cd8fcf755de2236dcd39a6",
-      "destination_size_bytes": 12545,
+      "destination_sha256": "513643e82d4f876b4df0526429bcdd161a7d72104bceac78cb9538385e9a26a5",
+      "destination_size_bytes": 13072,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }

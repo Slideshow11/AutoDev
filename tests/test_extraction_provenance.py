@@ -9,10 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import subprocess
 import sys
-import textwrap
 from pathlib import Path
 
 
@@ -25,30 +23,6 @@ SOURCE_REPO = "Slideshow11/Automated-Edge-Discovery"
 SOURCE_COMMIT = "b57fcaad806c68b93668bcd318fa26ab15a8ab40"
 SOURCE_PR = 417
 SOURCE_REVIEWED_HEAD = "18ba0df49d2a19779e350d6df5a102b254cbeed7"
-
-
-# Files that are allowed to mention forbidden tokens as part
-# of fixture or test-detection logic. The committed-state-scan
-# input file lists the forbidden tokens and is the scanner's
-# input data, not a contributor of leaked secrets.
-ALLOW_RELPATHS = {
-    Path("tests/test_autocoder_supervisor.py"),
-    Path("tests/test_extraction_provenance.py"),
-    Path(".github/workflows/scan-forbidden.txt"),
-    # Package source files implement the user-path rejection
-    # logic and naturally contain the forbidden tokens as part
-    # of the validation regexes; this is functional code
-    # extracted from AED and is not a secret leak.
-    Path("autocoder_supervisor/config.py"),
-    Path("autocoder_supervisor/supervisor.py"),
-    Path("autocoder_supervisor/contracts.py"),
-    # INVARIANTS.md files document the validator's rejection
-    # patterns (including the literal shape of rejected
-    # tokens like oauth_token:). They are part of the
-    # validator's public contract and not a leaked secret.
-    Path("INVARIANTS.md"),
-    Path("autocoder_supervisor/INVARIANTS.md"),
-}
 
 
 def _read_provenance() -> dict:
@@ -143,44 +117,72 @@ def test_provenance_does_not_contain_tokens_or_user_paths():
         )
 
 
-def _walk_repo_files():
-    """Yield (relpath, text) for every file under REPO_ROOT,
-    skipping caches, venvs, and the git directory.
+def test_canonical_scanner_returns_clean_on_current_tree():
+    """The canonical committed-state scanner returns 0 on
+    the current committed tree (no real credentials, no
+    user paths, no runtime evidence).
     """
-    for root, dirs, files in os.walk(REPO_ROOT):
-        if "/.git/" in root or root.endswith("/.git"):
-            continue
-        if "/__pycache__/" in root:
-            continue
-        if "/dist/" in root:
-            continue
-        for f in files:
-            p = Path(root) / f
-            try:
-                rel = p.relative_to(REPO_ROOT)
-            except ValueError:
-                continue
-            yield rel, p
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import run as scanner_run, SCANNER_INPUT_REL
+    rc = scanner_run(REPO_ROOT, REPO_ROOT / SCANNER_INPUT_REL)
+    assert rc == 0
 
 
-def test_no_committed_file_contains_user_specific_paths():
-    """No committed file under the standalone repository
-    contains ``/home/max/`` (or any other user-specific
-    absolute path). Tests that test the rejection of such
-    paths, and the scanner's input file, are excluded.
+def test_canonical_scanner_skips_its_own_data_input(tmp_path):
+    """The scanner does not report its own token-definition
+    input file (``scan-forbidden.txt``), even though that
+    file lists the forbidden tokens by design.
     """
-    forbidden = ["/home/max/", "/root/"]
-    for rel, p in _walk_repo_files():
-        if rel in ALLOW_RELPATHS:
-            continue
-        try:
-            text = p.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        for token in forbidden:
-            assert token not in text, (
-                f"{rel} contains {token!r}"
-            )
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import run as scanner_run, SCANNER_INPUT_REL
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("gho_\n")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "ok.py").write_text("USER_HOME = 'example'\n")
+    rc = scanner_run(tmp_path, scanner_input)
+    assert rc == 0
+
+
+def test_canonical_scanner_rejects_real_credential_in_source_file(tmp_path):
+    """An actual credential-shaped value in an otherwise
+    permitted source file still fails the scanner.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import run as scanner_run, SCANNER_INPUT_REL
+    src = tmp_path / "src"
+    src.mkdir()
+    leak = src / "leak.py"
+    # The literal credential string is constructed at runtime
+    # to avoid putting the literal token pattern in source.
+    parts = ["gh", "o_", "REAL", "_", "SEC"]
+    leak.write_text("REAL_TOKEN = '" + "".join(parts) + "'\n")
+    scanner_input = src / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("gho_\n")
+    rc = scanner_run(tmp_path, scanner_input)
+    assert rc == 1
+
+
+def test_canonical_scanner_rejects_home_max_in_ordinary_file(tmp_path):
+    """``/home/max/`` in any ordinary committed file fails
+    the scanner, even when that path is otherwise
+    permissible in dedicated detector / fixture files.
+    """
+    sys.path.insert(0, str(REPO_ROOT / "scripts"))
+    from canonical_scanner import run as scanner_run, SCANNER_INPUT_REL
+    src = tmp_path / "src"
+    src.mkdir()
+    parts = ["/", "home", "/max", "/"]
+    (src / "ordinary.py").write_text(
+        "USER_HOME = '" + "".join(parts) + ".cache'\n"
+    )
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("/home/max/\n")
+    rc = scanner_run(tmp_path, scanner_input)
+    assert rc == 1
 
 
 def test_no_incorrect_squash_parent_claim_in_tests_or_docs():
@@ -191,21 +193,38 @@ def test_no_incorrect_squash_parent_claim_in_tests_or_docs():
     separately.
     """
     forbidden = [
-        # Old incorrect claim that was corrected.
         "the merge commit's parents MUST include HEAD_A exactly",
         "the merge commit's parents MUST include the authorized",
     ]
-    for rel, p in _walk_repo_files():
-        if rel in ALLOW_RELPATHS:
+    allowed_self = {
+        Path("tests/test_extraction_provenance.py"),
+    }
+    for root, dirs, files in os.walk(REPO_ROOT):
+        if "/.git/" in root or root.endswith("/.git"):
             continue
-        try:
-            text = p.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
+        if "/__pycache__/" in root:
             continue
-        for token in forbidden:
-            assert token not in text, (
-                f"{rel} contains the incorrect claim: {token!r}"
-            )
+        if "/dist/" in root:
+            continue
+        if "/.pytest_cache/" in root:
+            continue
+        for f in files:
+            p = Path(root) / f
+            try:
+                rel = p.relative_to(REPO_ROOT)
+            except ValueError:
+                continue
+            if rel in allowed_self:
+                continue
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for token in forbidden:
+                assert token not in text, (
+                    f"{p.relative_to(REPO_ROOT)} contains the "
+                    f"incorrect claim: {token!r}"
+                )
 
 
 def test_package_can_operate_with_repository_identity_different_from_aed():
@@ -243,10 +262,6 @@ def test_package_can_operate_with_repository_identity_different_from_aed():
     }
     cfg = contracts.SupervisorConfig.from_dict(autodev_cfg)
     assert cfg.instance_id == "autodev-extraction-test"
-    # The validator does not pin repository identity at the
-    # package level — the operator chooses it at install time
-    # via AED_REPO_OWNER and AED_REPO_NAME. The default
-    # values fall through to env, not to AED.
     assert cfg.state_dir == "/var/tmp/autodev-supervisor-canary/state"
 
 
@@ -294,8 +309,7 @@ def test_extraction_manifest_records_distinct_fields():
 
     For a squash example,
     ``merge_commit_parents == [base_sha_before_merge]``
-    must hold. The test data in this file mimics a real
-    squash scenario and asserts the contract.
+    must hold.
     """
     base_sha = "9697b136f311b340e4794c8a20e2568fc2e2d08a"
     squash_sha = "b57fcaad806c68b93668bcd318fa26ab15a8ab40"
@@ -308,28 +322,31 @@ def test_extraction_manifest_records_distinct_fields():
         "merge_commit_parents": [base_sha],
         "merge_method": "squash",
     }
-    # Sanity: the authorized head is distinct from the parent.
     assert authorized_head != base_sha
-    # The squash parent is exactly the base SHA.
     assert terminal_evidence["merge_commit_parents"] == [base_sha]
-    # The authorized head is NOT in the parent list.
     assert authorized_head not in terminal_evidence["merge_commit_parents"]
-    # The squash commit SHA is non-empty.
     assert squash_sha
+
+
+def test_distribution_name_is_autocoder_supervisor():
+    """The distribution name in pyproject.toml is
+    ``autocoder-supervisor``. A different value indicates
+    the rename was not applied.
+    """
+    pyproject = (REPO_ROOT / "pyproject.toml").read_text()
+    assert 'name = "autocoder-supervisor"' in pyproject, (
+        "pyproject.toml distribution name must be "
+        '"autocoder-supervisor"'
+    )
 
 
 def test_no_broad_internal_compatibility_rename_occurred():
     """The extraction preserves the internal
-    ``autocoder_supervisor`` package name and the
-    ``aed-supervisor`` distribution name. A broad rename
-    would have changed them. This test fails if either name
-    appears anywhere with a different value.
+    ``autocoder_supervisor`` package name. A broad rename
+    would have changed it. The AED_-prefixed compatibility
+    variables and schema names are preserved.
     """
     pkg_init = (REPO_ROOT / "autocoder_supervisor" / "__init__.py").read_text()
     assert "autocoder_supervisor" in pkg_init
     pyproject = (REPO_ROOT / "pyproject.toml").read_text()
-    # The distribution name is "aed-supervisor"; the
-    # package name is "autocoder_supervisor". Neither has
-    # been renamed.
-    assert 'name = "aed-supervisor"' in pyproject
     assert 'autocoder_supervisor*' in pyproject

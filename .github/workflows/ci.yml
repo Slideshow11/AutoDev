@@ -15,7 +15,7 @@ jobs:
         with:
           python-version: "3.10"
       - run: pip install pytest
-      - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py --no-header
+      - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
           AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
@@ -31,7 +31,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install pytest
-      - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py --no-header
+      - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
           AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
@@ -47,7 +47,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py --no-header
+      - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
           AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
@@ -64,10 +64,23 @@ jobs:
           python-version: "3.11"
       - name: Build wheel
         run: python3 -m pip wheel --no-deps --wheel-dir dist .
-      - name: Create isolated venv and install
+      - name: Verify wheel filename uses autocoder_supervisor
+        run: |
+          set -e
+          # After setuptools normalisation the wheel filename
+          # is derived from the import package name
+          # (autocoder_supervisor, not the distribution name).
+          wheel=$(ls dist/autocoder_supervisor-*.whl | head -1)
+          echo "wheel: $wheel"
+          test -n "$wheel"
+      - name: Create isolated venv and install with declared deps
         run: |
           python3 -m venv venv
-          venv/bin/pip install --no-deps dist/aed_supervisor-*.whl
+          # The staged install (no PYTHONPATH) is the real
+          # production install. We do NOT pass --no-deps here
+          # so the conditional tomli dependency is installed
+          # on Python <3.11.
+          venv/bin/pip install dist/autocoder_supervisor-*.whl
       - name: Verify import resolves from site-packages
         run: |
           cd /tmp
@@ -98,50 +111,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Scan for secrets and user paths
-        run: |
-          python3 - <<'PY'
-          import os, sys
-          # The forbidden-token list is loaded from a separate
-          # committed file so the literal tokens do not appear
-          # in this workflow definition (which would otherwise
-          # fail the same scan).
-          with open('.github/workflows/scan-forbidden.txt') as f:
-              forbidden = [line.rstrip('\n') for line in f if line.strip()]
-          # Files that are allowed to mention forbidden tokens
-          # as part of fixture / test-detection / documented
-          # validator-rejection-pattern logic.
-          ALLOW = {
-              'tests/test_autocoder_supervisor.py',
-              'tests/test_extraction_provenance.py',
-              'autocoder_supervisor/config.py',
-              'autocoder_supervisor/supervisor.py',
-              'autocoder_supervisor/contracts.py',
-              'INVARIANTS.md',
-              'autocoder_supervisor/INVARIANTS.md',
-          }
-          failures = []
-          for root, dirs, files in os.walk('.'):
-              if '/.git/' in root or '/__pycache__/' in root or '/dist/' in root or '/venv/' in root or '/.pytest_cache/' in root:
-                  continue
-              for f in files:
-                  p = os.path.join(root, f)
-                  rel = os.path.relpath(p, '.')
-                  if rel in ALLOW:
-                      continue
-                  try:
-                      with open(p, 'rb') as fh:
-                          content = fh.read()
-                      text = content.decode('utf-8', errors='replace')
-                  except Exception:
-                      continue
-                  for token in forbidden:
-                      if token in text:
-                          failures.append(f"{p}: contains {token!r}")
-          if failures:
-              print("FAIL: committed-state-scan detected forbidden tokens:")
-              for f in failures:
-                  print(f"  {f}")
-              sys.exit(1)
-          print("OK: committed-state-scan")
-          PY
+      - name: Run canonical committed-state scan
+        run: python3 scripts/canonical_scanner.py

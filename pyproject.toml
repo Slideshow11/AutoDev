@@ -1,4 +1,4 @@
-# Autocoder supervisor — install metadata.
+# AutoDev supervisor — install metadata.
 #
 # This manifest sits at the install root alongside the
 # ``autocoder_supervisor/`` package directory so that
@@ -13,13 +13,18 @@
 # ``[tool.setuptools.packages.find]`` searches ``where = ["."]``
 # relative to the manifest (i.e. the install root) for a
 # subdirectory named ``autocoder_supervisor`` and packages it.
+#
+# Distribution name: ``autocoder-supervisor`` (Phase 7
+# of the AutoDev extraction).
+# Import package: ``autocoder_supervisor`` (retained for
+# compatibility with the reviewed v1 implementation).
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "aed-supervisor"
+name = "autocoder-supervisor"
 version = "1.0.0"
 description = "AutoDev supervisor (autocoder_supervisor package) v1"
 requires-python = ">=3.10"

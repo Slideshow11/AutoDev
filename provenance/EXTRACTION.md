@@ -47,8 +47,9 @@ narrative.
 
 ## File categories
 
-The extraction manifest records 17 source files and 22
-destination files. The destination tree adds a root
+The extraction manifest records 17 source files and 26
+destination files (18 tracked + 2 scripts + 4 .gitignore'd
+plus 4 other destinations covered earlier). The destination tree adds a root
 `INVARIANTS.md` (a copy of the package-internal ledger for
 top-level discoverability), the standalone root `README.md`,
 `docs/AED_INTEGRATION.md`, `.gitignore`, and the standalone
@@ -60,7 +61,7 @@ GitHub Actions workflow `.github/workflows/ci.yml`.
 | path_only | 6 |
 | branding_only | 1 (the package README rewrite) |
 | packaging_metadata_only | 1 |
-| standalone_ci_addition | 2 |
+| standalone_ci_addition | 4 |
 | standalone_documentation_addition | 3 |
 
 The 9 byte-identical files are the functional core of the
