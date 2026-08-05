@@ -99,13 +99,6 @@ class LifecycleStateRegistry:
             "LifecycleStateRegistry is immutable; build a derived registry via RegistryBuilder"
         )
 
-    @classmethod
-    def _with_metadata(cls, metadata: Mapping[str, Mapping[str, str]]) -> "LifecycleStateRegistry":
-        """Internal helper to attach caller-provided immutable metadata."""
-        obj = cls.__new__(cls)
-        object.__setattr__(obj, "metadata", _build_metadata(metadata))
-        return obj
-
     def all_known_states(self) -> FrozenSet[str]:
         return (
             self.terminal_states

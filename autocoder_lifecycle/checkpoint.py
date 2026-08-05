@@ -168,7 +168,9 @@ class CheckpointState:
             return v
 
         def optional_sha_hex(name: str, value):
-            if value is None:
+            if value is None or value == "":
+                # Empty string is treated as absent (consistent with
+                # ``base_head=""`` default sentinel in CheckpointState).
                 return None
             v = optional_str(name, value)
             if v is None:

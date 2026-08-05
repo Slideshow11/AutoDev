@@ -36,17 +36,20 @@ def _run(args, **kwargs) -> subprocess.CompletedProcess:
 
 
 def main() -> None:
-    out_dir = REPO_ROOT / "build"
-    out_dir.mkdir(exist_ok=True)
+    # Use a fresh per-invocation wheel directory to avoid mixing stale
+    # artifacts from previous runs.
+    out_dir = REPO_ROOT / "build" / f"wheel-{os.getpid()}"
+    out_dir.mkdir(parents=True, exist_ok=True)
     _run(
         [sys.executable, "-m", "build", "--wheel", "--outdir", str(out_dir)],
         cwd=str(REPO_ROOT),
     )
-    wheels = list(out_dir.glob("autocoder_supervisor-*.whl"))
+    wheels = sorted(out_dir.glob("autocoder_supervisor-*.whl"))
     if not wheels:
-        print("FAIL: no wheel produced")
+        print(f"FAIL: no wheel produced in {out_dir}")
         sys.exit(1)
-    wheel_path = wheels[-1]
+    wheel_path = wheels[-1]  # lexicographic last == newest
+    print(f"Built: {wheel_path}")
 
     workdir = Path(tempfile.mkdtemp(prefix="autocoder_lifecycle_smoke_"))
     try:
@@ -60,12 +63,12 @@ def main() -> None:
         # Import test with PYTHONPATH explicitly cleared.
         py = str(venv_dir / "bin" / "python3")
         cmd = (
-            f"import autocoder_lifecycle as l, autocoder_supervisor as s; "
-            f"assert hasattr(l, 'CheckpointState'); "
-            f"assert hasattr(l, 'RegistryBuilder'); "
-            f"assert hasattr(l, 'WatchdogState'); "
-            f"assert hasattr(s, '__name__'); "
-            f"print('PKG_OK')"
+            "import autocoder_lifecycle as l, autocoder_supervisor as s; "
+            "assert hasattr(l, 'CheckpointState'); "
+            "assert hasattr(l, 'RegistryBuilder'); "
+            "assert hasattr(l, 'WatchdogState'); "
+            "assert hasattr(s, '__name__'); "
+            "print('PKG_OK')"
         )
         proc = subprocess.run(
             [py, "-c", cmd],
@@ -75,7 +78,7 @@ def main() -> None:
             cwd=str(workdir),
         )
         if proc.returncode != 0:
-            print(f"FAIL: import smoke")
+            print("FAIL: import smoke")
             print(f"STDOUT: {proc.stdout}")
             print(f"STDERR: {proc.stderr}")
             sys.exit(proc.returncode)
@@ -92,7 +95,7 @@ def main() -> None:
             cwd=str(workdir),
         )
         if proc.returncode != 0:
-            print(f"FAIL: supervisor CLI help smoke")
+            print("FAIL: supervisor CLI help smoke")
             print(f"STDOUT: {proc.stdout}")
             print(f"STDERR: {proc.stderr}")
             sys.exit(proc.returncode)
@@ -109,7 +112,7 @@ def main() -> None:
             cwd=str(workdir),
         )
         if proc.returncode != 0 or "CLI present" not in proc.stdout:
-            print(f"FAIL: lifecycle import smoke")
+            print("FAIL: lifecycle import smoke")
             print(f"STDOUT: {proc.stdout}")
             print(f"STDERR: {proc.stderr}")
             sys.exit(proc.returncode)
@@ -117,6 +120,7 @@ def main() -> None:
         print("PKG_OK")
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

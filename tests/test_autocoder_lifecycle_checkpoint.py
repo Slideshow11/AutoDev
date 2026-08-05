@@ -101,6 +101,38 @@ class TestCheckpointJsonRoundtrip:
         assert restored.next_action == state.next_action
         assert restored.terminal_state == state.terminal_state
 
+    def test_from_dict_rejects_invalid_repo_type(self) -> None:
+        # Repo as int (not str) must be rejected, not coerced.
+        payload = _baseline_state().to_dict()
+        payload["repo"] = 42
+        with pytest.raises(ValueError, match="repo"):
+            CheckpointState.from_dict(payload)
+
+    def test_from_dict_rejects_invalid_completed_phases(self) -> None:
+        # completed_phases as a string (not a list) must be rejected.
+        payload = _baseline_state().to_dict()
+        payload["completed_phases"] = "PHASE_1"
+        with pytest.raises(ValueError, match="completed_phases"):
+            CheckpointState.from_dict(payload)
+
+    def test_from_dict_rejects_invalid_pr_number(self) -> None:
+        payload = _baseline_state().to_dict()
+        payload["pr_number"] = -1
+        with pytest.raises(ValueError, match="pr_number"):
+            CheckpointState.from_dict(payload)
+
+    def test_from_dict_treats_empty_base_head_as_none(self) -> None:
+        payload = _baseline_state().to_dict()
+        payload["base_head"] = ""
+        state = CheckpointState.from_dict(payload)
+        assert state.base_head == ""
+
+    def test_from_dict_rejects_non_string_base_head(self) -> None:
+        payload = _baseline_state().to_dict()
+        payload["base_head"] = 42
+        with pytest.raises(ValueError, match="base_head"):
+            CheckpointState.from_dict(payload)
+
 
 class TestResumeObservations:
     def test_no_drift(self) -> None:

@@ -65,60 +65,70 @@ def _iter_package_code_tokens():
     class-level, and function-level docstrings only. Runtime triple-quoted
     strings (e.g. ``message = \"\"\"HOLD_CODEX\"\"\"``) are NOT skipped, because
     they are real runtime values that the contract forbids.
+
+    The check uses BOTH line and column coordinates so that a string
+    statement on the SAME line as a docstring closing delimiter is
+    correctly classified as runtime code (a docstring ends at its
+    end-col, and a string statement starting after it is no longer
+    inside the docstring region).
     """
+    import ast
     for path in PACKAGE_ROOT.rglob("*.py"):
         if "__pycache__" in str(path):
             continue
         with open(path) as f:
             source = f.read()
-        # Compute the set of (line, col) positions that fall inside actual
-        # docstrings via AST inspection.
         try:
-            tree = __import__("ast").parse(source)
+            tree = ast.parse(source)
         except SyntaxError:
             continue
-        docstring_regions: list[tuple[int, int]] = []
-        for node in __import__("ast").walk(tree):
+        # Build a list of (start_line, start_col, end_line, end_col)
+        # tuples describing literal-string docstring regions.
+        docstring_regions: list[tuple[int, int, int, int]] = []
+        for node in ast.walk(tree):
             if isinstance(
                 node,
                 (
-                    __import__("ast").Module,
-                    __import__("ast").FunctionDef,
-                    __import__("ast").AsyncFunctionDef,
-                    __import__("ast").ClassDef,
+                    ast.Module,
+                    ast.FunctionDef,
+                    ast.AsyncFunctionDef,
+                    ast.ClassDef,
                 ),
             ):
                 body_first = node.body[0] if node.body else None
                 if (
-                    isinstance(body_first, __import__("ast").Expr)
-                    and isinstance(body_first.value, __import__("ast").Constant)
+                    isinstance(body_first, ast.Expr)
+                    and isinstance(body_first.value, ast.Constant)
                     and isinstance(body_first.value.value, str)
                 ):
                     ds = body_first.value
-                    docstring_regions.append((ds.lineno, ds.end_lineno))
+                    docstring_regions.append((ds.lineno, ds.col_offset, ds.end_lineno, ds.end_col_offset))
 
-        # Walk tokens and tag strings whose source line is inside a
-        # docstring region as DOCSTRING; bare-string literals or strings
-        # outside docstring regions are tagged CODE.
         try:
             tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
         except (tokenize.TokenizeError, IndentationError):
             continue
         for tok in tokens:
-            ttype, tstr, (srow, _), (erow, _), _ = tok
+            ttype, tstr, (srow, scol), (erow, ecol), _ = tok
             if ttype in (tokenize.NL, tokenize.NEWLINE):
                 continue
             if ttype == tokenize.COMMENT:
                 continue
-            if ttype == tokenize.STRING and _in_docstring(srow, erow, docstring_regions):
+            if ttype == tokenize.STRING and _in_docstring(srow, scol, erow, ecol, docstring_regions):
                 continue
             yield path, tstr
 
 
-def _in_docstring(srow: int, erow: int, regions: list) -> bool:
-    for ds_lo, ds_hi in regions:
-        if ds_lo <= srow and erow <= ds_hi:
-            return True
+def _in_docstring(srow: int, scol: int, erow: int, ecol: int, regions: list) -> bool:
+    """True iff the (start_line, start_col) -> (end_line, end_col) range is
+    entirely inside one of the registered docstring regions.
+    """
+    for ds_lo, ds_co, ds_hi, ds_eo in regions:
+        if srow < ds_lo or (srow == ds_lo and scol < ds_co):
+            continue
+        if erow > ds_hi or (erow == ds_hi and ecol > ds_eo):
+            continue
+        return True
     return False
 
 
