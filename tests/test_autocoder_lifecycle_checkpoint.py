@@ -42,47 +42,122 @@ class TestCheckpointStructure:
         state = _baseline_state()
         assert validate_checkpoint(state) == []
 
-    def test_missing_repo_fails(self) -> None:
-        state = _baseline_state()
-        state.repo = ""
-        errors = validate_checkpoint(state)
-        assert any("repo" in e for e in errors)
+    def test_missing_repo_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="repo"):
+            CheckpointState(
+                repo="", pr_number=1, branch="main",
+                current_head="a" * 64,
+            )
 
-    def test_missing_branch_fails(self) -> None:
-        state = _baseline_state()
-        state.branch = ""
-        errors = validate_checkpoint(state)
-        assert any("branch" in e for e in errors)
+    def test_missing_branch_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="branch"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="",
+                current_head="a" * 64,
+            )
 
-    def test_missing_current_head_fails(self) -> None:
-        state = _baseline_state()
-        state.current_head = ""
-        errors = validate_checkpoint(state)
-        assert any("current_head" in e for e in errors)
+    def test_missing_current_head_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="current_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="",
+            )
 
-    def test_invalid_current_head_sha_fails(self) -> None:
-        state = _baseline_state()
-        state.current_head = "not-a-sha"
-        errors = validate_checkpoint(state)
-        assert any("current_head" in e for e in errors)
+    def test_invalid_current_head_sha_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="current_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="not-a-sha",
+            )
 
-    def test_negative_pr_number_fails(self) -> None:
-        state = _baseline_state()
-        state.pr_number = -1
-        errors = validate_checkpoint(state)
-        assert any("pr_number" in e for e in errors)
+    def test_negative_pr_number_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="pr_number"):
+            CheckpointState(
+                repo="x", pr_number=-1, branch="main",
+                current_head="a" * 64,
+            )
 
-    def test_invalid_pending_actions_list_fails(self) -> None:
-        state = _baseline_state()
-        state.pending_actions = ["valid", 123]  # type: ignore[list-item]
-        errors = validate_checkpoint(state)
-        assert any("pending_actions" in e for e in errors)
+    def test_invalid_pending_actions_list_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="pending_actions"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64,
+                pending_actions=["valid", 123],  # type: ignore[list-item]
+            )
 
-    def test_invalid_unresolved_thread_ids_fails(self) -> None:
-        state = _baseline_state()
-        state.unresolved_thread_ids = "not-a-list"  # type: ignore[assignment]
-        errors = validate_checkpoint(state)
-        assert any("unresolved_thread_ids" in e for e in errors)
+    def test_invalid_unresolved_thread_ids_at_construction(self) -> None:
+        with pytest.raises(ValueError, match="unresolved_thread_ids"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64,
+                unresolved_thread_ids="not-a-list",  # type: ignore[assignment]
+            )
+
+    def test_base_head_empty_string_sentinel_accepted(self) -> None:
+        s = CheckpointState(
+            repo="x", pr_number=1, branch="main",
+            current_head="a" * 64, base_head="",
+        )
+        assert s.base_head == ""
+
+    def test_base_head_valid_sha_accepted(self) -> None:
+        s = CheckpointState(
+            repo="x", pr_number=1, branch="main",
+            current_head="a" * 64, base_head="b" * 64,
+        )
+        assert s.base_head == "b" * 64
+
+    def test_base_head_none_rejected(self) -> None:
+        with pytest.raises(ValueError, match="base_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64, base_head=None,  # type: ignore[arg-type]
+            )
+
+    def test_base_head_zero_rejected(self) -> None:
+        with pytest.raises(ValueError, match="base_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64, base_head=0,  # type: ignore[arg-type]
+            )
+
+    def test_base_head_false_rejected(self) -> None:
+        with pytest.raises(ValueError, match="base_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64, base_head=False,  # type: ignore[arg-type]
+            )
+
+    def test_base_head_malformed_string_rejected(self) -> None:
+        with pytest.raises(ValueError, match="base_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64, base_head="not-a-sha",
+            )
+
+    def test_last_verified_pr_head_int_rejected(self) -> None:
+        with pytest.raises(ValueError, match="last_verified_pr_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64,
+                last_verified_pr_head=42,  # type: ignore[arg-type]
+            )
+
+    def test_last_verified_base_head_int_rejected(self) -> None:
+        with pytest.raises(ValueError, match="last_verified_base_head"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64,
+                last_verified_base_head=42,  # type: ignore[arg-type]
+            )
+
+    def test_terminal_state_int_rejected(self) -> None:
+        with pytest.raises(ValueError, match="terminal_state"):
+            CheckpointState(
+                repo="x", pr_number=1, branch="main",
+                current_head="a" * 64,
+                terminal_state=42,  # type: ignore[arg-type]
+            )
 
 
 class TestCheckpointJsonRoundtrip:

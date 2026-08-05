@@ -30,14 +30,16 @@
       "autocoder_lifecycle/registry.py",
       "autocoder_lifecycle/checkpoint.py",
       "autocoder_lifecycle/no_stall.py",
-      "autocoder_lifecycle/watchdog.py"
+      "autocoder_lifecycle/watchdog.py",
+      "scripts/build_wheel_and_install_smoke.py"
     ],
     "destination_sha256": {
       "autocoder_lifecycle/__init__.py": "e603390e88fca28cd7572023d888d03608f025d254b25fe8d5fa2e1f671df098",
       "autocoder_lifecycle/registry.py": "69f2e30ab144c1ad0063f12af3650f4b533aceacce13af2ce541e9e277adab13",
-      "autocoder_lifecycle/checkpoint.py": "e2d9689772e27d16245ffc594d568f914e1b9947535b5760b8f968a1025d701e",
+      "autocoder_lifecycle/checkpoint.py": "d1ed4632db40e4112bc704f7f806fe6467d05010231c2f350ab4b30c41e5b35b",
       "autocoder_lifecycle/no_stall.py": "b068d9064e361e7eb47682c7666879e96c51a65bf6199003724b9ded241669c3",
-      "autocoder_lifecycle/watchdog.py": "b01c85545d1aedc50fb274590f411a5aa65f60b6d8cb8a09e231139a592caf0d"
+      "autocoder_lifecycle/watchdog.py": "b01c85545d1aedc50fb274590f411a5aa65f60b6d8cb8a09e231139a592caf0d",
+      "scripts/build_wheel_and_install_smoke.py": "a54a0de9fa225dac076cf3a5a0930be103be4c23daad3062305073efb62b700f"
     }
   },
   "test_destination_paths": [

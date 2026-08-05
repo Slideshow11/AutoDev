@@ -1,10 +1,23 @@
 """Smoke-test script for the wheel install path.
 
-Builds the autocoder-supervisor wheel and installs it into a fresh
-isolated venv (without the repository source tree on PYTHONPATH),
-then verifies that both autocoder_supervisor and autocoder_lifecycle
-are importable from the installed distribution and that the wheel
-contains the expected packages.
+Builds the autocoder-supervisor wheel into a fresh temporary directory,
+installs the produced wheel into a fresh isolated venv (without the
+repository source tree on PYTHONPATH), and verifies that both
+autocoder_supervisor and autocoder_lifecycle are importable from the
+installed distribution.
+
+Strict isolation invariants:
+
+- The wheel is built into a fresh ``TemporaryDirectory`` that has no
+  pre-existing artifacts. The repository ``build/`` directory is NOT
+  used.
+- The build must produce EXACTLY ONE matching wheel. The script fails
+  closed on zero or more than one matching wheel.
+- ``PYTHONPATH`` is cleared before the install/import tests so that
+  the repository source tree is not on the search path.
+- All temporary directories are automatically cleaned at exit.
+- Imports are exercised outside the repository checkout (in the
+  TemporaryDirectory) so that the test cannot pass via repo source.
 
 Run by:
 
@@ -15,7 +28,6 @@ Exits 0 on success; non-zero on any failure. Prints PKG_OK on success.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,29 +48,38 @@ def _run(args, **kwargs) -> subprocess.CompletedProcess:
 
 
 def main() -> None:
-    # Use a fresh per-invocation wheel directory to avoid mixing stale
-    # artifacts from previous runs.
-    out_dir = REPO_ROOT / "build" / f"wheel-{os.getpid()}"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    _run(
-        [sys.executable, "-m", "build", "--wheel", "--outdir", str(out_dir)],
-        cwd=str(REPO_ROOT),
-    )
-    wheels = sorted(out_dir.glob("autocoder_supervisor-*.whl"))
-    if not wheels:
-        print(f"FAIL: no wheel produced in {out_dir}")
-        sys.exit(1)
-    wheel_path = wheels[-1]  # lexicographic last == newest
-    print(f"Built: {wheel_path}")
-
-    workdir = Path(tempfile.mkdtemp(prefix="autocoder_lifecycle_smoke_"))
+    # Fresh, isolated scratch space: do NOT use REPO_ROOT/build/ because
+    # stale artifacts from previous runs can leak in. A TemporaryDirectory
+    # under /tmp is automatically cleaned at exit.
+    scratch = tempfile.TemporaryDirectory(prefix="autocoder_smoke_")
     try:
-        venv_dir = workdir / "venv"
+        scratch_root = Path(scratch.name)
+        out_dir = scratch_root / "wheel"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        _run(
+            [sys.executable, "-m", "build", "--wheel", "--outdir", str(out_dir)],
+            cwd=str(REPO_ROOT),
+        )
+        wheels = sorted(out_dir.glob("autocoder_supervisor-*.whl"))
+        # Strict: require exactly one matching wheel.
+        if len(wheels) == 0:
+            print(f"FAIL: no wheel produced in {out_dir}")
+            sys.exit(1)
+        if len(wheels) > 1:
+            print(
+                f"FAIL: expected exactly one matching wheel, found {len(wheels)}: {wheels}"
+            )
+            sys.exit(1)
+        wheel_path = wheels[0]
+        print(f"Built: {wheel_path}")
+
+        venv_dir = scratch_root / "venv"
         _run([sys.executable, "-m", "venv", str(venv_dir)])
         pip = venv_dir / "bin" / "pip"
 
+        # Strict: clear PYTHONPATH so the repo source tree is invisible.
         env = {**os.environ, "PYTHONPATH": ""}
-        _run([str(pip), "install", str(wheel_path)], env=env, cwd=str(workdir))
+        _run([str(pip), "install", str(wheel_path)], env=env, cwd=str(scratch_root))
 
         # Import test with PYTHONPATH explicitly cleared.
         py = str(venv_dir / "bin" / "python3")
@@ -75,7 +96,7 @@ def main() -> None:
             capture_output=True,
             text=True,
             env={**os.environ, "PYTHONPATH": ""},
-            cwd=str(workdir),
+            cwd=str(scratch_root),
         )
         if proc.returncode != 0:
             print("FAIL: import smoke")
@@ -92,7 +113,7 @@ def main() -> None:
             capture_output=True,
             text=True,
             env={**os.environ, "PYTHONPATH": ""},
-            cwd=str(workdir),
+            cwd=str(scratch_root),
         )
         if proc.returncode != 0:
             print("FAIL: supervisor CLI help smoke")
@@ -100,18 +121,18 @@ def main() -> None:
             print(f"STDERR: {proc.stderr}")
             sys.exit(proc.returncode)
 
-        # CLI help test for autocoder_lifecycle CLI (if any).
+        # Lifecycle import sanity test.
         proc = subprocess.run(
             [py, "-c",
-             "import autocoder_lifecycle as m; import argparse, sys; "
-             "p = argparse.ArgumentParser(prog='autocoder_lifecycle'); "
-             "print('CLI present')"],
+             "import autocoder_lifecycle as m; "
+             "assert m.ImmutableLifecycleRegistry() is not None; "
+             "print('LIFECYCLE_OK')"],
             capture_output=True,
             text=True,
             env={**os.environ, "PYTHONPATH": ""},
-            cwd=str(workdir),
+            cwd=str(scratch_root),
         )
-        if proc.returncode != 0 or "CLI present" not in proc.stdout:
+        if proc.returncode != 0 or "LIFECYCLE_OK" not in proc.stdout:
             print("FAIL: lifecycle import smoke")
             print(f"STDOUT: {proc.stdout}")
             print(f"STDERR: {proc.stderr}")
@@ -119,8 +140,9 @@ def main() -> None:
 
         print("PKG_OK")
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
-        shutil.rmtree(out_dir, ignore_errors=True)
+        # TemporaryDirectory cleanup. scratch is always defined even if
+        # the body failed before reaching scratch_root.
+        scratch.cleanup()
 
 
 if __name__ == "__main__":

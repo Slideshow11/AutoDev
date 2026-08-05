@@ -1,23 +1,28 @@
-# AutoDev supervisor — install metadata.
+# AutoDev supervisor and lifecycle primitives - install metadata.
 #
 # This manifest sits at the install root alongside the
-# ``autocoder_supervisor/`` package directory so that
-# ``pip install /opt/aed-supervisor`` (or any other install
-# root) finds both the package and its manifest together.
+# ``autocoder_supervisor/`` and ``autocoder_lifecycle/`` package
+# directories so that ``pip install /opt/aed-supervisor`` (or any
+# other install root) finds both packages and the manifest together.
 # The documented install procedure is:
 #
-#     sudo cp -r autocoder_supervisor /opt/aed-supervisor
+#     sudo cp -r autocoder_supervisor /opt/aed-supervisor/
+#     sudo cp -r autocoder_lifecycle /opt/aed-supervisor/
 #     sudo cp pyproject.toml /opt/aed-supervisor/pyproject.toml
 #     sudo python3 -m pip install /opt/aed-supervisor
 #
 # ``[tool.setuptools.packages.find]`` searches ``where = ["."]``
-# relative to the manifest (i.e. the install root) for a
-# subdirectory named ``autocoder_supervisor`` and packages it.
+# relative to the manifest (i.e. the install root) for
+# subdirectories named ``autocoder_supervisor`` and
+# ``autocoder_lifecycle`` and packages both. The lifecycle
+# primitives are generic, autonomous-development scaffolding
+# (no project-, provider-, or repository-specific coupling) and
+# ship as a sibling of the supervisor package.
 #
-# Distribution name: ``autocoder-supervisor`` (Phase 7
-# of the AutoDev extraction).
-# Import package: ``autocoder_supervisor`` (retained for
-# compatibility with the reviewed v1 implementation).
+# Distribution name: ``autocoder-supervisor``.
+# Import packages: ``autocoder_supervisor`` and
+# ``autocoder_lifecycle`` (the lifecycle primitives are a
+# separate, project-neutral package).
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
