@@ -118,8 +118,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      - run: pip install pytest
       - name: Validate provenance manifest
-        run: python3 tests/test_extraction_provenance.py
+        run: pytest -q tests/test_extraction_provenance.py --no-header
 
   committed-state-scan:
     name: committed-state-scan
