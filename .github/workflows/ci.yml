@@ -120,7 +120,7 @@ jobs:
           python-version: "3.11"
       - run: pip install pytest
       - name: Validate provenance manifest
-        run: pytest -q tests/test_extraction_provenance.py --no-header
+        run: PYTHONPATH=. pytest -q tests/test_extraction_provenance.py --no-header
 
   committed-state-scan:
     name: committed-state-scan
