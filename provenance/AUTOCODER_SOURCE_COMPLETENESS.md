@@ -65,8 +65,11 @@ tests/test_autocoder_supervisor_packaging.py
 ```
 
 Total: 17 source files migrated from AED. Plus 10 standalone AutoDev
-additions (README, INVARIANTS, CI workflows, scanner, scanner-allowlist,
-etc.) that have no AED source counterpart.
+additions (README, INVARIANTS, CI workflows, scanner,
+`scripts/canonical_scanner.py`,
+`scripts/scanner-occurrence-allowlist.json`,
+`tests/test_extraction_provenance.py`, etc.) that have no AED
+source counterpart.
 
 ## 4. Dependency closure
 
