@@ -1822,19 +1822,26 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                 d = json.loads(r.read())
         except Exception:
             break
-        threads = (
-            d.get("data", {})
-            .get("repository", {})
-            .get("pullRequest", {})
-            .get("reviewThreads", {})
-        )
-        for tn in threads.get("nodes", []):
+        # Guard against GraphQL errors where ``data`` is null.
+        # Each step coerces the possibly-null intermediate value
+        # to an empty dict before the next .get, so a partial
+        # response (errors, null repository, etc.) does not crash.
+        data_obj = d.get("data")
+        data = data_obj if isinstance(data_obj, dict) else {}
+        repo_obj = data.get("repository")
+        repo = repo_obj if isinstance(repo_obj, dict) else {}
+        pr_obj = repo.get("pullRequest")
+        pr_gql = pr_obj if isinstance(pr_obj, dict) else {}
+        threads_obj = pr_gql.get("reviewThreads")
+        threads = threads_obj if isinstance(threads_obj, dict) else {}
+        for tn in (threads.get("nodes") or []):
             all_threads.append((
                 tn.get("id"),
                 bool(tn.get("isResolved")),
                 bool(tn.get("isOutdated")),
             ))
-        pinfo = threads.get("pageInfo", {})
+        page_info_obj = threads.get("pageInfo")
+        pinfo = page_info_obj if isinstance(page_info_obj, dict) else {}
         if not pinfo.get("hasNextPage"):
             break
         cursor = pinfo.get("endCursor")

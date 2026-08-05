@@ -1687,3 +1687,56 @@ def test_launch_worker_unmatched_brace_in_worker_command_returns_none(
         "launch_worker must return None on unmatched brace in worker_command"
     )
 
+
+def test_capture_live_snapshot_handles_null_graphql_data(
+    isolated_state, monkeypatch
+):
+    """``capture_live_snapshot`` must not crash when the GraphQL
+    response has ``data: null`` (e.g. an errors-only response).
+
+    The crash mode is in the GraphQL pagination loop. We isolate
+    it by mocking the GraphQL call (api.github.com/graphql) to
+    return ``{"data": null}`` and leaving the REST calls (which
+    use api.github.com/<path> rather than /graphql) returning
+    empty defaults.
+    """
+    import json
+    import urllib.request
+    import autocoder_supervisor.supervisor as _sup
+
+    class _FakeResp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=20):
+        url = req.full_url if hasattr(req, "full_url") else req.get_full_url()
+        if "/graphql" in url:
+            # GraphQL: data is null (a partial error response)
+            return _FakeResp(json.dumps({"data": None, "errors": [{"message": "x"}]}).encode())
+        # REST PR/reviews/comments/check-runs: return an empty list/dict
+        if "/check-runs" in url:
+            return _FakeResp(json.dumps({"check_runs": []}).encode())
+        if "/pulls/" in url and "/reviews" in url:
+            return _FakeResp(json.dumps([]).encode())
+        if "/issues/" in url and "/comments" in url:
+            return _FakeResp(json.dumps([]).encode())
+        if "/pulls/" in url:
+            return _FakeResp(json.dumps({"head": {"sha": "deadbeef"}}).encode())
+        return _FakeResp(json.dumps({}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    snap = _sup.capture_live_snapshot({}, "fake-token")
+    assert isinstance(snap, dict)
+    assert "review_threads" in snap
+    assert snap["review_threads"] == {}
+
