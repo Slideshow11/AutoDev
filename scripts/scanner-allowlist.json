@@ -12,7 +12,9 @@
       "aws_access_key_id",
       "aws_secret_access_key",
       "oauth_token:",
-      "/home/"
+      "/home/",
+      "secret=",
+      "password="
     ],
     "autocoder_supervisor/config.py": [
       "-----BEGIN",
@@ -25,21 +27,29 @@
       "ghs_",
       "oauth_token:",
       "sk-",
-      "/home/"
+      "/home/",
+      "password=",
+      "secret="
     ],
     "autocoder_supervisor/supervisor.py": [
       "/root/",
       "sk-",
-      "oauth_token:"
+      "oauth_token:",
+      "password=",
+      "secret="
     ],
     "autocoder_supervisor/contracts.py": [
       "/root/"
     ],
     "INVARIANTS.md": [
-      "oauth_token:"
+      "oauth_token:",
+      "password=",
+      "secret="
     ],
     "autocoder_supervisor/INVARIANTS.md": [
-      "oauth_token:"
+      "oauth_token:",
+      "password=",
+      "secret="
     ],
     "tests/test_autocoder_supervisor.py": [
       "ghp_",
@@ -70,6 +80,12 @@
       "/home/",
       "/root/",
       "/Users/"
+    ],
+    "provenance/EXTRACTION.md": [
+      "password=",
+      "secret=",
+      "ghp_",
+      "ghs_"
     ]
   }
 }

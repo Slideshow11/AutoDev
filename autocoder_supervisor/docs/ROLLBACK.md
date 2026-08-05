@@ -39,7 +39,6 @@ if [ -x /opt/aed-supervisor/venv/bin/python ]; then
         echo "rollback virtualenv is incomplete" >&2
         exit 1
     }
-fi
     # VIRTUALENV install: rebuild the venv from the
     # preserved previous source tree.
     sudo rm -rf /opt/aed-supervisor/venv

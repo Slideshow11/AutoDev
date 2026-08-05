@@ -1170,6 +1170,16 @@ def test_dry_sim_does_not_launch_worker(
     monkeypatch.setattr(supervisor, "cooldown_active",
                         lambda: False)
     monkeypatch.setattr(supervisor, "AUTHORITATIVE_HEAD", AUTH)
+    # Seed snapshot A on disk BEFORE installing the
+    # write_snapshot spy. Without an actual on-disk
+    # snapshot the dry-sim test would pass vacuously
+    # because run_iteration_v5 derives events only from
+    # the snapshot diff.
+    dirty = dict(_clean_snap())
+    dirty["review_threads"] = {
+        "PRRT_DRYSIM_NEW": {"resolved": False, "outdated": False},
+    }
+    supervisor.write_snapshot("A", dirty)
     # Pre-populate an unconsumed event so the main loop
     # observes an actionable event.
     supervisor.write_unconsumed_event({
@@ -1179,7 +1189,6 @@ def test_dry_sim_does_not_launch_worker(
     supervisor.enter_readiness(
         supervisor.STATE_ACTIVE_REPAIR, head_sha=AUTH,
     )
-    supervisor.write_snapshot("A", _clean_snap())
     rs = {"current_head": AUTH}
     with patch.object(supervisor, "capture_live_snapshot",
                       return_value=_clean_snap()), \

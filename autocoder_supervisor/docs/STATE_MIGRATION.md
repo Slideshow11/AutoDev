@@ -40,6 +40,7 @@ on the old layout and logs a `migration_required` line.
 ## Migration command (future schema versions only)
 
 ```bash
+INSTANCE=canary  # whatever name the operator chooses
 # (When a future schema version introduces this command.)
 sudo python3 -m autocoder_supervisor.migrate \
     --config /etc/aed-supervisor/aed-supervisor.toml \
@@ -90,15 +91,15 @@ systemctl --user stop aed-supervisor-legacy.service
 # 2. Copy the LEGACY STATE CONTENTS into the existing
 #    destination, while the supervisor is stopped.
 sudo install -d -o aed-supervisor -g aed-supervisor -m 0700 \
-    /var/lib/aed-supervisor/%i/state
+    /var/lib/aed-supervisor/$INSTANCE/state
 sudo rsync -a \
     --chown=aed-supervisor:aed-supervisor \
     --chmod=D0700,F0600 \
     ~/.hermes/aed-supervisor/state/ \
-    /var/lib/aed-supervisor/%i/state/
+    /var/lib/aed-supervisor/$INSTANCE/state/
 
 # 3. Verify the resulting layout has NO
-#    /var/lib/aed-supervisor/%i/state/state/ directory.
+#    /var/lib/aed-supervisor/$INSTANCE/state/state/ directory.
 test ! -e /var/lib/aed-supervisor/%i/state/state
 
 # 4. Update the configuration to point at the new paths.

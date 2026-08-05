@@ -33,7 +33,7 @@ state_dir = "/var/lib/aed-supervisor/canary/state"
 # which it will spawn its child worker). Must be a
 # non-user-specific absolute path. The worker may write to
 # this checkout (e.g. new commits).
-working_checkout = "/opt/Automated-Edge-Discovery"
+working_checkout = "/opt/AutoDev"
 
 # Plaintext log + heartbeat + lock paths. Per-instance log
 # file, parent /var/log/aed-supervisor is created with

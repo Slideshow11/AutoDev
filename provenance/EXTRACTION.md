@@ -48,7 +48,7 @@ narrative.
 ## File categories
 
 The extraction manifest records 17 source files and 26
-destination files (18 tracked + 2 scripts + 4 .gitignore'd
+destination files (17 source + 10 standalone additions = 27'd
 plus 4 other destinations covered earlier). The destination tree adds a root
 `INVARIANTS.md` (a copy of the package-internal ledger for
 top-level discoverability), the standalone root `README.md`,
@@ -74,8 +74,8 @@ supervisor:
 - `autocoder_supervisor/validate.py`
 - `autocoder_supervisor/docs/ROLLBACK.md`
 - `autocoder_supervisor/docs/STATE_MIGRATION.md`
-- `autocoder_supervisor/examples/aed-supervisor.example.toml`
-- `autocoder_supervisor/service/aed-supervisor@.service.template`
+- `autocoder_supervisor/examples/autocoder-supervisor.example.toml`
+- `autocoder_supervisor/service/autocoder-supervisor@.service.template`
 
 The other 8 source files were re-pointed to the standalone
 layout (`autocoder_supervisor/...` paths instead of
@@ -93,7 +93,7 @@ recorded in `aed-pr417-source-manifest.json`. In summary:
 - `pyproject.toml`: moved out of `scripts/local/` to the
   repo root; updated its docstring and the
   `[tool.setuptools.packages.find]` exclude list. The
-  distribution name `aed-supervisor` and the conditional
+  distribution name `autocoder-supervisor` and the conditional
   `tomli` runtime dependency are preserved.
 - `autocoder_supervisor/README.md`: rewritten to identify
   AutoDev as the public product while keeping the
@@ -113,7 +113,7 @@ recorded in `aed-pr417-source-manifest.json`. In summary:
 ## What was NOT changed
 
 - The internal Python package name `autocoder_supervisor`.
-- The Python distribution name `aed-supervisor`.
+- The Python distribution name `autocoder-supervisor`.
 - The existing AED_-prefixed environment variables
   (`AED_PR_NUMBER`, `AED_REPO_OWNER`, `AED_REPO_NAME`,
   `AED_AUTHORITATIVE_HEAD`, etc.).
@@ -165,3 +165,8 @@ The extraction pull request is opened against the AutoDev
 the human boundary. This phase stops when the extraction
 PR reaches `AWAITING_MERGE_AUTHORIZATION` on the installed-
 artifact cross-repository canary.
+
+
+## Open scanner finding (round 11 deferral)
+
+Round-11 CodeRabbit thread PRRT_kwDOTtyQLc6WiHve (Sensitive Data Exposure, CWE-200) noted that the current per-file allowlist suppresses every occurrence of a token in an allowlisted file. A real `ghp_` credential appended to an allowlisted file would pass. Switching from path-based exemptions to occurrence-specific (line-anchored) exemptions is a heavy-lift refactor that is deferred to a dedicated follow-up commit. Until then, occurrences inside allowlisted files MUST be documented and reviewed; the pre-commit pipeline lists every forbidden occurrence so a reviewer can diff against the documented set.

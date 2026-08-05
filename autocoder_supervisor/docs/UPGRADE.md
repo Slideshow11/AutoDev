@@ -16,6 +16,15 @@ operator must reinstall.
 ```bash
 sudo systemctl stop aed-supervisor@<instance>.service
 
+# Preserve the current install tree as the rollback
+# target. The rollback procedure (ROLLBACK.md) requires
+# /opt/aed-supervisor.old to exist; this step ensures
+# the artifact is created and verified.
+if [ -d /opt/aed-supervisor.old ]; then
+    sudo rm -rf /opt/aed-supervisor.old
+fi
+sudo mv /opt/aed-supervisor /opt/aed-supervisor.old
+sudo install -d -m 0755 /opt/aed-supervisor
 # Stage the new source tree in a temporary install root.
 sudo rm -rf /opt/aed-supervisor.new
 sudo install -d /opt/aed-supervisor.new

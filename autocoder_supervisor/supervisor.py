@@ -833,9 +833,12 @@ def lease_alive(lease: dict) -> Optional[dict]:
     # working_checkout exactly. We compare against the resolved
     # REPO_DIR (no basename fallback) so that operators using
     # multiple checkouts under different names cannot
-    # accidentally inherit each other's leases.
-    repo_dir = str(REPO_DIR).rstrip("/")  # type: ignore[name-defined]
-    if cwd.rstrip("/") != repo_dir:
+    # accidentally inherit each other's leases. Both sides
+    # are resolved with os.path.realpath so symlinks and
+    # ``..`` components do not produce a spurious mismatch.
+    repo_dir = os.path.realpath(str(REPO_DIR)).rstrip("/")  # type: ignore[name-defined]
+    cwd_resolved = os.path.realpath(cwd).rstrip("/")
+    if cwd_resolved != repo_dir:
         return None
     lease["heartbeat_at"] = now_iso()
     return lease
@@ -890,14 +893,30 @@ def cooldown_active() -> bool:
 
 
 def build_resume_prompt(rs: dict, live: dict) -> str:
-    return RESUME_PROMPT_TEMPLATE.format(  # type: ignore[name-defined]
-        pr_number=PR_NUMBER,  # type: ignore[name-defined]
-        repo_owner=REPO_OWNER,  # type: ignore[name-defined]
-        repo_name=REPO_NAME,  # type: ignore[name-defined]
-        branch=os.environ.get("AED_BRANCH", "feat/controller-run-identity-and-locking"),
-        head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
-        session_id=SESSION_ID,  # type: ignore[name-defined]
-    )
+    # Substitute into the operator-supplied resume prompt
+    # template. ``str.format`` raises KeyError for
+    # unknown placeholders and ValueError for unmatched
+    # ``{`` or ``}``. Catching both here lets callers
+    # treat template errors like any other launch failure
+    # instead of terminating the daemon.
+    try:
+        return RESUME_PROMPT_TEMPLATE.format(  # type: ignore[name-defined]
+            pr_number=PR_NUMBER,  # type: ignore[name-defined]
+            repo_owner=REPO_OWNER,  # type: ignore[name-defined]
+            repo_name=REPO_NAME,  # type: ignore[name-defined]
+            branch=os.environ.get(
+                "AED_BRANCH", "feat/controller-run-identity-and-locking"
+            ),
+            head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+            session_id=SESSION_ID,  # type: ignore[name-defined]
+        )
+    except (KeyError, ValueError) as exc:
+        log(
+            "error",
+            "resume prompt template substitution failed",
+            error=str(exc),
+        )
+        raise
 
 
 def _resolve_hermes_bin() -> Optional[str]:

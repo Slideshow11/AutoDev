@@ -127,5 +127,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Run canonical committed-state scan
         run: python3 scripts/canonical_scanner.py
