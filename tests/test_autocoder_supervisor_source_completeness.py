@@ -131,7 +131,13 @@ def test_audit_schema_header(audit):
     assert src["reference_commit_sha"] == AED_REF
     assert src["tracked_file_count"] > 0
     dst = audit["destination"]
-    assert dst["reference_head_sha"] == AUTODEV_HEAD
+    # reference_head_sha is informational metadata about the
+    # head at which the audit was generated. It is allowed to be
+    # behind the current AutoDev HEAD (every commit creates a new
+    # HEAD that the audit cannot predate by construction).
+    # The hard correctness requirement is on destination bytes vs
+    # actual committed bytes, enforced by
+    # test_all_migrated_records_have_matching_destination_bytes.
     assert dst["pr_number"] == 1
 
 
