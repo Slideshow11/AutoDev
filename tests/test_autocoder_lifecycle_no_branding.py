@@ -59,47 +59,67 @@ def _iter_package_sources():
 
 
 def _iter_package_code_tokens():
-    """Yield (path, token-value) for every Python token in non-string, non-comment positions."""
+    """Yield (path, token-value) for every Python token in non-string, non-comment positions.
+
+    Uses the ``ast`` module's docstring detection to skip module-level,
+    class-level, and function-level docstrings only. Runtime triple-quoted
+    strings (e.g. ``message = \"\"\"HOLD_CODEX\"\"\"``) are NOT skipped, because
+    they are real runtime values that the contract forbids.
+    """
     for path in PACKAGE_ROOT.rglob("*.py"):
         if "__pycache__" in str(path):
             continue
         with open(path) as f:
-            src = f.read()
+            source = f.read()
+        # Compute the set of (line, col) positions that fall inside actual
+        # docstrings via AST inspection.
         try:
-            tokens = list(tokenize.generate_tokens(io.StringIO(src).readline))
+            tree = __import__("ast").parse(source)
+        except SyntaxError:
+            continue
+        docstring_regions: list[tuple[int, int]] = []
+        for node in __import__("ast").walk(tree):
+            if isinstance(
+                node,
+                (
+                    __import__("ast").Module,
+                    __import__("ast").FunctionDef,
+                    __import__("ast").AsyncFunctionDef,
+                    __import__("ast").ClassDef,
+                ),
+            ):
+                body_first = node.body[0] if node.body else None
+                if (
+                    isinstance(body_first, __import__("ast").Expr)
+                    and isinstance(body_first.value, __import__("ast").Constant)
+                    and isinstance(body_first.value.value, str)
+                ):
+                    ds = body_first.value
+                    docstring_regions.append((ds.lineno, ds.end_lineno))
+
+        # Walk tokens and tag strings whose source line is inside a
+        # docstring region as DOCSTRING; bare-string literals or strings
+        # outside docstring regions are tagged CODE.
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
         except (tokenize.TokenizeError, IndentationError):
             continue
-        # Walk tokens; STRING tokens are triple-quoted docstrings when they
-        # span multiple lines and the ENTIRE token text begins with the same
-        # triple-quote prefix used for opening. We classify a string as a
-        # docstring if it's the first STRING on its line and is preceded only
-        # by indentation + whitespace (i.e. it is the body of a
-        # module/class/function docstring).
-        prev_kind_on_line = None
         for tok in tokens:
-            ttype, tstr, (srow, scol), _, _ = tok
+            ttype, tstr, (srow, _), (erow, _), _ = tok
             if ttype in (tokenize.NL, tokenize.NEWLINE):
-                prev_kind_on_line = None
-                continue
-            # Document heuristics for docstring detection.
-            if ttype == tokenize.STRING and (tstr.startswith('"""') or tstr.startswith("'''")):
-                # Treat as docstring if preceded only by indentation/NEWLINE.
-                # Use a simple heuristic: a multiline string OR a
-                # single-line triple-quote on its own.
-                # We call it a docstring.
-                prev_kind_on_line = "DOCSTRING"
-                continue
-            if ttype == tokenize.STRING:
-                # Bare string literal — runtime code, treat as CODE.
-                yield path, tstr
-                prev_kind_on_line = "CODE"
                 continue
             if ttype == tokenize.COMMENT:
-                prev_kind_on_line = "COMMENT"
                 continue
-            # Any other token: treat as CODE.
+            if ttype == tokenize.STRING and _in_docstring(srow, erow, docstring_regions):
+                continue
             yield path, tstr
-            prev_kind_on_line = "CODE"
+
+
+def _in_docstring(srow: int, erow: int, regions: list) -> bool:
+    for ds_lo, ds_hi in regions:
+        if ds_lo <= srow and erow <= ds_hi:
+            return True
+    return False
 
 
 class TestRuntimeContractsAreClean:
@@ -181,17 +201,16 @@ class TestInstallableWheel:
     """Smoke-test that the package can be imported from a fresh install."""
 
     def test_can_install_from_external_directory(self) -> None:
+        # Build the wheel, install it into an isolated environment with
+        # PYTHONPATH cleared, and verify both packages import from outside
+        # the repository checkout.
         proc = subprocess.run(
-            [sys.executable, "-c",
-             "import autocoder_lifecycle as pkg; "
-             "assert hasattr(pkg, 'CheckpointState'); "
-             "assert hasattr(pkg, 'RegistryBuilder'); "
-             "assert hasattr(pkg, 'WatchdogState'); "
-             "print('PKG_OK')"],
-            cwd="/tmp",
+            [sys.executable, "scripts/build_wheel_and_install_smoke.py"],
+            cwd=str(PACKAGE_ROOT.parent),
             capture_output=True,
             text=True,
-            env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT.parent)},
         )
-        assert proc.returncode == 0, proc.stderr
+        assert proc.returncode == 0, (
+            f"wheel install smoke failed:\nSTDOUT: {proc.stdout}\nSTDERR: {proc.stderr}"
+        )
         assert "PKG_OK" in proc.stdout

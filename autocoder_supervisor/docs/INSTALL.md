@@ -15,17 +15,23 @@ package directory side-by-side:
 ```
 <repo-root>/
 ├── pyproject.toml                        # packaging manifest
-└── autocoder_supervisor/                 # Python package
+├── autocoder_supervisor/                 # supervisor-v1 Python package
+│   ├── __init__.py
+│   ├── contracts.py
+│   ├── config.py
+│   ├── supervisor.py
+│   ├── validate.py
+│   ├── INVARIANTS.md
+│   ├── README.md
+│   ├── docs/
+│   ├── examples/
+│   └── service/
+└── autocoder_lifecycle/                  # generic lifecycle primitives
     ├── __init__.py
-    ├── contracts.py
-    ├── config.py
-    ├── supervisor.py
-    ├── validate.py
-    ├── INVARIANTS.md
-    ├── README.md
-    ├── docs/
-    ├── examples/
-    └── service/
+    ├── registry.py
+    ├── checkpoint.py
+    ├── no_stall.py
+    └── watchdog.py
 ```
 
 The committed `pyproject.toml` is at `pyproject.toml`
@@ -58,8 +64,9 @@ Either system-wide:
 # 1. Create the install root.
 sudo install -d /opt/aed-supervisor
 
-# 2. Copy the package directory into the install root.
+# 2. Copy the package directories into the install root.
 sudo cp -r autocoder_supervisor /opt/aed-supervisor/
+sudo cp -r autocoder_lifecycle /opt/aed-supervisor/
 
 # 3. Copy the packaging manifest to the install root.
 sudo cp pyproject.toml /opt/aed-supervisor/pyproject.toml
@@ -79,6 +86,7 @@ sudo python3 -m pip install /opt/aed-supervisor
 # 1. Stage the install root in a temp location.
 sudo install -d /opt/aed-supervisor-install
 sudo cp -r autocoder_supervisor /opt/aed-supervisor-install/
+sudo cp -r autocoder_lifecycle /opt/aed-supervisor-install/
 sudo cp pyproject.toml /opt/aed-supervisor-install/pyproject.toml
 
 # 2. Create the venv.

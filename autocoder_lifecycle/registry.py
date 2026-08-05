@@ -10,15 +10,15 @@ Default AutoDev vocabulary
 The default :class:`ImmutableLifecycleRegistry` provides only platform-
 generic terminal, hold, and informational states:
 
-- ``COMPLETED``         — generic successful close (terminal)
-- ``FAILED``            — generic hard failure (terminal)
-- ``AWAITING_HUMAN_AUTHORIZATION`` — generic human-authorization request (terminal / parked)
-- ``OPERATOR_REQUIRED`` — generic operator-intervention request (terminal / parked)
-- ``HEAD_CHANGED``      — generic head drift (terminal / parked)
-- ``CI_PENDING``        — generic external dependency pending (terminal / parked)
-- ``CI_FAILED``         — generic external dependency failure (terminal / parked)
-- ``RUNNING``           — generic in-progress (informational)
-- ``NOT_RUN``           — generic initial state (informational)
+- ``COMPLETED``         - generic successful close (terminal)
+- ``FAILED``            - generic hard failure (terminal)
+- ``AWAITING_HUMAN_AUTHORIZATION`` - generic human-authorization request (terminal / parked)
+- ``OPERATOR_REQUIRED`` - generic operator-intervention request (terminal / parked)
+- ``HEAD_CHANGED``      - generic head drift (terminal / parked)
+- ``CI_PENDING``        - generic external dependency pending (terminal / parked)
+- ``CI_FAILED``         - generic external dependency failure (terminal / parked)
+- ``RUNNING``           - generic in-progress (informational)
+- ``NOT_RUN``           - generic initial state (informational)
 
 Provider- and project-specific states (e.g. ``HOLD_CODEX_RESPONSE_PENDING``
 or ``MERGE_READY_AWAITING_HUMAN_AUTHORIZATION``) must live in adapters that
@@ -26,12 +26,11 @@ consume the registry interface.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from enum import Enum
-from typing import Dict, FrozenSet, Iterable, Mapping
+from types import MappingProxyType
+from typing import FrozenSet, Mapping
 
 
-class LifecycleCategory(str, Enum):
+class LifecycleCategory(str, __import__("enum").Enum):
     """Stable identifiers for lifecycle-state categories.
 
     A registry implementation MAY use any subset of these categories.
@@ -45,20 +44,67 @@ class LifecycleCategory(str, Enum):
     UNKNOWN = "unknown"
 
 
-@dataclass(frozen=True)
+def _frozen_metadata():
+    """Build an immutable metadata mapping with normalized per-state entries."""
+    raw = {
+        "COMPLETED": {"completed": "true"},
+        "FAILED": {"completed": "false"},
+        "AWAITING_HUMAN_AUTHORIZATION": {"completed": "false"},
+        "OPERATOR_REQUIRED": {"completed": "false"},
+        "HEAD_CHANGED": {"completed": "false"},
+        "CI_PENDING": {"completed": "false"},
+        "CI_FAILED": {"completed": "false"},
+        "RUNNING": {"completed": "false"},
+        "NOT_RUN": {"completed": "false"},
+    }
+    return MappingProxyType(
+        {state: MappingProxyType(meta) for state, meta in raw.items()}
+    )
+
+
 class LifecycleStateRegistry:
     """Immutable, pluggable lifecycle-state registry.
 
-    The protocol intentionally stores only state strings and category
-    metadata. Provider- and project-specific vocabulary must be encoded in
-    subclasses or derived registries, NOT in this core class.
+    All set-typed fields are ``frozenset`` and the metadata mapping is
+    wrapped in ``MappingProxyType`` so callers cannot mutate the registry
+    after construction. Providers / projects construct derived registries
+    via :class:`RegistryBuilder`, which produces a similarly immutable
+    instance.
     """
 
-    terminal_states: FrozenSet[str]
-    parked_states: FrozenSet[str]
-    hold_states: FrozenSet[str]
-    informational_states: FrozenSet[str]
-    metadata: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    __slots__ = (
+        "terminal_states",
+        "parked_states",
+        "hold_states",
+        "informational_states",
+        "metadata",
+    )
+
+    def __init__(
+        self,
+        terminal_states,
+        parked_states,
+        hold_states,
+        informational_states,
+        metadata=None,
+    ) -> None:
+        object.__setattr__(self, "terminal_states", frozenset(terminal_states))
+        object.__setattr__(self, "parked_states", frozenset(parked_states))
+        object.__setattr__(self, "hold_states", frozenset(hold_states))
+        object.__setattr__(self, "informational_states", frozenset(informational_states))
+        object.__setattr__(self, "metadata", _frozen_metadata() if metadata is None else _build_metadata(metadata))
+
+    def __setattr__(self, name, value) -> None:
+        raise AttributeError(
+            "LifecycleStateRegistry is immutable; build a derived registry via RegistryBuilder"
+        )
+
+    @classmethod
+    def _with_metadata(cls, metadata: Mapping[str, Mapping[str, str]]) -> "LifecycleStateRegistry":
+        """Internal helper to attach caller-provided immutable metadata."""
+        obj = cls.__new__(cls)
+        object.__setattr__(obj, "metadata", _build_metadata(metadata))
+        return obj
 
     def all_known_states(self) -> FrozenSet[str]:
         return (
@@ -105,44 +151,18 @@ class LifecycleStateRegistry:
         return self.metadata_for(state).get("completed", "").lower() == "true"
 
     def metadata_for(self, state: str) -> Mapping[str, str]:
-        return self.metadata.get(state, {})
+        m = self.metadata.get(state, {})
+        return m if isinstance(m, MappingProxyType) else _EMPTY_METADATA
 
 
-# Keep the protocol name as the concrete dataclass for simplicity.
-# Adapters and callers program against the dataclass itself.
-LifecycleStateRegistryProtocol = LifecycleStateRegistry
+_EMPTY_METADATA = MappingProxyType({})
 
 
-def _default_metadata() -> Dict[str, Dict[str, str]]:
-    return {
-        "COMPLETED": {"completed": "true"},
-        "FAILED": {"completed": "false"},
-        "AWAITING_HUMAN_AUTHORIZATION": {"completed": "false"},
-        "OPERATOR_REQUIRED": {"completed": "false"},
-        "HEAD_CHANGED": {"completed": "false"},
-        "CI_PENDING": {"completed": "false"},
-        "CI_FAILED": {"completed": "false"},
-        "RUNNING": {"completed": "false"},
-        "NOT_RUN": {"completed": "false"},
-    }
-
-
-_DEFAULT_REGISTRY = LifecycleStateRegistry(
-    terminal_states=frozenset({"COMPLETED", "FAILED"}),
-    parked_states=frozenset({"AWAITING_HUMAN_AUTHORIZATION", "OPERATOR_REQUIRED"}),
-    hold_states=frozenset({"HEAD_CHANGED", "CI_PENDING", "CI_FAILED"}),
-    informational_states=frozenset({"RUNNING", "NOT_RUN"}),
-    metadata=_default_metadata(),
-)
-
-
-def ImmutableLifecycleRegistry() -> LifecycleStateRegistry:
-    """Return the default AutoDev generic lifecycle registry.
-
-    The returned instance is module-level and frozen; callers MUST NOT
-    mutate it.
-    """
-    return _DEFAULT_REGISTRY
+def _build_metadata(raw: Mapping[str, Mapping[str, str]]) -> Mapping[str, Mapping[str, str]]:
+    """Wrap every metadata level in ``MappingProxyType`` so the result is fully immutable."""
+    return MappingProxyType(
+        {state: MappingProxyType(dict(meta)) for state, meta in raw.items()}
+    )
 
 
 class RegistryBuilder:
@@ -158,11 +178,13 @@ class RegistryBuilder:
         self._parked: set[str] = set(base.parked_states)
         self._hold: set[str] = set(base.hold_states)
         self._informational: set[str] = set(base.informational_states)
-        self._metadata: dict[str, Dict[str, str]] = {
-            state: dict(meta) for state, meta in base.metadata.items()
+        # Start from the base's existing metadata entries.
+        self._metadata: dict[str, dict[str, str]] = {
+            state: dict(meta)
+            for state, meta in base.metadata.items()
         }
 
-    def with_terminal(self, states: Iterable[str]) -> "RegistryBuilder":
+    def with_terminal(self, states) -> "RegistryBuilder":
         for s in states:
             self._terminal.add(s)
             self._parked.discard(s)
@@ -170,7 +192,7 @@ class RegistryBuilder:
             self._informational.discard(s)
         return self
 
-    def with_parked(self, states: Iterable[str]) -> "RegistryBuilder":
+    def with_parked(self, states) -> "RegistryBuilder":
         for s in states:
             self._parked.add(s)
             self._terminal.discard(s)
@@ -178,7 +200,7 @@ class RegistryBuilder:
             self._informational.discard(s)
         return self
 
-    def with_hold(self, states: Iterable[str]) -> "RegistryBuilder":
+    def with_hold(self, states) -> "RegistryBuilder":
         for s in states:
             self._hold.add(s)
             self._terminal.discard(s)
@@ -186,7 +208,7 @@ class RegistryBuilder:
             self._informational.discard(s)
         return self
 
-    def with_informational(self, states: Iterable[str]) -> "RegistryBuilder":
+    def with_informational(self, states) -> "RegistryBuilder":
         for s in states:
             self._informational.add(s)
             self._terminal.discard(s)
@@ -199,10 +221,32 @@ class RegistryBuilder:
         return self
 
     def build(self) -> LifecycleStateRegistry:
+        # Construct an immutable registry directly.
         return LifecycleStateRegistry(
             terminal_states=frozenset(self._terminal),
             parked_states=frozenset(self._parked),
             hold_states=frozenset(self._hold),
             informational_states=frozenset(self._informational),
-            metadata=dict(self._metadata),
+            metadata=MappingProxyType(
+                {state: dict(meta) for state, meta in self._metadata.items()}
+            ),
         )
+
+
+_DEFAULT_REGISTRY = LifecycleStateRegistry(
+    terminal_states=frozenset({"COMPLETED", "FAILED"}),
+    parked_states=frozenset({"AWAITING_HUMAN_AUTHORIZATION", "OPERATOR_REQUIRED"}),
+    hold_states=frozenset({"HEAD_CHANGED", "CI_PENDING", "CI_FAILED"}),
+    informational_states=frozenset({"RUNNING", "NOT_RUN"}),
+)
+
+
+def ImmutableLifecycleRegistry() -> LifecycleStateRegistry:
+    """Return the default AutoDev generic lifecycle registry.
+
+    The returned instance is module-level and immutable; callers MUST
+    NOT mutate it. The registry is exposed for tests and default
+    vocabulary use; project-specific states are registered via the
+    AED-side adapter (PR 1b in the validated roadmap).
+    """
+    return _DEFAULT_REGISTRY

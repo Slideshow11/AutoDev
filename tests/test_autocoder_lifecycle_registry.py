@@ -14,9 +14,19 @@ from autocoder_lifecycle import (
 class TestDefaultRegistry:
     def test_default_registry_is_immutable(self) -> None:
         reg = ImmutableLifecycleRegistry()
-        # The returned object is a frozen dataclass.
-        with pytest.raises((AttributeError, Exception)):
-            reg.terminal_states = frozenset()  # type: ignore[misc]
+        # Sets are frozensets and metadata is MappingProxyType; mutating
+        # the metadata mapping should fail.
+        assert isinstance(reg.terminal_states, frozenset)
+        assert isinstance(reg.parked_states, frozenset)
+        assert isinstance(reg.hold_states, frozenset)
+        assert isinstance(reg.informational_states, frozenset)
+        # Metadata proxy: assignment raises TypeError.
+        with pytest.raises(TypeError):
+            reg.metadata["COMPLETED"] = {}  # type: ignore[index]  # noqa: E501
+        # Slot-based class with __setattr__: assignment raises
+        # AttributeError.
+        with pytest.raises(AttributeError):
+            reg.terminal_states = frozenset()  # type: ignore[misc]  # noqa: E501
 
     def test_default_terminal_states_present(self) -> None:
         reg = ImmutableLifecycleRegistry()

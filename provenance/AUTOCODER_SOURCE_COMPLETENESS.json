@@ -913,9 +913,9 @@
         "destination_path": "autocoder_supervisor/docs/INSTALL.md",
         "transformation_classification": "path_only",
         "source_sha256": "df7c7811a65048412341580d0f8953456d7747051092b7de515d7540bdff1ca6",
-        "destination_sha256": "d00167acf57a31251acf5b244ecb4e9c00a458b8fae0760d0b48bb047c1f6a4a",
+        "destination_sha256": "2efaf2b08445b07e1ca17e1fb030f0513dfcc9e1bc76b097e4f83b6d9b8543c4",
         "source_size_bytes": 5345,
-        "destination_size_bytes": 9214,
+        "destination_size_bytes": 9573,
         "transformation_explanation": "Replaced the source-tree layout snippet (which described the AED scripts/local/ layout) with the standalone layout. Re-pointed install paths."
       },
       {
