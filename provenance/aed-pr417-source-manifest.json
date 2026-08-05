@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-05T01:57:40Z",
+  "captured_utc": "2026-08-05T03:02:17Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -89,9 +89,9 @@
       "source_path": "scripts/local/autocoder_supervisor/docs/INSTALL.md",
       "destination_path": "autocoder_supervisor/docs/INSTALL.md",
       "source_sha256": "df7c7811a65048412341580d0f8953456d7747051092b7de515d7540bdff1ca6",
-      "destination_sha256": "9e4ad15c467504332a1c9861ad3b356c0725419500262755853173beaa0dd64f",
+      "destination_sha256": "d00167acf57a31251acf5b244ecb4e9c00a458b8fae0760d0b48bb047c1f6a4a",
       "source_size_bytes": 5345,
-      "destination_size_bytes": 7487,
+      "destination_size_bytes": 9214,
       "transformation_classification": "path_only",
       "transformation_explanation": "Replaced the source-tree layout snippet (which described the AED scripts/local/ layout) with the standalone layout. Re-pointed install paths."
     },
@@ -280,8 +280,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "ab1f154a14be9a7a56ee3b88cac5f2ef03d0d7ccb238e414238568fd837a1ffa",
-      "destination_size_bytes": 27452,
+      "destination_sha256": "9f5260371df896ab63140ae42cff9378ed58b03bba4fccd146c8382415f008f7",
+      "destination_size_bytes": 29769,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }

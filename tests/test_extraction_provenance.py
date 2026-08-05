@@ -747,3 +747,59 @@ def test_canonical_scanner_detects_utf32_bom(tmp_path):
         "tokens"
     )
 
+
+def test_install_md_creates_state_dir():
+    """The example configuration in
+    ``autocoder_supervisor/examples/aed-supervisor.example.toml``
+    sets ``state_dir`` to ``/var/lib/aed-supervisor/<instance>/state``.
+    INSTALL.md must create that nested ``state`` directory
+    explicitly with owner ``aed-supervisor:aed-supervisor``
+    and mode ``0700`` BEFORE service enablement, because
+    the systemd ``StateDirectory=`` directive creates only
+    the parent ``/var/lib/aed-supervisor/<instance>/``.
+    The test verifies that all three required directives
+    appear in the INSTALL.md installation procedure.
+    """
+    install_md = REPO_ROOT / "autocoder_supervisor" / "docs" / "INSTALL.md"
+    example_toml = (
+        REPO_ROOT / "autocoder_supervisor" / "examples"
+        / "aed-supervisor.example.toml"
+    )
+    text = install_md.read_text()
+    # Locate the example's state_dir.
+    example_dir = None
+    for line in example_toml.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("state_dir"):
+            example_dir = s.split("=", 1)[1].strip().strip('"').strip("'")
+            break
+    assert example_dir is not None, (
+        "example configuration must declare a state_dir"
+    )
+    # Nested component is the trailing element past the
+    # systemd StateDirectory parent. The example uses
+    # /var/lib/aed-supervisor/<instance>/state — we
+    # require the literal "state" segment inside the
+    # nested install command.
+    assert "/$INSTANCE/state" in text, (
+        "INSTALL.md must mkdir the nested "
+        "$INSTANCE/state directory before service "
+        "enablement; the systemd StateDirectory= "
+        "directive does not create the nested directory"
+    )
+    # The nested block must include owner (chown), mode
+    # 0700, and a verify step.
+    install_block_lower = text.lower()
+    assert "chown aed-supervisor:aed-supervisor" in install_block_lower, (
+        "INSTALL.md must chown the nested state_dir to "
+        "aed-supervisor:aed-supervisor"
+    )
+    assert "chmod 0700" in install_block_lower, (
+        "INSTALL.md must chmod the nested state_dir to "
+        "0700"
+    )
+    assert "test -d /var/lib/aed-supervisor" in text, (
+        "INSTALL.md must verify the nested state_dir "
+        "exists with a test -d check"
+    )
+

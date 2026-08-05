@@ -126,14 +126,50 @@ unit, with `aed-supervisor` as the owner. The unit template
 also writes to the working checkout (the worker may commit
 there); the operator must own that path too.
 
+The example configuration in
+`autocoder_supervisor/examples/aed-supervisor.example.toml`
+sets ``state_dir`` to ``/var/lib/aed-supervisor/<instance>/state``.
+Note that this is a *nested* directory inside the systemd
+state-directory parent — the systemd ``StateDirectory=`` directive
+creates only ``/var/lib/aed-supervisor/<instance>/``, not the
+nested ``state`` directory. The operator MUST create the
+nested ``state`` directory manually with ``aed-supervisor`` as
+the owner and ``0700`` as the mode *before* enabling the
+service, so the supervisor can read and write its lease,
+snapshots, and readiness state file without falling back
+to runtime directory creation under the wrong owner.
+
 ```bash
 INSTANCE=canary  # whatever name the operator chooses
 
-# Per-instance state directory (lease, snapshots, readiness)
-sudo install -d -o aed-supervisor -g aed-supervisor -m 0700 \
+# Per-instance state directory parent (systemd
+# StateDirectory= directive will also create this on
+# service start, but creating it explicitly here lets us
+# set the owner once).
+sudo install -d -o aed-supervisor -g aed-supervisor -m 0755 \
     /var/lib/aed-supervisor/$INSTANCE
 
-# Per-instance log directory
+# Nested state_dir matching the configured
+# state_dir in aed-supervisor.example.toml. The
+# systemd StateDirectory= directive does NOT create
+# this nested directory; the supervisor will create it
+# at runtime under the running service UID if it is
+# missing, which produces the wrong owner for operator
+# inspection. Create it here with the systemd user and
+# mode 0700 BEFORE enabling the service.
+sudo install -d -o aed-supervisor -g aed-supervisor -m 0700 \
+    /var/lib/aed-supervisor/$INSTANCE/state
+
+# Verify the nested state directory has the required
+# ownership and mode. Fail the install if any check
+# fails so the supervisor does not start with the wrong
+# state directory permissions.
+test -d /var/lib/aed-supervisor/$INSTANCE/state
+sudo chown aed-supervisor:aed-supervisor \
+    /var/lib/aed-supervisor/$INSTANCE/state
+sudo chmod 0700 /var/lib/aed-supervisor/$INSTANCE/state
+
+# Per-instance log directory (systemd LogsDirectory=)
 sudo install -d -o aed-supervisor -g aed-supervisor -m 0750 \
     /var/log/aed-supervisor/$INSTANCE
 
