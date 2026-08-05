@@ -34,7 +34,28 @@ EXTRACTION_MANIFEST = (
 AED_REF = "b57fcaad806c68b93668bcd318fa26ab15a8ab40"
 AED_REPO_ENV_VAR = "AUTODEV_AED_REPO_PATH"
 AED_REPO = Path(os.environ.get(AED_REPO_ENV_VAR) or (AUTODEV_REPO.parent / "Automated-Edge-Discovery"))
-AUTODEV_HEAD = "e99c33aa8b857600e70941637a7007af83af0a64"
+
+
+def _resolve_autodev_head() -> str:
+    """Resolve the current AutoDev HEAD at test-collection time.
+
+    Falls back to the pinned constant only if the local git checkout
+    is not available.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(AUTODEV_REPO),
+            text=True,
+        ).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+    return "e99c33aa8b857600e70941637a7007af83af0a64"
+
+
+AUTODEV_HEAD = _resolve_autodev_head()
 
 
 # --- Schema constants ---
@@ -259,6 +280,82 @@ def test_byte_identical_records_have_matching_hashes(audit, manifest):
         assert s and d and s == d, (
             f"COPIED_BYTE_IDENTICAL entry has mismatched hashes: "
             f"source={s}, destination={d}"
+        )
+
+
+def test_all_migrated_records_have_matching_destination_bytes(audit, manifest):
+    """Every migrated record (COPIED_BYTE_IDENTICAL or TRANSFORMED_IN_AUTODEV)
+    must:
+
+    - have a destination file in the exact AutoDev HEAD commit;
+    - have the recorded destination size match the actual file size;
+    - have the recorded destination SHA-256 match the actual file SHA-256.
+
+    Reads the destination bytes from the exact AutoDev HEAD commit so the
+    check is independent of the working tree. The migration manifest is the
+    source of (source_path -> destination_path) mapping; the audit provides
+    disposition and expected counts. If the audit claims fewer migrated
+    records than the manifest declares, that drift must fail closed.
+
+    This test is the regression prevention for the audit-binding failure:
+    the audit's destination metadata must match the committed destination
+    bytes exactly, for every migrated record.
+    """
+    migrated_dispositions = ("COPIED_BYTE_IDENTICAL", "TRANSFORMED_IN_AUTODEV")
+    migrated = [
+        r for r in audit["aed_file_records"]
+        if r["disposition"] in migrated_dispositions
+    ]
+    assert len(migrated) >= 17, (
+        f"audit claims only {len(migrated)} migrated records; "
+        "expected at least 17 (1 COPIED + 16 TRANSFORMED)"
+    )
+    # Build source -> manifest entry index
+    manifest_by_source = {}
+    for entry in manifest["files"]:
+        src = entry.get("source_path")
+        if src:
+            manifest_by_source[src] = entry
+
+    for r in migrated:
+        source_path = r.get("aed_source_path")
+        assert source_path, f"migrated record missing aed_source_path: {r}"
+        manifest_entry = manifest_by_source.get(source_path)
+        assert manifest_entry is not None, (
+            f"migrated record {source_path!r} not found in extraction manifest"
+        )
+        dest_path = manifest_entry.get("destination_path")
+        recorded_sha = manifest_entry.get("destination_sha256")
+        recorded_size = manifest_entry.get("destination_size_bytes")
+        assert dest_path, (
+            f"manifest entry for {source_path!r} missing destination_path"
+        )
+        assert recorded_sha, (
+            f"manifest entry for {source_path!r} missing destination_sha256"
+        )
+        assert recorded_size is not None, (
+            f"manifest entry for {source_path!r} missing destination_size_bytes"
+        )
+        # Read the committed destination bytes via git show HEAD:<path>
+        try:
+            committed_bytes = subprocess.check_output(
+                ["git", "show", f"{AUTODEV_HEAD}:{dest_path}"],
+                cwd=str(AUTODEV_REPO),
+            )
+        except subprocess.CalledProcessError:
+            pytest.fail(
+                f"destination path {dest_path!r} is not present in "
+                f"AutoDev HEAD {AUTODEV_HEAD}"
+            )
+        actual_sha = hashlib.sha256(committed_bytes).hexdigest()
+        actual_size = len(committed_bytes)
+        assert actual_sha == recorded_sha, (
+            f"migrated destination sha mismatch for {dest_path}: "
+            f"recorded {recorded_sha[:16]}..., actual {actual_sha[:16]}..."
+        )
+        assert actual_size == recorded_size, (
+            f"migrated destination size mismatch for {dest_path}: "
+            f"recorded {recorded_size}, actual {actual_size}"
         )
 
 

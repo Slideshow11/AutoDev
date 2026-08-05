@@ -1,7 +1,7 @@
 {
   "header": {
     "schema": "autocoder.source_completeness.v1",
-    "produced_at": "2026-08-05T10:05:21Z",
+    "produced_at": "2026-08-05T13:50:00Z",
     "produced_by": "humphry-extraction-agent (continuation run)",
     "purpose": "Full enumeration and dependency-closure audit of all tracked files in AED at b57fcaad806c68b93668bcd318fa26ab15a8ab40 against AutoDev PR #1's extracted supervisor-v1 subsystem. Determines whether PR #1 contains the entire supervisor-v1 runtime and identifies which broader autonomous-development components remain in AED as documented retained AED-specific integrations."
   },
@@ -16,7 +16,7 @@
   },
   "destination": {
     "repository": "Slideshow11/AutoDev",
-    "reference_head_sha": "e99c33aa8b857600e70941637a7007af83af0a64",
+    "reference_head_sha": "6023ca2d1e4dab0eab702ebce9cb93fa4c4b79b1",
     "reference_head_short": "e99c33aa8b85",
     "branch": "feat/extract-supervisor-v1",
     "pr_number": 1
@@ -1130,8 +1130,8 @@
   },
   "clean_install_proof": {
     "wheel_path": "/tmp/wheels/autocoder_supervisor-1.0.0-py3-none-any.whl",
-    "wheel_size_bytes": 38251,
-    "wheel_sha256": "f14683f3b12ab4b250dc66d5d76f8bca15ad0b560bfdaf2598e0f9e0849d8084",
+    "wheel_size_bytes": 38616,
+    "wheel_sha256": "b32812f8b96a937d1cb7c8a432dfb97f9fd9434d1a8710000b9f06d517f50cf8",
     "build_command": "python3 -m build --wheel --outdir /tmp/wheels",
     "build_exit_code": 0,
     "fresh_venv_path": "/tmp/clean_venv",
@@ -1175,7 +1175,7 @@
   },
   "pr_scope_decision": {
     "verdict": "PR_1_CONTAINS_SELF_CONTAINED_SUPERVISOR_V1",
-    "rationale": "PR #1 contains a self-contained supervisor-v1 subsystem (autocoder_supervisor Python package with five source modules: __init__.py, config.py, contracts.py, supervisor.py, validate.py). All Python imports inside the package resolve to Python stdlib + the package's own .config / .contracts relative imports. Subprocess invocations reach only 'git', 'gh', 'which', and the configured 'hermes' binary; no subprocess call references the AED repository layout. The installed wheel at /tmp/wheels/autocoder_supervisor-1.0.0-py3-none-any.whl (sha256=f14683f3b12ab4b250dc66d5d76f8bca15ad0b560bfdaf2598e0f9e0849d8084) installs cleanly into a fresh venv with no AED checkout on PYTHONPATH, and all public modules (autocoder_supervisor, .supervisor, .validate, .config, .contracts) import successfully. The supervisor's CLI entry points (python -m autocoder_supervisor.supervisor --help and python -m autocoder_supervisor.validate --help) both exit 0 from the clean venv. The AED-side lifecycle subsystem (aed_lifecycle/*, aed_policy/*), the AED-side shared helpers (scripts/local/_shared_*, _ledger_review_shared.py, _smoke_shared.py, _production_facade.py), and the AED-side operation scripts (scripts/local/aed_*, scripts/local/autocoder_run_controller, scripts/local/phase_exec, scripts/local/phase_ledger, scripts/local/mutation_policy, etc.) are NOT supervisor-v1 runtime dependencies and are retained in AED as documented in docs/AED_INTEGRATION.md. Future AutoDev work may extract individual AED scripts into separate AutoDev PRs.",
+    "rationale": "PR #1 contains a self-contained supervisor-v1 subsystem (autocoder_supervisor Python package with five source modules: __init__.py, config.py, contracts.py, supervisor.py, validate.py). All Python imports inside the package resolve to Python stdlib + the package's own .config / .contracts relative imports. Subprocess invocations reach only 'git', 'gh', 'which', and the configured 'hermes' binary; no subprocess call references the AED repository layout. The installed wheel at /tmp/wheels/autocoder_supervisor-1.0.0-py3-none-any.whl (sha256=b32812f8b96a937d1cb7c8a432dfb97f9fd9434d1a8710000b9f06d517f50cf8) installs cleanly into a fresh venv with no AED checkout on PYTHONPATH, and all public modules (autocoder_supervisor, .supervisor, .validate, .config, .contracts) import successfully. The supervisor's CLI entry points (python -m autocoder_supervisor.supervisor --help and python -m autocoder_supervisor.validate --help) both exit 0 from the clean venv. The AED-side lifecycle subsystem (aed_lifecycle/*, aed_policy/*), the AED-side shared helpers (scripts/local/_shared_*, _ledger_review_shared.py, _smoke_shared.py, _production_facade.py), and the AED-side operation scripts (scripts/local/aed_*, scripts/local/autocoder_run_controller, scripts/local/phase_exec, scripts/local/phase_ledger, scripts/local/mutation_policy, etc.) are NOT supervisor-v1 runtime dependencies and are retained in AED as documented in docs/AED_INTEGRATION.md. Future AutoDev work may extract individual AED scripts into separate AutoDev PRs.",
     "missing_direct_supervisor_v1_dependencies": [],
     "no_pr_expansion_required": true
   },
