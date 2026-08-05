@@ -1,0 +1,652 @@
+{
+  "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+  "token_id_registry": [
+    {
+      "token_id": "tok_3b122b9d4638",
+      "token_sha256_prefix": "3b122b9d4638c4dd",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_0fe68e7a8a47",
+      "token_sha256_prefix": "0fe68e7a8a473efa",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_46dc943e3424",
+      "token_sha256_prefix": "46dc943e3424a225",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_efc06d5a2a7d",
+      "token_sha256_prefix": "efc06d5a2a7df66a",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_1caf8e22a84d",
+      "token_sha256_prefix": "1caf8e22a84dd745",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_b670eb5d70a6",
+      "token_sha256_prefix": "b670eb5d70a65acd",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_9d8e3c88df47",
+      "token_sha256_prefix": "9d8e3c88df4791b9",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_449b11820b0f",
+      "token_sha256_prefix": "449b11820b0f6526",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_4d925b8ea5a5",
+      "token_sha256_prefix": "4d925b8ea5a582ea",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_eee0dde13d22",
+      "token_sha256_prefix": "eee0dde13d2205ee",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_be2351089858",
+      "token_sha256_prefix": "be2351089858bb9f",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_d1f885fa5e5a",
+      "token_sha256_prefix": "d1f885fa5e5aae22",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_0379b92cb7d9",
+      "token_sha256_prefix": "0379b92cb7d9c750",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_7afda09eac5b",
+      "token_sha256_prefix": "7afda09eac5b3bb7",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_57b72ae4eb8b",
+      "token_sha256_prefix": "57b72ae4eb8b0be7",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_27ab25361b56",
+      "token_sha256_prefix": "27ab25361b56a572",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_a184fed6cfdd",
+      "token_sha256_prefix": "a184fed6cfdd97ed",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_9bf3261bcf56",
+      "token_sha256_prefix": "9bf3261bcf561731",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    },
+    {
+      "token_id": "tok_a33af3975220",
+      "token_sha256_prefix": "a33af3975220eced",
+      "note": "Token ID is the SHA-256 of the forbidden token. The scanner matches the token-id to a forbidden token by computing the SHA-256 of every token in scan-forbidden.txt."
+    }
+  ],
+  "comment": "Each occurrence documents ONE occurrence of ONE forbidden token in ONE file at ONE line. The token is referenced by its stable token_id (SHA-256 prefix), never by the literal token string. The scanner verifies every (path, token_id, ordinal) matches a real occurrence in the current source by comparing line_sha256. A new occurrence at a new (path, ordinal) fails. A line_sha256 drift fails. Stale allowances fail.",
+  "occurrences": [
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "INVARIANTS.md",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 1,
+      "line": 277,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Documented occurrence in INVARIANTS.md at line 277; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "INVARIANTS.md",
+      "token_id": "tok_a184fed6cfdd",
+      "ordinal": 1,
+      "line": 277,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Documented occurrence in INVARIANTS.md at line 277; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "INVARIANTS.md",
+      "token_id": "tok_9bf3261bcf56",
+      "ordinal": 1,
+      "line": 277,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Documented occurrence in INVARIANTS.md at line 277; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 26,
+      "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 26; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 328,
+      "line_sha256": "2f6554caf40f3da89fb1e0de130ffc67c0e4a0737e5a83dd6194180a8a0c00f6",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 328; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 910,
+      "line_sha256": "d4f96c46f3c591135f11766f9e4d6460f26f8e5bcf6077b4fb0411bf7a7203f6",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 910; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 918,
+      "line_sha256": "84eb379aeed6aaa9e2e7c25e56336d77a569250be87136d3cdd30d0a55dd173f",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 918; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 5,
+      "line": 924,
+      "line_sha256": "55bd33f356a9cfa1cd8c527f1e80610db413c82d87b63f6a2f922d21e22d338a",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 924; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 6,
+      "line": 924,
+      "line_sha256": "55bd33f356a9cfa1cd8c527f1e80610db413c82d87b63f6a2f922d21e22d338a",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 924; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 7,
+      "line": 928,
+      "line_sha256": "71d9eedbdca8b3c6b9d3b7de29120f085ec346a2263bf081c1646659c79bc292",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 928; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 8,
+      "line": 928,
+      "line_sha256": "71d9eedbdca8b3c6b9d3b7de29120f085ec346a2263bf081c1646659c79bc292",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 928; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_0fe68e7a8a47",
+      "ordinal": 1,
+      "line": 26,
+      "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 26; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_0fe68e7a8a47",
+      "ordinal": 2,
+      "line": 328,
+      "line_sha256": "2f6554caf40f3da89fb1e0de130ffc67c0e4a0737e5a83dd6194180a8a0c00f6",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 328; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_46dc943e3424",
+      "ordinal": 1,
+      "line": 26,
+      "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 26; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_46dc943e3424",
+      "ordinal": 2,
+      "line": 328,
+      "line_sha256": "2f6554caf40f3da89fb1e0de130ffc67c0e4a0737e5a83dd6194180a8a0c00f6",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 328; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_efc06d5a2a7d",
+      "ordinal": 1,
+      "line": 26,
+      "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 26; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 1,
+      "line": 26,
+      "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 26; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 2,
+      "line": 329,
+      "line_sha256": "73523fdbb81efcb6ad3c3e766d52577c91448a159a137b176e576792acca5ed1",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 329; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 1,
+      "line": 27,
+      "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 27; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 2,
+      "line": 329,
+      "line_sha256": "73523fdbb81efcb6ad3c3e766d52577c91448a159a137b176e576792acca5ed1",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 329; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 3,
+      "line": 362,
+      "line_sha256": "ca111e29c7d93e6fc99bda07066a5f90b1d2ef0eab818ca23fbfa7a80f4fa013",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 362; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 4,
+      "line": 388,
+      "line_sha256": "e74fdb6589040b891b8551df1f834a9bd9244babe59cf3313d56022a50c62c9f",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 388; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 5,
+      "line": 457,
+      "line_sha256": "c36fdc7b0ac97f299388c3d1940809b63a000d8a763c81d4798e4c9aa8c94d9f",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 457; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 6,
+      "line": 732,
+      "line_sha256": "e0286c951c0e35cb5ed8b459ce857fbb837ba85c1ea9ddefd8fb430eb07d7eeb",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 732; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 7,
+      "line": 755,
+      "line_sha256": "0b4aabf615a2e5e78ddb2a40209f06269ce46025f38495084580b4100abc6c46",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 755; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 8,
+      "line": 779,
+      "line_sha256": "807399cde213762ed30f59c09f897f6bef10942241e3e08f1759b97aba870271",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 779; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 9,
+      "line": 802,
+      "line_sha256": "5a5ae8973e0e6d6d87a8b41a55c691b440744dab1a91bb613af301bbcf0bcc42",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 802; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 10,
+      "line": 826,
+      "line_sha256": "5b2ed03aaa4beaa6fd18e0c5af5ed94b7c50408ab8586ca0b7d6a95930615278",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 826; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_9d8e3c88df47",
+      "ordinal": 1,
+      "line": 27,
+      "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 27; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_9d8e3c88df47",
+      "ordinal": 2,
+      "line": 329,
+      "line_sha256": "73523fdbb81efcb6ad3c3e766d52577c91448a159a137b176e576792acca5ed1",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 329; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_449b11820b0f",
+      "ordinal": 1,
+      "line": 27,
+      "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 27; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_449b11820b0f",
+      "ordinal": 2,
+      "line": 330,
+      "line_sha256": "a21e6084999bfdad4c94e91a19f390cbcf89588ee8fed5062bf2e7656a4df367",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 330; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_4d925b8ea5a5",
+      "ordinal": 1,
+      "line": 27,
+      "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 27; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_4d925b8ea5a5",
+      "ordinal": 2,
+      "line": 330,
+      "line_sha256": "a21e6084999bfdad4c94e91a19f390cbcf89588ee8fed5062bf2e7656a4df367",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 330; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_eee0dde13d22",
+      "ordinal": 1,
+      "line": 27,
+      "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 27; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_eee0dde13d22",
+      "ordinal": 2,
+      "line": 331,
+      "line_sha256": "1e7e2c709696e96fc084e600a881e35c5724d2580cd02f2a05ec331cc4ae00ab",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 331; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_be2351089858",
+      "ordinal": 1,
+      "line": 28,
+      "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 28; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_be2351089858",
+      "ordinal": 2,
+      "line": 331,
+      "line_sha256": "1e7e2c709696e96fc084e600a881e35c5724d2580cd02f2a05ec331cc4ae00ab",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 331; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 1,
+      "line": 28,
+      "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 28; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 2,
+      "line": 332,
+      "line_sha256": "eac9c23f4f8e96d21ff84ce2b63813ce842c948e56853b558bef6a48c4701def",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 332; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_0379b92cb7d9",
+      "ordinal": 1,
+      "line": 28,
+      "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 28; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_7afda09eac5b",
+      "ordinal": 1,
+      "line": 28,
+      "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 28; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_57b72ae4eb8b",
+      "ordinal": 1,
+      "line": 28,
+      "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 28; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_27ab25361b56",
+      "ordinal": 1,
+      "line": 29,
+      "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 29; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_a184fed6cfdd",
+      "ordinal": 1,
+      "line": 29,
+      "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 29; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_9bf3261bcf56",
+      "ordinal": 1,
+      "line": 29,
+      "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 29; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_extraction_provenance.py",
+      "token_id": "tok_a33af3975220",
+      "ordinal": 1,
+      "line": 29,
+      "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
+      "purpose": "Documented occurrence in tests/test_extraction_provenance.py at line 29; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_autocoder_supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 984,
+      "line_sha256": "10870d39f862840c8b63cbcc0492a613fa429ee8ab760df8c60cc35b465638e0",
+      "purpose": "Documented occurrence in tests/test_autocoder_supervisor.py at line 984; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_autocoder_supervisor.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 1,
+      "line": 991,
+      "line_sha256": "ead33203ba392ea9227ede7067969b231639f45f1083f9a380585070983de8ea",
+      "purpose": "Documented occurrence in tests/test_autocoder_supervisor.py at line 991; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "provenance/EXTRACTION.md",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 1,
+      "line": 172,
+      "line_sha256": "1a416e1b9e9ebf2c1d1edfba7d76f24c3ea16afc95f187a2a9c95c17a129c507",
+      "purpose": "Documented occurrence in provenance/EXTRACTION.md at line 172; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_449b11820b0f",
+      "ordinal": 1,
+      "line": 1598,
+      "line_sha256": "af3db392fa43b3ca245dfc0eea8c5ee419bd0a29bbe32fe39a02ea59e8e23ba5",
+      "purpose": "Documented occurrence in autocoder_supervisor/supervisor.py at line 1598; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 1,
+      "line": 410,
+      "line_sha256": "8a60ba7ddc7b5b87a8ff84441af591f7ed19f74cd240c7c2fa7ee3cb3a60d2ac",
+      "purpose": "Documented occurrence in autocoder_supervisor/supervisor.py at line 410; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/INVARIANTS.md",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 1,
+      "line": 276,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Documented occurrence in autocoder_supervisor/INVARIANTS.md at line 276; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/INVARIANTS.md",
+      "token_id": "tok_a184fed6cfdd",
+      "ordinal": 1,
+      "line": 276,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Documented occurrence in autocoder_supervisor/INVARIANTS.md at line 276; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/INVARIANTS.md",
+      "token_id": "tok_9bf3261bcf56",
+      "ordinal": 1,
+      "line": 276,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Documented occurrence in autocoder_supervisor/INVARIANTS.md at line 276; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 12,
+      "line_sha256": "c3bb43a6ccf91a4f4e64da06d247c1c994528da62e243d1f8b39b027260021be",
+      "purpose": "Documented occurrence in autocoder_supervisor/config.py at line 12; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 90,
+      "line_sha256": "819caa3a517ae3dc75d509aaf945af46d9b1999b54a359b837676cc601ebbe2a",
+      "purpose": "Documented occurrence in autocoder_supervisor/config.py at line 90; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_0fe68e7a8a47",
+      "ordinal": 1,
+      "line": 90,
+      "line_sha256": "819caa3a517ae3dc75d509aaf945af46d9b1999b54a359b837676cc601ebbe2a",
+      "purpose": "Documented occurrence in autocoder_supervisor/config.py at line 90; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_46dc943e3424",
+      "ordinal": 1,
+      "line": 15,
+      "line_sha256": "523a37fd5abd227763504e078aeec9940ff6141776dc3b300ecb24eb6ff78ece",
+      "purpose": "Documented occurrence in autocoder_supervisor/config.py at line 15; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_46dc943e3424",
+      "ordinal": 2,
+      "line": 95,
+      "line_sha256": "b72c0833bb9cf7b37ca9359c25550f921fa19c7911142c8f3ff13e4e97195630",
+      "purpose": "Documented occurrence in autocoder_supervisor/config.py at line 95; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_4d925b8ea5a5",
+      "ordinal": 1,
+      "line": 69,
+      "line_sha256": "4be8e2a24629574b07994c4ff4c15cee5fae5d08c3d4e0dfb2ef091c1ca496db",
+      "purpose": "Documented occurrence in autocoder_supervisor/config.py at line 69; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    }
+  ]
+}

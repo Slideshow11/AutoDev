@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-05T03:42:38Z",
+  "captured_utc": "2026-08-05T05:16:54Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -262,17 +262,17 @@
       "source_path": null,
       "destination_path": "scripts/canonical_scanner.py",
       "source_sha256": null,
-      "destination_sha256": "4e876037f030dc9fada5cf68fc03a81c5999b800609012696e0ee8447ac7aba6",
-      "destination_size_bytes": 11940,
+      "destination_sha256": "9a57fa8259dc379055b5fe21c56f631e03460a8c41a78ab9089ae4502b062188",
+      "destination_size_bytes": 13657,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
     {
       "source_path": null,
-      "destination_path": "scripts/scanner-allowlist.json",
+      "destination_path": "scripts/scanner-occurrence-allowlist.json",
       "source_sha256": null,
-      "destination_sha256": "34615c33ffcb98e6c1e44d35404da88477ed7fc077761185775dce7a37033ff4",
-      "destination_size_bytes": 2045,
+      "destination_sha256": "8e16ae57b380edc6e25437e6078767c3ea54109bea06a22adbfd6b41f34a5c27",
+      "destination_size_bytes": 35749,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -280,8 +280,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "a3472ab57f2eb12d64bc8b07573e3154876e329302abc6900e08575483b57934",
-      "destination_size_bytes": 30595,
+      "destination_sha256": "413ea9a03bfedeb95862bc7bb02732a1889b528cc273129a088384de165938e8",
+      "destination_size_bytes": 45321,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }
