@@ -1555,3 +1555,66 @@ def test_exact_head_snapshot_contract_has_provider_issue_comments():
         "ExactHeadSnapshotDict"
     )
 
+
+def test_build_resume_prompt_raises_on_unknown_placeholder(isolated_state, monkeypatch):
+    """The resume-prompt template must raise a clear
+    exception (not crash the daemon) when it contains an
+    unknown placeholder. The supervisor's build_resume_prompt
+    guards the str.format call with try/except for KeyError
+    and ValueError, logging the error before re-raising.
+    """
+    import autocoder_supervisor.supervisor as _sup
+    bad_template = "{pr_number} {repo_owner} {repo_name} {head} {bogus}"
+    monkeypatch.setattr(_sup, "RESUME_PROMPT_TEMPLATE", bad_template)
+    rs = {"current_head": _sup.AUTHORITATIVE_HEAD}
+    live = {"head_sha": _sup.AUTHORITATIVE_HEAD}
+    try:
+        _sup.build_resume_prompt(rs, live)
+    except (KeyError, ValueError):
+        # The supervisor raises a clear error rather than
+        # crashing the daemon. Either KeyError (unknown
+        # placeholder) or ValueError (unmatched {/}) is
+        # acceptable.
+        return
+    raise AssertionError(
+        "build_resume_prompt must raise on unknown placeholder"
+    )
+
+
+def test_build_resume_prompt_raises_on_unmatched_brace(isolated_state, monkeypatch):
+    """A template with an unmatched ``{`` raises ValueError,
+    which the supervisor's guard catches and re-raises.
+    """
+    import autocoder_supervisor.supervisor as _sup
+    bad_template = "{pr_number unclosed"
+    monkeypatch.setattr(_sup, "RESUME_PROMPT_TEMPLATE", bad_template)
+    rs = {"current_head": _sup.AUTHORITATIVE_HEAD}
+    live = {"head_sha": _sup.AUTHORITATIVE_HEAD}
+    try:
+        _sup.build_resume_prompt(rs, live)
+    except ValueError:
+        return
+    raise AssertionError(
+        "build_resume_prompt must raise on unmatched brace"
+    )
+
+
+def test_build_resume_prompt_succeeds_with_valid_template(isolated_state, monkeypatch):
+    """A well-formed template substitutes all fields correctly.
+    """
+    import autocoder_supervisor.supervisor as _sup
+    good_template = "X{pr_number}X{repo_owner}X{repo_name}X{head}X"
+    monkeypatch.setattr(_sup, "RESUME_PROMPT_TEMPLATE", good_template)
+    # Patch the supervisor's module-level constants for this test
+    monkeypatch.setattr(_sup, "PR_NUMBER", 7)
+    monkeypatch.setattr(_sup, "REPO_OWNER", "alice")
+    monkeypatch.setattr(_sup, "REPO_NAME", "demo")
+    monkeypatch.setattr(_sup, "AUTHORITATIVE_HEAD", "deadbeef")
+    rs = {"current_head": _sup.AUTHORITATIVE_HEAD}
+    live = {"head_sha": _sup.AUTHORITATIVE_HEAD}
+    out = _sup.build_resume_prompt(rs, live)
+    assert "X7X" in out
+    assert "XaliceX" in out
+    assert "XdemoX" in out
+    assert "XdeadbeefX" in out
+
