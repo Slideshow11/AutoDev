@@ -388,16 +388,45 @@ def validate_checkpoint(
     if registry is None:
         registry = ImmutableLifecycleRegistry()
 
-    # If the constructor's __post_init__ was bypassed (e.g. by mutating
-    # an already-validated instance), re-check type invariants here so
-    # we never invoke registry methods with non-string values.
+    # Re-validate EVERY field invariant. The constructor's __post_init__
+    # validates fields at construction time, but a caller may mutate an
+    # already-validated instance. validate_checkpoint runs the same
+    # invariant checks again so that a structurally-bad checkpoint cannot
+    # influence registry-method calls or operator-required decisions.
     errors: List[str] = []
-    if not isinstance(state.current_head, str) or not _is_sha256_hex(state.current_head):
-        errors.append("current_head must be 64 lowercase hex characters")
+    for fname in _REQUIRED_STRING_FIELDS:
+        v = getattr(state, fname)
+        if not isinstance(v, str) or not v:
+            errors.append(
+                "required string field %r missing or empty" % fname
+            )
+    if not _is_non_negative_int(state.pr_number):
+        errors.append("pr_number must be a non-negative int")
     if not isinstance(state.base_head, str):
         errors.append("base_head must be a string")
     elif state.base_head != "" and not _is_sha256_hex(state.base_head):
         errors.append("base_head must be 64 lowercase hex chars")
+    if not isinstance(state.current_head, str) or not _is_sha256_hex(state.current_head):
+        errors.append("current_head must be 64 lowercase hex characters")
+    for fname in (
+        "completed_phases",
+        "pending_actions",
+        "authorized_thread_ids",
+        "unresolved_thread_ids",
+    ):
+        if not _is_string_list(getattr(state, fname)):
+            errors.append("%s must be a list of strings" % fname)
+    for fname in (
+        "phase",
+        "next_phase",
+        "next_action",
+        "last_verified_pr_head",
+        "last_verified_base_head",
+        "updated_at",
+    ):
+        v = getattr(state, fname)
+        if v is not None and not isinstance(v, str):
+            errors.append("%s must be a string or None" % fname)
     for fname in ("last_verified_pr_head", "last_verified_base_head"):
         v = getattr(state, fname)
         if v is not None and (not isinstance(v, str) or not _is_sha256_hex(v)):

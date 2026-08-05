@@ -136,7 +136,10 @@ def main() -> None:
             print("FAIL: lifecycle import smoke")
             print(f"STDOUT: {proc.stdout}")
             print(f"STDERR: {proc.stderr}")
-            sys.exit(proc.returncode)
+            # Non-zero status when the marker is absent: exit with the
+            # actual process return code OR 1 if returncode is 0 but
+            # the marker is missing.
+            sys.exit(proc.returncode if proc.returncode != 0 else 1)
 
         print("PKG_OK")
     finally:
