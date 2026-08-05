@@ -1822,11 +1822,14 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                 d = json.loads(r.read())
         except Exception:
             break
-        # Guard against GraphQL errors where ``data`` is null.
-        # Each step coerces the possibly-null intermediate value
-        # to an empty dict before the next .get, so a partial
-        # response (errors, null repository, etc.) does not crash.
-        data_obj = d.get("data")
+        # Guard against GraphQL errors where the root response
+        # is null or a list, ``data`` is null, or any intermediate
+        # value is a non-dict. Each step coerces the possibly-null
+        # intermediate value to an empty dict before the next
+        # ``.get``, so a partial response (errors, null repository,
+        # etc.) does not crash.
+        root = d if isinstance(d, dict) else {}
+        data_obj = root.get("data")
         data = data_obj if isinstance(data_obj, dict) else {}
         repo_obj = data.get("repository")
         repo = repo_obj if isinstance(repo_obj, dict) else {}
@@ -1834,9 +1837,18 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         pr_gql = pr_obj if isinstance(pr_obj, dict) else {}
         threads_obj = pr_gql.get("reviewThreads")
         threads = threads_obj if isinstance(threads_obj, dict) else {}
-        for tn in (threads.get("nodes") or []):
+        nodes_obj = threads.get("nodes")
+        nodes = nodes_obj if isinstance(nodes_obj, list) else []
+        for tn in nodes:
+            if not isinstance(tn, dict):
+                # Skip malformed node entries (e.g. a stray
+                # string or null from a partial response).
+                continue
+            node_id = tn.get("id")
+            if not isinstance(node_id, str):
+                continue
             all_threads.append((
-                tn.get("id"),
+                node_id,
                 bool(tn.get("isResolved")),
                 bool(tn.get("isOutdated")),
             ))

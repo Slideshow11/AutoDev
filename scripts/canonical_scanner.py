@@ -140,6 +140,14 @@ def _load_occurrence_allowlist(
     entries = {}
     seen_keys = set()
     for idx, occ in enumerate(occurrences):
+        if not isinstance(occ, dict):
+            # Reject non-dict entries (e.g. a stray string or
+            # integer). ``field not in occ`` would raise TypeError
+            # for non-dict values, hiding the validation failure.
+            raise AllowlistError(
+                f"occurrence entry #{idx} is not a dict: "
+                f"got {type(occ).__name__}"
+            )
         for field in REQUIRED_OCCURRENCE_FIELDS:
             if field not in occ:
                 raise AllowlistError(
@@ -190,17 +198,26 @@ def _load_occurrence_allowlist(
 
 def _walk_text_files(repo_root: Path):
     excluded = (
-        "/.git",
-        "/__pycache__",
-        "/dist",
-        "/build",
-        "/venv",
-        "/.venv",
-        "/.pytest_cache",
-        "/node_modules",
+        ".git",
+        "__pycache__",
+        "dist",
+        "build",
+        "venv",
+        ".venv",
+        ".pytest_cache",
+        "node_modules",
     )
     for root, dirs, files in os.walk(repo_root):
-        if any(ex in root for ex in excluded):
+        # Compare each directory under the repo_root against the
+        # exclusion list using path components, not the absolute
+        # ``root`` string. A repo whose absolute path happens to
+        # contain "/build" (e.g. ``/opt/build/repo``) must not
+        # skip every file.
+        rel_root = Path(root).relative_to(repo_root)
+        rel_parts = rel_root.parts
+        if any(part in excluded for part in rel_parts):
+            # Prune the excluded subtree before descending.
+            dirs[:] = [d for d in dirs if d not in excluded]
             continue
         for f in files:
             p = Path(root) / f
@@ -262,7 +279,16 @@ def run(repo_root: Path, scanner_input: Path) -> int:
     seen_paths: set = set()
     for rel, p in _walk_text_files(repo_root):
         seen_paths.add(str(rel))
-        if rel == SCANNER_INPUT_REL:
+        # ``rel`` is a Path while SCANNER_INPUT_REL is a str. Compare
+        # as Path objects so the scanner actually skips its own
+        # controlled token-definition file.
+        if rel == Path(SCANNER_INPUT_REL):
+            continue
+        # The occurrence allowlist file is the scanner's own
+        # controlled data file; it documents forbidden tokens
+        # (by token-id) without ever containing real secrets.
+        # Skip it just like the token-definition input file.
+        if rel == Path(OCCURRENCE_ALLOWLIST_REL):
             continue
         try:
             content = p.read_bytes()

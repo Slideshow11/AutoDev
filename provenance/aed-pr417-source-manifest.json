@@ -159,9 +159,9 @@
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "destination_path": "autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
-      "destination_sha256": "08435f8f18885661ee03ed7aae64e5c92e970ca0a075ad0fad25be0639102567",
+      "destination_sha256": "75fd2f9ca74764dcc064b24bec9ac86cce2b32ce1c49869a78e27bda773b61ab",
       "source_size_bytes": 86428,
-      "destination_size_bytes": 90975,
+      "destination_size_bytes": 91496,
       "transformation_classification": "path_only",
       "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
     },
@@ -262,8 +262,8 @@
       "source_path": null,
       "destination_path": "scripts/canonical_scanner.py",
       "source_sha256": null,
-      "destination_sha256": "9a57fa8259dc379055b5fe21c56f631e03460a8c41a78ab9089ae4502b062188",
-      "destination_size_bytes": 13657,
+      "destination_sha256": "6e18c3b23f7a958bd86c8604c3ba5e3ed12446bd978f2843c281f191b02bd68a",
+      "destination_size_bytes": 15037,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -271,8 +271,8 @@
       "source_path": null,
       "destination_path": "scripts/scanner-occurrence-allowlist.json",
       "source_sha256": null,
-      "destination_sha256": "8e16ae57b380edc6e25437e6078767c3ea54109bea06a22adbfd6b41f34a5c27",
-      "destination_size_bytes": 35749,
+      "destination_sha256": "fb7f7f41305b921c2df2a52d11277c35b7ac36c1b1e6f427efcff8c8c0f773aa",
+      "destination_size_bytes": 36242,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -280,8 +280,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "413ea9a03bfedeb95862bc7bb02732a1889b528cc273129a088384de165938e8",
-      "destination_size_bytes": 45321,
+      "destination_sha256": "3546cf16ad831fcad957b23ca9a182af06289d46e782080cea549a48b2e8f276",
+      "destination_size_bytes": 48092,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }

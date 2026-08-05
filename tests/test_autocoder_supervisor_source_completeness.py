@@ -159,33 +159,62 @@ def test_all_records_have_valid_aed_blob_sha(audit):
 
 
 def test_aed_sha256_recomputed_at_reference_commit():
-    """Recompute SHA-256 of every AED file at b57fcaad and cross-check with audit."""
-    # This is a slow operation: enumerate git ls-tree, hash each blob.
+    """Recompute SHA-256 of every AED file at b57fcaad and cross-check with audit.
+
+    This test verifies the audit's central integrity claim: every
+    AED file's recorded ``aed_sha256`` matches the bytes at commit
+    ``b57fcaad``. The test reads each blob via ``git cat-file``,
+    hashes its bytes, and compares against the record.
+    """
+    import hashlib as _hashlib
+
     if not AED_REPO.exists():
         pytest.skip(f"AED_REPO does not exist at {AED_REPO}; set {AED_REPO_ENV_VAR}")
+    audit_data = json.loads(AUDIT_JSON.read_text())
+    expected_count = audit_data["source"]["tracked_file_count"]
+    rec_by_path = {r["aed_source_path"]: r for r in audit_data["aed_file_records"]}
+
     out = subprocess.check_output(
         ["git", "ls-tree", "-r", AED_REF],
         cwd=str(AED_REPO),
         text=True,
     )
-    blob_to_path = {}
+    path_to_blob = {}
     for line in out.splitlines():
         parts = line.split(maxsplit=3)
         if len(parts) != 4:
             continue
         if parts[1] != "blob":
             continue
-        blob_to_path[parts[3]] = parts[2]
-    # At minimum we expect 713 files (matches the audit count)
-    assert len(blob_to_path) >= 700, f"unexpected AED file count: {len(blob_to_path)}"
-    # Cross-check: every record's blob_sha is in this set, and SHA-256 matches
-    audit_data = json.loads(AUDIT_JSON.read_text())
-    rec_by_path = {r["aed_source_path"]: r for r in audit_data["aed_file_records"]}
-    for path, blob_sha in blob_to_path.items():
+        path_to_blob[parts[3]] = parts[2]
+    # Compare against the audit's count, not a hard-coded number.
+    assert len(path_to_blob) == expected_count, (
+        f"unexpected AED file count: {len(path_to_blob)} vs {expected_count}"
+    )
+    # Cross-check: every record's blob_sha matches git, the recorded
+    # SHA-256 matches the actual blob bytes, and the recorded size
+    # matches the actual blob size.
+    for path, blob_sha in path_to_blob.items():
         rec = rec_by_path.get(path)
         assert rec is not None, f"AED file not in audit: {path}"
         assert rec["aed_blob_sha"] == blob_sha, (
-            f"blob SHA mismatch for {path}: {rec['aed_blob_sha']} != {blob_sha}"
+            f"blob SHA mismatch for {path}: "
+            f"{rec['aed_blob_sha']} != {blob_sha}"
+        )
+        blob_bytes = subprocess.check_output(
+            ["git", "cat-file", "blob", blob_sha],
+            cwd=str(AED_REPO),
+        )
+        actual_sha = _hashlib.sha256(blob_bytes).hexdigest()
+        actual_size = len(blob_bytes)
+        assert rec["aed_sha256"] == actual_sha, (
+            f"SHA-256 mismatch for {path}: "
+            f"recorded {rec['aed_sha256'][:16]}..., "
+            f"actual {actual_sha[:16]}..."
+        )
+        assert rec["aed_size_bytes"] == actual_size, (
+            f"size mismatch for {path}: "
+            f"recorded {rec['aed_size_bytes']}, actual {actual_size}"
         )
 
 
@@ -206,6 +235,31 @@ def test_all_manifest_source_files_classified_as_extracted(audit, manifest):
     missing = manifest_source_paths - extracted_paths
     assert not missing, f"manifest source paths not classified as extracted: {missing}"
     assert audit["extracted_manifest_match"]["all_manifest_source_paths_classified_as_extracted"] is True
+
+
+def test_byte_identical_records_have_matching_hashes(audit, manifest):
+    """Every file classified as ``COPIED_BYTE_IDENTICAL`` in the audit must
+    satisfy ``source_sha256 == destination_sha256`` in the extraction
+    manifest. Without this invariant, the audit can drift from reality.
+    """
+    byte_identical_paths = {
+        r["aed_source_path"]
+        for r in audit["aed_file_records"]
+        if r["disposition"] == "COPIED_BYTE_IDENTICAL"
+    }
+    if not byte_identical_paths:
+        pytest.skip("no COPIED_BYTE_IDENTICAL records to verify")
+    for entry in manifest["files"]:
+        if not entry.get("source_path"):
+            continue
+        if entry["source_path"] not in byte_identical_paths:
+            continue
+        s = entry.get("source_sha256")
+        d = entry.get("destination_sha256")
+        assert s and d and s == d, (
+            f"COPIED_BYTE_IDENTICAL entry has mismatched hashes: "
+            f"source={s}, destination={d}"
+        )
 
 
 def test_manifest_match_count(audit, manifest):
@@ -274,9 +328,7 @@ def test_supervisor_v1_tests_no_aed_internal_python_imports():
                 continue
             for pat in AED_LAYOUT_PATTERNS:
                 if pat in line:
-                    # Allow this only if it's a comment-like or string literal,
-                    # which is rare; assert no real import match.
-                    assert False, (
+                    raise AssertionError(
                         f"{py.name}: AED-layout reference in import: {line}"
                     )
 

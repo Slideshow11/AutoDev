@@ -647,6 +647,15 @@
       "line": 69,
       "line_sha256": "4be8e2a24629574b07994c4ff4c15cee5fae5d08c3d4e0dfb2ef091c1ca496db",
       "purpose": "Documented occurrence in autocoder_supervisor/config.py at line 69; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": ".github/workflows/ci.yml",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 100,
+      "line_sha256": "c14913ccd1adfbd002a09154daad42efc1187eb97588e62610ae3ba71ae8ea6f",
+      "purpose": "Documented occurrence in .github/workflows/ci.yml at line 100 (GitHub runner path /home/runner/work/<repo>/<repo>/venv/bin/python \u2014 a fixed CI runner path, not a credential leak)."
     }
   ]
 }

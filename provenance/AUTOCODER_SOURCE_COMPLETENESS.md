@@ -21,8 +21,8 @@ The audit enumerated **713 tracked files** in AED at the reference commit.
 
 | Disposition                                  | Count | Description |
 | -------------------------------------------- | ----- | ----------- |
-| `COPIED_BYTE_IDENTICAL`                      | 11    | Files copied byte-for-byte into AutoDev |
-| `TRANSFORMED_IN_AUTODEV`                     | 6     | Files copied with path / branding / packaging transformation |
+| `COPIED_BYTE_IDENTICAL`                      | 1     | Files copied byte-for-byte into AutoDev (verified by SHA-256 equality) |
+| `TRANSFORMED_IN_AUTODEV`                     | 16    | Files copied with path / branding / packaging transformation |
 | `RETAINED_AS_AED_SPECIFIC_INTEGRATION`       | 457   | AED-side code retained in AED (lifecycle, policy, scripts, docs, engine, tests) |
 | `HISTORICAL_OR_RUNTIME_EVIDENCE_EXCLUDED`    | 239   | AED fixture data, corpus evidence, egg-info build artifacts |
 | **Unclassified**                             | **0** | **Zero unclassified candidates** |
@@ -42,7 +42,7 @@ autocoder_supervisor/supervisor.py
 autocoder_supervisor/validate.py
 ```
 
-Plus the four documented doc/config files outside the package proper:
+Plus the nine documented doc/config files outside the package proper:
 
 ```
 autocoder_supervisor/INVARIANTS.md
@@ -64,8 +64,9 @@ tests/test_autocoder_supervisor.py
 tests/test_autocoder_supervisor_packaging.py
 ```
 
-Total: 17 source files migrated. Plus 10 standalone AutoDev additions
-(README, INVARIANTS, CI workflows, scanner, scanner-allowlist, etc.).
+Total: 17 source files migrated from AED. Plus 10 standalone AutoDev
+additions (README, INVARIANTS, CI workflows, scanner, scanner-allowlist,
+etc.) that have no AED source counterpart.
 
 ## 4. Dependency closure
 
@@ -158,6 +159,13 @@ classification:
 
 **Every manifest source path maps to an `EXTRACTED` classification.**
 
+The byte-identical subset is verified by `source_sha256 == destination_sha256`
+in the provenance manifest; the only file with matching source and
+destination hashes is `autocoder_supervisor/__init__.py`. The other
+sixteen extracted files carry `transformation_classification` values
+in the provenance manifest indicating path, branding, or packaging
+transformations applied during extraction.
+
 ## 7. PR scope decision
 
 **Verdict:** `PR_1_CONTAINS_SELF_CONTAINED_SUPERVISOR_V1`
@@ -212,17 +220,22 @@ runtime dependencies.
 
 ## 8. Audit tests
 
-Two test files enforce the audit:
+Two test files enforce the audit; both were added by PR #1:
 
-1. `tests/test_autocoder_supervisor_source_completeness.py` (added by this
-   audit) — schema validation, disposition completeness, hash integrity,
-   supervisor-v1 dependency-closure proof, clean-install proof regression,
+1. `tests/test_autocoder_supervisor_source_completeness.py` — schema
+   validation, disposition completeness, hash integrity, supervisor-v1
+   dependency-closure proof, clean-install proof regression,
    no-AED-path-leak regression, manifest-match cross-check, supervisor-v1
    scope decision invariant.
 
-2. `tests/test_extraction_provenance.py` (existing) — references the
-   provenance manifest for byte-identical and hash verification. The
-   audit cross-checks this manifest against its own classification.
+2. `tests/test_extraction_provenance.py` — references the provenance
+   manifest for byte-identical and hash verification. The audit
+   cross-checks this manifest against its own classification.
+
+(PR #1 ships these tests because they validate the extraction's own
+manifests and the supervisor's behavior; they are not AED-side test
+code. AED-side tests live in `Automated-Edge-Discovery/tests/` and
+are not part of the AutoDev repo.)
 
 ## 9. Summary
 

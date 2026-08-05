@@ -26,8 +26,8 @@
     "disposition_counts": {
       "RETAINED_AS_AED_SPECIFIC_INTEGRATION": 457,
       "HISTORICAL_OR_RUNTIME_EVIDENCE_EXCLUDED": 239,
-      "TRANSFORMED_IN_AUTODEV": 6,
-      "COPIED_BYTE_IDENTICAL": 11
+      "TRANSFORMED_IN_AUTODEV": 16,
+      "COPIED_BYTE_IDENTICAL": 1
     },
     "package_counts": {
       "aed_ci_workflow": 6,
@@ -760,12 +760,6 @@
         "scripts/local/autocoder_supervisor/INVARIANTS.md",
         "scripts/local/autocoder_supervisor/README.md",
         "scripts/local/autocoder_supervisor/config.py",
-        "scripts/local/pyproject.toml",
-        "tests/test_autocoder_supervisor.py",
-        "tests/test_autocoder_supervisor_packaging.py"
-      ],
-      "COPIED_BYTE_IDENTICAL": [
-        "scripts/local/autocoder_supervisor/__init__.py",
         "scripts/local/autocoder_supervisor/contracts.py",
         "scripts/local/autocoder_supervisor/docs/INSTALL.md",
         "scripts/local/autocoder_supervisor/docs/ISOLATED_TEST.md",
@@ -775,7 +769,13 @@
         "scripts/local/autocoder_supervisor/examples/aed-supervisor.example.toml",
         "scripts/local/autocoder_supervisor/service/aed-supervisor@.service.template",
         "scripts/local/autocoder_supervisor/supervisor.py",
-        "scripts/local/autocoder_supervisor/validate.py"
+        "scripts/local/autocoder_supervisor/validate.py",
+        "scripts/local/pyproject.toml",
+        "tests/test_autocoder_supervisor.py",
+        "tests/test_autocoder_supervisor_packaging.py"
+      ],
+      "COPIED_BYTE_IDENTICAL": [
+        "scripts/local/autocoder_supervisor/__init__.py"
       ]
     }
   },
@@ -5428,7 +5428,7 @@
       "aed_blob_sha": "dc08e96c8f7b4076bdb811c7a5dbdc365345e73b",
       "aed_sha256": "257ac4ab4ee37b52d93e21a5139084cf67c16a884b94bc55ed0a66c5ad8d4791",
       "aed_size_bytes": 13791,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5436,7 +5436,7 @@
       "aed_blob_sha": "dfb3b8bb27acce2905bd3837f5c89d002c320994",
       "aed_sha256": "df7c7811a65048412341580d0f8953456d7747051092b7de515d7540bdff1ca6",
       "aed_size_bytes": 5345,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5444,7 +5444,7 @@
       "aed_blob_sha": "e07ff0780e90798d8c6b273b28c25c70c157e9cb",
       "aed_sha256": "5040c9100d5cd02ed968f8cfd4c85af345490cf82f3f528ef6fd896caabb0a2a",
       "aed_size_bytes": 2315,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5452,7 +5452,7 @@
       "aed_blob_sha": "a6d6f714b52e195959f6a7344174a436bfb33968",
       "aed_sha256": "71d65ed2a096a4a6867160629e1f7e1a2019c1ea183504ac87b19d2bb6630c3c",
       "aed_size_bytes": 2363,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5460,7 +5460,7 @@
       "aed_blob_sha": "fc9ed725e424cc7ed177f03bf08d272560e219ef",
       "aed_sha256": "f6179e149e20b764334ea61ac1900a8047e2119aa48794437979df37a84afa5f",
       "aed_size_bytes": 3305,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5468,7 +5468,7 @@
       "aed_blob_sha": "925be87d5d36eec71a485e6d88f02f9f9164edce",
       "aed_sha256": "c90a8962bc90186adda1957ba1727dbb6831048aae4c303376283589ef691179",
       "aed_size_bytes": 1845,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5476,7 +5476,7 @@
       "aed_blob_sha": "4873a7453d68af8aff79d5d21eb8b7631753f126",
       "aed_sha256": "a36de8e0da0f79494143f56c0acd995d090a5728fcf6b8526a64d540c2b29dad",
       "aed_size_bytes": 3510,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5484,7 +5484,7 @@
       "aed_blob_sha": "8adfb2a4cbd10340cf2960ab663fd880d244eca5",
       "aed_sha256": "0b932e336ad31b238e194f170b4e0ce55946bfbb54be93fe3ad7ee29867e64f5",
       "aed_size_bytes": 2477,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5492,7 +5492,7 @@
       "aed_blob_sha": "2857a5c5992b5e941c60554f39c3f7fb7ed958fa",
       "aed_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "aed_size_bytes": 86428,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {
@@ -5500,7 +5500,7 @@
       "aed_blob_sha": "738b2287504e23161634b872bd4f4046a229aa62",
       "aed_sha256": "82164445f7705df8d83d5282e94f8e4346dd2422038784c1f3787188f7a54224",
       "aed_size_bytes": 14191,
-      "disposition": "COPIED_BYTE_IDENTICAL",
+      "disposition": "TRANSFORMED_IN_AUTODEV",
       "package": "autocoder_supervisor_v1_runtime"
     },
     {

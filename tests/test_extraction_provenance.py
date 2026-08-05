@@ -21,6 +21,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PROVENANCE_PATH = REPO_ROOT / "provenance" / "aed-pr417-source-manifest.json"
 EXTRACTION_NARRATIVE = REPO_ROOT / "provenance" / "EXTRACTION.md"
 
+# Import SCANNER_INPUT_REL at module scope so the helper
+# ``_build_minimal_manifest`` can resolve the constant without a
+# per-caller import. Tests that exercise the scanner still
+# import their own copy from canonical_scanner for convenience.
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+from canonical_scanner import SCANNER_INPUT_REL  # noqa: E402
+
 
 FORBIDDEN_TOKENS_FULL = (
     '/home/', '/root/', '/Users/', '/~/.hermes/', 'gho_',
@@ -396,6 +403,11 @@ def test_canonical_scanner_documented_occurrence_passes(scanner_fixture):
     """An approved documented occurrence in the
     occurrence allowlist passes when the actual source
     line matches.
+
+    The fixture file's content matches the documented
+    allowlist entry line-for-line (same path, token_id,
+    ordinal). The scanner should accept it as a documented
+    occurrence and exit 0.
     """
     import sys as _sys
     _sys.path.insert(0, str(REPO_ROOT / "scripts"))
@@ -407,34 +419,88 @@ def test_canonical_scanner_documented_occurrence_passes(scanner_fixture):
     scanner_input.write_text(
         "\n".join(FORBIDDEN_TOKENS_FULL) + "\n", encoding="utf-8"
     )
-    copy_real_allowlist(scanner_fixture)
-    _copy_real_source_files(scanner_fixture)
-    # Copy the real occurrence allowlist.
-    src = scanner_fixture / "src"
-    src.mkdir()
+    # Build a fixture-specific allowlist containing ONLY the
+    # one occurrence we are about to reproduce in the fixture.
+    # Copying the entire real allowlist would fail the scanner
+    # with rc=2 because the fixture tree does not contain the
+    # real source files referenced by the other allowances.
     real = REPO_ROOT / OCCURRENCE_ALLOWLIST_REL
+    real_manifest = json.loads(real.read_text())
+    real_repo = REPO_ROOT
+    # Pick the first occurrence that maps to a real repo file
+    # AND whose recorded line contains exactly one forbidden
+    # token (so the fixture reproduces a single clean entry
+    # without dragging in collateral tokens from neighbouring
+    # occurrences on the same line).
+    forbidden = [
+        ln.strip() for ln in
+        scanner_input.read_text().splitlines() if ln.strip()
+    ]
+    src_occ = None
+    for occ in real_manifest["occurrences"]:
+        rel = occ["path"]
+        if not (real_repo / rel).exists():
+            continue
+        text = (real_repo / rel).read_text(encoding="utf-8")
+        lines = text.splitlines()
+        if occ["line"] - 1 >= len(lines):
+            continue
+        line = lines[occ["line"] - 1]
+        token_hits = [t for t in forbidden if t in line]
+        if len(token_hits) != 1:
+            continue
+        # Resolve the recorded token_id back to its literal token
+        # to confirm the single hit matches the allowance.
+        recorded_token = None
+        for tid_entry in real_manifest["token_id_registry"]:
+            if tid_entry["token_id"] == occ["token_id"]:
+                # The token-id registry stores SHA-256 prefixes
+                # only; resolve via the scanner's runtime map.
+                pass
+        # Build the runtime token_id_to_token map (the
+        # scanner does this internally from the forbidden
+        # tokens; replicate for the assertion below).
+        token_id_to_token = {
+            "tok_" + hashlib.sha256(t.encode("utf-8")).hexdigest()[:12]: t
+            for t in forbidden
+        }
+        recorded_token = token_id_to_token.get(occ["token_id"])
+        if recorded_token is None or recorded_token not in token_hits:
+            continue
+        src_occ = occ
+        break
+    assert src_occ is not None, (
+        "no single-token occurrence in the real manifest maps to a "
+        "file in the repo and reproduces cleanly"
+    )
+    fixture_allowlist = {
+        "schema_version": real_manifest["schema_version"],
+        "token_id_registry": real_manifest["token_id_registry"],
+        "occurrences": [src_occ],
+    }
     allowlist = scanner_fixture / OCCURRENCE_ALLOWLIST_REL
     allowlist.parent.mkdir(parents=True, exist_ok=True)
-    allowlist.write_text(real.read_text(), encoding="utf-8")
-    # Add a file with a credential-shaped line whose line
-    # content matches an existing allowlist entry for that
-    # file at the same ordinal. We copy an existing
-    # occurrence from the real manifest.
-    manifest = json.loads(real.read_text())
-    src_occ = next(
-        occ for occ in manifest["occurrences"]
-        if occ["path"] != "scripts/scanner-occurrence-allowlist.json"
+    allowlist.write_text(
+        json.dumps(fixture_allowlist), encoding="utf-8"
     )
-    leak = src / "leak.txt"
-    line_text = (
-        f"    my credential-shaped line for {src_occ['token_id']}\n"
-    )
-    leak.write_text(line_text)
+    # Reproduce the documented line in the fixture.
+    src = scanner_fixture / "src"
+    src.mkdir()
+    rel = src_occ["path"]
+    fixture_file = scanner_fixture / rel
+    fixture_file.parent.mkdir(parents=True, exist_ok=True)
+    real_file = real_repo / rel
+    line_no = src_occ["line"]
+    line_text = real_file.read_text(encoding="utf-8").splitlines()[line_no - 1] + "\n"
+    fixture_file.write_text(line_text, encoding="utf-8")
     rc = run(scanner_fixture, scanner_input)
-    # This will fail unless the copied manifest already
-    # documents this specific file. The test asserts
-    # the documented-path passes when added.
-    assert rc in (0, 1), "scanner must terminate cleanly"
+    # The scanner must accept the documented occurrence
+    # (rc == 0) since the fixture file reproduces the recorded
+    # line exactly and the fixture allowlist documents only
+    # this single (path, token_id, ordinal).
+    assert rc == 0, (
+        f"documented occurrence must pass; rc={rc}"
+    )
 
 
 def test_canonical_scanner_rejects_unknown_token_id(scanner_fixture):
@@ -830,6 +896,10 @@ def test_canonical_scanner_utf32be_bom(scanner_fixture):
     assert rc == 1, f"UTF-32BE credential must fail; rc={rc}"
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="uid 0 bypasses file permission checks; chmod 0o000 cannot make a file unreadable to root",
+)
 def test_canonical_scanner_fails_closed_on_unreadable_file(scanner_fixture):
     """An unreadable committed file fails the scanner.
     """
@@ -857,15 +927,6 @@ def test_canonical_scanner_fails_closed_on_unreadable_file(scanner_fixture):
         f"unreadable committed file must fail scanning; "
         f"rc={rc}"
     )
-
-
-@pytest.mark.skipif(
-    os.geteuid() == 0,
-    reason="uid 0 bypasses file permission checks; chmod 0o000 cannot make a file unreadable to root",
-)
-def test_canonical_scanner_unreadable_file_test():
-    """Test marker: see above (skipped when uid is root)."""
-    pass
 
 
 def test_canonical_scanner_rejects_tracked_runtime_state(tmp_path, monkeypatch):
