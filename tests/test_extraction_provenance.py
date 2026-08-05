@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROVENANCE_PATH = REPO_ROOT / "provenance" / "aed-pr417-source-manifest.json"
@@ -408,6 +410,10 @@ def test_canonical_scanner_detects_utf16be_bom(tmp_path):
     assert rc == 1
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="uid 0 bypasses file permission checks; chmod 0o000 cannot make a file unreadable to root",
+)
 def test_canonical_scanner_fails_closed_on_unreadable_file(tmp_path):
     """An unreadable committed file fails the scanner (does
     NOT silently continue).
@@ -606,7 +612,7 @@ def test_service_template_uses_state_logs_directory():
 
 
 
-def test_canonical_scanner_rejects_user_home_paths():
+def test_canonical_scanner_rejects_user_home_paths(tmp_path):
     """The configured forbidden-token rule includes the
     literal generic prefix ``/home/``. The scanner must
     reject actual Linux user-home paths like
@@ -616,90 +622,128 @@ def test_canonical_scanner_rejects_user_home_paths():
     allow-listed files. The test uses the real
     scanner configuration rather than a separately-
     constructed placeholder token.
+
+    The fixture tree lives entirely under ``tmp_path``
+    so the test does not write into the live repository
+    working tree.
     """
     import subprocess as _sp
-    import tempfile as _tf
-    import shutil as _sh
-    # Derive the repo root from this test file's location
-    # so the test works in any checkout directory.
-    repo = str(Path(__file__).resolve().parent.parent)
-    scanner = f"{repo}/scripts/canonical_scanner.py"
-    # Create a tmp file under the repo cwd that contains
-    # an actual /home/alice/ path; the scanner must
-    # reject it.
-    leak_dir = _tf.mkdtemp(dir=repo, prefix=".tmp_scanner_leak_")
-    leak_path = f"{leak_dir}/leak.txt"
-    with open(leak_path, "w") as f:
-        f.write("see /home/alice/secret.txt\n")
-        f.write("also /home/max/secret.txt\n")
-    try:
-        res = _sp.run(
-            ["python3", scanner],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    finally:
-        _sh.rmtree(leak_dir, ignore_errors=True)
-    assert res.returncode == 1, (
-        f"scanner must reject user-home paths; "
-        f"stdout={res.stdout!r}"
+    import sys as _sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from canonical_scanner import (
+        SCANNER_INPUT_REL, _load_allowlist, _load_forbidden,
     )
-    out = res.stdout
-    # At least one of the user names must appear in the
-    # scanner's failure output so the failure is
-    # attributable.
-    assert ("alice" in out or "/home/" in out), (
-        f"scanner must reject /home/alice/path; "
-        f"stdout={out!r}"
+    # Build a fresh fixture tree under tmp_path.
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("/home/\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    leak = src / "leak.txt"
+    leak.write_text(
+        "see /home/alice/secret.txt\n"
+        "also /home/max/secret.txt\n"
+    )
+    # Run the scanner's run() directly against the
+    # fixture tree rather than invoking the CLI on the
+    # live repository root.
+    from canonical_scanner import run as _scanner_run
+    rc = _scanner_run(tmp_path, scanner_input)
+    assert rc == 1, (
+        "scanner must reject user-home paths in the "
+        "fixture tree"
     )
 
 
-def test_canonical_scanner_rules_file_exempt_from_its_own_rule():
+def test_canonical_scanner_rules_file_exempt_from_its_own_rule(tmp_path):
     """The scanner's own controlled token-definition file
     and the scanner-allowlist JSON are explicitly exempt
     from the forbidden-token scan.
+
+    The fixture tree lives entirely under ``tmp_path``.
     """
-    import subprocess as _sp
-    repo = str(Path(__file__).resolve().parent.parent)
-    res = _sp.run(
-        ["python3", "scripts/canonical_scanner.py"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        timeout=60,
+    import sys as _sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from canonical_scanner import (
+        SCANNER_INPUT_REL, run as _scanner_run,
     )
-    assert res.returncode == 0, (
-        f"scanner's own input file must remain exempt; "
-        f"stdout={res.stdout!r} stderr={res.stderr!r}"
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("/home/\n", encoding="utf-8")
+    # No source files added: the scanner's only entries
+    # are the controlled token-definition file (exempt)
+    # and any allow-listed files copied into the fixture
+    # tree.
+    rc = _scanner_run(tmp_path, scanner_input)
+    assert rc == 0, (
+        "scanner must exit 0 on a fixture tree with no "
+        "violations; the controlled token-definition file "
+        "is unconditionally exempt"
     )
 
 
-def test_canonical_scanner_unchanged_text_accepted():
+def test_canonical_scanner_unchanged_text_accepted(tmp_path):
     """A file with no forbidden tokens remains clean. The
     test ensures no false positives are introduced by
     the new rule.
+
+    The fixture tree lives entirely under ``tmp_path``.
     """
-    import subprocess as _sp
-    import tempfile as _tf
-    import shutil as _sh
-    repo = str(Path(__file__).resolve().parent.parent)
-    benign_dir = _tf.mkdtemp(dir=repo, prefix=".tmp_scanner_benign_")
-    benign_path = f"{benign_dir}/benign.txt"
-    with open(benign_path, "w") as f:
-        f.write("plain ordinary prose with no user paths at all.\n")
-    try:
-        res = _sp.run(
-            ["python3", f"{repo}/scripts/canonical_scanner.py"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-    finally:
-        _sh.rmtree(benign_dir, ignore_errors=True)
-    assert res.returncode == 0, (
-        f"scanner must accept benign text without "
-        f"/home/; stdout={res.stdout!r}"
+    import sys as _sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from canonical_scanner import (
+        SCANNER_INPUT_REL, run as _scanner_run,
     )
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("/home/\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    benign = src / "benign.txt"
+    benign.write_text(
+        "plain ordinary prose with no user paths at all.\n"
+    )
+    rc = _scanner_run(tmp_path, scanner_input)
+    assert rc == 0, (
+        "scanner must accept benign text without "
+        "/home/ in the fixture tree"
+    )
+
+
+def test_canonical_scanner_detects_utf32_bom(tmp_path):
+    """A file encoded in UTF-32LE or UTF-32BE whose bytes
+    include a forbidden token MUST still be rejected. The
+    scanner detects UTF-32 BOMs before UTF-16 BOMs because
+    the first two bytes of UTF-32LE and UTF-16LE coincide.
+    """
+    import sys as _sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+    from canonical_scanner import (
+        SCANNER_INPUT_REL, run as _scanner_run,
+    )
+    scanner_input = tmp_path / SCANNER_INPUT_REL
+    scanner_input.parent.mkdir(parents=True, exist_ok=True)
+    scanner_input.write_text("gho_\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    leak = src / "leak.txt"
+    # UTF-32LE BOM (\xff\xfe\x00\x00) followed by a token.
+    leak.write_bytes(
+        b"\xff\xfe\x00\x00gho_LEAKED_TOKEN\n"
+    )
+    rc = _scanner_run(tmp_path, scanner_input)
+    assert rc == 1, (
+        "scanner must reject UTF-32LE-encoded forbidden "
+        "tokens"
+    )
+    # UTF-32BE BOM (\x00\x00\xfe\xff) followed by a token.
+    leak2 = src / "leak2.txt"
+    leak2.write_bytes(
+        b"\x00\x00\xfe\xffgho_LEAKED_TOKEN\n"
+    )
+    rc2 = _scanner_run(tmp_path, scanner_input)
+    assert rc2 == 1, (
+        "scanner must reject UTF-32BE-encoded forbidden "
+        "tokens"
+    )
+

@@ -176,7 +176,7 @@ sudo -u aed-supervisor $EDITOR \
 
 A minimal `supervisor.env` content:
 
-```
+```text
 AED_PR_NUMBER=1
 AED_REPO_OWNER=Slideshow11
 AED_REPO_NAME=AutoDev

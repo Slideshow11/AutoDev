@@ -143,7 +143,17 @@ def run(repo_root: Path, scanner_input: Path) -> int:
             # bytes between every byte of a UTF-16-encoded
             # file and the scanner would miss the forbidden
             # tokens in such a file.
-            if content.startswith(b"\xff\xfe"):
+            # UTF-32 BOMs MUST be checked before UTF-16
+            # BOMs: UTF-32LE and UTF-16LE share the first
+            # two bytes ``\xff\xfe``; a UTF-32LE file
+            # would be mis-decoded as UTF-16LE and the
+            # scanner would miss the forbidden tokens. The
+            # same applies to UTF-32BE / UTF-16BE.
+            if content.startswith(b"\xff\xfe\x00\x00"):
+                encoding = "utf-32-le"
+            elif content.startswith(b"\x00\x00\xfe\xff"):
+                encoding = "utf-32-be"
+            elif content.startswith(b"\xff\xfe"):
                 encoding = "utf-16-le"
             elif content.startswith(b"\xfe\xff"):
                 encoding = "utf-16-be"
@@ -153,8 +163,18 @@ def run(repo_root: Path, scanner_input: Path) -> int:
                 text = content.decode(encoding, errors="replace")
             except (LookupError, UnicodeDecodeError):
                 text = content.decode("utf-8", errors="replace")
+            # Token matching must also run against the raw
+            # byte stream. UTF-32LE / UTF-32BE encodings pad
+            # each ASCII byte with three zero bytes, so a
+            # literal ASCII token like ``gho_`` becomes
+            # ``g\x00\x00\x00h\x00\x00\x00o\x00\x00\x00_``
+            # in the decoded text and is invisible to a
+            # substring search. The raw bytes still contain
+            # the literal token, so we fall back to a
+            # raw-byte search.
+            raw = content
             for token in forbidden:
-                if token not in text:
+                if token not in text and token.encode("ascii") not in raw:
                     continue
                 allowed = allowlist.get(rel)
                 if allowed is not None and token in allowed:

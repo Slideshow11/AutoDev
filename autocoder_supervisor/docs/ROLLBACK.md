@@ -26,7 +26,20 @@ test -d /opt/aed-supervisor.old || {
     exit 1
 }
 
+# Verify the preserved source tree is complete before
+# deleting the active virtualenv. An incomplete backup
+# would leave the service without a runnable environment.
+test -f /opt/aed-supervisor.old/pyproject.toml || {
+    echo "rollback source tree is incomplete" >&2
+    exit 1
+}
+
 if [ -x /opt/aed-supervisor/venv/bin/python ]; then
+    test -x /opt/aed-supervisor.old/venv/bin/python || {
+        echo "rollback virtualenv is incomplete" >&2
+        exit 1
+    }
+fi
     # VIRTUALENV install: rebuild the venv from the
     # preserved previous source tree.
     sudo rm -rf /opt/aed-supervisor/venv
@@ -59,8 +72,8 @@ sudo journalctl -u aed-supervisor@<instance>.service -n 50
 
 The persistent state files (lease, snapshots, readiness
 state) are **not** modified by a rollback — they live under
-`/var/lib/aed-supervisor/state/`, separate from the source
-tree.
+`/var/lib/aed-supervisor/<instance>/state/`, separate from the
+source tree.
 
 ## When rollback is not enough
 
@@ -69,9 +82,9 @@ wrote a corrupted state file, do **not** restart the service
 with the corrupted state. Instead:
 
 1. Stop the service.
-2. Inspect the state directory: `ls -la /var/lib/aed-supervisor/state/`.
+2. Inspect the state directory: `ls -la /var/lib/aed-supervisor/<instance>/state/`.
 3. Move any state file with `sudo journalctl -u aed-supervisor` error
-   references to `/var/lib/aed-supervisor/state/quarantine/`.
+   references to `/var/lib/aed-supervisor/<instance>/state/quarantine/`.
 4. Restart the service — it will start in `ACTIVE_REPAIR` and
    rebuild the missing state from the live PR.
 5. File an issue with the corrupted state file contents so

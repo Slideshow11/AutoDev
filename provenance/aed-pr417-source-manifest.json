@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-05T00:55:59Z",
+  "captured_utc": "2026-08-05T01:42:45Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -89,9 +89,9 @@
       "source_path": "scripts/local/autocoder_supervisor/docs/INSTALL.md",
       "destination_path": "autocoder_supervisor/docs/INSTALL.md",
       "source_sha256": "df7c7811a65048412341580d0f8953456d7747051092b7de515d7540bdff1ca6",
-      "destination_sha256": "8cfa59329b5090813d8b47fbc64990565415e9643319a3df3ef4a134402c3859",
+      "destination_sha256": "9e4ad15c467504332a1c9861ad3b356c0725419500262755853173beaa0dd64f",
       "source_size_bytes": 5345,
-      "destination_size_bytes": 7483,
+      "destination_size_bytes": 7487,
       "transformation_classification": "path_only",
       "transformation_explanation": "Replaced the source-tree layout snippet (which described the AED scripts/local/ layout) with the standalone layout. Re-pointed install paths."
     },
@@ -109,9 +109,9 @@
       "source_path": "scripts/local/autocoder_supervisor/docs/ROLLBACK.md",
       "destination_path": "autocoder_supervisor/docs/ROLLBACK.md",
       "source_sha256": "71d65ed2a096a4a6867160629e1f7e1a2019c1ea183504ac87b19d2bb6630c3c",
-      "destination_sha256": "d036c7078a98e6df8c3db4bcb1906b0fc4c64244144f0b870db4650b58f6e26f",
+      "destination_sha256": "2bac5d02888b95cbf2099ba80c8713d324ee07c3be07972b28a408925eb1ef79",
       "source_size_bytes": 2363,
-      "destination_size_bytes": 3110,
+      "destination_size_bytes": 3560,
       "transformation_classification": "path_only",
       "transformation_explanation": "Path re-pointed to standalone layout."
     },
@@ -139,9 +139,9 @@
       "source_path": "scripts/local/autocoder_supervisor/examples/aed-supervisor.example.toml",
       "destination_path": "autocoder_supervisor/examples/aed-supervisor.example.toml",
       "source_sha256": "a36de8e0da0f79494143f56c0acd995d090a5728fcf6b8526a64d540c2b29dad",
-      "destination_sha256": "fdf6e95cfa0db9b2c3150fab7c3a371259db0a987b664d6416f5a2576d487651",
+      "destination_sha256": "ee2e6c9d1c5fbf4034e9c9eb6616e610988ed0017d85d448047cc09ea06d4eaf",
       "source_size_bytes": 3510,
-      "destination_size_bytes": 4656,
+      "destination_size_bytes": 4732,
       "transformation_classification": "path_only",
       "transformation_explanation": "Path re-pointed to standalone layout."
     },
@@ -262,8 +262,8 @@
       "source_path": null,
       "destination_path": "scripts/canonical_scanner.py",
       "source_sha256": null,
-      "destination_sha256": "a71db21634153bc47e52e9c8b608a52ccd80349056f0de17cb25669e3edf0b92",
-      "destination_size_bytes": 9054,
+      "destination_sha256": "0a7bf70ecf0e9c15c8f75016240acf087cb01be47e304b9fd4213c2067fbe8f5",
+      "destination_size_bytes": 10138,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -271,8 +271,8 @@
       "source_path": null,
       "destination_path": "scripts/scanner-allowlist.json",
       "source_sha256": null,
-      "destination_sha256": "812b4807f5f3529ee8ba5f76d8bdfbc78fa8484fb25036dd473a194c92acd3f1",
-      "destination_size_bytes": 1513,
+      "destination_sha256": "87a0ad95647777b8f085f8159d12ebf238c3358fe92477aa3a0d7ff951e47d18",
+      "destination_size_bytes": 1761,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -280,8 +280,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "0c1c79a2e4cb0e92075333d00dd0c42a18d8aeadbee67c5cd619f5ba1c48fc16",
-      "destination_size_bytes": 25729,
+      "destination_sha256": "ab1f154a14be9a7a56ee3b88cac5f2ef03d0d7ccb238e414238568fd837a1ffa",
+      "destination_size_bytes": 27452,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }

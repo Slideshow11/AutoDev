@@ -89,9 +89,10 @@ post_codex_recovery_request = false
 
 # Operator-configured list of required GitHub Actions check
 # names (status contexts) that must reach a SUCCESS
-# conclusion for the PR to be considered ready. Empty by
-# default; set this to match the standalone AutoDev CI
-# workflow's ``jobs.*.name`` values.
+# conclusion for the PR to be considered ready. The list
+# below contains six workflow names that match the
+# standalone AutoDev CI workflow's ``jobs.*.name`` values;
+# set ``required_check_names = []`` to require no checks.
 required_check_names = [
     "test (3.10)",
     "test (3.11)",
