@@ -163,18 +163,58 @@ def run(repo_root: Path, scanner_input: Path) -> int:
                 text = content.decode(encoding, errors="replace")
             except (LookupError, UnicodeDecodeError):
                 text = content.decode("utf-8", errors="replace")
-            # Token matching must also run against the raw
-            # byte stream. UTF-32LE / UTF-32BE encodings pad
+            # UTF-32 normalization: UTF-32LE / UTF-32BE pad
             # each ASCII byte with three zero bytes, so a
             # literal ASCII token like ``gho_`` becomes
             # ``g\x00\x00\x00h\x00\x00\x00o\x00\x00\x00_``
             # in the decoded text and is invisible to a
-            # substring search. The raw bytes still contain
-            # the literal token, so we fall back to a
-            # raw-byte search.
+            # substring search. The token IS still present
+            # as a subsequence of the decoded text once
+            # the zero padding has been removed, so we
+            # build a normalized view of the decoded text
+            # and search that as well.
+            if encoding in ("utf-32-le", "utf-32-be"):
+                zero_pad = b"\x00\x00\x00"
+                step = 4
+            else:
+                zero_pad = b""
+                step = 1
             raw = content
+            normalized = ""
+            try:
+                if encoding in ("utf-32-le", "utf-32-be"):
+                    normalized = (
+                        content.lstrip(b"\xff\xfe\x00\x00\x00\x00\xfe\xff")
+                        .decode("ascii", errors="ignore")
+                    )
+                    # The above is approximate; the
+                    # correct per-encoding strip is below.
+                    if encoding == "utf-32-le":
+                        normalized_bytes = b""
+                        for i in range(0, len(content) - 3, 4):
+                            ch = content[i:i + 4]
+                            if len(ch) == 4 and ch != b"\x00\x00\x00":
+                                normalized_bytes += bytes([ch[0]])
+                        normalized = normalized_bytes.decode(
+                            "ascii", errors="ignore"
+                        )
+                    else:  # utf-32-be
+                        normalized_bytes = b""
+                        for i in range(0, len(content) - 3, 4):
+                            ch = content[i:i + 4]
+                            if len(ch) == 4 and ch != b"\x00\x00\x00":
+                                normalized_bytes += bytes([ch[3]])
+                        normalized = normalized_bytes.decode(
+                            "ascii", errors="ignore"
+                        )
+            except Exception:
+                normalized = ""
             for token in forbidden:
-                if token not in text and token.encode("ascii") not in raw:
+                if (
+                    token not in text
+                    and token.encode("ascii") not in raw
+                    and token not in normalized
+                ):
                     continue
                 allowed = allowlist.get(rel)
                 if allowed is not None and token in allowed:

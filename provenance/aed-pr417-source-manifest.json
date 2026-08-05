@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-05T03:02:17Z",
+  "captured_utc": "2026-08-05T03:19:46Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -262,8 +262,8 @@
       "source_path": null,
       "destination_path": "scripts/canonical_scanner.py",
       "source_sha256": null,
-      "destination_sha256": "0a7bf70ecf0e9c15c8f75016240acf087cb01be47e304b9fd4213c2067fbe8f5",
-      "destination_size_bytes": 10138,
+      "destination_sha256": "4e876037f030dc9fada5cf68fc03a81c5999b800609012696e0ee8447ac7aba6",
+      "destination_size_bytes": 11940,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
@@ -280,8 +280,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "9f5260371df896ab63140ae42cff9378ed58b03bba4fccd146c8382415f008f7",
-      "destination_size_bytes": 29769,
+      "destination_sha256": "a3472ab57f2eb12d64bc8b07573e3154876e329302abc6900e08575483b57934",
+      "destination_size_bytes": 30595,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }

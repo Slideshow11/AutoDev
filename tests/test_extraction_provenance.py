@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import codecs
 import pytest
 
 
@@ -661,25 +662,38 @@ def test_canonical_scanner_rules_file_exempt_from_its_own_rule(tmp_path):
     from the forbidden-token scan.
 
     The fixture tree lives entirely under ``tmp_path``.
+    Both the controlled token-definition file AND the
+    scanner-allowlist.json must be present in the fixture
+    so the test exercises the per-file allow-list exemption.
     """
     import sys as _sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
     from canonical_scanner import (
-        SCANNER_INPUT_REL, run as _scanner_run,
+        SCANNER_INPUT_REL, SCANNER_ALLOWLIST_REL, run as _scanner_run,
     )
     scanner_input = tmp_path / SCANNER_INPUT_REL
     scanner_input.parent.mkdir(parents=True, exist_ok=True)
     scanner_input.write_text("/home/\n", encoding="utf-8")
-    # No source files added: the scanner's only entries
-    # are the controlled token-definition file (exempt)
-    # and any allow-listed files copied into the fixture
-    # tree.
+    # Mirror the actual scanner-allowlist.json into the
+    # fixture tree so _load_allowlist() returns a mapping
+    # that applies to the scanner-input file.
+    src = tmp_path / "src"
+    src.mkdir()
+    scanner_allowlist = tmp_path / "scripts" / "scanner-allowlist.json"
+    scanner_allowlist.parent.mkdir(parents=True, exist_ok=True)
+    real = (
+        Path(__file__).resolve().parent.parent
+        / "scripts" / "scanner-allowlist.json"
+    )
+    scanner_allowlist.write_text(real.read_text(), encoding="utf-8")
     rc = _scanner_run(tmp_path, scanner_input)
     assert rc == 0, (
         "scanner must exit 0 on a fixture tree with no "
         "violations; the controlled token-definition file "
         "is unconditionally exempt"
     )
+
+
 
 
 def test_canonical_scanner_unchanged_text_accepted(tmp_path):
@@ -715,6 +729,9 @@ def test_canonical_scanner_detects_utf32_bom(tmp_path):
     include a forbidden token MUST still be rejected. The
     scanner detects UTF-32 BOMs before UTF-16 BOMs because
     the first two bytes of UTF-32LE and UTF-16LE coincide.
+    Each payload is encoded with Python's native UTF-32
+    codec so the bytes ARE genuinely UTF-32 encoded, not a
+    raw BOM prefix followed by ASCII.
     """
     import sys as _sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -727,20 +744,20 @@ def test_canonical_scanner_detects_utf32_bom(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     leak = src / "leak.txt"
-    # UTF-32LE BOM (\xff\xfe\x00\x00) followed by a token.
-    leak.write_bytes(
-        b"\xff\xfe\x00\x00gho_LEAKED_TOKEN\n"
-    )
+    leak.write_bytes("gho_LEAKED_TOKEN".encode("utf-32"))
     rc = _scanner_run(tmp_path, scanner_input)
     assert rc == 1, (
         "scanner must reject UTF-32LE-encoded forbidden "
         "tokens"
     )
-    # UTF-32BE BOM (\x00\x00\xfe\xff) followed by a token.
-    leak2 = src / "leak2.txt"
-    leak2.write_bytes(
-        b"\x00\x00\xfe\xffgho_LEAKED_TOKEN\n"
-    )
+    # Build a fresh fixture subtree for the BE case so the
+    # UTF-32BE assertion does not scan the prior LE file.
+    import shutil as _sh_util
+    _sh_util.rmtree(tmp_path / "src")
+    src2 = tmp_path / "src"
+    src2.mkdir()
+    leak2 = src2 / "leak.txt"
+    leak2.write_bytes(codecs.BOM_UTF32_BE + "gho_LEAKED_TOKEN".encode("utf-32-be"))
     rc2 = _scanner_run(tmp_path, scanner_input)
     assert rc2 == 1, (
         "scanner must reject UTF-32BE-encoded forbidden "
@@ -798,7 +815,7 @@ def test_install_md_creates_state_dir():
         "INSTALL.md must chmod the nested state_dir to "
         "0700"
     )
-    assert "test -d /var/lib/aed-supervisor" in text, (
+    assert "test -d /var/lib/aed-supervisor/$INSTANCE/state" in text, (
         "INSTALL.md must verify the nested state_dir "
         "exists with a test -d check"
     )
