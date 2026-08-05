@@ -2,7 +2,6 @@
   "_note": "Files in this allow-list may contain the corresponding forbidden tokens as part of their documented purpose (validator regexes, test fixtures, invariants ledger, scanner data input). The scanner reads this file rather than embedding the mappings in its own source. Adding a file here without a clear documentary purpose is grounds for reviewer rejection.",
   "files": {
     "scripts/scanner-allowlist.json": [
-      "/home/<user>/",
       "/root/",
       "/Users/",
       "gho_",
@@ -12,7 +11,8 @@
       "-----BEGIN",
       "aws_access_key_id",
       "aws_secret_access_key",
-      "oauth_token:"
+      "oauth_token:",
+      "/home/"
     ],
     "autocoder_supervisor/config.py": [
       "-----BEGIN",
@@ -25,16 +25,14 @@
       "ghs_",
       "oauth_token:",
       "sk-",
-      "/home/<user>/"
+      "/home/"
     ],
     "autocoder_supervisor/supervisor.py": [
-      "/home/<user>/",
       "/root/",
       "sk-",
       "oauth_token:"
     ],
     "autocoder_supervisor/contracts.py": [
-      "/home/<user>/",
       "/root/"
     ],
     "INVARIANTS.md": [
@@ -44,11 +42,10 @@
       "oauth_token:"
     ],
     "tests/test_autocoder_supervisor.py": [
-      "/home/<user>/",
-      "ghp_"
+      "ghp_",
+      "/home/"
     ],
     "tests/test_extraction_provenance.py": [
-      "/home/<user>/",
       "/root/",
       "/Users/",
       "gho_",
@@ -58,7 +55,8 @@
       "-----BEGIN",
       "aws_access_key_id",
       "aws_secret_access_key",
-      "oauth_token:"
+      "oauth_token:",
+      "/home/"
     ]
   }
 }

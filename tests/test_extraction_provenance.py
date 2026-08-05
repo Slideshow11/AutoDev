@@ -604,3 +604,100 @@ def test_service_template_uses_state_logs_directory():
             f"StateDirectory={line} must include %i"
         )
 
+
+
+def test_canonical_scanner_rejects_user_home_paths():
+    """The configured forbidden-token rule includes the
+    literal generic prefix ``/home/``. The scanner must
+    reject actual Linux user-home paths like
+    ``/home/alice/`` and ``/home/max/`` while remaining
+    exempt for the scanner's own controlled token-
+    definition input file and for explicitly
+    allow-listed files. The test uses the real
+    scanner configuration rather than a separately-
+    constructed placeholder token.
+    """
+    import subprocess as _sp
+    import tempfile as _tf
+
+    repo = "/tmp/Autocoder"
+    scanner = f"{repo}/scripts/canonical_scanner.py"
+    # Create a tmp file under the repo cwd that contains
+    # an actual /home/alice/ path; the scanner must
+    # reject it.
+    leak_dir = _tf.mkdtemp(dir=repo, prefix=".tmp_scanner_leak_")
+    leak_path = f"{leak_dir}/leak.txt"
+    with open(leak_path, "w") as f:
+        f.write("see /home/alice/secret.txt\n")
+        f.write("also /home/max/secret.txt\n")
+    try:
+        res = _sp.run(
+            ["python3", scanner],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        import shutil as _sh
+        _sh.rmtree(leak_dir, ignore_errors=True)
+    assert res.returncode == 1, (
+        f"scanner must reject user-home paths; "
+        f"stdout={res.stdout!r}"
+    )
+    out = res.stdout
+    # At least one of the user names must appear in the
+    # scanner's failure output so the failure is
+    # attributable.
+    assert ("alice" in out or "/home/" in out), (
+        f"scanner must reject /home/alice/path; "
+        f"stdout={out!r}"
+    )
+
+
+def test_canonical_scanner_rules_file_exempt_from_its_own_rule():
+    """The scanner's own controlled token-definition file
+    and the scanner-allowlist JSON are explicitly exempt
+    from the forbidden-token scan.
+    """
+    import subprocess as _sp
+    res = _sp.run(
+        ["python3", "scripts/canonical_scanner.py"],
+        cwd="/tmp/Autocoder",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert res.returncode == 0, (
+        f"scanner's own input file must remain exempt; "
+        f"stdout={res.stdout!r} stderr={res.stderr!r}"
+    )
+
+
+def test_canonical_scanner_unchanged_text_accepted():
+    """A file with no forbidden tokens remains clean. The
+    test ensures no false positives are introduced by
+    the new rule.
+    """
+    import subprocess as _sp
+    import tempfile as _tf
+    import shutil as _sh
+    repo = "/tmp/Autocoder"
+    benign_dir = _tf.mkdtemp(dir=repo, prefix=".tmp_scanner_benign_")
+    benign_path = f"{benign_dir}/benign.txt"
+    with open(benign_path, "w") as f:
+        f.write("plain ordinary prose with no user paths at all.\n")
+    try:
+        res = _sp.run(
+            ["python3", f"{repo}/scripts/canonical_scanner.py"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        _sh.rmtree(benign_dir, ignore_errors=True)
+    assert res.returncode == 0, (
+        f"scanner must accept benign text without "
+        f"/home/; stdout={res.stdout!r}"
+    )

@@ -1,4 +1,4 @@
-/home/<user>/
+/home/
 /root/
 /Users/
 /~/.hermes/

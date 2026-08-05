@@ -291,11 +291,6 @@ class ReviewerProviderSnapshotDict(TypedDict, total=False):
     latest_review_ts: Optional[str]
     latest_comment_id: Optional[int]
 
-    paused: bool
-    in_progress: bool
-    latest_review_ts: Optional[str]
-    latest_comment_id: Optional[int]
-
 
 class ExactHeadSnapshotDict(TypedDict, total=False):
     """Snapshot of the live PR and provider surfaces."""
