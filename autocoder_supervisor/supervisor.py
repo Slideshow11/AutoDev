@@ -935,7 +935,18 @@ def _resolve_hermes_bin() -> Optional[str]:
 
 
 def launch_worker(rs: dict, live: dict) -> Optional[dict]:
-    prompt = build_resume_prompt(rs, live)
+    try:
+        prompt = build_resume_prompt(rs, live)
+    except (KeyError, ValueError) as exc:
+        # ``build_resume_prompt`` already logs and re-raises;
+        # the supervisor surfaces a regular launch failure
+        # instead of terminating the daemon.
+        log(
+            "error",
+            "invalid resume_prompt_template",
+            error=str(exc),
+        )
+        return None
     # Resolve the hermes binary: prefer AED_HERMES_BIN, then
     # the configured worker_command (whose first element is
     # the binary path), then `which hermes`.
@@ -959,13 +970,26 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # flags; the post-substitution flags are appended if they
     # are not already present.
     if configured_cmd:
-        cmd = [
-            part.format(
-                prompt=prompt,
-                session_id=SESSION_ID,  # type: ignore[name-defined]
+        try:
+            cmd = [
+                part.format(
+                    prompt=prompt,
+                    session_id=SESSION_ID,  # type: ignore[name-defined]
+                )
+                for part in configured_cmd
+            ]
+        except (KeyError, IndexError, ValueError) as exc:
+            # The configured worker_command template contains
+            # an unknown placeholder or unmatched brace. Log
+            # the failure and return ``None`` so the launch
+            # fails like any other launch failure rather than
+            # terminating the daemon.
+            log(
+                "error",
+                "invalid worker_command template",
+                error=str(exc),
             )
-            for part in configured_cmd
-        ]
+            return None
         # The configured template provides the launch
         # arguments; do not append the standard flags if they
         # are already there.

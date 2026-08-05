@@ -1618,3 +1618,72 @@ def test_build_resume_prompt_succeeds_with_valid_template(isolated_state, monkey
     assert "XdemoX" in out
     assert "XdeadbeefX" in out
 
+
+def test_launch_worker_invalid_resume_template_returns_none(isolated_state, monkeypatch):
+    """When ``build_resume_prompt`` raises (KeyError / ValueError),
+    ``launch_worker`` must catch the failure and return ``None``
+    rather than terminating the daemon.
+    """
+    import autocoder_supervisor.supervisor as _sup
+
+    # Force build_resume_prompt to raise ValueError.
+    def boom(*args, **kwargs):
+        raise ValueError("forced resume-prompt failure for test")
+
+    monkeypatch.setattr(_sup, "build_resume_prompt", boom)
+    # Patch module-level constants so the rest of launch_worker
+    # would otherwise be reachable.
+    monkeypatch.setattr(_sup, "WORKER_COMMAND_TEMPLATE", ["hermes", "chat"])
+    monkeypatch.setattr(_sup, "SESSION_ID", "abc123")
+
+    out = _sup.launch_worker({"current_head": "h"}, {"head_sha": "h"})
+    assert out is None, (
+        "launch_worker must return None on invalid resume_prompt_template"
+    )
+
+
+def test_launch_worker_invalid_worker_command_template_returns_none(
+    isolated_state, monkeypatch
+):
+    """When the configured ``worker_command`` template contains an
+    unknown placeholder or unmatched brace, ``launch_worker`` must
+    catch the substitution error and return ``None`` rather than
+    terminating the daemon.
+    """
+    import autocoder_supervisor.supervisor as _sup
+
+    monkeypatch.setattr(_sup, "build_resume_prompt", lambda rs, live: "P")
+    # A worker_command template with an unknown placeholder.
+    monkeypatch.setattr(
+        _sup, "WORKER_COMMAND_TEMPLATE",
+        ["hermes", "chat", "{prompt}", "--resume", "{bogus}"],
+    )
+    monkeypatch.setattr(_sup, "SESSION_ID", "abc123")
+
+    out = _sup.launch_worker({"current_head": "h"}, {"head_sha": "h"})
+    assert out is None, (
+        "launch_worker must return None on invalid worker_command template"
+    )
+
+
+def test_launch_worker_unmatched_brace_in_worker_command_returns_none(
+    isolated_state, monkeypatch
+):
+    """An unmatched ``{`` in a worker_command template raises
+    ValueError from ``str.format``. ``launch_worker`` must catch
+    that and return ``None``.
+    """
+    import autocoder_supervisor.supervisor as _sup
+
+    monkeypatch.setattr(_sup, "build_resume_prompt", lambda rs, live: "P")
+    monkeypatch.setattr(
+        _sup, "WORKER_COMMAND_TEMPLATE",
+        ["hermes", "chat", "{prompt unclosed", "--resume", "{session_id}"],
+    )
+    monkeypatch.setattr(_sup, "SESSION_ID", "abc123")
+
+    out = _sup.launch_worker({"current_head": "h"}, {"head_sha": "h"})
+    assert out is None, (
+        "launch_worker must return None on unmatched brace in worker_command"
+    )
+
