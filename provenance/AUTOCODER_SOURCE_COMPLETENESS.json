@@ -16,7 +16,7 @@
   },
   "destination": {
     "repository": "Slideshow11/AutoDev",
-    "reference_head_sha": "416a664050ad983135738a4ca2d4f91625f68018",
+    "reference_head_sha": "7561ed0504968edd8815e1a24fc8b859545b40bb",
     "reference_head_short": "e99c33aa8b85",
     "branch": "feat/extract-supervisor-v1",
     "pr_number": 1
