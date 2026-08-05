@@ -1,0 +1,104 @@
+[Unit]
+Description=AutoDev supervisor (autocoder_supervisor package) v1
+Documentation=https://github.com/Slideshow11/AutoDev
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The supervisor and any launched worker run as a dedicated,
+# unprivileged system account (``aed-supervisor``). The
+# account is created during installation (see
+# docs/INSTALL.md); if the account is missing systemd will
+# refuse to start the service.
+User=aed-supervisor
+Group=aed-supervisor
+
+# All paths below are absolute. The systemd template unit
+# is copied to /etc/systemd/system/aed-supervisor@.service
+# and instantiated as aed-supervisor@<instance>.service.
+#
+# The supervisor package is installed at /opt/aed-supervisor
+# (via the documented procedure in docs/INSTALL.md). The
+# install root contains:
+#
+#     /opt/aed-supervisor/
+#     ├── pyproject.toml
+#     └── autocoder_supervisor/   <- the Python package
+#
+# ``pip install /opt/aed-supervisor`` registers the package
+# in the active Python environment's site-packages, so no
+# PYTHONPATH override is needed.
+#
+# ExecStart selection:
+#
+#   * SYSTEM-WIDE install (default):
+#       ExecStart uses /usr/bin/env python3 which resolves
+#       to the system Python where the package is installed.
+#
+#   * VIRTUALENV install:
+#       Replace the ExecStart line with the venv Python,
+#       e.g. /opt/aed-supervisor/venv/bin/python3. The
+#       venv install keeps the supervisor's interpreter
+#       pinned to a known-good Python.
+#
+# Pick the ExecStart that matches your install and comment
+# out the other before enabling the service.
+WorkingDirectory=/var/lib/aed-supervisor/%i
+
+# Per-instance environment file. The operator materializes
+# this file before enabling the service. It carries the four
+# AED_PR_NUMBER / AED_REPO_OWNER / AED_REPO_NAME /
+# AED_AUTHORITATIVE_HEAD variables plus any other runtime
+# configuration. See docs/INSTALL.md for a minimal example.
+EnvironmentFile=/etc/aed-supervisor/%i/supervisor.env
+
+Environment=HOME=/var/lib/aed-supervisor/%i
+Environment=PYTHONPATH=
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=AED_SUPERVISOR_CONFIG=/etc/aed-supervisor/%i/aed-supervisor.toml
+
+# SYSTEM-WIDE: leave this ExecStart uncommented.
+ExecStart=/usr/bin/env python3 -m autocoder_supervisor.supervisor --config /etc/aed-supervisor/%i/aed-supervisor.toml
+# VIRTUALENV: comment out the line above and uncomment the one below.
+#ExecStart=/opt/aed-supervisor/venv/bin/python3 -m autocoder_supervisor.supervisor --config /etc/aed-supervisor/%i/aed-supervisor.toml
+Restart=always
+RestartSec=10
+# KillMode=control-group: when the service is stopped, the
+# entire control group (including the worker and its
+# descendants) is terminated. This prevents orphaned workers
+# that linger after the supervisor dies.
+KillMode=control-group
+TimeoutStopSec=30
+MemoryMax=512M
+CPUQuota=50%
+
+# Privilege / namespace hardening: the supervisor and any
+# launched worker run as the unprivileged aed-supervisor
+# account and have no write access to most of the host
+# filesystem.
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+
+# State directory is the supervisor's persistent state and
+# runtime writes (lease, snapshots, readiness state, log
+# file). LockPersonality + ProtectHome already block
+# /var/lib/aed-supervisor's siblings, but we also need
+# /var/log/aed-supervisor and /var/lib/aed-supervisor/%i
+# to be writable.
+StateDirectory=aed-supervisor/%i
+LogsDirectory=aed-supervisor
+# ReadWritePaths is set after StateDirectory / LogsDirectory
+# so the supervisor can write to the resolved directories.
+# Combined with ProtectSystem=full (below), the only
+# writable areas on the host are the dedicated paths.
+ProtectSystem=full
+ReadWritePaths=/var/lib/aed-supervisor/%i /var/log/aed-supervisor /opt/aed-supervisor/working_checkout/%i
+
+[Install]
+WantedBy=default.target
