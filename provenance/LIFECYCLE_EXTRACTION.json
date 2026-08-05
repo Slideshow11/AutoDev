@@ -1,0 +1,81 @@
+{
+  "schema": "autocoder.lifecycle_extraction_provenance.v1",
+  "produced_at": "2026-08-05T16:10:00Z",
+  "produced_by": "humphry-extraction-agent (implementation worker)",
+  "role": "lifecycle-extraction-provenance",
+  "purpose": "Migration provenance for the lifecycle-extraction PR. This is a NEW provenance record, separate from the supervisor-extraction provenance recorded in tests/test_extraction_provenance.py. It documents only the lifecycle-specific migration.",
+  "aed_reference": {
+    "repository": "Slideshow11/Automated-Edge-Discovery",
+    "commit_sha": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
+    "commit_short": "b57fcaad",
+    "source_paths": [
+      "aed_lifecycle/__init__.py",
+      "aed_lifecycle/checkpoint.py",
+      "aed_lifecycle/no_stall.py",
+      "aed_lifecycle/watchdog.py"
+    ],
+    "source_sha256": {
+      "aed_lifecycle/__init__.py": "ccab7f08ed1c570cf4f30c7d9e930188ba9dbdd1c486399d4ad6dba72ed72050",
+      "aed_lifecycle/checkpoint.py": "12c9a80ad4a4ddafdae3d2977d4f372be371573a691a2ee460afd732b36af9e8",
+      "aed_lifecycle/no_stall.py": "ae545e6194d875e94cb0dee74a2fbdc94981788330a723d7f453456429187fc5",
+      "aed_lifecycle/watchdog.py": "ae12fc526d2dd34708a24a0c8118f22ff19c570f508d93b25a0cb5cc8f58073c"
+    }
+  },
+  "autodev_reference": {
+    "repository": "Slideshow11/AutoDev",
+    "parent_commit": "a79bb613a70db3d3bd659a5c8985ffcfc0835984",
+    "destination_package": "autocoder_lifecycle",
+    "destination_paths": [
+      "autocoder_lifecycle/__init__.py",
+      "autocoder_lifecycle/registry.py",
+      "autocoder_lifecycle/checkpoint.py",
+      "autocoder_lifecycle/no_stall.py",
+      "autocoder_lifecycle/watchdog.py",
+      "scripts/build_wheel_and_install_smoke.py"
+    ],
+    "destination_sha256": {
+      "autocoder_lifecycle/__init__.py": "e603390e88fca28cd7572023d888d03608f025d254b25fe8d5fa2e1f671df098",
+      "autocoder_lifecycle/registry.py": "69f2e30ab144c1ad0063f12af3650f4b533aceacce13af2ce541e9e277adab13",
+      "autocoder_lifecycle/checkpoint.py": "0f381db8db1b39dbf9e3b49932639a96d13a1ce2ec4367ddd188ed66ba71be61",
+      "autocoder_lifecycle/no_stall.py": "b068d9064e361e7eb47682c7666879e96c51a65bf6199003724b9ded241669c3",
+      "autocoder_lifecycle/watchdog.py": "b01c85545d1aedc50fb274590f411a5aa65f60b6d8cb8a09e231139a592caf0d",
+      "scripts/build_wheel_and_install_smoke.py": "321a3dfd721086fa942b16c1371904f7f4c386c536c1537eafaff00e9f381330"
+    }
+  },
+  "test_destination_paths": [
+    "tests/test_autocoder_lifecycle_registry.py",
+    "tests/test_autocoder_lifecycle_checkpoint.py",
+    "tests/test_autocoder_lifecycle_no_stall.py",
+    "tests/test_autocoder_lifecycle_watchdog.py",
+    "tests/test_autocoder_lifecycle_no_branding.py"
+  ],
+  "test_destination_sha256": {
+    "tests/test_autocoder_lifecycle_registry.py": "ce8c71f0a5d449d818d344b9da110504516fe9e925cc72af2397b5bb3a6edbea",
+    "tests/test_autocoder_lifecycle_checkpoint.py": "e0229c913e68f26809fcbc315a2fadf31c0c3db2920979d9685cebcf7ce7bee5",
+    "tests/test_autocoder_lifecycle_no_stall.py": "9c4329661273f3282aeca2d3efa54cba5e7d9161435dc8b7eacf8365f2f567ef",
+    "tests/test_autocoder_lifecycle_watchdog.py": "790a2a34de4f854aa8a907f7884d316ed0c47d2ea51a15d14ebf4522045223b6",
+    "tests/test_autocoder_lifecycle_no_branding.py": "40e05d6bc655a5898a34de81acf6683087223fa57c120c69d73d083a15666950"
+  },
+  "transformation_classification": "RENAME_AND_GENERICIZE",
+  "registry_interface_design_decision": {
+    "decision": "Introduce a typed LifecycleStateRegistry protocol with a default minimal generic registry. AutoDev ships the registry, the registry builder, and the default registry. Project-/provider-specific states register against this registry via the AED-side adapter (PR 1b in the validated roadmap).",
+    "rationale": "Originally aed_lifecycle had a hardcoded TERMINAL_LIFECYCLE_STATES set that contained 14 reviewer-coupled states (HOLD_CODEX_RESPONSE_PENDING, MERGE_READY_AWAITING_HUMAN_AUTHORIZATION, CODEX_CLEAN_PASS, etc.). Migrating that set into AutoDev would force the generic core to inherit AED-specific reviewer semantics. Instead, AutoDev exposes a registry protocol with a small, platform-generic default vocabulary (COMPLETED, FAILED, AWAITING_HUMAN_AUTHORIZATION, OPERATOR_REQUIRED, HEAD_CHANGED, CI_PENDING, CI_FAILED, RUNNING, NOT_RUN) and reserves the provider-specific vocabulary for the AED-side adapter."
+  },
+  "omitted_aed_specific_portions": {
+    "files_kept_in_aed_only": [
+      "aed_lifecycle_states.py (CLI wrapper, will be updated to register AED states with AutoDev in PR 1b)",
+      "schemas/aed_lifecycle_states_v1.json (the schema stays in AED; the AED-side adapter registers its states with AutoDev)",
+      "tests/test_aed_no_stall.py schema-coupled tests (test_canonical_registry_covers_schema_hold_and_terminal, test_every_schema_hold_is_terminal, test_every_schema_non_terminal_is_not_terminal; these stay in AED; they will be moved to the AED-side test package in PR 1b)"
+    ],
+    "removed_aed_branding": [
+      "_load_schema_states (deleted; the schema-loader stays in AED as the AED-side adapter)",
+      "schemas/aed_lifecycle_states_v1.json (deleted reference; the schema stays in AED only)",
+      "AED checkout path (deleted reference from runtime code; no literal user-profile path)",
+      "Humphry, Telegram (deleted from runtime code)",
+      "MERGE_READY_AWAITING_HUMAN_AUTHORIZATION, CODEX_CLEAN_PASS, HOLD_CODEX_RESPONSE_PENDING, etc. (deleted from runtime code; moved to AED-side adapter)"
+    ]
+  },
+  "explicit_statement_aed_not_modified": "The source AED commit b57fcaad806c68b93668bcd318fa26ab15a8ab40 was NOT modified by this extraction. The AED-side adapter that consumes the new autocoder_lifecycle package is a separate roadmap PR (PR 1b in the validated roadmap). The historical PR #1 supervisor-extraction provenance recorded in tests/test_extraction_provenance.py was not altered by this extraction.",
+  "supervisor_extraction_altered_by_this_pr": false,
+  "test_results_reported_at_commit_time": "PENDING_AT_COMMIT_TIME"
+}

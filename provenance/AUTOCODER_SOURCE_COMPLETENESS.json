@@ -853,9 +853,9 @@
         "destination_path": "pyproject.toml",
         "transformation_classification": "packaging_metadata_only",
         "source_sha256": "8fc7e1319f879c71f1e272b4a56d56951aa2b223366d238e96b114540c125532",
-        "destination_sha256": "69c20394d9999f6d9dd8b32582f5576c866671f8f6edd1f4416d9acc147935cf",
+        "destination_sha256": "a7ef1909c28aa6bb4b05900080af089bf058a89e3f85e7c5f9cdb744006c9a41",
         "source_size_bytes": 1304,
-        "destination_size_bytes": 1513,
+        "destination_size_bytes": 1868,
         "transformation_explanation": "Moved from scripts/local/pyproject.toml to the standalone repository root; updated the docstring and the [tool.setuptools.packages.find] exclude list to reflect the new layout. Distribution name and runtime dependency on tomli for Python <3.11 are preserved."
       },
       {
@@ -913,9 +913,9 @@
         "destination_path": "autocoder_supervisor/docs/INSTALL.md",
         "transformation_classification": "path_only",
         "source_sha256": "df7c7811a65048412341580d0f8953456d7747051092b7de515d7540bdff1ca6",
-        "destination_sha256": "d00167acf57a31251acf5b244ecb4e9c00a458b8fae0760d0b48bb047c1f6a4a",
+        "destination_sha256": "2efaf2b08445b07e1ca17e1fb030f0513dfcc9e1bc76b097e4f83b6d9b8543c4",
         "source_size_bytes": 5345,
-        "destination_size_bytes": 9214,
+        "destination_size_bytes": 9573,
         "transformation_explanation": "Replaced the source-tree layout snippet (which described the AED scripts/local/ layout) with the standalone layout. Re-pointed install paths."
       },
       {
