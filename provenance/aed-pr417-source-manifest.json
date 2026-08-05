@@ -1,6 +1,6 @@
 {
   "schema": "autocoder.pr417.source_manifest.v1",
-  "captured_utc": "2026-08-05T00:49:46Z",
+  "captured_utc": "2026-08-05T00:55:59Z",
   "source_repository": "Slideshow11/Automated-Edge-Discovery",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -280,8 +280,8 @@
       "source_path": null,
       "destination_path": "tests/test_extraction_provenance.py",
       "source_sha256": null,
-      "destination_sha256": "f63ea480d71a431883d32d765bafde00b17fb39327c947a971df82557d951978",
-      "destination_size_bytes": 25528,
+      "destination_sha256": "0c1c79a2e4cb0e92075333d00dd0c42a18d8aeadbee67c5cd619f5ba1c48fc16",
+      "destination_size_bytes": 25729,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }

@@ -619,8 +619,10 @@ def test_canonical_scanner_rejects_user_home_paths():
     """
     import subprocess as _sp
     import tempfile as _tf
-
-    repo = "/tmp/Autocoder"
+    import shutil as _sh
+    # Derive the repo root from this test file's location
+    # so the test works in any checkout directory.
+    repo = str(Path(__file__).resolve().parent.parent)
     scanner = f"{repo}/scripts/canonical_scanner.py"
     # Create a tmp file under the repo cwd that contains
     # an actual /home/alice/ path; the scanner must
@@ -639,7 +641,6 @@ def test_canonical_scanner_rejects_user_home_paths():
             timeout=60,
         )
     finally:
-        import shutil as _sh
         _sh.rmtree(leak_dir, ignore_errors=True)
     assert res.returncode == 1, (
         f"scanner must reject user-home paths; "
@@ -661,9 +662,10 @@ def test_canonical_scanner_rules_file_exempt_from_its_own_rule():
     from the forbidden-token scan.
     """
     import subprocess as _sp
+    repo = str(Path(__file__).resolve().parent.parent)
     res = _sp.run(
         ["python3", "scripts/canonical_scanner.py"],
-        cwd="/tmp/Autocoder",
+        cwd=repo,
         capture_output=True,
         text=True,
         timeout=60,
@@ -682,7 +684,7 @@ def test_canonical_scanner_unchanged_text_accepted():
     import subprocess as _sp
     import tempfile as _tf
     import shutil as _sh
-    repo = "/tmp/Autocoder"
+    repo = str(Path(__file__).resolve().parent.parent)
     benign_dir = _tf.mkdtemp(dir=repo, prefix=".tmp_scanner_benign_")
     benign_path = f"{benign_dir}/benign.txt"
     with open(benign_path, "w") as f:
