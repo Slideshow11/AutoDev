@@ -313,3 +313,252 @@ policy:
 | "exactly one writer"                    | I-01        |
 | "no merge without authorisation"        | I-02, I-14  |
 | "no secrets in committed tree"          | I-15        |
+
+---
+
+# AutoDev Control Plane — Invariant Ledger (v1)
+
+This ledger (continued below v1) describes the invariants enforced
+by the `autocoder_orchestration` package. The invariants are
+versioned with this ledger.
+
+Every invariant names:
+
+- the **invariant** — the behavioural rule;
+- the **enforcing implementation** — the function/module in
+  `autocoder_orchestration/*.py` that enforces it;
+- the **asserting tests** — the test names in
+  `tests/test_autocoder_orchestration_*.py` that prove it.
+
+---
+
+## C-01 — State transitions are mechanically enforced
+
+The controller is the only writer of `state.json`. The state
+machine refuses any transition that is not in the
+`_FORWARD_TRANSITIONS` table. Workers cannot mutate state
+directly; they invoke controller methods that re-validate the
+transition.
+
+- Enforcing implementation: `state_machine.transition()`
+- Asserting tests: `test_prohibited_transitions.*`,
+  `test_worker_cannot_set_controller_only_state`,
+  `test_verifier_cannot_authorize_merge`.
+
+## C-02 — Worker author cannot place the run in controller-only states
+
+Implementation workers cannot place the run in:
+
+- CANDIDATE_FROZEN
+- VERIFYING
+- AWAITING_MERGE_AUTHORIZATION
+- MERGE_AUTHORIZED
+- COMPLETE
+
+These states are reserved for the controller, candidate builder,
+verifier, and human operator respectively.
+
+- Enforcing implementation: `state_machine.CONTROLLER_ONLY_STATES`
+- Asserting tests: `test_implementation_worker_cannot_set_*` (5 tests).
+
+## C-03 — Only the verifier can write verifier evidence
+
+The verifier writes a `verifier-record.json` file. The
+controller's `verifier_passed` and `verifier_failed` methods
+are the only entry points that accept a verifier record.
+Implementation workers cannot write a verifier record.
+
+- Enforcing implementation: `controller.verifier_passed`,
+  `controller.verifier_failed`
+- Asserting tests: `test_verifier_api_only_takes_records`.
+
+## C-04 — Readiness is a structured gate evaluation
+
+The readiness engine evaluates 25 named gates and returns one
+structured decision. There is no skip/ignore/trust/assume/force
+flag. A failed gate prevents a passing decision.
+
+- Enforcing implementation: `readiness.ReadinessEngine.evaluate`
+- Asserting tests: `tests/test_autocoder_orchestration_readiness.py`
+  (31 tests covering every gate).
+
+## C-05 — Strict observer requires continuous qualifying interval
+
+The strict observer records observations and rejects the quiet
+window if any observation inside the qualifying interval is
+non-qualifying. The interval resets on a failed observation.
+PID and process-start-identity must remain stable for the
+interval.
+
+- Enforcing implementation: `observer.StrictObserver.observe`
+- Asserting tests: `test_watcher_oscillation_resets`,
+  `test_unresolved_thread_resets_interval`,
+  `test_stale_head_disqualifies`.
+
+## C-06 — Candidate must be built from exact-head Git-object bytes
+
+The candidate builder reads files via `git show <exact_head>:<path>`,
+never from the mutable working tree. Path traversal is rejected,
+absolute paths are rejected.
+
+- Enforcing implementation: `candidate.CandidateBuilder._git_show_sha`
+- Asserting tests: `test_build_from_exact_head`,
+  `test_build_refuses_unsafe_path`,
+  `test_build_writes_files`.
+
+## C-07 — Candidate refuses without a passing readiness certificate
+
+The candidate builder rejects any readiness decision that has
+failed gates. A `CandidateNotReady` error is raised. No partial
+candidate is written.
+
+- Enforcing implementation: `candidate.CandidateBuilder.build`
+- Asserting tests: `test_refuses_without_readiness`,
+  `test_refuses_head_mismatch`,
+  `test_refuses_run_id_mismatch`.
+
+## C-08 — Verifier role guard rejects same-identity verifier
+
+The verifier role guard rejects a verification attempt when:
+
+- the verifier process identity matches the implementation worker;
+- the verifier executable path is inside the target branch checkout;
+- the verifier has write credentials configured.
+
+- Enforcing implementation:
+  `verifier_handoff.VerifierRoleGuard.validate`
+- Asserting tests: `test_rejects_same_process_identity`,
+  `test_rejects_executable_in_target_checkout`,
+  `test_rejects_write_credentials`.
+
+## C-09 — Merge authorization binds all critical fields
+
+The merge authorization includes:
+
+- authorized head;
+- candidate SHA-256;
+- verifier record SHA-256;
+- merge method (squash only by default).
+
+It is the human-only signature that authorizes the merge.
+
+- Enforcing implementation: `merge_authorization.MergeAuthorization`
+- Asserting tests: `test_refuses_no_match_head_commit`,
+  `test_refuses_admin`, `test_refuses_auto`,
+  `test_refuses_merge_commit`, `test_refuses_rebase`.
+
+## C-10 — Merge executor refuses unsafe variants
+
+The merge executor refuses:
+
+- a different head than the authorized one;
+- admin bypass;
+- auto-merge;
+- merge commit;
+- rebase merge;
+- missing match-head-commit flag.
+
+- Enforcing implementation: `merge_authorization.MergeExecutor`
+- Asserting tests: `test_compute_command`, `test_refuses_admin`,
+  `test_refuses_auto`, `test_refuses_merge_commit`,
+  `test_refuses_rebase`, `test_refuses_no_match_head_commit`.
+
+## C-11 — State files are mode 0600, private directories are mode 0700
+
+The state store writes state files with mode 0600 and creates
+private directories with mode 0700. Symlinks are rejected.
+
+- Enforcing implementation: `store._atomic_write`,
+  `store._ensure_private_dir`
+- Asserting tests: `test_write_creates_file_with_0600`,
+  `test_creates_directory_with_0700`.
+
+## C-12 — Malformed state fails closed
+
+Reading a state file with invalid JSON, a non-dict top-level,
+or a symlink raises `StateCorruption`. The store does not
+silently default.
+
+- Enforcing implementation: `store._read_json`
+- Asserting tests: `test_read_invalid_json_raises`,
+  `test_read_non_dict_raises`.
+
+## C-13 — Path traversal rejected
+
+Both the store and the candidate builder reject paths containing
+`..` segments or absolute paths.
+
+- Enforcing implementation: `store._safe_path`,
+  `candidate.CandidateBuilder._git_show_sha`
+- Asserting tests: `test_write_rejects_unsafe_path`,
+  `test_build_refuses_unsafe_path`.
+
+## C-14 — No literal PR number or repository name in observer
+
+The strict observer contains no embedded PR number, repository
+name, or expected SHA. All these identifiers come from the run
+context or the data source.
+
+- Enforcing implementation: `observer.StrictObserver`
+- Asserting tests: `test_observer_module_has_no_pr_number`,
+  `test_observer_module_has_no_repo_name`.
+
+## C-15 — PR-scoped state paths
+
+The controller's state path is keyed by repo owner, repo name,
+PR number, and run ID. PR #1 state cannot enter PR #2 state.
+
+- Enforcing implementation: `context.RunContext.state_path`
+- Asserting tests: `test_run_id_uniqueness`,
+  `test_pr_one_state_cannot_enter_pr_two`.
+
+## C-16 — Atomic rev-bumping writes
+
+The state store writes revision-bumped files atomically. After
+write, the in-place revision is incremented; the new revision
+is what readers see.
+
+- Enforcing implementation: `store.write_atomic`
+- Asserting tests: `test_write_revisions_increment`,
+  `test_cas_succeeds_on_match`.
+
+## C-17 — Inventory hashes invalidate the candidate
+
+The candidate records the SHA-256 of every input file. If a
+later re-build computes a different SHA for the same path,
+the candidate is invalidated.
+
+- Enforcing implementation: `candidate.Candidate.source_files`
+- Asserting tests: `test_input_hash_match_accepted`,
+  `test_input_hash_mismatch_rejected`.
+
+## C-18 — Atomic journal writes
+
+The store appends to the journal via Python's append mode. Each
+entry is a single JSON line. The journal is auditable.
+
+- Enforcing implementation: `store.append_journal`,
+  `store.read_journal`
+- Asserting tests: `test_append_and_read`.
+
+## C-19 — Lock ownership uses PID + process-start identity
+
+A lease acquired by PID X can only be re-acquired or released
+by the same PID with the same /proc start_id. PID reuse is
+detected as a different start identity.
+
+- Enforcing implementation: `store.Lease.acquire`
+- Asserting tests: `test_different_process_cannot_acquire`,
+  `test_same_process_re_acquire`.
+
+## C-20 — Controller-owned state machine
+
+The controller is the only place where the state machine
+transitions are applied. Workers report observations; the
+controller applies transitions. A terminal token printed by
+a worker is informational only.
+
+- Enforcing implementation: `controller.Controller`
+- Asserting tests: `test_full_happy_path`,
+  `test_block`, `test_state_persisted_across_reload`.
+
