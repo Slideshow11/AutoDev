@@ -26,6 +26,7 @@ import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from .context import RunContext, make_run_context, generate_run_id
+from .canonical_paths import canonical_paths as _canonical_artifact_paths
 from .state_machine import (
     StateMachine,
     STATE_PLANNED,
@@ -82,6 +83,25 @@ EXIT_INVARG = 2
 EXIT_GUARD = 3
 EXIT_STATE = 4
 EXIT_INTERNAL = 5
+
+# Author login used by CodeRabbit on this repository. The CLI filters
+# latestReviews by this identity so a human review cannot satisfy the
+# CodeRabbit guard.
+CODERABBIT_AUTHOR_LOGIN = "coderabbitai"
+
+
+def _resolve_evidence_root(args: argparse.Namespace, store) -> Path:
+    """Resolve the canonical evidence root for this CLI invocation.
+
+    Per C-24 the three named roots must be independent. When the
+    operator passes --evidence-root, that path is used. Otherwise we
+    default to a sibling directory of the run-state root, never to
+    the state root itself.
+    """
+    if getattr(args, "evidence_root", None):
+        return Path(str(args.evidence_root))
+    state_root_path = Path(str(store.state_root))
+    return state_root_path.parent / "evidence"
 
 
 def _emit(payload: Dict[str, Any], *, json_mode: bool, exit_code: int) -> int:
@@ -435,7 +455,13 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
     )
     auth_payload = auth.to_dict()
     auth_payload["_sha256"] = auth.compute_sha256()
-    store.write_atomic("merge-authorization.json", auth_payload)
+    # Persist the canonical authorization artifact under the evidence
+    # root (one canonical filename across initialize/authorize/merge/post-merge).
+    evidence_root = _resolve_evidence_root(args, store)
+    paths = _canonical_artifact_paths(evidence_root)
+    paths["authorization"].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    from .artifacts import write_artifact
+    write_artifact(paths["authorization"], auth_payload)
     controller = Controller(ctx, store)
     sm = controller.authorize_merge(auth)
     return _emit(
@@ -461,14 +487,6 @@ def cmd_merge(args: argparse.Namespace) -> int:
     may call ``MergeExecutor().compute_command`` and ``_run`` directly.
     """
     store = StateStore(args.state_root)
-    auth_payload = store.read_optional("merge-authorization.json")
-    if auth_payload is None:
-        return _emit(
-            {"error": "no merge authorization on file"},
-            json_mode=args.json,
-            exit_code=EXIT_STATE,
-        )
-    auth = MergeAuthorization.from_dict(auth_payload)
     rc = store.read_optional("run_context.json")
     if rc is None:
         return _emit(
@@ -477,6 +495,32 @@ def cmd_merge(args: argparse.Namespace) -> int:
             exit_code=EXIT_STATE,
         )
     ctx = RunContext.from_dict(rc)
+    # Resolve the canonical evidence root once per invocation. All four
+    # control-plane artifacts share this root (per C-24).
+    evidence_root = _resolve_evidence_root(args, store)
+    paths = _canonical_artifact_paths(evidence_root)
+
+    # Read the canonical authorization artifact from the evidence root.
+    from .artifacts import read_artifact
+    try:
+        auth_result = read_artifact(paths["authorization"])
+    except FileNotFoundError:
+        return _emit(
+            {"error": f"no merge authorization at {paths['authorization']}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    except Exception as e:
+        return _emit(
+            {"error": f"merge authorization unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    auth = MergeAuthorization.from_dict(auth_result.payload)
+    authorization_path = paths["authorization"]
+    candidate_path = paths["candidate"]
+    verifier_path = paths["verifier"]
+    merge_record_path = paths["merge_record"]
 
     # Fetch live PR identity via gh using the production helper.
     try:
@@ -558,8 +602,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
             "unresolved_current": unresolved_current,
             "unresolved_outdated": unresolved_outdated,
         }
-    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError, RuntimeError) as exc:
-        # Fail closed: incomplete thread evidence blocks the merge.
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        # Timeout, network error, or malformed JSON: incomplete thread
+        # evidence cannot represent zero unresolved threads. Fail closed.
         return _emit(
             {"error": f"failed to fetch complete thread inventory: {exc!r}"},
             json_mode=args.json,
@@ -582,15 +627,20 @@ def cmd_merge(args: argparse.Namespace) -> int:
             passing = {c["name"] for c in checks if c.get("state") == "SUCCESS"}
             live_ci_state["all_required_passing"] = required.issubset(passing)
             live_ci_state["coderabbit_passing"] = "CodeRabbit" in passing
-    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        # Timeout or transient failure: retain the failing CI state
+        # (all_required_passing stays False). Fail closed downstream.
         pass
 
-    # Fetch the latest CodeRabbit review state.
+    # Fetch the latest CodeRabbit review state. Filter reviews by the
+    # configured CodeRabbit author login so a human review cannot
+    # satisfy the CodeRabbit guard. Leave the field unavailable when no
+    # matching review exists.
     live_review_state = {"latest_coderabbit_state": None}
     try:
         rev_proc = subprocess.run(
             ["gh", "api", "graphql", "-f",
-             "query={{repository(owner:{owner},name:{repo}){{pullRequest(number:{pr}){{latestReviews(first:1){{nodes{{author{{login}} state}}}}}}}}}}".format(
+             "query={{repository(owner:{owner},name:{repo}){{pullRequest(number:{pr}){{latestReviews(first:10){{nodes{{author{{login}} state}}}}}}}}}}".format(
                  owner=ctx.repo_owner, repo=ctx.repo_name, pr=auth.pr_number,
              )],
             capture_output=True, text=True, timeout=30,
@@ -599,32 +649,41 @@ def cmd_merge(args: argparse.Namespace) -> int:
             rd = json.loads(rev_proc.stdout)
             nodes = (rd.get("data", {}).get("repository", {}).get("pullRequest", {})
                        .get("latestReviews", {}).get("nodes", []))
-            if nodes:
-                live_review_state["latest_coderabbit_state"] = nodes[0].get("state")
-    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError):
+            coderabbit_match = next(
+                (n for n in nodes
+                 if (n.get("author", {}).get("login") or "")
+                 .lower() == CODERABBIT_AUTHOR_LOGIN.lower()),
+                None,
+            )
+            if coderabbit_match is not None:
+                live_review_state["latest_coderabbit_state"] = coderabbit_match.get("state")
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        # Timeout or transient failure: keep latest_coderabbit_state None
+        # so the CodeRabbit guard fails closed.
         pass
 
-    # Working tree clean?
-    wt_clean_proc = subprocess.run(
-        ["git", "-C", str(ctx.local_checkout), "status", "--porcelain"],
-        capture_output=True, text=True, timeout=10,
-    )
-    working_tree_clean = (wt_clean_proc.returncode == 0 and wt_clean_proc.stdout.strip() == "")
+    # Working tree clean? Re-measure after the branch switch and fast-forward
+    # so a post-merge dirty tree is reported as post-merge dirty.
+    working_tree_clean = False
+    try:
+        wt_clean_proc = subprocess.run(
+            ["git", "-C", str(ctx.local_checkout), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+        working_tree_clean = (
+            wt_clean_proc.returncode == 0 and wt_clean_proc.stdout.strip() == ""
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        # Timeout or transient failure: dirty is the safe default.
+        working_tree_clean = False
 
     # Resolve canonical artifact paths for the production transaction.
-    # Per C-24, the three named roots must be independent. When the
-    # operator does not pass --evidence-root, default it to a peer
-    # directory under the same parent as run_state_root; the validator
-    # refuses paths that resolve to the same directory.
-    state_root_path = Path(str(store.state_root))
-    if hasattr(args, "evidence_root") and args.evidence_root:
-        evidence_root = Path(str(args.evidence_root))
-    else:
-        evidence_root = state_root_path.parent / "evidence"
-    authorization_path = evidence_root / "authorization.json"
-    candidate_path = evidence_root / "candidate.json"
-    verifier_path = evidence_root / "verifier.json"
-    merge_record_path = evidence_root / "merge-record.json"
+    # All four named roots are independent (C-24); the canonical evidence
+    # root was resolved once at the top of this function.
+    authorization_path = paths["authorization"]
+    candidate_path = paths["candidate"]
+    verifier_path = paths["verifier"]
+    merge_record_path = paths["merge_record"]
 
     inputs = MergeTransactionInputs(
         authorization_artifact_path=authorization_path,
@@ -684,14 +743,35 @@ def cmd_merge(args: argparse.Namespace) -> int:
 def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     """Verify the post-merge state."""
     store = StateStore(args.state_root)
-    record_payload = store.read_optional("merge-record.json")
-    if record_payload is None:
+    rc = store.read_optional("run_context.json")
+    if rc is None:
         return _emit(
-            {"error": "no merge record on file"},
+            {"error": "no run context on file"},
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    record = MergeRecord.from_dict(record_payload)
+    ctx = RunContext.from_dict(rc)
+    # Read the canonical merge-record artifact from the canonical evidence
+    # root. Per C-24, the post-merge verify command must use the same
+    # path as the merge transaction.
+    evidence_root = _resolve_evidence_root(args, store)
+    paths = _canonical_artifact_paths(evidence_root)
+    from .artifacts import read_artifact
+    try:
+        record_result = read_artifact(paths["merge_record"])
+    except FileNotFoundError:
+        return _emit(
+            {"error": f"no merge record at {paths['merge_record']}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    except Exception as e:
+        return _emit(
+            {"error": f"merge record unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    record = MergeRecord.from_dict(record_result.payload)
     if not record.local_main_equals_origin_main:
         return _emit(
             {"error": "local main does not match origin/main"},
@@ -771,7 +851,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     m = sub.add_parser("merge", parents=[common])
     m.add_argument("--evidence-root", default="")
-    m.add_argument("--pr-number", type=int, default=0)
 
     args = parser.parse_args(argv)
     try:

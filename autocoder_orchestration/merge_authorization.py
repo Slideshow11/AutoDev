@@ -123,13 +123,15 @@ class MergeAuthorization:
             raise ValueError("pr_number must be a positive integer")
         if not isinstance(self.authorized_head, str):
             raise ValueError("authorized_head must be a string")
-        _check_sha(self.authorized_head, "authorized_head")
+        # Git commit SHA must be exactly 40 lowercase hex characters.
+        _check_git_sha(self.authorized_head, "authorized_head")
         if not isinstance(self.candidate_sha256, str):
             raise ValueError("candidate_sha256 must be a string")
-        _check_sha(self.candidate_sha256, "candidate_sha256")
+        # SHA-256 digests must be exactly 64 lowercase hex characters.
+        _check_digest(self.candidate_sha256, "candidate_sha256")
         if not isinstance(self.verifier_record_sha256, str):
             raise ValueError("verifier_record_sha256 must be a string")
-        _check_sha(self.verifier_record_sha256, "verifier_record_sha256")
+        _check_digest(self.verifier_record_sha256, "verifier_record_sha256")
         if self.merge_method not in ("squash",):
             raise ValueError(
                 f"merge_method must be 'squash', got {self.merge_method!r}"
@@ -190,6 +192,11 @@ class MergeAuthorization:
 
 
 # === MergeRecord dataclass ===
+
+# === Merge-record schema-version enforcement ===
+
+SUPPORTED_MERGE_RECORD_SCHEMAS = ("autocoder.merge_record.v2",)
+
 
 @dataclass
 class MergeRecord:
@@ -258,8 +265,21 @@ class MergeRecord:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "MergeRecord":
+        schema_version = str(
+            payload.get("schema_version", "autocoder.merge_record.v2")
+        )
+        if schema_version not in SUPPORTED_MERGE_RECORD_SCHEMAS:
+            # Reject unknown or legacy schema versions rather than
+            # coercing them to v2 defaults. A consumer cannot otherwise
+            # distinguish "this observation was never recorded" from
+            # "this observation was recorded as failed"; C-28 depends
+            # on that distinction.
+            raise MergeAuthorizationMalformed(
+                f"unsupported merge record schema_version {schema_version!r}; "
+                f"supported: {list(SUPPORTED_MERGE_RECORD_SCHEMAS)}"
+            )
         return cls(
-            schema_version=str(payload.get("schema_version", "autocoder.merge_record.v2")),
+            schema_version=schema_version,
             run_id=str(payload.get("run_id", "")),
             repo=str(payload.get("repo", "")),
             pr_number=int(payload.get("pr_number", 0)),
@@ -292,6 +312,25 @@ class MergeRecord:
 
 # === Helpers ===
 
+_LOWER_HEX_40_RE = re.compile(r"^[0-9a-f]{40}$")
+_LOWER_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _check_git_sha(value: str, label: str) -> None:
+    """Validate a Git commit SHA: exactly 40 lowercase hex characters."""
+    if not isinstance(value, str) or not _LOWER_HEX_40_RE.match(value):
+        raise ValueError(f"{label} must be 40 lowercase hex chars (Git commit SHA)")
+
+
+def _check_digest(value: str, label: str) -> None:
+    """Validate a SHA-256 digest: exactly 64 lowercase hex characters."""
+    if not isinstance(value, str) or not _LOWER_HEX_64_RE.match(value):
+        raise ValueError(f"{label} must be 64 lowercase hex chars (SHA-256 digest)")
+
+
+# Backwards-compatible alias: accept either 40 (commit SHA) or 64
+# (digest). The validators above split them; _check_sha remains for
+# fields whose type is not pinned to either length.
 _LOWER_HEX_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 
 
@@ -456,11 +495,16 @@ def fetch_live_pr_payload(
     return {
         "state": state,
         "merged": merged,
+        "isDraft": bool(doc.get("isDraft", False)),
         "head": {"sha": str(doc.get("headRefOid", ""))},
         "baseRefName": str(doc.get("baseRefName", "")),
         "mergeable": str(doc.get("mergeable", "")),
         "mergeStateStatus": str(doc.get("mergeStateStatus", "")),
         "autoMergeRequest": doc.get("autoMergeRequest"),
+        # Include the repository identity so the cross-binding guard
+        # in execute_guarded_merge_transaction can compare it against
+        # auth.repo (per C-25: every integrity guard is mandatory).
+        "repo": repo,
     }
 
 
@@ -615,6 +659,22 @@ def reconcile_after_merge(
             "local and origin tip identical at reconciliation; "
             "merge commit identity may be ambiguous"
         )
+
+    # Verify the squash commit is reachable from the authorized base.
+    # If the merge commit is not reachable from the base, the merge
+    # is either unrelated to this PR or the local fast-forward did
+    # not actually pull it in; record the observation.
+    if squash_merge_commit and origin_pre_merge_sha and base_branch:
+        rc_merge_in_base, _, _ = _run_git(
+            ["merge-base", "--is-ancestor", squash_merge_commit, base_branch],
+            repo_root,
+        )
+        if rc_merge_in_base != 0:
+            unavailable.append(
+                f"squash commit {squash_merge_commit[:12]} is not an "
+                f"ancestor of base {base_branch}"
+            )
+
     rc, out, _ = _run_git(["log", "-1", "--format=%P", squash_merge_commit], repo_root)
     if rc != 0:
         raise MergeError(f"cannot read merge commit parents: rc={rc}")
@@ -634,9 +694,15 @@ def reconcile_after_merge(
     else:
         authorized_head_tree = out.strip()
         if authorized_head_tree != squash_tree_sha256:
-            raise MergeError(
-                f"squash tree {squash_tree_sha256!r} does not match authorized head tree "
-                f"{authorized_head_tree!r}"
+            # A tree mismatch can legitimately happen when the base
+            # branch advanced between authorization and merge (C-27).
+            # Record the observation; do not raise after the
+            # irreversible remote merge. Base-stability policy, if
+            # required, is enforced in _repeat_exact_head_guards
+            # before the remote merge.
+            unavailable.append(
+                f"squash tree {squash_tree_sha256} != authorized head tree "
+                f"{authorized_head_tree} (base advanced?)"
             )
 
     # 9. Remote feature branch deletion.
@@ -688,6 +754,16 @@ def reconcile_after_merge(
                 aed_clean = actual_aed_sha == expected_aed_sha256
                 aed_checked = True
 
+    # Re-measure the working tree after the fast-forward and any
+    # feature-branch cleanup so the post-merge record reflects the
+    # post-merge state, not the pre-merge snapshot.
+    rc, out, _ = _run_git(["status", "--porcelain"], repo_root)
+    if rc != 0:
+        unavailable.append("git status --porcelain (post-merge)")
+        working_tree_clean_post = False
+    else:
+        working_tree_clean_post = (out.strip() == "")
+
     return PostMergeReconciliation(
         initial_branch=initial_branch,
         target_branch=base_branch,
@@ -702,7 +778,7 @@ def reconcile_after_merge(
         squash_parent=squash_parent,
         feature_branch_local_deleted=feature_branch_local_deleted,
         feature_branch_remote_deleted=feature_branch_remote_deleted,
-        working_tree_clean=True,
+        working_tree_clean=working_tree_clean_post,
         unavailable_observations=unavailable,
         aed_clean=aed_clean,
         aed_checked=aed_checked,
@@ -730,8 +806,6 @@ class MergeTransactionInputs:
     live_thread_inventory: Dict[str, Any]
     working_tree_clean: bool
 
-    base_branch: str = "main"
-    feature_branch: str = ""
     gh_executable: str = "gh"
     merge_subprocess_timeout: float = 60.0
 
@@ -834,6 +908,18 @@ def _repeat_exact_head_guards(
         raise MergeError(f"PR is not mergeable: {pr['mergeable']!r}")
     if pr.get("autoMergeRequest") is not None:
         raise MergeError("auto-merge request present on PR")
+    # Drafts are not mergeable in practice; reject explicitly so the
+    # transaction does not rely on a downstream gh pr merge failure.
+    if pr.get("isDraft"):
+        raise MergeError("PR is a draft")
+    # mergeStateStatus indicates the server-side merge readiness
+    # (CLEAN/BLOCKED/UNSTABLE/DIRTY). CLEAN is the only acceptable
+    # state for a guarded merge.
+    merge_state = str(pr.get("mergeStateStatus") or "")
+    if merge_state and merge_state != "CLEAN":
+        raise MergeError(
+            f"PR mergeStateStatus is {merge_state!r}, expected 'CLEAN'"
+        )
 
     # 2. CI inventory.
     ci = inputs.live_ci_state
@@ -899,10 +985,26 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
     """
     _validate_inputs(inputs)
 
+    # Validate the live PR payload shape before any binding check. A
+    # missing or malformed key is a MergeError, not a KeyError, so
+    # the CLI's exception handlers keep working. Empty payloads are
+    # tolerated (tests that exercise path-only checks legitimately pass
+    # empty live payloads); the production CLI always populates them.
+    pr = inputs.live_pr_payload
+    if pr:
+        for key in ("state", "merged", "head", "baseRefName", "mergeable"):
+            if key not in pr:
+                raise MergeError(f"live_pr_payload is missing required key {key!r}")
+        if not isinstance(pr["head"], dict) or "sha" not in pr["head"]:
+            raise MergeError("live_pr_payload['head'] must contain 'sha'")
+
     # 1. Read authorization artifact (mandatory, sidecar-verified).
     auth, auth_digest = _read_authorization(inputs.authorization_artifact_path)
-    # Cross-bind repository identity against the live PR payload if provided.
-    live_repo = inputs.live_pr_payload.get("repo")
+    # Cross-bind repository identity against the live PR payload. The
+    # binding is mandatory when live_repo is present; missing live_repo
+    # only blocks the binding itself (the production CLI always
+    # populates it via fetch_live_pr_payload).
+    live_repo = pr.get("repo")
     if live_repo and auth.repo != live_repo:
         raise MergeError(
             f"authorization repo {auth.repo!r} != live repo {live_repo!r}"
@@ -948,20 +1050,10 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
     _repeat_exact_head_guards(inputs, auth, candidate_digest, verifier_digest)
 
     # 5. Build and invoke the guarded command. The runner is invoked
-    #    exactly once for the authorized command set.
-    cmd: List[str] = [
-        inputs.gh_executable,
-        "pr",
-        "merge",
-        str(auth.pr_number),
-        "--repo",
-        auth.repo,
-        "--squash",
-    ]
-    if auth.delete_branch:
-        cmd.append("--delete-branch")
-    if auth.require_match_head_commit:
-        cmd.extend(["--match-head-commit", auth.authorized_head])
+    #    exactly once for the authorized command set. The exact argv
+    #    is built by the same MergeExecutor.compute_command function
+    #    used for preview, so preview and execution cannot diverge.
+    cmd = MergeExecutor(gh_executable=inputs.gh_executable).compute_command(auth)
 
     # Refuse forbidden flags defensively (the merge runner must not be
     # tricked into using admin / auto / merge / rebase).
@@ -1000,9 +1092,10 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
             ["git", "-C", str(inputs.repository_checkout), "show",
              f"{auth.authorized_head}:scripts/quiet_window_observer.py"],
             stderr=subprocess.DEVNULL,
+            timeout=10.0,
         )
         expected_aed_sha = digest_bytes(raw_aed)
-    except (subprocess.CalledProcessError, OSError):
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         aed_unavailable = True
         expected_aed_sha = None
 

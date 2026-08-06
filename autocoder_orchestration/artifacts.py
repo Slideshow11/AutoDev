@@ -125,7 +125,8 @@ class LegacyArtifactRefused(ArtifactError):
 # stricter safe-path rules defined in store.py when validating evidence
 # paths stored inside an artifact payload.
 LEGACY_FOOTER_RE = re.compile(rb"^# sha256: [0-9a-f]{64}\s*$", re.MULTILINE)
-SIDECAR_DIGEST_RE = re.compile(r"^[0-9a-f]{64}\s*$")
+SIDECAR_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_FOOTER_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 
 _CANONICAL_SEPARATOR = (",", ":")
 _CANONICAL_ENSURE_ASCII = False
@@ -156,7 +157,7 @@ def parse_sidecar_text(text: str, *, path: str) -> str:
     """
     if text.endswith("\n"):
         text = text[:-1]
-    if not SIDECAR_DIGEST_RE.match(text):
+    if not SIDECAR_DIGEST_RE.fullmatch(text):
         raise ArtifactMalformedSidecar(path, text)
     return text
 
@@ -482,20 +483,57 @@ def read_legacy_with_footer(
     with open(artifact_path, "rb") as f:
         blob = f.read()
 
+    # Decode as UTF-8 first, then validate the footer. Malformed UTF-8
+    # is converted to an ArtifactMalformedJSON-style refusal so callers
+    # map artifact failures uniformly.
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ArtifactMalformedJSON(
+            f"legacy artifact is not valid UTF-8: {artifact_path}: {e}"
+        ) from e
+
     # Strip the footer (must be the LAST non-empty line).
-    text = blob.decode("utf-8")
     lines = text.splitlines()
     if not lines or not lines[-1].startswith("# sha256: "):
         raise LegacyArtifactRefused(
             f"no legacy footer line found: {artifact_path}"
         )
     footer_line = lines[-1]
-    expected_footer_digest = footer_line.split(None, 2)[2].strip()
+    parts = footer_line.split(None, 2)
+    if len(parts) < 3:
+        raise LegacyArtifactRefused(
+            f"malformed legacy footer: {artifact_path}"
+        )
+    expected_footer_digest = parts[2].strip()
+    # The footer digest must be exactly 64 lowercase hexadecimal characters.
+    if not _FOOTER_DIGEST_RE.fullmatch(expected_footer_digest):
+        raise ArtifactMalformedSidecar(
+            path=str(artifact_path), content=expected_footer_digest
+        )
+
     body_text = "\n".join(lines[:-1])
     # Re-add a single trailing newline if present in the original
     # to preserve deterministic body hashing; here we do not need that
     # because we already extracted the digest.
-    payload = json.loads(body_text)
+    # Verify the footer digest matches the actual body bytes. If the
+    # historical writer covered body_bytes (without the footer), the
+    # comparison holds; if it covered a different byte sequence, the
+    # unverified digest is refused here.
+    actual_body_digest = digest_bytes(body_text.encode("utf-8"))
+    if actual_body_digest != expected_footer_digest:
+        raise ArtifactDigestMismatch(
+            path=str(artifact_path),
+            expected=expected_footer_digest,
+            actual=actual_body_digest,
+        )
+
+    try:
+        payload = json.loads(body_text)
+    except json.JSONDecodeError as e:
+        raise ArtifactMalformedJSON(
+            f"legacy artifact is not valid JSON: {artifact_path}: {e}"
+        ) from e
     if not isinstance(payload, dict):
         raise ArtifactMalformedJSON(
             f"legacy artifact top-level JSON must be an object: {artifact_path}"
