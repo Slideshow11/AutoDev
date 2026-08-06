@@ -255,6 +255,18 @@ class CandidateBuilder:
                     f"expected input {rel!r} hash mismatch: expected {expected_hash!r}, "
                     f"actual {actual!r}"
                 )
+        # Reject an expired readiness certificate.
+        from datetime import datetime, timezone
+        try:
+            now_iso = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if readiness.is_expired(now_iso):
+                raise CandidateError(
+                    f"readiness certificate {readiness.certificate_id!r} is expired "
+                    f"(issued_at={readiness.issued_at}, expires_at={readiness.expires_at}, now={now_iso})"
+                )
+        except (ValueError, TypeError) as e:
+            raise CandidateError(f"readiness certificate expiry parse failed: {e!r}")
+
         cert_sha = hashlib.sha256(
             json.dumps(readiness.to_dict(), sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -303,12 +315,18 @@ class CandidateBuilder:
             raise CandidateError(f"unsafe path: {path!r}")
         if (len(head) != 40 and len(head) != 64) or not all(c in "0123456789abcdef" for c in head):
             raise CandidateError(f"head must be 40 or 64 lowercase hex: {head!r}")
-        # Use subprocess.check_output with safe args.
-        proc = subprocess.run(
-            ["git", "show", f"{head}:{path}"],
-            cwd=repo_root,
-            capture_output=True,
-        )
+        # Use subprocess.run with safe args and a bounded timeout.
+        try:
+            proc = subprocess.run(
+                ["git", "show", f"{head}:{path}"],
+                cwd=repo_root,
+                capture_output=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise CandidateError(
+                f"git show timed out for {path!r} at {head[:12]}..."
+            ) from e
         if proc.returncode != 0:
             raise CandidateError(
                 f"git show failed for {path!r} at {head[:12]}...: {proc.stderr.decode()!r}"

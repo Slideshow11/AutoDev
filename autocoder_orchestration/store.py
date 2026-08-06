@@ -125,18 +125,50 @@ def _ensure_private_file(path: Path) -> None:
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
-    """Write ``data`` to ``path`` atomically with mode 0600."""
+    """Write ``data`` to ``path`` atomically and durably with mode 0600.
+
+    The write proceeds as:
+    1. Create a private temporary file in the same directory as the
+       target. The temp file does not collide with existing lock
+       files because tempfile.mkstemp is atomic and uses random
+       suffixes.
+    2. Write the data, flush Python buffers, and fsync the file to
+       push the data to durable storage.
+    3. Set the temp file mode to 0600.
+    4. Atomically rename the temp file to the target.
+    5. fsync the parent directory so the rename is also durable.
+    6. If anything fails, clean up the temp file and raise.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     # Ensure parent directory is private.
-    os.chmod(path.parent, 0o700)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError as e:
+        raise StateStoreError(f"cannot set parent dir mode 0700: {e!r}")
     fd, tmp_path = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
     )
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        os.chmod(tmp_path, 0o600)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp_path, 0o600)
+        except OSError as e:
+            raise StateStoreError(f"cannot set file mode 0600: {e!r}")
         os.replace(tmp_path, path)
+        # fsync the parent directory so the rename is durable
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError:
+            # On platforms without O_DIRECTORY (e.g. Windows), skip
+            # directory fsync. Atomic replace still holds.
+            pass
     except Exception:
         try:
             os.unlink(tmp_path)
@@ -146,17 +178,26 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 
 def _read_json(path: Path) -> dict:
-    """Read a JSON file with strict mode 0600 enforcement."""
+    """Read a JSON file with strict mode 0600 enforcement.
+
+    Uses lstat() to detect symlinks before stat() would follow them.
+    Rejects:
+    - missing files;
+    - symlinks (valid or dangling);
+    - world- or group-readable files.
+    """
     try:
-        st = path.stat()
+        lst = os.lstat(path)
     except FileNotFoundError:
         raise StateStoreError(f"file missing: {path}")
-    if stat.S_ISLNK(st.st_mode):
+    except OSError as e:
+        raise StateCorruption(f"lstat failed for {path}: {e}")
+    if stat.S_ISLNK(lst.st_mode):
         raise StateCorruption(f"file is a symlink: {path}")
-    if (st.st_mode & 0o777) & 0o077:
+    if (lst.st_mode & 0o777) & 0o077:
         raise StateCorruption(
             f"file has world or group permission bits set: {path} "
-            f"(mode={oct(st.st_mode & 0o777)})"
+            f"(mode={oct(lst.st_mode & 0o777)})"
         )
     try:
         with open(path, "rb") as f:

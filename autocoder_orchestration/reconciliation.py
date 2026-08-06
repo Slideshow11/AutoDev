@@ -59,8 +59,9 @@ class Finding:
             raise ValueError(f"invalid review_id: {self.review_id!r}")
         if "/" in self.thread_id or not self.thread_id:
             raise ValueError(f"invalid thread_id: {self.thread_id!r}")
-        if len(self.head_sha) != 64:
-            raise ValueError(f"head_sha must be 64 lowercase hex chars")
+        # Accept either 40-character SHA-1 or 64-character object ID.
+        if (len(self.head_sha) != 40 and len(self.head_sha) != 64) or not all(c in "0123456789abcdef" for c in self.head_sha):
+            raise ValueError(f"head_sha must be 40 or 64 lowercase hex chars")
 
     def is_resolvable(self) -> bool:
         return self.disposition in (

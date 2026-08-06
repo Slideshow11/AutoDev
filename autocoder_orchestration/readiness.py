@@ -185,7 +185,20 @@ class ReadinessCertificate:
         )
 
     def is_expired(self, now: str) -> bool:
-        return self.expires_at <= now
+        """Return True iff ``now`` is at or after ``expires_at``.
+
+        Both arguments are accepted as UTC ISO-8601 strings with
+        any of these forms:
+        - Z suffix (e.g. 2026-08-05T22:00:00Z)
+        - explicit UTC offset (e.g. 2026-08-05T22:00:00+00:00)
+        - fractional seconds
+        """
+        from datetime import datetime, timezone
+        def parse(ts):
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            return datetime.fromisoformat(ts).astimezone(timezone.utc)
+        return parse(now) >= parse(self.expires_at)
 
     def compute_sha256(self) -> str:
         return hashlib.sha256(
@@ -375,7 +388,12 @@ class ReadinessEngine:
     def _gate_exact_head(self, pr: dict, expected_head: str) -> GateResult:
         if not isinstance(pr, dict):
             return GateResult(GATE_EXACT_HEAD, False, "live PR payload is not a dict")
-        head = pr.get("head", {}).get("sha")
+        head_field = pr.get("head")
+        if not isinstance(head_field, dict):
+            return GateResult(GATE_EXACT_HEAD, False, "live PR payload has no head dict")
+        head = head_field.get("sha")
+        if not isinstance(head, str):
+            return GateResult(GATE_EXACT_HEAD, False, "live PR head sha is not a string")
         if head != expected_head:
             return GateResult(
                 GATE_EXACT_HEAD,
@@ -393,7 +411,9 @@ class ReadinessEngine:
     def _gate_base(self, pr: dict, expected_base: str, expected_base_sha: str) -> GateResult:
         if not isinstance(pr, dict):
             return GateResult(GATE_BASE_BRANCH_AND_SHA, False, "live PR payload is not a dict")
-        base = pr.get("base", {})
+        base = pr.get("base")
+        if not isinstance(base, dict):
+            return GateResult(GATE_BASE_BRANCH_AND_SHA, False, "live PR payload has no base dict")
         if base.get("ref") != expected_base:
             return GateResult(
                 GATE_BASE_BRANCH_AND_SHA,
@@ -525,6 +545,13 @@ class ReadinessEngine:
         )
 
     def _gate_unresolved_current(self, threads: list) -> GateResult:
+        if not isinstance(threads, list):
+            return GateResult(
+                GATE_UNRESOLVED_CURRENT_THREADS,
+                False,
+                f"threads is not a list: {type(threads).__name__}",
+                evidence={"type": type(threads).__name__},
+            )
         unresolved = [
             t for t in threads
             if isinstance(t, dict) and not t.get("isResolved") and not t.get("isOutdated")
@@ -538,6 +565,13 @@ class ReadinessEngine:
         )
 
     def _gate_unresolved_outdated(self, threads: list) -> GateResult:
+        if not isinstance(threads, list):
+            return GateResult(
+                GATE_UNRESOLVED_OUTDATED_THREADS,
+                False,
+                f"threads is not a list: {type(threads).__name__}",
+                evidence={"type": type(threads).__name__},
+            )
         unresolved = [
             t for t in threads
             if isinstance(t, dict) and not t.get("isResolved") and t.get("isOutdated")
@@ -658,6 +692,12 @@ class ReadinessEngine:
         first_utc: Optional[str],
         last_utc: Optional[str],
     ) -> GateResult:
+        # The gate always requires:
+        # - complete == True
+        # - no non-qualifying observation in the supplied set
+        # - the actual monotonic span between first and last qualifying
+        #   observations is >= the configured required duration.
+        # The complete boolean is not sufficient evidence.
         if not complete:
             return GateResult(
                 GATE_QUIET_WINDOW_COMPLETE,
@@ -665,26 +705,70 @@ class ReadinessEngine:
                 "strict readiness window not complete",
                 evidence={"complete": False},
             )
-        # Every observation in the interval must be qualifying
+        # Every observation must be qualifying
         nonqual_inside = []
         for o in observations:
             if not isinstance(o, dict):
                 continue
             if not o.get("qualifying"):
                 nonqual_inside.append(o)
-        ok = len(nonqual_inside) == 0
+        if nonqual_inside:
+            return GateResult(
+                GATE_QUIET_WINDOW_COMPLETE,
+                False,
+                f"quiet window complete but {len(nonqual_inside)} non-qualifying observations inside",
+                evidence={
+                    "complete": complete,
+                    "first_utc": first_utc,
+                    "last_utc": last_utc,
+                    "required_duration": min_monotonic,
+                    "nonqual_inside_count": len(nonqual_inside),
+                },
+            )
+        # Compute observed span from the qualifying observations themselves
+        qualifying_obs = [o for o in observations if isinstance(o, dict) and o.get("qualifying")]
+        if len(qualifying_obs) < 2:
+            return GateResult(
+                GATE_QUIET_WINDOW_COMPLETE,
+                False,
+                "fewer than 2 qualifying observations; cannot compute observed span",
+                evidence={"qualifying_count": len(qualifying_obs)},
+            )
+        first_mono = qualifying_obs[0].get("ts_monotonic")
+        last_mono = qualifying_obs[-1].get("ts_monotonic")
+        if not isinstance(first_mono, (int, float)) or not isinstance(last_mono, (int, float)):
+            return GateResult(
+                GATE_QUIET_WINDOW_COMPLETE,
+                False,
+                "qualifying observations are missing monotonic timestamps",
+                evidence={"first_mono": first_mono, "last_mono": last_mono},
+            )
+        observed_span = float(last_mono) - float(first_mono)
+        if observed_span < float(min_monotonic):
+            return GateResult(
+                GATE_QUIET_WINDOW_COMPLETE,
+                False,
+                f"observed span {observed_span:.1f}s is less than required {float(min_monotonic):.1f}s",
+                evidence={
+                    "complete": complete,
+                    "first_utc": first_utc,
+                    "last_utc": last_utc,
+                    "required_duration": float(min_monotonic),
+                    "observed_span": observed_span,
+                    "nonqual_inside_count": 0,
+                },
+            )
         return GateResult(
             GATE_QUIET_WINDOW_COMPLETE,
-            ok,
-            "quiet window complete with no non-qualifying observation"
-            if ok
-            else f"quiet window complete but {len(nonqual_inside)} non-qualifying observations inside",
+            True,
+            "quiet window complete with observed monotonic span >= required duration",
             evidence={
                 "complete": complete,
                 "first_utc": first_utc,
                 "last_utc": last_utc,
-                "min_monotonic": min_monotonic,
-                "nonqual_inside_count": len(nonqual_inside),
+                "required_duration": float(min_monotonic),
+                "observed_span": observed_span,
+                "nonqual_inside_count": 0,
             },
         )
 

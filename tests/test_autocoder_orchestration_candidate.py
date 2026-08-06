@@ -90,7 +90,11 @@ def _good_kwargs() -> dict:
         parse_failure=None,
         fallback_success=False,
         quiet_window_complete=True,
-        quiet_window_observations=[{"qualifying": True, "ts_monotonic": 1.0}],
+        quiet_window_observations=[
+            {"qualifying": True, "ts_monotonic": 100.0},
+            {"qualifying": True, "ts_monotonic": 200.0},
+            {"qualifying": True, "ts_monotonic": 350.0},
+        ],
         quiet_window_min_monotonic=180.0,
         quiet_window_first_utc="2026-08-05T22:00:00Z",
         quiet_window_last_utc="2026-08-05T22:03:00Z",
@@ -103,13 +107,15 @@ def _good_kwargs() -> dict:
 
 def _good_cert() -> ReadinessCertificate:
     from autocoder_orchestration.readiness import ReadinessEngine
+    from datetime import datetime, timezone, timedelta
     eng = ReadinessEngine(run_id="r1", repo="o/r", pr_number=2)
     decision = eng.evaluate(**_good_kwargs())
     assert decision.overall_passed
+    now = datetime.now(tz=timezone.utc)
     return ReadinessCertificate(
         decision=decision,
-        issued_at="2026-08-05T22:00:00Z",
-        expires_at="2026-08-05T22:10:00Z",
+        issued_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        expires_at=(now + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         certificate_id="cert-1",
         issuer="observer",
     )

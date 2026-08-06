@@ -208,10 +208,16 @@ class RunContext:
         Pending runs are promoted to PR-scoped runs atomically. The
         run-id is preserved; state tree moves to the PR-scoped path.
         """
-        if not isinstance(pr_number, int) or pr_number <= 0:
-            raise ValueError("pr_number must be a positive integer")
-        if not isinstance(pr_head, str) or len(pr_head) != 64:
-            raise ValueError("pr_head must be 64 lowercase hex chars")
+        # bool is a subclass of int; reject it explicitly.
+        if isinstance(pr_number, bool) or not isinstance(pr_number, int) or pr_number <= 0:
+            raise ValueError("pr_number must be a positive integer (not a bool)")
+        # PR head sha accepts 40- or 64-character lowercase hex.
+        if (
+            not isinstance(pr_head, str)
+            or (len(pr_head) != 40 and len(pr_head) != 64)
+            or not all(c in "0123456789abcdef" for c in pr_head)
+        ):
+            raise ValueError("pr_head must be 40 or 64 lowercase hex chars")
         return dataclasses.replace(self, pr_number=pr_number, current_authorized_head=pr_head)
 
     def with_new_head(self, new_head: str) -> "RunContext":

@@ -217,12 +217,23 @@ class MergeExecutor:
 
     def _default_run(self, args, env=None, cwd=None) -> dict:
         import subprocess
-        proc = subprocess.run(args, capture_output=True, text=True, env=env, cwd=cwd)
-        return {
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        }
+        try:
+            proc = subprocess.run(
+                args, capture_output=True, text=True, env=env, cwd=cwd,
+                timeout=60,
+            )
+            return {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            }
+        except subprocess.TimeoutExpired as e:
+            return {
+                "returncode": -1,
+                "stdout": e.stdout or "" if hasattr(e, "stdout") else "",
+                "stderr": (e.stderr or "") + f" [TIMEOUT after 60s]" if hasattr(e, "stderr") else "TIMEOUT",
+                "timed_out": True,
+            }
 
     def compute_command(
         self,
@@ -328,43 +339,74 @@ class MergeExecutor:
                 f"gh pr merge failed (rc={proc['returncode']}): "
                 f"stdout={proc['stdout']!r} stderr={proc['stderr']!r}"
             )
-        # Post-merge state
+        # Post-merge state — every subprocess call uses a bounded timeout
+        # to prevent the post-merge collection from hanging the run.
         import subprocess as _sp
-        head_sha = _sp.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=auto_repo_root, text=True
-        ).strip()
-        origin_main = _sp.check_output(
-            ["git", "rev-parse", "origin/main"], cwd=auto_repo_root, text=True
-        ).strip()
-        local_main = _sp.check_output(
-            ["git", "rev-parse", "main"], cwd=auto_repo_root, text=True
-        ).strip()
+        try:
+            head_sha = _sp.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=auto_repo_root, text=True, timeout=30,
+            ).strip()
+        except _sp.TimeoutExpired as e:
+            raise MergeError(
+                f"git rev-parse HEAD timed out after 30s; local merge observation incomplete"
+            ) from e
+        try:
+            origin_main = _sp.check_output(
+                ["git", "rev-parse", "origin/main"], cwd=auto_repo_root, text=True, timeout=30,
+            ).strip()
+        except _sp.TimeoutExpired as e:
+            # Don't claim fast-forward when — origin observation is incomplete.
+            raise MergeError(
+                f"git rev-parse origin/main timed out after 30s; local origin observation incomplete"
+            ) from e
+        try:
+            local_main = _sp.check_output(
+                ["git", "rev-parse", "main"], cwd=auto_repo_root, text=True, timeout=30,
+            ).strip()
+        except _sp.TimeoutExpired as e:
+            raise MergeError(
+                f"git rev-parse main timed out after 30s; local base observation incomplete"
+            ) from e
         # Squash commit details
-        parent_proc = _sp.check_output(
-            ["git", "log", "--format=%H", "-1", f"{head_sha}^1"],
-            cwd=auto_repo_root, text=True
-        ).strip()
+        try:
+            parent_proc = _sp.check_output(
+                ["git", "log", "--format=%H", "-1", f"{head_sha}^1"],
+                cwd=auto_repo_root, text=True, timeout=30,
+            ).strip()
+        except _sp.TimeoutExpired as e:
+            raise MergeError(
+                f"git log on squash commit timed out after 30s; squash parent observation incomplete"
+            ) from e
         cat_file = _sp.check_output(
             ["git", "cat-file", "-p", head_sha],
             cwd=auto_repo_root, text=True
         )
         parent_count = sum(1 for line in cat_file.splitlines() if line.startswith("parent "))
-        # Branch deleted
-        local_branch_present = _sp.run(
-            ["git", "show-ref", "refs/heads/feat/extract-lifecycle-primitives-v1"],
-            cwd=auto_repo_root, capture_output=True, text=True,
-        ).returncode == 0
-        remote_branch_present = bool(
-            _sp.run(
-                ["git", "ls-remote", "--heads", "origin", auth.repo.rsplit("/", 1)[-1] + ":HEAD"],
-                cwd=auto_repo_root, capture_output=True, text=True,
-            ).stdout.strip()
-        )
+        # Branch deleted — all subprocess calls bounded.
+        try:
+            local_branch_present = _sp.run(
+                ["git", "show-ref", "refs/heads/feat/extract-lifecycle-primitives-v1"],
+                cwd=auto_repo_root, capture_output=True, text=True, timeout=30,
+            ).returncode == 0
+        except _sp.TimeoutExpired:
+            local_branch_present = None  # unknown
+        try:
+            remote_branch_present = bool(
+                _sp.run(
+                    ["git", "ls-remote", "--heads", "origin", auth.repo.rsplit("/", 1)[-1] + ":HEAD"],
+                    cwd=auto_repo_root, capture_output=True, text=True, timeout=30,
+                ).stdout.strip()
+            )
+        except _sp.TimeoutExpired:
+            remote_branch_present = None  # unknown
         # Clean status
-        auto_clean = _sp.run(
-            ["git", "status", "--porcelain"],
-            cwd=auto_repo_root, capture_output=True, text=True,
-        ).stdout.strip() == ""
+        try:
+            auto_clean = _sp.run(
+                ["git", "status", "--porcelain"],
+                cwd=auto_repo_root, capture_output=True, text=True, timeout=30,
+            ).stdout.strip() == ""
+        except _sp.TimeoutExpired:
+            auto_clean = None  # unknown
         # Note: aed_clean is checked separately by the caller
         record = MergeRecord(
             schema_version="autocoder.merge_record.v1",

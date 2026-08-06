@@ -8,6 +8,7 @@
 #
 #     sudo cp -r autocoder_supervisor /opt/aed-supervisor/
 #     sudo cp -r autocoder_lifecycle /opt/aed-supervisor/
+#     sudo cp -r autocoder_orchestration /opt/aed-supervisor/
 #     sudo cp pyproject.toml /opt/aed-supervisor/pyproject.toml
 #     sudo python3 -m pip install /opt/aed-supervisor
 #

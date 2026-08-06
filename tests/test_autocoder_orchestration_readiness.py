@@ -85,7 +85,11 @@ def _kwargs(**overrides) -> dict:
         parse_failure=None,
         fallback_success=False,
         quiet_window_complete=True,
-        quiet_window_observations=[{"qualifying": True, "ts_monotonic": 1.0}],
+        quiet_window_observations=[
+            {"qualifying": True, "ts_monotonic": 100.0},
+            {"qualifying": True, "ts_monotonic": 200.0},
+            {"qualifying": True, "ts_monotonic": 350.0},
+        ],
         quiet_window_min_monotonic=180.0,
         quiet_window_first_utc="2026-08-05T22:00:00Z",
         quiet_window_last_utc="2026-08-05T22:03:00Z",

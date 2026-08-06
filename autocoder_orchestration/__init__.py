@@ -122,7 +122,6 @@ __all__ = [
     "StateMachine",
     "StateConflict",
     "InvalidTransition",
-    "State",
     "STATE_PLANNED",
     "STATE_IMPLEMENTING",
     "STATE_AWAITING_CI",
