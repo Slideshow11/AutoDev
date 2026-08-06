@@ -16,6 +16,7 @@ follow the convention:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import hashlib
 import json
 import os
@@ -129,7 +130,7 @@ def cmd_initialize(args: argparse.Namespace) -> int:
     required = [
         "owner", "repo", "local_checkout", "base_branch",
         "authorized_base_sha", "feature_branch",
-        "task_specification_path", "task_specification_sha256",
+        "taskspec_path", "taskspec_sha256",
     ]
     for r in required:
         if not getattr(args, r, None):
@@ -154,14 +155,15 @@ def cmd_initialize(args: argparse.Namespace) -> int:
         base_branch=args.base_branch,
         authorized_base_sha=args.authorized_base_sha,
         feature_branch=args.feature_branch,
-        task_specification_path=args.task_specification_path,
-        task_specification_sha256=args.task_specification_sha256,
+        task_specification_path=args.taskspec_path,
+        task_specification_sha256=args.taskspec_sha256,
         required_ci_jobs=list(required_ci_jobs),
         implementation_worker_command=list(impl_cmd),
         evidence_root=args.evidence_root,
         state_root=args.state_root,
         run_id=run_id,
     )
+    Path(ctx.state_path).mkdir(parents=True, exist_ok=True)
     store = StateStore(ctx.state_path)
     store.write_atomic("run_context.json", ctx.to_dict())
     sm = StateMachine()
@@ -540,8 +542,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     init.add_argument("--base-branch", required=True)
     init.add_argument("--authorized-base-sha", required=True)
     init.add_argument("--feature-branch", required=True)
-    init.add_argument("--task-specification-path", required=True)
-    init.add_argument("--task-specification-sha256", required=True)
+    init.add_argument("--taskspec-path", required=True)
+    init.add_argument("--taskspec-sha256", required=True)
     init.add_argument("--required-ci-jobs", default="")
     init.add_argument("--impl-worker-command", default="")
     init.add_argument("--evidence-root", default="/var/tmp/autodev-evidence")

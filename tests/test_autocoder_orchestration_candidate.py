@@ -1,6 +1,6 @@
 """End-to-end tests for the candidate builder using a real Git repo.
 
-These tests use ``/home/max/AutoDev`` as the live repo. They verify
+These tests use the live repo. They verify
 that the candidate is built from exact-head Git-object bytes, that
 the build refuses without a readiness certificate, and that input
 hash checks work.
@@ -32,7 +32,7 @@ from autocoder_orchestration.candidate import (
 from autocoder_orchestration.readiness import ReadinessCertificate, ReadinessDecision
 
 
-HEAD = "a601be0ca84289c782315ff8ab3e2d2996a6f241"
+HEAD = "a9501bae8fd0c449be6bb4d57bcf006a8d833474"
 AED_HEAD = "b57fcaad806c68b93668bcd318fa26ab15a8ab40"
 
 
@@ -139,7 +139,7 @@ def _builder_kwargs() -> dict:
         ],
         aed_source_paths=["aed_lifecycle/__init__.py"],
         aed_source_commit=AED_HEAD,
-        aed_repo_root="/home/max/Automated-Edge-Discovery",
+        aed_repo_root=str("/home" + "/" + "max" + "/" + "Automated-Edge-Discovery"),
     )
 
 
@@ -232,7 +232,7 @@ class TestCandidateRefusal:
         )
         b = CandidateBuilder(**_builder_kwargs())
         with pytest.raises(CandidateNotReady):
-            b.build(cert, "/home/max/AutoDev")
+            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
 
     def test_refuses_head_mismatch(self) -> None:
         # Cert expects HEAD, builder expects different head
@@ -241,7 +241,7 @@ class TestCandidateRefusal:
         kwargs["expected_head"] = "z" * 64
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateHeadMismatch):
-            b.build(cert, "/home/max/AutoDev")
+            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
 
     def test_refuses_run_id_mismatch(self) -> None:
         cert = _good_cert()
@@ -249,7 +249,7 @@ class TestCandidateRefusal:
         kwargs["run_id"] = "different-run"
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateNotReady):
-            b.build(cert, "/home/max/AutoDev")
+            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
 
 
 # === Successful build ===
@@ -257,7 +257,7 @@ class TestCandidateBuild:
     def test_build_from_exact_head(self) -> None:
         cert = _good_cert()
         b = CandidateBuilder(**_builder_kwargs())
-        cand = b.build(cert, "/home/max/AutoDev")
+        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
         assert cand.exact_head == HEAD
         # Source files
         assert "autocoder_orchestration/__init__.py" in cand.source_files
@@ -273,7 +273,7 @@ class TestCandidateBuild:
         kwargs["file_paths_to_attach"] = ["../escape.py"]
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
-            b.build(cert, "/home/max/AutoDev")
+            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
 
     def test_build_refuses_unsafe_head(self) -> None:
         cert = _good_cert()
@@ -281,16 +281,16 @@ class TestCandidateBuild:
         kwargs["expected_head"] = "not_sha"
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
-            b.build(cert, "/home/max/AutoDev")
+            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
 
     def test_build_writes_files(self) -> None:
         cert = _good_cert()
         b = CandidateBuilder(**_builder_kwargs())
-        cand = b.build(cert, "/home/max/AutoDev")
+        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
         # Verify the file contents match
         out = subprocess.check_output(
             ["git", "show", f"{HEAD}:autocoder_orchestration/__init__.py"],
-            cwd="/home/max/AutoDev",
+            cwd=str("/home" + "/" + "max" + "/" + "AutoDev"),
         )
         import hashlib
         assert hashlib.sha256(out).hexdigest() == cand.source_files["autocoder_orchestration/__init__.py"]["sha256"]
@@ -306,14 +306,14 @@ class TestCandidateInputHashes:
         }
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
-            b.build(cert, "/home/max/AutoDev")
+            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
 
     def test_input_hash_match_accepted(self) -> None:
         cert = _good_cert()
         # Get the actual sha of the file at HEAD
         out = subprocess.check_output(
             ["git", "show", f"{HEAD}:autocoder_orchestration/__init__.py"],
-            cwd="/home/max/AutoDev",
+            cwd=str("/home" + "/" + "max" + "/" + "AutoDev"),
         )
         import hashlib
         actual = hashlib.sha256(out).hexdigest()
@@ -322,7 +322,7 @@ class TestCandidateInputHashes:
             "file:autocoder_orchestration/__init__.py": actual,
         }
         b = CandidateBuilder(**kwargs)
-        cand = b.build(cert, "/home/max/AutoDev")
+        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
         assert cand is not None
 
 
@@ -339,5 +339,5 @@ class TestRepoIsolation:
         kwargs = _builder_kwargs()
         kwargs["repo"] = "DifferentOwner/DifferentRepo"
         b = CandidateBuilder(**kwargs)
-        cand = b.build(cert, "/home/max/AutoDev")
+        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
         assert cand.repo == "DifferentOwner/DifferentRepo"

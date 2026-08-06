@@ -128,11 +128,11 @@ class RunContext:
             raise ValueError("feature_branch must be non-empty")
         if not self.base_branch:
             raise ValueError("base_branch must be non-empty")
-        if not self.authorized_base_sha or len(self.authorized_base_sha) != 64:
+        if not self.authorized_base_sha or (len(self.authorized_base_sha) != 40 and len(self.authorized_base_sha) != 64):
             raise ValueError(
                 f"authorized_base_sha must be 64 lowercase hex chars: {self.authorized_base_sha!r}"
             )
-        if self.current_authorized_head is not None and len(self.current_authorized_head) != 64:
+        if self.current_authorized_head is not None and (len(self.current_authorized_head) != 40 and len(self.current_authorized_head) != 64):
             raise ValueError(
                 "current_authorized_head must be 64 lowercase hex chars when set"
             )

@@ -14,6 +14,7 @@ fails closed at the gate level).
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -185,6 +186,11 @@ class ReadinessCertificate:
 
     def is_expired(self, now: str) -> bool:
         return self.expires_at <= now
+
+    def compute_sha256(self) -> str:
+        return hashlib.sha256(
+            json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
 
 class ReadOnlyGithubClient:

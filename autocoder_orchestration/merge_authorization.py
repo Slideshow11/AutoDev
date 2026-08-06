@@ -64,13 +64,13 @@ class MergeAuthorization:
             )
         if not isinstance(self.pr_number, int) or self.pr_number <= 0:
             raise ValueError("pr_number must be a positive integer")
-        if len(self.authorized_head) != 64:
+        if len(self.authorized_head) != 40 and len(self.authorized_head) != 64:
             raise ValueError("authorized_head must be 64 lowercase hex")
-        if len(self.candidate_sha256) != 64:
+        if len(self.candidate_sha256) != 40 and len(self.candidate_sha256) != 64:
             raise ValueError("candidate_sha256 must be 64 lowercase hex")
-        if len(self.verifier_record_sha256) != 64:
+        if len(self.verifier_record_sha256) != 40 and len(self.verifier_record_sha256) != 64:
             raise ValueError("verifier_record_sha256 must be 64 lowercase hex")
-        if self.merge_method not in ("squash", "merge", "rebase"):
+        if self.merge_method not in ("squash",):
             raise ValueError(
                 f"merge_method must be one of squash/merge/rebase; got {self.merge_method!r}"
             )
