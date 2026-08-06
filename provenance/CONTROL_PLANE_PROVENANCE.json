@@ -1,0 +1,197 @@
+{
+  "schema": "autocoder.control_plane_provenance.v1",
+  "captured_utc": "2026-08-05T22:45:00Z",
+  "source_parent": "a601be0ca84289c782315ff8ab3e2d2996a6f241",
+  "destination_branch": "feat/autonomous-execution-control-plane-v1",
+  "destination_head": "337c3b1111fb8e0820a6e9c160eeac6db4cc5145",
+  "files": [
+    {
+      "destination_path": "INVARIANTS.md",
+      "destination_sha256": "2ca7bc70c784a08887c1f6f7058247f7da4241b3490f19d8cf6843e81a46f464",
+      "destination_size_bytes": 21672
+    },
+    {
+      "destination_path": "autocoder_orchestration/__init__.py",
+      "destination_sha256": "94745fadde49761127abb7b1c4a016917301452ec961185eb57ef18becd57752",
+      "destination_size_bytes": 4518
+    },
+    {
+      "destination_path": "autocoder_orchestration/candidate.py",
+      "destination_sha256": "6d294cd8f2f5f143fda9c5d9a2e035091ceca32771dc4d3112a73ea5a62a4ba8",
+      "destination_size_bytes": 15813
+    },
+    {
+      "destination_path": "autocoder_orchestration/cli.py",
+      "destination_sha256": "fdfdf584a63ba712bba0cc6d068bac47a08539fffa046f7672e129f98bfdf4e0",
+      "destination_size_bytes": 21465
+    },
+    {
+      "destination_path": "autocoder_orchestration/context.py",
+      "destination_sha256": "83d6f9023f44e93703d96b0b45b1b5d564e741323ea5e649f52725ff9ee42bf1",
+      "destination_size_bytes": 15909
+    },
+    {
+      "destination_path": "autocoder_orchestration/controller.py",
+      "destination_sha256": "d6de1dd5a19d6b644dad21b15afecb573192ea2da7029890476625d6309c9147",
+      "destination_size_bytes": 12609
+    },
+    {
+      "destination_path": "autocoder_orchestration/merge_authorization.py",
+      "destination_sha256": "56f86a6a4a1bf28743d4ad9a1d3835ac1a587834561e9e6a6978cf762e7fc99c",
+      "destination_size_bytes": 16530
+    },
+    {
+      "destination_path": "autocoder_orchestration/observer.py",
+      "destination_sha256": "49d01777535ca17a4f951f61f5eebdd961c08272fd59af7b7a7a163140acf6a0",
+      "destination_size_bytes": 13146
+    },
+    {
+      "destination_path": "autocoder_orchestration/readiness.py",
+      "destination_sha256": "97050ad0099a98ccb759d6ff35eeb0ba550b9258196ff51f3085ee7fe50b3254",
+      "destination_size_bytes": 27490
+    },
+    {
+      "destination_path": "autocoder_orchestration/reconciliation.py",
+      "destination_sha256": "f247f85513d2439e5cb12dcfc1c4f652ce6367a3c187f64a855f88360447a474",
+      "destination_size_bytes": 9148
+    },
+    {
+      "destination_path": "autocoder_orchestration/state_machine.py",
+      "destination_sha256": "476114a5bfa8f9134ec9842f4d2a8a52e4c6eb2e91cb7641e4b73237ea374ead",
+      "destination_size_bytes": 16142
+    },
+    {
+      "destination_path": "autocoder_orchestration/store.py",
+      "destination_sha256": "0be46107879f31b42af9494689817a3bf856489e2234d6c541aca475aac806c6",
+      "destination_size_bytes": 12988
+    },
+    {
+      "destination_path": "autocoder_orchestration/verifier_handoff.py",
+      "destination_sha256": "c207ea19a27f92c5d51b4a77d716faa11d71180d364ab05965caea6be9ceab74",
+      "destination_size_bytes": 10598
+    },
+    {
+      "destination_path": "docs/CONTROL_PLANE_ADR.md",
+      "destination_sha256": "3a902af61165941293fb303777332a951a33417597ec93f95d34dd90d49f5f56",
+      "destination_size_bytes": 7841
+    },
+    {
+      "destination_path": "provenance/AUTOCODER_SOURCE_COMPLETENESS.json",
+      "destination_sha256": "fb1c0ced624af97f1991ce6cc0806271ebd7ba520c139fbabdc59513189da608",
+      "destination_size_bytes": 464948
+    },
+    {
+      "destination_path": "provenance/aed-pr417-source-manifest.json",
+      "destination_sha256": "afb7a80d741bf982733779204b11537183c8f5529fac49572b7190e609807419",
+      "destination_size_bytes": 16031
+    },
+    {
+      "destination_path": "pyproject.toml",
+      "destination_sha256": "53c4594ff9be3b8aa9fbeebb6a7b78ac78c87754881bc168f74a720b77a654e8",
+      "destination_size_bytes": 1999
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_candidate.py",
+      "destination_sha256": "f79b1d07dc23b0c33e1fdca832a94dddda81735f7afc113dcc60c660d363a919",
+      "destination_size_bytes": 12133
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_cli.py",
+      "destination_sha256": "f5f95e9da40831a9f3b0e8ef31d2792f6d6216039b9b8b24f44605f89b8a918f",
+      "destination_size_bytes": 1851
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_context.py",
+      "destination_sha256": "b08eb39097cbb671b757606f6407b4eaf7070bf36ea6821bc8046537e394d202",
+      "destination_size_bytes": 6344
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_controller.py",
+      "destination_sha256": "b9401a6fc7ebfb6140d56b387000807c85352947198dbfea4c848073d4bddb33",
+      "destination_size_bytes": 8173
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_observer.py",
+      "destination_sha256": "26503e5d0d4c42921e66677c2b2cac9006680e6bdd3efb0b35e271330120e134",
+      "destination_size_bytes": 8445
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_readiness.py",
+      "destination_sha256": "0fef286d143942f5c082d58e3abcc452d9d0cede62948fdb1284b00a167d46cb",
+      "destination_size_bytes": 12030
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_reconciliation.py",
+      "destination_sha256": "bb8465e211d5faa85d2eba15613ebd06b492881578f11c7e038957a8695b07c9",
+      "destination_size_bytes": 8095
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_state_machine.py",
+      "destination_sha256": "7253b6674cb721e9705f62156eadc95bfb42e0f2dabce429a0dcf7cd3d88396f",
+      "destination_size_bytes": 12549
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_store.py",
+      "destination_sha256": "a46bfc07d1b0cc8efe20a002ea24c390bc5f6a290c92ef7dfe806aa5aa0a8349",
+      "destination_size_bytes": 6899
+    },
+    {
+      "destination_path": "tests/test_autocoder_orchestration_verifier.py",
+      "destination_sha256": "b7b157b305016a1c2fd371af3fd5d49c181a79f1a2167adbe05ddac88ec87806",
+      "destination_size_bytes": 12805
+    }
+  ],
+  "summary": {
+    "files_added": 27,
+    "newly_added_packages": [
+      "autocoder_orchestration"
+    ],
+    "newly_added_modules": [
+      "autocoder_orchestration/__init__.py",
+      "autocoder_orchestration/context.py",
+      "autocoder_orchestration/state_machine.py",
+      "autocoder_orchestration/store.py",
+      "autocoder_orchestration/readiness.py",
+      "autocoder_orchestration/observer.py",
+      "autocoder_orchestration/reconciliation.py",
+      "autocoder_orchestration/candidate.py",
+      "autocoder_orchestration/verifier_handoff.py",
+      "autocoder_orchestration/merge_authorization.py",
+      "autocoder_orchestration/controller.py",
+      "autocoder_orchestration/cli.py"
+    ],
+    "tests_added": 199,
+    "ADR_added": "docs/CONTROL_PLANE_ADR.md",
+    "invariants_added": 20
+  },
+  "existing_modules_reused": [
+    "autocoder_supervisor",
+    "autocoder_lifecycle"
+  ],
+  "interfaces_changed": [
+    "pyproject.toml"
+  ],
+  "newly_implemented_modules": [
+    "autocoder_orchestration/* (12 modules)"
+  ],
+  "deferred_capabilities": [
+    "Self-hosting canary against this PR's own workflow",
+    "Strict readiness window observation",
+    "Independent verifier handoff (requires a separate session)",
+    "AED lifecycle adapter (PR 1b in the validated roadmap)",
+    "Decomposition of supervisor into smaller adapter modules",
+    "Full review-provider extraction (reconciliation adapter)"
+  ],
+  "test_inventory": {
+    "tests/test_autocoder_orchestration_context.py": 22,
+    "tests/test_autocoder_orchestration_state_machine.py": 42,
+    "tests/test_autocoder_orchestration_store.py": 22,
+    "tests/test_autocoder_orchestration_readiness.py": 31,
+    "tests/test_autocoder_orchestration_observer.py": 16,
+    "tests/test_autocoder_orchestration_reconciliation.py": 22,
+    "tests/test_autocoder_orchestration_candidate.py": 13,
+    "tests/test_autocoder_orchestration_verifier.py": 21,
+    "tests/test_autocoder_orchestration_controller.py": 10,
+    "tests/test_autocoder_orchestration_cli.py": 4
+  }
+}

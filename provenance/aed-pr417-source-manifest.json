@@ -226,8 +226,8 @@
       "source_path": null,
       "destination_path": "INVARIANTS.md",
       "source_sha256": null,
-      "destination_sha256": "ccd502ba201b831d51a3eaf3fa8028cd284bdafbcf17da5059030d604669bd29",
-      "destination_size_bytes": 13116,
+      "destination_sha256": "2ca7bc70c784a08887c1f6f7058247f7da4241b3490f19d8cf6843e81a46f464",
+      "destination_size_bytes": 21672,
       "transformation_classification": "standalone_documentation_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
