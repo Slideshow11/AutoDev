@@ -440,19 +440,37 @@ class MergeExecutor:
             except (_sp.CalledProcessError, OSError, _sp.TimeoutExpired):
                 return default
 
-        head_sha = _safe_git(["rev-parse", "HEAD"])
+        # Track which evidence queries fell back to their defaults so the
+        # audit record (notes) reflects any local git observation gap. A
+        # non-empty `notes` value here is informational, not an error.
+        _notes_parts = []
+        def _safe_git_tracked(args, default="", timeout=30):
+            try:
+                value = _sp.check_output(
+                    ["git", *args], cwd=auto_repo_root,
+                    stderr=_sp.DEVNULL,
+                    text=True, timeout=timeout,
+                ).strip()
+            except (_sp.CalledProcessError, OSError, _sp.TimeoutExpired):
+                _notes_parts.append(" ".join(args))
+                return default
+            return value
+
+        head_sha = _safe_git_tracked(["rev-parse", "HEAD"])
         if not head_sha:
             raise MergeError(
                 "git rev-parse HEAD returned no output; local observation incomplete"
             )
-        origin_main = _safe_git(["rev-parse", "origin/main"])
-        local_main = _safe_git(["rev-parse", "main"])
-        parent_proc = _safe_git(["log", "--format=%H", "-1", f"{head_sha}^1"])
-        cat_file = _sp.check_output(
-            ["git", "cat-file", "-p", head_sha],
-            cwd=auto_repo_root, text=True
+        origin_main = _safe_git_tracked(["rev-parse", "origin/main"])
+        local_main = _safe_git_tracked(["rev-parse", "main"])
+        parent_proc = _safe_git_tracked(["log", "--format=%H", "-1", f"{head_sha}^1"])
+        # cat-file is wrapped in the same defensive helper: a corrupted or
+        # missing local object (e.g. lazy clone, GC race) must not propagate
+        # out of merge() after the remote merge is already irreversible.
+        cat_file = _safe_git_tracked(["cat-file", "-p", head_sha])
+        parent_count = sum(
+            1 for line in cat_file.splitlines() if line.startswith("parent ")
         )
-        parent_count = sum(1 for line in cat_file.splitlines() if line.startswith("parent "))
         # Branch deleted — all subprocess calls bounded.
         try:
             local_branch_present = _sp.run(
@@ -507,6 +525,9 @@ class MergeExecutor:
                 "admin_bypass": False,
                 "merge_commit_or_rebase_merge": False,
             },
-            notes="",
+            notes=(
+                "post-merge git evidence gaps: " + "; ".join(_notes_parts)
+                if _notes_parts else ""
+            ),
         )
         return record
