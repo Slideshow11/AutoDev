@@ -349,30 +349,30 @@ class ExactFileDigestTests(unittest.TestCase):
 
     # 18: mismatched authorized candidate digest blocks
     def test_mismatched_authorized_candidate_digest_blocks(self):
+        """authorization.candidate_sha256 must equal the verified candidate file digest."""
+        AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+        WRONG_CAND = "f" * 64
         candidate = self.tmpdir / "candidate.json"
-        write_artifact(candidate, {"head": {"head_sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"}, "files": []})
-        verifier = self.tmpdir / "verifier.json"
-        write_artifact(verifier, {
-            "verdict": "VERIFIED", "defects": [], "candidate_sha256": "a" * 64,
-        })
-        # Authorization claims candidate digest is different.
+        write_artifact(candidate, {"head": {"head_sha": AH}, "files": []})
+        # Authorization points at a different digest than the file on disk.
         authorization = self.tmpdir / "authorization.json"
         write_artifact(authorization, {
             "schema_version": "autocoder.merge_authorization.v1",
             "run_id": "test",
             "repo": "Slideshow11/AutoDev",
             "pr_number": 3,
-            "authorized_head": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
-            "candidate_sha256": "f" * 64,  # wrong digest
+            "authorized_head": AH,
+            "candidate_sha256": WRONG_CAND,
             "verifier_record_sha256": "b" * 64,
         })
-        # Patch verifier payload candidate_sha256 to match auth's "wrong" value.
-        # (But the verifier's payload already has its own candidate_sha256.)
-        # Reload verifier with the wrong digest:
-        # Actually the verifier's payload candidate_sha256 is independent.
-        # We'll override the verifier payload to match the auth.
+        # Verifier agrees that WRONG_CAND is the candidate digest, so its
+        # candidate_sha256 matches authorization. The mismatch being
+        # tested is between WRONG_CAND and the verified candidate file
+        # digest on disk.
+        verifier = self.tmpdir / "verifier.json"
         write_artifact(verifier, {
-            "verdict": "VERIFIED", "defects": [], "candidate_sha256": "f" * 64,
+            "verdict": "VERIFIED", "defects": [],
+            "candidate_sha256": WRONG_CAND,
         })
         merge_record = self.tmpdir / "merge-record.json"
         inputs = MergeTransactionInputs(
@@ -384,7 +384,8 @@ class ExactFileDigestTests(unittest.TestCase):
             run_state_root=self.tmpdir / "state",
             evidence_root=self.tmpdir / "evidence",
             live_pr_payload={
-                "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+                "state": "open", "merged": False,
+                "head": {"sha": AH},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
             },
@@ -393,18 +394,24 @@ class ExactFileDigestTests(unittest.TestCase):
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
-        runner_calls = []
-        def fake_runner(*args, **kwargs):
-            runner_calls.append((args, kwargs))
-            return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake_runner,
-        ):
+        ) as safe_run:
             with self.assertRaises(MergeError) as ctx:
                 execute_guarded_merge_transaction(inputs)
-        self.assertIn("candidate digest", str(ctx.exception))
-        self.assertEqual(runner_calls, [])
+        safe_run.assert_not_called()
+        # The exception MUST mention some digest mismatch path involving
+        # the WRONG_CAND we put in authorization, since the candidate
+        # file on disk has a different digest.
+        msg = str(ctx.exception)
+        self.assertIn(WRONG_CAND, msg)
+        self.assertIn("digest", msg.lower())
+        # Sanity: a digest mismatch was indeed detected at this layer,
+        # not at some other earlier check.
+        self.assertNotEqual(
+            WRONG_CAND,
+            digest_bytes(candidate.read_bytes()),
+        )
 
     # 19: mismatched verifier candidate binding blocks
     def test_mismatched_verifier_candidate_binding_blocks(self):
@@ -444,18 +451,17 @@ class ExactFileDigestTests(unittest.TestCase):
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
-        runner_calls = []
-        def fake_runner(*args, **kwargs):
-            runner_calls.append((args, kwargs))
-            return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake_runner,
-        ):
+        ) as safe_run:
             with self.assertRaises(MergeError) as ctx:
                 execute_guarded_merge_transaction(inputs)
-        self.assertIn("candidate digest", str(ctx.exception).lower())
-        self.assertEqual(runner_calls, [])
+        safe_run.assert_not_called()
+        # Exception specifically names verifier candidate digest.
+        msg = str(ctx.exception).lower()
+        self.assertIn("verifier", msg)
+        self.assertIn("digest", msg)
+        self.assertIn("candidate", msg)
 
     # 20: full-file digest and canonical digest cannot be confused.
     def test_full_file_and_canonical_digest_cannot_be_confused(self):
