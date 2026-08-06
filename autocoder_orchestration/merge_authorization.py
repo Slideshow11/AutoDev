@@ -232,6 +232,28 @@ class MergeExecutor:
         self.gh_executable = gh_executable
         self._run = subprocess_runner or self._default_run
 
+    @staticmethod
+    def _read_local_artifact(auto_repo_root: str, rel_path: str) -> dict:
+        try:
+            return json.loads(
+                subprocess.check_output(
+                    ["cat", rel_path],
+                    cwd=auto_repo_root,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=10,
+                )
+            )
+        except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired):
+            return {}
+
+    @staticmethod
+    def _compute_dict_sha(payload: dict) -> str:
+        import hashlib
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
     def _default_run(self, args, env=None, cwd=None) -> dict:
         import subprocess
         try:
@@ -329,6 +351,24 @@ class MergeExecutor:
         verifier_record_sha256_actual: str,
         auto_repo_root: str,
     ) -> MergeRecord:
+        # Re-bind candidate and verifier record hashes from the local
+        # store at auto_repo_root. This is a safety net that prevents
+        # the caller from passing hashes that do not match the actual
+        # persisted artifacts.
+        cand_payload = self._read_local_artifact(auto_repo_root, "candidate.json")
+        verifier_payload = self._read_local_artifact(auto_repo_root, "verifier-record.json")
+        persisted_cand_sha = cand_payload.get("_sha256")
+        persisted_vr_sha = self._compute_dict_sha(verifier_payload)
+        if persisted_cand_sha and persisted_cand_sha != candidate_sha256_actual:
+            raise MergeError(
+                f"caller-provided candidate_sha256 {candidate_sha256_actual!r} does not match "
+                f"persisted candidate.json _sha256 {persisted_cand_sha!r}"
+            )
+        if persisted_vr_sha and persisted_vr_sha != verifier_record_sha256_actual:
+            raise MergeError(
+                f"caller-provided verifier_record_sha256 {verifier_record_sha256_actual!r} "
+                f"does not match persisted verifier-record.json digest {persisted_vr_sha!r}"
+            )
         """Execute the merge and return a post-merge record."""
         # Pre-merge guards
         if live_pr_payload.get("merged"):

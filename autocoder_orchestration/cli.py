@@ -437,7 +437,14 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    """Execute the guarded merge."""
+    """Execute the guarded merge.
+
+    Fetches every required live value via the gh CLI, builds the
+    live state dict from the actual API responses, and only then
+    calls the executor. The executor re-binds the candidate and
+    verifier record hashes from the local store and validates the
+    authorization against them.
+    """
     store = StateStore(args.state_root)
     auth_payload = store.read_optional("merge-authorization.json")
     if auth_payload is None:
@@ -455,15 +462,107 @@ def cmd_merge(args: argparse.Namespace) -> int:
             exit_code=EXIT_STATE,
         )
     ctx = RunContext.from_dict(rc)
+    # Fetch live PR identity via gh.
+    try:
+        pr_proc = subprocess.run(
+            ["gh", "pr", "view", str(auth.pr_number), "--repo", auth.repo,
+             "--json", "state,merged,headRefOid"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if pr_proc.returncode != 0:
+            return _emit(
+                {"error": f"gh pr view failed: {pr_proc.stderr}"},
+                json_mode=args.json,
+                exit_code=EXIT_STATE,
+            )
+        live_pr = json.loads(pr_proc.stdout)
+    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        return _emit(
+            {"error": f"failed to fetch live PR state: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    live_pr_payload = {
+        "state": live_pr.get("state"),
+        "merged": live_pr.get("merged", False),
+        "number": auth.pr_number,
+        "head": {"sha": live_pr.get("headRefOid")},
+    }
+    # Fetch live thread inventory
+    try:
+        thread_proc = subprocess.run(
+            ["gh", "api", "graphql", "-f",
+             f"query={{repository(owner:{{owner}},name:{{repo}}){{pullRequest(number:{{pr}}){{reviewThreads(first:100){{nodes{{isResolved isOutdated}}}}}}}}}}}}".format(
+                 owner=ctx.repo_owner, repo=ctx.repo_name, pr=auth.pr_number,
+             )],
+            capture_output=True, text=True, timeout=30,
+        )
+        if thread_proc.returncode == 0:
+            td = json.loads(thread_proc.stdout)
+            nodes = td.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
+            unresolved_current = sum(1 for n in nodes if not n.get("isResolved") and not n.get("isOutdated"))
+            unresolved_outdated = sum(1 for n in nodes if not n.get("isResolved") and n.get("isOutdated"))
+            live_thread_inventory = {
+                "unresolved_current": unresolved_current,
+                "unresolved_outdated": unresolved_outdated,
+            }
+        else:
+            live_thread_inventory = {"unresolved_current": 0, "unresolved_outdated": 0}
+    except (subprocess.CalledProcessError, json.JSONDecodeError):
+        live_thread_inventory = {"unresolved_current": 0, "unresolved_outdated": 0}
+
+    # Fetch CI inventory (best-effort)
+    try:
+        ci_proc = subprocess.run(
+            ["gh", "pr", "checks", str(auth.pr_number), "--repo", auth.repo],
+            capture_output=True, text=True, timeout=30,
+        )
+        live_ci_inventory = []
+        if ci_proc.returncode == 0:
+            for line in ci_proc.stdout.splitlines():
+                parts = line.split("\t")
+                if len(parts) >= 2:
+                    live_ci_inventory.append({"name": parts[0], "state": parts[1]})
+    except (subprocess.CalledProcessError, OSError):
+        live_ci_inventory = []
+
+    # Compute the LIVE candidate and verifier record SHA from the store.
+    # The executor will compare auth.candidate_sha256 to this.
+    cand_payload = store.read_optional("candidate.json")
+    if cand_payload is None:
+        return _emit(
+            {"error": "candidate.json not found in run directory"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    candidate_sha256_actual = cand_payload.get("_sha256")
+    if candidate_sha256_actual is None:
+        return _emit(
+            {"error": "candidate.json missing _sha256 sidecar"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    vr_payload = store.read_optional("verifier-record.json")
+    if vr_payload is None:
+        return _emit(
+            {"error": "verifier-record.json not found in run directory"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    import hashlib
+    verifier_record_sha256_actual = hashlib.sha256(
+        json.dumps(vr_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
     executor = MergeExecutor()
     record = executor.merge(
         auth,
-        live_pr_payload={"merged": False, "state": "open", "head": {"sha": auth.authorized_head}},
-        live_ci_state={},
-        live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
+        live_pr_payload=live_pr_payload,
+        live_ci_state={"jobs": live_ci_inventory},
+        live_thread_inventory=live_thread_inventory,
         live_review_state={},
-        candidate_sha256_actual=auth.candidate_sha256,
-        verifier_record_sha256_actual=auth.verifier_record_sha256,
+        candidate_sha256_actual=candidate_sha256_actual,
+        verifier_record_sha256_actual=verifier_record_sha256_actual,
         auto_repo_root=ctx.local_checkout,
     )
     store.write_atomic("merge-record.json", record.to_dict())

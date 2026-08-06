@@ -439,9 +439,13 @@ class Lease:
         if self._fd is not None:
             os.close(self._fd)
             self._fd = None
-        # Don't delete the lock file; the lease record persists.
-        # The next acquirer decides whether to overwrite based on
-        # identity match.
+        # Clear the persisted identity. The next acquirer should
+        # freely acquire and write its own identity. This avoids
+        # a stale identity blocking a legitimate new caller.
+        try:
+            self.store.clear_lease()
+        except StateStoreError:
+            pass
 
     def is_held(self) -> bool:
         return self._fd is not None

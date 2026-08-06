@@ -202,44 +202,63 @@ class TestCompareAndSwapConcurrency:
     """
 
     def test_concurrent_cas_only_one_succeeds(self, tmp_path) -> None:
-        """Two callers CAS on the same expected revision. Exactly one
+        """Two concurrent callers attempt the same CAS. Exactly one
         succeeds; the other receives StateRevisionMismatch.
 
-        Uses subprocess to run two child processes, since the CAS uses
-        fcntl advisory locks which require actual distinct processes.
+        Both processes are launched in parallel via subprocess.Popen
+        and synchronized via a barrier file. This exercises the
+        flock-based mutual exclusion rather than the sequential
+        fallback.
         """
-        import subprocess, sys, tempfile
+        import subprocess, sys, time
         store_root = str(tmp_path / "state")
         os.makedirs(store_root)
         # Initialize the counter
         store = StateStore(store_root)
         store.write_atomic("counter.json", {"value": 0})
+        # Synchronization barrier: both processes wait for the file
+        # to exist before continuing.
+        barrier_path = str(tmp_path / "barrier")
 
-        worker_script = (
-            "import sys\n"
-            "sys.path.insert(0, \'\')\n"
-            "import os\n"
-            "from autocoder_orchestration.store import StateStore, StateRevisionMismatch\n"
-            "store = StateStore(sys.argv[1])\n"
-            "try:\n"
-            "    store.compare_and_swap(\"counter.json\", {\"value\": int(sys.argv[2])}, expected_revision=1)\n"
-            "    print(\"ok\")\n"
-            "except StateRevisionMismatch as e:\n"
-            "    print(f\"mismatch: {e}\")\n"
-        )
-        # Write the worker script
+        worker_script = """
+import sys, time, os
+sys.path.insert(0, '')
+from autocoder_orchestration.store import StateStore, StateRevisionMismatch
+store = StateStore(sys.argv[1])
+# Wait for the barrier file to exist (the parent creates it after
+# both subprocess.Popen calls return).
+barrier = sys.argv[3]
+deadline = time.time() + 10
+while not os.path.exists(barrier) and time.time() < deadline:
+    time.sleep(0.001)
+try:
+    store.compare_and_swap("counter.json", {"value": int(sys.argv[2])}, expected_revision=1)
+    print("ok")
+except StateRevisionMismatch as e:
+    print(f"mismatch: {e}")
+"""
         worker_path = str(tmp_path / "worker.py")
         with open(worker_path, "w") as f:
             f.write(worker_script)
 
-        results = []
-        for i in range(2):
-            proc = subprocess.run(
-                [sys.executable, worker_path, store_root, str(i + 1)],
-                capture_output=True, text=True, timeout=30,
+        # Launch both processes in parallel
+        procs = [
+            subprocess.Popen(
+                [sys.executable, worker_path, store_root, str(i + 1), barrier_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             )
-            stdout = proc.stdout.strip()
-            results.append("ok" if stdout == "ok" else "mismatch")
+            for i in range(2)
+        ]
+        # Give both a moment to start
+        time.sleep(0.05)
+        # Release the barrier so both proceed
+        with open(barrier_path, "w") as f:
+            f.write("go")
+        # Collect results
+        results = []
+        for proc in procs:
+            stdout, _ = proc.communicate(timeout=30)
+            results.append("ok" if stdout.strip() == "ok" else "mismatch")
 
         # Exactly one ok, one mismatch
         results.sort()
