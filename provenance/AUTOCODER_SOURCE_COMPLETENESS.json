@@ -853,9 +853,9 @@
         "destination_path": "pyproject.toml",
         "transformation_classification": "packaging_metadata_only",
         "source_sha256": "8fc7e1319f879c71f1e272b4a56d56951aa2b223366d238e96b114540c125532",
-        "destination_sha256": "53c4594ff9be3b8aa9fbeebb6a7b78ac78c87754881bc168f74a720b77a654e8",
+        "destination_sha256": "b4420e9353948d46d893c5fb75be9bf96e73485ddfbec8c84f3fa34efb643b40",
         "source_size_bytes": 1304,
-        "destination_size_bytes": 1999,
+        "destination_size_bytes": 2061,
         "transformation_explanation": "Moved from scripts/local/pyproject.toml to the standalone repository root; updated the docstring and the [tool.setuptools.packages.find] exclude list to reflect the new layout. Distribution name and runtime dependency on tomli for Python <3.11 are preserved."
       },
       {
