@@ -272,9 +272,18 @@
       "source_sha256": null,
       "transformation_classification": "standalone_documentation_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+    },
+    {
+      "destination_path": "autocoder_orchestration/canonical_paths.py",
+      "destination_sha256": "608fd41ee43bbebaebbaf56502592c3df02dd1de4db1e21ef45d22d6d2802825",
+      "destination_size_bytes": 1169,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_documentation_addition",
+      "transformation_explanation": "Newly authored for the standalone repository. Provides canonical artifact path helpers shared across init/authorize/merge/post-merge."
     }
   ],
-  "last_modification_note": "Post-PR-4 review repair pass 2: added docs/CONTROL_PLANE_ADR.md to manifest; updated INVARIANTS.md hash; repaired pagination in cli.py; completed state transition persistence; tightened test mocks with assert_not_called().",
+  "last_modification_note": "PR #4 review repair round 3: repaired 18 formal review-body findings + 3 doc fixes. Added autocoder_orchestration/canonical_paths.py. Manifest now has 29 files (17 source, 12 standalone).",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -296,5 +305,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-06T18:30:00Z"
+  "updated_at_utc": "2026-08-06T16:35:00Z"
 }
