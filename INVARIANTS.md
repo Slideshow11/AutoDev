@@ -562,3 +562,184 @@ a worker is informational only.
 - Asserting tests: `test_full_happy_path`,
   `test_block`, `test_state_persisted_across_reload`.
 
+
+# AED Autocoder Orchestration — Invariant Ledger (v1)
+
+This document is the canonical, versioned description of the
+behavioural invariants enforced by the AutoDev orchestration
+control plane. The control plane drives a single PR through
+qualification and merge.
+
+## C-21 — One canonical artifact digest
+
+Every persistent orchestration artifact (readiness certificate,
+candidate, verifier handoff, verifier record, merge authorization,
+merge record, evidence freeze, final report, invalidation registry
+entries) is written and read through `autocoder_orchestration.artifacts`.
+
+The artifact file is valid UTF-8 JSON only. No comment or digest
+footer line is appended. The artifact digest is SHA-256 of the
+EXACT complete artifact-file bytes. The digest lives in a separate
+atomic sidecar `<artifact-path>.sha256`. The sidecar contains
+exactly one lowercase 64-character hex digest (optional trailing
+newline).
+
+- Enforcing implementation: `autocoder_orchestration/artifacts.py`
+  (`write_artifact`, `read_artifact`).
+- Asserting tests: `test_writer_creates_valid_json_without_footer`,
+  `test_sidecar_equals_sha256_of_exact_file_bytes`, `test_reader_*`.
+
+## C-22 — Mandatory sidecars on every artifact
+
+Every accepted persistent artifact must have a sidecar. A missing
+sidecar, malformed sidecar text, malformed JSON, symlink, insecure
+mode or digest mismatch raises and blocks any caller — including
+the production merge path.
+
+There is no production merge path that treats a missing digest as
+optional. The reader returns a payload together with the verified
+exact-file digest or raises.
+
+- Enforcing implementation: `artifacts.read_artifact`.
+- Asserting tests: `test_reader_rejects_missing_sidecar`,
+  `test_reader_rejects_malformed_sidecar`,
+  `test_reader_rejects_symlink_*`, `test_reader_rejects_insecure_mode`,
+  `test_reader_rejects_appended_footer_text`,
+  `test_mandatory_sidecar_blocks_merge_runner`.
+
+## C-23 — No legacy footer artifacts in the production merge path
+
+Production flows that read a candidate, verifier record, merge
+authorization, or merge record via `read_artifact` refuse artifacts
+whose body contains a `# sha256: ...` footer text line.
+
+A legacy artifact may only be loaded by the explicit audit-only
+helper `read_legacy_with_footer`, which exists for one-time
+conversion or forensic review and is not used by the production
+merge path.
+
+- Enforcing implementation: `artifacts.read_artifact`,
+  `artifacts.read_legacy_with_footer`.
+- Asserting tests: `test_legacy_footer_artifacts_are_refused_by_production_merge`,
+  `test_explicit_legacy_conversion_is_audited_and_deterministic`.
+
+## C-24 — Repository / state / evidence roots are independent
+
+The repository checkout, run-state root and evidence root are three
+distinct named roots. The production merge path refuses to proceed
+if any two of them resolve to the same directory.
+
+A production merge invocation does not require copying artifacts
+into the repository checkout, renaming artifacts to magic
+filenames, or constructing a temporary fake run root.
+
+- Enforcing implementation: `merge_authorization._ensure_distinct_paths`,
+  `merge_authorization.MergeTransactionInputs`.
+- Asserting tests: `test_repository_root_and_state_root_are_independent`,
+  `test_evidence_paths_do_not_require_temporary_staging`,
+  `test_end_to_end_simulated_authorization_to_complete_flow`.
+
+## C-25 — One guarded merge transaction
+
+The production merge path is one checked-in operation,
+`execute_guarded_merge_transaction`, which:
+
+1. loads and verifies the human authorization artifact,
+2. loads and verifies the candidate and verifier artifacts,
+3. fetches all live GitHub evidence,
+4. repeats every exact-head and integrity guard,
+5. constructs only the permitted command
+   (`gh pr merge <pr> --repo <owner/repo> --squash --delete-branch --match-head-commit <exact-head>`),
+6. invokes it once with a finite timeout,
+7. preserves stdout, stderr, return code and timing,
+8. resolves timeout or ambiguity against the live PR state,
+9. writes the merge result through the canonical artifact writer,
+10. transitions the state machine to COMPLETE.
+
+The CLI must call this operation. A production flow that calls
+`MergeExecutor().compute_command` and a separate runner, then
+expects another command to build the merge record, is prohibited.
+
+- Enforcing implementation: `merge_authorization.execute_guarded_merge_transaction`,
+  `cli.cmd_merge`.
+- Asserting tests: `test_merge_operation_invokes_runner_exactly_once`,
+  `test_failed_pre_merge_guard_invokes_runner_zero_times`,
+  `test_admin_auto_merge_rebase_flags_are_impossible`,
+  `test_cli_exercise_production_path`.
+
+## C-26 — Timeout reconciliation fails closed or completes reconciliation
+
+If the guarded merge subprocess times out:
+
+- The runner does NOT retry blindly.
+- The runner re-queries the live PR.
+- If the server-side merge completed, reconciliation continues.
+- If the server-side merge did NOT complete, the transaction fails
+  closed with `MergeSubprocessFailed` or `MergeAmbiguousOutcome`.
+
+A merge subprocess that times out AND the live re-query fails is
+always reported as `MergeAmbiguousOutcome`; the merge is rejected.
+
+- Enforcing implementation: `merge_authorization.execute_guarded_merge_transaction`
+  timeout reconciliation block.
+- Asserting tests: `test_timeout_plus_server_side_merged_is_reconciled_as_success`,
+  `test_timeout_plus_server_side_open_is_not_reported_as_merged`,
+  `test_ambiguous_state_fails_closed`.
+
+## C-27 — Branch-independent post-merge verification
+
+The post-merge reconciliation does not assume the current
+checked-out branch. It:
+
+- reads the current branch from `HEAD`;
+- refuses if the working tree is dirty;
+- switches to the authorized base branch when needed;
+- fast-forwards the local base branch with `--ff-only`;
+- verifies local base equals origin/base;
+- verifies the squash commit, its tree and its parent;
+- verifies the remote feature branch deletion;
+- deletes the local feature branch only when it matches the
+  authorized head SHA-256;
+- records any unavailable observation explicitly rather than
+  fabricating success.
+
+- Enforcing implementation: `merge_authorization.reconcile_after_merge`.
+- Asserting tests: `test_current_feature_branch_safely_switched_to_base_before_ff`,
+  `test_dirty_working_tree_blocks_branch_switching`,
+  `test_unrelated_branches_are_never_deleted`,
+  `test_server_side_merge_followed_by_local_git_failure_still_writes_record`.
+
+## C-28 — Restart recovery after irreversible merge
+
+A successful remote-side merge is irreversible. The transaction
+writes the merge record with whatever local Git observations
+were available; any missing observation is recorded as
+`unavailable_observations` and the merge is still reported as
+COMPLETE if the server-side merge completed.
+
+A subsequent process restart can load the merge record from the
+canonical artifact (which survives process restart) and resume
+the audit / reconciliation flow.
+
+- Enforcing implementation: `merge_authorization.MergeRecord.unavailable_observations`,
+  `artifacts.write_artifact` durable writer.
+- Asserting tests: `test_server_side_merge_followed_by_local_git_failure_still_writes_record`,
+  `test_authorization_and_merge_records_survive_process_restart`.
+
+## C-29 — No temporary artifact staging required
+
+A production merge invocation does not require:
+
+- copying artifacts into the repository checkout;
+- renaming artifacts to magic filenames;
+- constructing a temporary fake run root;
+- modifying candidate or verifier records;
+- manually computing a different digest convention.
+
+The artifacts live at their canonical paths and are loaded
+directly.
+
+- Enforcing implementation: `cli.cmd_merge`,
+  `merge_authorization.execute_guarded_merge_transaction`.
+- Asserting tests: `test_evidence_paths_do_not_require_temporary_staging`,
+  `test_end_to_end_simulated_authorization_to_complete_flow`.

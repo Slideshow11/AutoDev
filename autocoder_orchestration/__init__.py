@@ -108,6 +108,25 @@ from .merge_authorization import (
     MergeRecord,
 )
 from .controller import Controller
+from .artifacts import (
+    ArtifactError,
+    ArtifactMissing,
+    ArtifactSymlink,
+    ArtifactInsecureMode,
+    ArtifactMalformedJSON,
+    ArtifactMalformedSidecar,
+    ArtifactDigestMismatch,
+    LegacyArtifactRefused,
+    ArtifactWriteResult,
+    ArtifactReadResult,
+    write_artifact,
+    read_artifact,
+    read_artifact_at,
+    read_legacy_with_footer,
+    digest_bytes,
+    digest_file,
+    parse_sidecar_text,
+)
 
 __all__ = [
     "RunContext",
@@ -170,4 +189,21 @@ __all__ = [
     "MergeExecutor",
     "MergeRecord",
     "Controller",
+    "ArtifactError",
+    "ArtifactMissing",
+    "ArtifactSymlink",
+    "ArtifactInsecureMode",
+    "ArtifactMalformedJSON",
+    "ArtifactMalformedSidecar",
+    "ArtifactDigestMismatch",
+    "LegacyArtifactRefused",
+    "ArtifactWriteResult",
+    "ArtifactReadResult",
+    "write_artifact",
+    "read_artifact",
+    "read_artifact_at",
+    "read_legacy_with_footer",
+    "digest_bytes",
+    "digest_file",
+    "parse_sidecar_text",
 ]
