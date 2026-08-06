@@ -167,7 +167,15 @@ class Controller:
         return self._apply(sm, STATE_AWAITING_CI, ACTOR_IMPL_WORKER, head_observed=head_observed)
 
     def record_readiness_certificate(self, cert: ReadinessCertificate, *, head_observed: str) -> StateMachine:
-        """QUALIFYING_READINESS -> READY_FOR_CANDIDATE."""
+        """QUALIFYING_READINESS -> READY_FOR_CANDIDATE.
+
+        Safe sequence:
+        1. Validate inputs.
+        2. Validate current state supports the transition.
+        3. Write artifact only after both pass.
+        4. Apply the transition only after the artifact is on disk.
+        A rejected transition leaves no accepted artifact.
+        """
         if not isinstance(cert, ReadinessCertificate):
             raise ControllerError("cert must be a ReadinessCertificate")
         if cert.decision.expected_head != head_observed:
@@ -175,82 +183,140 @@ class Controller:
                 f"cert expected head {cert.decision.expected_head!r} != "
                 f"observed head {head_observed!r}"
             )
+        # Validate the transition will succeed BEFORE writing the artifact.
+        sm = self._require_state_for_event()
+        next_sm = sm.transition(
+            STATE_READY_FOR_CANDIDATE,
+            ACTOR_CONTROLLER,
+            head_observed=head_observed,
+            head_required=self.context.current_authorized_head,
+        )
+        # Transition valid. Write the artifact, then commit state.
         cert_payload = cert.to_dict()
         cert_payload["_sha256"] = cert.compute_sha256()
         self.store.write_atomic("readiness.json", cert_payload)
-        sm = self._require_state_for_event()
-        return self._apply(sm, STATE_READY_FOR_CANDIDATE, ACTOR_CONTROLLER, head_observed=head_observed)
+        return self.save_state_machine(next_sm) and next_sm or next_sm
 
     def build_candidate(self, candidate: Candidate, *, head_observed: str) -> StateMachine:
-        """READY_FOR_CANDIDATE -> CANDIDATE_FROZEN."""
+        """READY_FOR_CANDIDATE -> CANDIDATE_FROZEN.
+
+        Validates the transition before writing the artifact.
+        """
         if not isinstance(candidate, Candidate):
             raise ControllerError("candidate must be a Candidate")
+        sm = self._require_state_for_event()
+        next_sm = sm.transition(
+            STATE_CANDIDATE_FROZEN,
+            ACTOR_CANDIDATE_BUILDER,
+            head_observed=head_observed,
+            head_required=self.context.current_authorized_head,
+        )
         cand_payload = candidate.to_dict()
         cand_payload["_sha256"] = candidate.compute_sha256()
         self.store.write_atomic("candidate.json", cand_payload)
         self.store.write_atomic("candidate.sha256", {"sha256": cand_payload["_sha256"]})
-        sm = self._require_state_for_event()
-        return self._apply(sm, STATE_CANDIDATE_FROZEN, ACTOR_CANDIDATE_BUILDER, head_observed=head_observed)
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def write_handoff(self, handoff: VerifierHandoff) -> StateRevision:
         return self.store.write_atomic("verifier-handoff.json", handoff.to_dict())
 
-    def prompt_verifier(
-        self,
-        *,
-        head_observed: str,
-        contest: str,
-        repo: str,
-        pr_number: int,
-    ) -> tuple:
+    def prompt_verifier(self, *, head_observed: str) -> StateMachine:
         """CANDIDATE_FROZEN -> AWAITING_INDEPENDENT_VERIFICATION.
 
-        ``contest`` is the human-readable contest identifier printed
-        for the operator. ``repo`` is the GitHub repository string.
+        Validates the transition before declaring the run
+        awaiting independent verification. Returns the
+        post-transition state machine.
         """
         sm = self._require_state_for_event()
-        return sm, self._apply(sm, STATE_AWAITING_INDEPENDENT_VERIFICATION, ACTOR_CONTROLLER, head_observed=head_observed)
+        next_sm = sm.transition(
+            STATE_AWAITING_INDEPENDENT_VERIFICATION,
+            ACTOR_CONTROLLER,
+            head_observed=head_observed,
+            head_required=self.context.current_authorized_head,
+        )
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def verifier_started(self, *, head_observed: str, verifier_identity: Dict[str, Any]) -> StateMachine:
-        """AWAITING_INDEPENDENT_VERIFICATION -> VERIFYING."""
-        self.store.write_atomic("verifier_process.json", {"verifier_process": dict(verifier_identity)})
+        """AWAITING_INDEPENDENT_VERIFICATION -> VERIFYING.
+
+        Validates the transition before writing the artifact.
+        """
         sm = self._require_state_for_event()
-        return self._apply(sm, STATE_VERIFYING, ACTOR_VERIFIER, head_observed=head_observed)
+        next_sm = sm.transition(
+            STATE_VERIFYING,
+            ACTOR_VERIFIER,
+            head_observed=head_observed,
+            head_required=self.context.current_authorized_head,
+        )
+        self.store.write_atomic("verifier_process.json", {"verifier_process": dict(verifier_identity)})
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def verifier_failed(self, *, head_observed: str, verifier_record: Dict[str, Any]) -> StateMachine:
         """VERIFYING -> VERIFICATION_FAILED."""
-        self.store.write_atomic("verifier-record.json", verifier_record)
         sm = self._require_state_for_event()
-        return self._apply(sm, STATE_VERIFICATION_FAILED, ACTOR_VERIFIER, head_observed=head_observed)
+        next_sm = sm.transition(
+            STATE_VERIFICATION_FAILED,
+            ACTOR_VERIFIER,
+            head_observed=head_observed,
+            head_required=self.context.current_authorized_head,
+        )
+        self.store.write_atomic("verifier-record.json", verifier_record)
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def verifier_passed(self, *, head_observed: str, verifier_record: Dict[str, Any]) -> StateMachine:
         """VERIFYING -> AWAITING_MERGE_AUTHORIZATION."""
-        self.store.write_atomic("verifier-record.json", verifier_record)
         sm = self._require_state_for_event()
-        return self._apply(sm, STATE_AWAITING_MERGE_AUTHORIZATION, ACTOR_CONTROLLER, head_observed=head_observed)
+        next_sm = sm.transition(
+            STATE_AWAITING_MERGE_AUTHORIZATION,
+            ACTOR_CONTROLLER,
+            head_observed=head_observed,
+            head_required=self.context.current_authorized_head,
+        )
+        self.store.write_atomic("verifier-record.json", verifier_record)
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def authorize_merge(self, auth: MergeAuthorization) -> StateMachine:
         """AWAITING_MERGE_AUTHORIZATION -> MERGE_AUTHORIZED.
 
+        Validates the transition before writing the artifact.
         Caller-supplied merge authorization is validated by the
         caller; the controller stores the authorization and applies
         the transition.
         """
         if not isinstance(auth, MergeAuthorization):
             raise ControllerError("auth must be a MergeAuthorization")
+        sm = self._require_state_for_event()
+        next_sm = sm.transition(
+            STATE_MERGE_AUTHORIZED,
+            ACTOR_HUMAN,
+            head_observed=auth.authorized_head,
+            head_required=self.context.current_authorized_head,
+        )
         auth_payload = auth.to_dict()
         auth_payload["_sha256"] = auth.compute_sha256()
         self.store.write_atomic("merge-authorization.json", auth_payload)
-        sm = self._require_state_for_event()
-        return self._apply(sm, STATE_MERGE_AUTHORIZED, ACTOR_HUMAN, head_observed=auth.authorized_head)
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def report_merged(self, record: MergeRecord) -> StateMachine:
         """MERGE_AUTHORIZED -> POST_MERGE_VERIFYING."""
         if not isinstance(record, MergeRecord):
             raise ControllerError("record must be a MergeRecord")
-        self.store.write_atomic("merge-record.json", record.to_dict())
         sm = self._require_state_for_event()
-        return self._apply(sm, STATE_POST_MERGE_VERIFYING, ACTOR_CONTROLLER, head_observed=record.authorized_head)
+        next_sm = sm.transition(
+            STATE_POST_MERGE_VERIFYING,
+            ACTOR_CONTROLLER,
+            head_observed=record.authorized_head,
+            head_required=self.context.current_authorized_head,
+        )
+        self.store.write_atomic("merge-record.json", record.to_dict())
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def report_complete(self) -> StateMachine:
         """POST_MERGE_VERIFYING -> COMPLETE."""
@@ -261,9 +327,16 @@ class Controller:
         """* -> BLOCKED."""
         if not isinstance(reason, str) or not reason:
             raise ControllerError("reason must be a non-empty string")
-        self.store.write_atomic("block.json", {"reason": reason, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
         sm = self._require_state_for_event()
-        return self._apply(sm, STATE_BLOCKED, ACTOR_CONTROLLER)
+        next_sm = sm.transition(
+            STATE_BLOCKED,
+            ACTOR_CONTROLLER,
+            head_observed=self.context.current_authorized_head,
+            head_required=self.context.current_authorized_head,
+        )
+        self.store.write_atomic("block.json", {"reason": reason, "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+        self.save_state_machine(next_sm)
+        return next_sm
 
     def verification_repair_started(self) -> StateMachine:
         """VERIFICATION_FAILED -> VERIFICATION_REPAIR."""

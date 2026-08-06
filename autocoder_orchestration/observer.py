@@ -181,6 +181,11 @@ class StrictObserver:
         log = anonymous_log or ObservationLog()
         first_qualifying: Optional[Observation] = None
         last_qualifying: Optional[Observation] = None
+        # Track the supervisor identity we observed at the start of the
+        # current interval. ANY change to PID or process-start identity
+        # resets the interval, not just the first/last comparison.
+        interval_pid: Optional[int] = None
+        interval_start_id: Optional[str] = None
         iter_count = 0
         while True:
             if self.max_iterations is not None and iter_count >= self.max_iterations:
@@ -189,25 +194,44 @@ class StrictObserver:
             snap = self._safe_fetch(expected_head)
             obs = self._classify(snap, expected_head)
             log.append(obs)
-            if obs.qualifying:
-                if first_qualifying is None:
-                    first_qualifying = obs
-                last_qualifying = obs
-                if (
-                    first_qualifying is not None
-                    and last_qualifying is not None
-                    and (last_qualifying.ts_monotonic - first_qualifying.ts_monotonic)
-                    >= self.quiet_window_seconds
-                ):
-                    # Also require PID and start-identity stability
-                    if first_qualifying.supervisor_pid == last_qualifying.supervisor_pid and \
-                       first_qualifying.process_start_identity == last_qualifying.process_start_identity:
-                        duration = last_qualifying.ts_monotonic - first_qualifying.ts_monotonic
-                        return log, True, duration
-            else:
+            if not obs.qualifying:
                 # Reset
                 first_qualifying = None
                 last_qualifying = None
+                interval_pid = None
+                interval_start_id = None
+                time.sleep(self.poll_interval_seconds)
+                continue
+            # Track identity at the start of the current interval.
+            if first_qualifying is None:
+                first_qualifying = obs
+                last_qualifying = obs
+                interval_pid = obs.supervisor_pid
+                interval_start_id = obs.process_start_identity
+            else:
+                # Reset on any identity change from the interval start.
+                if (
+                    obs.supervisor_pid != interval_pid
+                    or obs.process_start_identity != interval_start_id
+                ):
+                    first_qualifying = obs
+                    last_qualifying = obs
+                    interval_pid = obs.supervisor_pid
+                    interval_start_id = obs.process_start_identity
+                else:
+                    last_qualifying = obs
+            # Check span
+            if (
+                first_qualifying is not None
+                and last_qualifying is not None
+                and (last_qualifying.ts_monotonic - first_qualifying.ts_monotonic)
+                >= self.quiet_window_seconds
+                # And the entire interval has stable identity
+                and interval_pid == last_qualifying.supervisor_pid
+                and interval_start_id == last_qualifying.process_start_identity
+            ):
+                duration = last_qualifying.ts_monotonic - first_qualifying.ts_monotonic
+                return log, True, duration
             time.sleep(self.poll_interval_seconds)
         duration = (
             (last_qualifying.ts_monotonic - first_qualifying.ts_monotonic)

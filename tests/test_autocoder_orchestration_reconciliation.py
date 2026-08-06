@@ -1,6 +1,8 @@
 """Tests for autocoder_orchestration.reconciliation."""
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from autocoder_orchestration.reconciliation import (
@@ -46,9 +48,8 @@ class TestFinding:
         assert f.disposition == FindingDisposition.OPEN_VALID
 
     def test_invalid_provider_rejected(self) -> None:
-        with pytest.raises(ValueError):
-            f = _finding()
-            f = Finding(
+        with pytest.raises(ValueError, match="provider"):
+            Finding(
                 provider="bad/provider",
                 review_id="r1",
                 thread_id="t1",
@@ -58,12 +59,12 @@ class TestFinding:
                 is_outdated=False,
                 severity="x",
                 description="x",
-                description_hash="x",
+                description_hash=hashlib.sha256("x".encode()).hexdigest(),
                 disposition=FindingDisposition.OPEN_VALID,
             )
 
     def test_invalid_review_id_rejected(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="review_id"):
             Finding(
                 provider="coderabbitai",
                 review_id="r/1",
@@ -74,12 +75,12 @@ class TestFinding:
                 is_outdated=False,
                 severity="x",
                 description="x",
-                description_hash="x",
+                description_hash=hashlib.sha256("x".encode()).hexdigest(),
                 disposition=FindingDisposition.OPEN_VALID,
             )
 
     def test_invalid_thread_id_rejected(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="thread_id"):
             Finding(
                 provider="coderabbitai",
                 review_id="r1",
@@ -90,12 +91,12 @@ class TestFinding:
                 is_outdated=False,
                 severity="x",
                 description="x",
-                description_hash="x",
+                description_hash=hashlib.sha256("x".encode()).hexdigest(),
                 disposition=FindingDisposition.OPEN_VALID,
             )
 
     def test_invalid_head_sha_rejected(self) -> None:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="head_sha"):
             Finding(
                 provider="coderabbitai",
                 review_id="r1",
@@ -106,7 +107,7 @@ class TestFinding:
                 is_outdated=False,
                 severity="x",
                 description="x",
-                description_hash="x",
+                description_hash=hashlib.sha256("x".encode()).hexdigest(),
                 disposition=FindingDisposition.OPEN_VALID,
             )
 

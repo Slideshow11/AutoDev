@@ -69,16 +69,16 @@ def _threads() -> list:
     return []
 
 
-def _good_kwargs() -> dict:
+def _good_kwargs(expected_head: str = HEAD) -> dict:
     return dict(
-        expected_head=HEAD,
+        expected_head=expected_head,
         expected_base_sha="a79bb613a70db3d3bd659a5c8985ffcfc0835984",
         expected_base_branch="main",
         required_ci_jobs=("test (3.10)", "test (3.11)", "test (3.12)", "package-smoke", "provenance", "committed-state-scan"),
-        live_pr_payload=_open_pr_payload(),
-        live_check_runs=_check_runs(),
+        live_pr_payload=_open_pr_payload(head=expected_head),
+        live_check_runs=_check_runs(head=expected_head),
         live_threads=_threads(),
-        live_reviews=_reviews_at_head(),
+        live_reviews=_reviews_at_head(head=expected_head),
         body_reconciled=True,
         impl_worker_active=False,
         repair_worker_active=False,
@@ -105,11 +105,12 @@ def _good_kwargs() -> dict:
     )
 
 
-def _good_cert() -> ReadinessCertificate:
+def _good_cert(expected_head: str = HEAD) -> ReadinessCertificate:
     from autocoder_orchestration.readiness import ReadinessEngine
     from datetime import datetime, timezone, timedelta
     eng = ReadinessEngine(run_id="r1", repo="o/r", pr_number=2)
-    decision = eng.evaluate(**_good_kwargs())
+    kwargs = _good_kwargs(expected_head)
+    decision = eng.evaluate(**kwargs)
     assert decision.overall_passed
     now = datetime.now(tz=timezone.utc)
     return ReadinessCertificate(
@@ -259,91 +260,125 @@ class TestCandidateRefusal:
 
 
 # === Successful build ===
-class TestCandidateBuild:
-    def test_build_from_exact_head(self) -> None:
-        cert = _good_cert()
-        b = CandidateBuilder(**_builder_kwargs())
-        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
-        assert cand.exact_head == HEAD
-        # Source files
-        assert "autocoder_orchestration/__init__.py" in cand.source_files
-        aip = cand.source_files["autocoder_orchestration/__init__.py"]
-        assert len(aip["sha256"]) == 64
-        assert aip["size_bytes"] > 0
-        # AED source files
-        assert "aed_lifecycle/__init__.py" in cand.aed_source_files
+class _TmpGitRepo:
+    """A fixture that creates a real, committed Git repository."""
 
-    def test_build_refuses_unsafe_path(self) -> None:
-        cert = _good_cert()
+    def __init__(self, tmp_path):
+        self.root = str(tmp_path / "src_repo")
+        os.makedirs(self.root)
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"],
+                       cwd=self.root, check=True)
+        subprocess.run(["git", "config", "user.name", "Test"],
+                       cwd=self.root, check=True)
+        # Create a sample file and commit it
+        sample = os.path.join(self.root, "sample.py")
+        with open(sample, "w") as f:
+            f.write("# sample file\n")
+        subprocess.run(["git", "add", "sample.py"], cwd=self.root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=self.root, check=True)
+        self.head = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=self.root, text=True
+        ).strip()
+
+    def head_full(self):
+        return self.head
+
+
+@pytest.fixture
+def tmp_git_repo(tmp_path):
+    return _TmpGitRepo(tmp_path)
+
+
+class TestCandidateBuild:
+    def test_build_from_exact_head(self, tmp_git_repo) -> None:
+        cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
+        kwargs["expected_head"] = tmp_git_repo.head_full()
+        kwargs["file_paths_to_attach"] = ["sample.py"]
+        b = CandidateBuilder(**kwargs)
+        cand = b.build(cert, tmp_git_repo.root)
+        assert cand.exact_head == tmp_git_repo.head_full()
+        assert "sample.py" in cand.source_files
+        sf = cand.source_files["sample.py"]
+        assert len(sf["sha256"]) == 64
+        assert sf["size_bytes"] > 0
+
+    def test_build_refuses_unsafe_path(self, tmp_git_repo) -> None:
+        cert = _good_cert(tmp_git_repo.head_full())
+        kwargs = _builder_kwargs()
+        kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["../escape.py"]
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
-            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+            b.build(cert, tmp_git_repo.root)
 
-    def test_build_refuses_unsafe_head(self) -> None:
-        cert = _good_cert()
+    def test_build_refuses_unsafe_head(self, tmp_git_repo) -> None:
+        cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
         kwargs["expected_head"] = "not_sha"
+        kwargs["file_paths_to_attach"] = ["sample.py"]
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
-            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+            b.build(cert, tmp_git_repo.root)
 
-    def test_build_writes_files(self) -> None:
-        cert = _good_cert()
-        b = CandidateBuilder(**_builder_kwargs())
-        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+    def test_build_writes_files(self, tmp_git_repo) -> None:
+        import hashlib
+        cert = _good_cert(tmp_git_repo.head_full())
+        kwargs = _builder_kwargs()
+        kwargs["expected_head"] = tmp_git_repo.head_full()
+        kwargs["file_paths_to_attach"] = ["sample.py"]
+        b = CandidateBuilder(**kwargs)
+        cand = b.build(cert, tmp_git_repo.root)
         # Verify the file contents match
         out = subprocess.check_output(
-            ["git", "show", f"{HEAD}:autocoder_orchestration/__init__.py"],
-            cwd=str("/home" + "/" + "max" + "/" + "AutoDev"),
+            ["git", "show", f"{tmp_git_repo.head_full()}:sample.py"],
+            cwd=tmp_git_repo.root,
         )
-        import hashlib
-        assert hashlib.sha256(out).hexdigest() == cand.source_files["autocoder_orchestration/__init__.py"]["sha256"]
+        assert hashlib.sha256(out).hexdigest() == cand.source_files["sample.py"]["sha256"]
 
 
 # === Input hash checks ===
 class TestCandidateInputHashes:
-    def test_input_hash_mismatch_rejected(self) -> None:
-        cert = _good_cert()
+    def test_input_hash_mismatch_rejected(self, tmp_git_repo) -> None:
+        cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
-        kwargs["expected_input_hashes"] = {
-            "file:autocoder_orchestration/__init__.py": "z" * 64,
-        }
+        kwargs["expected_head"] = tmp_git_repo.head_full()
+        kwargs["file_paths_to_attach"] = ["sample.py"]
+        kwargs["expected_input_hashes"] = {"file:sample.py": "z" * 64}
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
-            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+            b.build(cert, tmp_git_repo.root)
 
-    def test_input_hash_match_accepted(self) -> None:
-        cert = _good_cert()
-        # Get the actual sha of the file at HEAD
-        out = subprocess.check_output(
-            ["git", "show", f"{HEAD}:autocoder_orchestration/__init__.py"],
-            cwd=str("/home" + "/" + "max" + "/" + "AutoDev"),
-        )
+    def test_input_hash_match_accepted(self, tmp_git_repo) -> None:
         import hashlib
+        cert = _good_cert(tmp_git_repo.head_full())
+        out = subprocess.check_output(
+            ["git", "show", f"{tmp_git_repo.head_full()}:sample.py"],
+            cwd=tmp_git_repo.root,
+        )
         actual = hashlib.sha256(out).hexdigest()
         kwargs = _builder_kwargs()
-        kwargs["expected_input_hashes"] = {
-            "file:autocoder_orchestration/__init__.py": actual,
-        }
+        kwargs["expected_head"] = tmp_git_repo.head_full()
+        kwargs["file_paths_to_attach"] = ["sample.py"]
+        kwargs["expected_input_hashes"] = {"file:sample.py": actual}
         b = CandidateBuilder(**kwargs)
-        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+        cand = b.build(cert, tmp_git_repo.root)
         assert cand is not None
 
 
 # === Repository isolation ===
 class TestRepoIsolation:
-    """Repository A state cannot enter repository B.
-
-    The candidate binds the exact head from the AutoDev repo and the
-    exact AED reference. Mixing repositories must fail.
+    """The candidate binds the exact head from a specific repository.
+    Mixing repositories must fail.
     """
 
-    def test_repo_owner_used_in_candidate(self) -> None:
-        cert = _good_cert()
+    def test_repo_owner_used_in_candidate(self, tmp_git_repo) -> None:
+        cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
+        kwargs["expected_head"] = tmp_git_repo.head_full()
+        kwargs["file_paths_to_attach"] = ["sample.py"]
         kwargs["repo"] = "DifferentOwner/DifferentRepo"
         b = CandidateBuilder(**kwargs)
-        cand = b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+        cand = b.build(cert, tmp_git_repo.root)
         assert cand.repo == "DifferentOwner/DifferentRepo"

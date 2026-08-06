@@ -150,7 +150,7 @@ class TestVerifierRoleGuard:
             "created_at": "2026-08-05T22:00:00Z",
             "repo_owner": "o",
             "repo_name": "r",
-            "local_checkout": str("/home" + "/" + "max" + "/" + "AutoDev"),
+            "local_checkout": str(tmp_path),
             "base_branch": "main",
             "authorized_base_sha": "a" * 64,
             "feature_branch": "feat/test",
@@ -175,7 +175,7 @@ class TestVerifierRoleGuard:
         guard = VerifierRoleGuard(h, store)
         ok, reason = guard.validate(
             verifier_identity=ProcessIdentity(pid=42, start_id="abc"),
-            verifier_executable_path=str("/home" + "/" + "max" + "/" + "AutoDev" + "/" + "scripts" + "/" + "verifier"),
+            verifier_executable_path=str(tmp_path / "scripts" / "verifier"),
             write_credentials_present=False,
         )
         assert not ok
