@@ -263,9 +263,18 @@
       "source_sha256": null,
       "transformation_classification": "standalone_ci_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+    },
+    {
+      "destination_path": "docs/CONTROL_PLANE_ADR.md",
+      "destination_sha256": "84aa10973ad4aad267d910951ee00ac394e105ba66bbc9dce6c629a8d2cc0cf5",
+      "destination_size_bytes": 11412,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_documentation_addition",
+      "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }
   ],
-  "last_modification_note": "Post-PR-4 review repair: INVARIANTS.md continued-header change (title -> \"continued\"); fix asserting-test name reference (test_mandatory_sidecar_blocks_merge_runner -> test_missing_candidate_digest_blocks_merge_runner + test_missing_verifier_digest_blocks_merge_runner); docs/CONTROL_PLANE_ADR.md fixed \"four artifacts\" -> \"five artifacts\".",
+  "last_modification_note": "Post-PR-4 review repair pass 2: added docs/CONTROL_PLANE_ADR.md to manifest; updated INVARIANTS.md hash; repaired pagination in cli.py; completed state transition persistence; tightened test mocks with assert_not_called().",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -287,5 +296,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-06T13:55:00Z"
+  "updated_at_utc": "2026-08-06T18:30:00Z"
 }

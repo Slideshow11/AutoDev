@@ -488,28 +488,83 @@ def cmd_merge(args: argparse.Namespace) -> int:
             exit_code=EXIT_STATE,
         )
 
-    # Fetch live thread inventory via gh graphql.
+    # Fetch live thread inventory via gh graphql with pagination.
+    # An incomplete inventory is treated as a guard failure (C-22):
+    # missing data must never weaken merge authorization. We follow
+    # reviewThreads.pageInfo.hasNextPage and fail closed if another
+    # page exists or if the query fails.
+    live_thread_inventory = None
     try:
-        thread_proc = subprocess.run(
-            ["gh", "api", "graphql", "-f",
-             "query={{repository(owner:{owner},name:{repo}){{pullRequest(number:{pr}){{reviewThreads(first:100){{nodes{{isResolved isOutdated}}}}}}}}}}".format(
-                 owner=ctx.repo_owner, repo=ctx.repo_name, pr=auth.pr_number,
-             )],
-            capture_output=True, text=True, timeout=30,
-        )
-        if thread_proc.returncode == 0:
+        all_nodes = []
+        has_next = True
+        cursor = "null"
+        page_count = 0
+        while has_next:
+            page_count += 1
+            if page_count > 10:
+                # Defensive: refuse if more than 10 pages of review
+                # threads exist (well above realistic limits).
+                raise RuntimeError(
+                    f"reviewThreads pagination exceeded {page_count} pages"
+                )
+            q = (
+                "query($owner:String!,$name:String!,$pr:Int!,$cursor:String){"
+                "repository(owner:$owner,name:$name){"
+                "pullRequest(number:$pr){"
+                "reviewThreads(first:100, after:$cursor){"
+                "pageInfo { hasNextPage endCursor }"
+                "nodes { isResolved isOutdated }"
+                "}}}"
+            )
+            thread_proc = subprocess.run(
+                ["gh", "api", "graphql",
+                 "-f", f"query={q}",
+                 "-F", f"owner={ctx.repo_owner}",
+                 "-F", f"name={ctx.repo_name}",
+                 "-F", f"pr={auth.pr_number}",
+                 "-F", f"cursor={cursor}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if thread_proc.returncode != 0:
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"failed: rc={thread_proc.returncode} "
+                    f"stderr={thread_proc.stderr.strip()}"
+                )
             td = json.loads(thread_proc.stdout)
-            nodes = td.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
-            unresolved_current = sum(1 for n in nodes if not n.get("isResolved") and not n.get("isOutdated"))
-            unresolved_outdated = sum(1 for n in nodes if not n.get("isResolved") and n.get("isOutdated"))
-            live_thread_inventory = {
-                "unresolved_current": unresolved_current,
-                "unresolved_outdated": unresolved_outdated,
-            }
-        else:
-            live_thread_inventory = {"unresolved_current": 0, "unresolved_outdated": 0}
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        live_thread_inventory = {"unresolved_current": 0, "unresolved_outdated": 0}
+            page = (
+                td.get("data", {}).get("repository", {})
+                  .get("pullRequest", {}).get("reviewThreads", {})
+            )
+            if not page:
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"returned no data: {thread_proc.stdout[:200]!r}"
+                )
+            all_nodes.extend(page.get("nodes", []))
+            page_info = page.get("pageInfo", {})
+            has_next = bool(page_info.get("hasNextPage"))
+            cursor = page_info.get("endCursor") or "null"
+
+        unresolved_current = sum(
+            1 for n in all_nodes
+            if not n.get("isResolved") and not n.get("isOutdated")
+        )
+        unresolved_outdated = sum(
+            1 for n in all_nodes
+            if not n.get("isResolved") and n.get("isOutdated")
+        )
+        live_thread_inventory = {
+            "unresolved_current": unresolved_current,
+            "unresolved_outdated": unresolved_outdated,
+        }
+    except (subprocess.CalledProcessError, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        # Fail closed: incomplete thread evidence blocks the merge.
+        return _emit(
+            {"error": f"failed to fetch complete thread inventory: {exc!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
 
     # Fetch live CI inventory.
     live_ci_state = {"all_required_passing": False, "coderabbit_passing": False,
@@ -557,7 +612,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
     working_tree_clean = (wt_clean_proc.returncode == 0 and wt_clean_proc.stdout.strip() == "")
 
     # Resolve canonical artifact paths for the production transaction.
-    evidence_root = Path(str(args.evidence_root)) if hasattr(args, "evidence_root") and args.evidence_root else Path(store.state_root)
+    # Per C-24, the three named roots must be independent. When the
+    # operator does not pass --evidence-root, default it to a peer
+    # directory under the same parent as run_state_root; the validator
+    # refuses paths that resolve to the same directory.
+    state_root_path = Path(str(store.state_root))
+    if hasattr(args, "evidence_root") and args.evidence_root:
+        evidence_root = Path(str(args.evidence_root))
+    else:
+        evidence_root = state_root_path.parent / "evidence"
     authorization_path = evidence_root / "authorization.json"
     candidate_path = evidence_root / "candidate.json"
     verifier_path = evidence_root / "verifier.json"
@@ -588,13 +651,31 @@ def cmd_merge(args: argparse.Namespace) -> int:
             exit_code=EXIT_GUARD,
         )
 
+    # Persist the COMPLETE state transition on the run-state side, so a
+    # subsequent restart sees the controller in COMPLETE even if the
+    # CLI process exits before a separate post-merge verify invocation.
+    final_state = record.final_state
+    state_warning: Optional[str] = None
+    try:
+        controller = Controller(ctx, store)
+        sm = controller.report_complete()
+        final_state = sm.current_state
+    except (ControllerError, StateStoreError) as e:
+        # The merge record is already durable. The state transition is
+        # best-effort bookkeeping; surface as a warning but still
+        # report success because the merge was completed.
+        state_warning = f"state-machine transition failed: {e!r}"
+
+    payload = {
+        "run_id": auth.run_id,
+        "state": final_state,
+        "squash_merge_commit": record.squash_merge_commit,
+        "merge_record_digest": rec_digest,
+    }
+    if state_warning is not None:
+        payload["warning"] = state_warning
     return _emit(
-        {
-            "run_id": auth.run_id,
-            "state": record.final_state,
-            "squash_merge_commit": record.squash_merge_commit,
-            "merge_record_digest": rec_digest,
-        },
+        payload,
         json_mode=args.json,
         exit_code=EXIT_OK,
     )
@@ -688,7 +769,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ma.add_argument("--keep-branch", action="store_true")
     ma.add_argument("--notes", default="")
 
-    sub.add_parser("merge", parents=[common])
+    m = sub.add_parser("merge", parents=[common])
+    m.add_argument("--evidence-root", default="")
+    m.add_argument("--pr-number", type=int, default=0)
 
     args = parser.parse_args(argv)
     try:

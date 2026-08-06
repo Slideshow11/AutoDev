@@ -843,9 +843,9 @@
   },
   "extracted_manifest_match": {
     "manifest_file": "provenance/aed-pr417-source-manifest.json",
-    "manifest_files_count": 27,
+    "manifest_files_count": 28,
     "manifest_source_files_count": 17,
-    "manifest_standalone_additions_count": 10,
+    "manifest_standalone_additions_count": 11,
     "all_manifest_source_paths_classified_as_extracted": true,
     "manifest_records": [
       {
@@ -7588,5 +7588,12 @@
       "package": "aed_tests",
       "rationale": "AED tests covering controller, runner, mutation policy, ledger, lifecycle states, PR gate, tasker, codex response, etc.; the supervisor-v1 tests have been migrated to AutoDev (tests/test_autocoder_supervisor*.py)."
     }
-  ]
+  ],
+  "metrics": {
+    "extracted_manifest_match": {
+      "manifest_files_count": 28,
+      "manifest_source_files_count": 17,
+      "manifest_standalone_additions_count": 11
+    }
+  }
 }

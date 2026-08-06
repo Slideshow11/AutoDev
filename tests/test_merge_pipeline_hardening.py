@@ -1552,17 +1552,12 @@ class HardeningRepairTests(unittest.TestCase):
             live_thread_inventory={},
             working_tree_clean=True,
         )
-        runner_calls = []
-        def fake_runner(*args, **kwargs):
-            runner_calls.append((args, kwargs))
-            return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake_runner,
-        ):
+        ) as safe_run:
             with self.assertRaises(MergeInputsCollide):
                 execute_guarded_merge_transaction(inputs)
-        self.assertEqual(runner_calls, [])
+        safe_run.assert_not_called()
 
     def test_artifact_path_collision_blocks(self):
         """C-24: the four artifact paths must also be distinct from each other."""
@@ -1572,10 +1567,10 @@ class HardeningRepairTests(unittest.TestCase):
         inputs = self._inputs(paths)
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            return_value={"returncode": 0, "stdout": "", "stderr": "", "timed_out": False},
-        ):
+        ) as safe_run:
             with self.assertRaises(MergeInputsCollide):
                 execute_guarded_merge_transaction(inputs)
+        safe_run.assert_not_called()
 
     def test_missing_candidate_head_sha_blocks(self):
         """C-22: candidate payload missing head.head_sha is a hard failure (C-22)."""
@@ -1597,8 +1592,14 @@ class HardeningRepairTests(unittest.TestCase):
         # Actually the sidecar is now invalid. Recreate the artifact fully.
         write_artifact(paths["auth"], auth)
         inputs = self._inputs(paths)
-        with self.assertRaises(MergeAuthorizationMalformed) as ctx:
-            execute_guarded_merge_transaction(inputs)
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+        ) as safe_run:
+            with self.assertRaises(MergeAuthorizationMalformed) as ctx:
+                execute_guarded_merge_transaction(inputs)
+        # Mandatory: the merge runner must NOT have been invoked when the
+        # integrity check fails (C-25: guarded transaction).
+        safe_run.assert_not_called()
         self.assertIn("head.head_sha", str(ctx.exception).lower())
 
     def test_missing_verifier_candidate_sha256_blocks(self):
@@ -1618,8 +1619,12 @@ class HardeningRepairTests(unittest.TestCase):
             f.write(json.dumps(auth, sort_keys=True, separators=(",", ":")))
         write_artifact(paths["auth"], auth)
         inputs = self._inputs(paths)
-        with self.assertRaises(MergeAuthorizationMalformed) as ctx:
-            execute_guarded_merge_transaction(inputs)
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+        ) as safe_run:
+            with self.assertRaises(MergeAuthorizationMalformed) as ctx:
+                execute_guarded_merge_transaction(inputs)
+        safe_run.assert_not_called()
         self.assertIn("candidate_sha256", str(ctx.exception).lower())
 
     def test_c28_reconciliation_failure_writes_record_before_raising(self):
