@@ -61,7 +61,7 @@ class Finding:
             raise ValueError(f"invalid thread_id: {self.thread_id!r}")
         # Accept either 40-character SHA-1 or 64-character object ID.
         if (len(self.head_sha) != 40 and len(self.head_sha) != 64) or not all(c in "0123456789abcdef" for c in self.head_sha):
-            raise ValueError(f"head_sha must be 40 or 64 lowercase hex chars")
+            raise ValueError("head_sha must be 40 or 64 lowercase hex chars")
 
     def is_resolvable(self) -> bool:
         return self.disposition in (

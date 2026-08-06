@@ -241,22 +241,22 @@ class TestCandidateRefusal:
         with pytest.raises(CandidateNotReady):
             b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
 
-    def test_refuses_head_mismatch(self) -> None:
+    def test_refuses_head_mismatch(self, tmp_git_repo) -> None:
         # Cert expects HEAD, builder expects different head
-        cert = _good_cert()
+        cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
-        kwargs["expected_head"] = "z" * 64
+        kwargs["expected_head"] = "z" * 40
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateHeadMismatch):
-            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+            b.build(cert, tmp_git_repo.root)
 
-    def test_refuses_run_id_mismatch(self) -> None:
-        cert = _good_cert()
+    def test_refuses_run_id_mismatch(self, tmp_git_repo) -> None:
+        cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
         kwargs["run_id"] = "different-run"
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateNotReady):
-            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+            b.build(cert, tmp_git_repo.root)
 
 
 # === Successful build ===
@@ -271,6 +271,11 @@ class _TmpGitRepo:
                        cwd=self.root, check=True)
         subprocess.run(["git", "config", "user.name", "Test"],
                        cwd=self.root, check=True)
+        # Add an origin remote so the candidate builder can validate it.
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://github.com/o/r"],
+            cwd=self.root, check=True,
+        )
         # Create a sample file and commit it
         sample = os.path.join(self.root, "sample.py")
         with open(sample, "w") as f:
@@ -374,11 +379,26 @@ class TestRepoIsolation:
     """
 
     def test_repo_owner_used_in_candidate(self, tmp_git_repo) -> None:
+        """When self.repo is "DifferentOwner/DifferentRepo" but the checkout
+        is for "o/r", the build must fail with CandidateError.
+        """
+        from autocoder_orchestration.candidate import CandidateError
         cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["sample.py"]
         kwargs["repo"] = "DifferentOwner/DifferentRepo"
         b = CandidateBuilder(**kwargs)
+        with pytest.raises(CandidateError):
+            b.build(cert, tmp_git_repo.root)
+
+    def test_repo_owner_matched_in_candidate(self, tmp_git_repo) -> None:
+        """When self.repo matches the checkout origin, the build succeeds."""
+        cert = _good_cert(tmp_git_repo.head_full())
+        kwargs = _builder_kwargs()
+        kwargs["expected_head"] = tmp_git_repo.head_full()
+        kwargs["file_paths_to_attach"] = ["sample.py"]
+        kwargs["repo"] = "o/r"
+        b = CandidateBuilder(**kwargs)
         cand = b.build(cert, tmp_git_repo.root)
-        assert cand.repo == "DifferentOwner/DifferentRepo"
+        assert cand.repo == "o/r"

@@ -254,23 +254,32 @@ class StateStore:
         equals ``expected_revision``.
 
         The operation is wrapped in a stable advisory lock keyed by
-        a dedicated coordination-lock inode. The lock covers:
+        a dedicated coordination-lock inode. The lock file is
+        created once on first use and persists across calls so its
+        inode is stable. A blocking ``LOCK_EX`` is used so concurrent
+        callers serialize through the lock instead of failing fast.
+
+        The lock covers:
         - revision read
         - expected-revision comparison
         - new-state construction
         - durable write
         - revision update
-        A concurrent caller attempting the same CAS will block on
-        the lock until the original caller finishes.
         """
         safe = _safe_path(rel_path)
+        # Flatten the safe name for the lock file (no slashes allowed)
+        flat = safe.replace("/", "_")
         full = Path(self.state_root) / safe
         # Coordination lock file (separate from the lease lock).
-        coord_lock_path = Path(self.state_root) / f".{safe}.cas.lock"
+        # Use a separate file under state_root; do NOT unlink it after
+        # release, so its inode remains stable across CAS calls.
+        coord_lock_path = Path(self.state_root) / f".cas.lock.{flat}"
         fd = None
         try:
             fd = os.open(str(coord_lock_path), os.O_RDWR | os.O_CREAT, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Blocking exclusive lock: a concurrent caller waits until
+            # the original caller finishes.
+            fcntl.flock(fd, fcntl.LOCK_EX)
         except OSError as e:
             if fd is not None:
                 os.close(fd)
@@ -284,11 +293,9 @@ class StateStore:
                 )
             return self.write_atomic(safe, payload)
         finally:
+            # Release the flock but do NOT unlink. Keeping the file
+            # is essential so its inode stays stable.
             os.close(fd)
-            try:
-                os.unlink(coord_lock_path)
-            except OSError:
-                pass
 
     def append_journal(self, rel_path: str, entry: dict) -> None:
         safe = _safe_path(rel_path)

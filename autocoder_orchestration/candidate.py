@@ -210,6 +210,12 @@ class CandidateBuilder:
             raise CandidateNotReady(
                 f"readiness decision did not pass: {[g.gate for g in readiness.decision.failed_gates()]}"
             )
+        # Validate the checkout's remote against self.repo before
+        # constructing the candidate. The remote origin URL is
+        # compared to "<owner>/<repo>". A mismatch indicates the
+        # candidate would carry evidence from one repository under
+        # another's identity.
+        self._validate_repo_checkout(auto_repo_root)
         if readiness.decision.run_id != self.run_id:
             raise CandidateNotReady(
                 f"readiness run_id {readiness.decision.run_id!r} != "
@@ -306,6 +312,45 @@ class CandidateBuilder:
         if p.exists() and p.is_symlink():
             raise ValueError(f"{label} must not be a symlink: {path!r}")
         return path
+
+    def _validate_repo_checkout(self, auto_repo_root: str) -> None:
+        """Confirm the checkout's remote origin matches self.repo.
+
+        Reads `git remote get-url origin` and verifies it ends with
+        "<self.repo_owner>/<self.repo_name>". Refuses the build on
+        a mismatch so a candidate cannot carry evidence from one
+        repository under another's identity.
+        """
+        try:
+            url = subprocess.check_output(
+                ["git", "remote", "get-url", "origin"],
+                cwd=auto_repo_root,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            ).decode("utf-8", errors="replace").strip()
+        except subprocess.TimeoutExpired as e:
+            raise CandidateError(
+                "git remote get-url origin timed out; cannot validate checkout"
+            ) from e
+        except subprocess.CalledProcessError as e:
+            raise CandidateError(
+                f"git remote get-url origin failed: {e!r}; cannot validate checkout"
+            ) from e
+        # The remote URL may be https://github.com/<owner>/<repo>.git
+        # or git@github.com:<owner>/<repo>.git. Strip prefixes/suffixes.
+        url_clean = url.removesuffix(".git")
+        for prefix in (
+            "https://github.com/",
+            "http://github.com/",
+            "git@github.com:",
+        ):
+            if url_clean.startswith(prefix):
+                url_clean = url_clean[len(prefix):]
+                break
+        if url_clean != self.repo:
+            raise CandidateError(
+                f"checkout origin {url!r} does not match builder repo {self.repo!r}"
+            )
 
     def _git_show_sha(self, repo_root: str, head: str, path: str) -> tuple[str, int]:
         if not isinstance(path, str) or not path:

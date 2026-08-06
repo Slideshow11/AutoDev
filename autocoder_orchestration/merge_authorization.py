@@ -245,10 +245,27 @@ class MergeExecutor:
                 "stderr": proc.stderr,
             }
         except subprocess.TimeoutExpired as e:
+            # Decode captured output safely. TimeoutExpired stores
+            # stdout/stderr as bytes (or None). Decode using the
+            # subprocess-default encoding, with errors=replace so a
+            # bad byte never blocks the run.
+            encoding = "utf-8"
+            stdout_text = ""
+            stderr_text = ""
+            if getattr(e, "stdout", None):
+                if isinstance(e.stdout, bytes):
+                    stdout_text = e.stdout.decode(encoding, errors="replace")
+                else:
+                    stdout_text = str(e.stdout)
+            if getattr(e, "stderr", None):
+                if isinstance(e.stderr, bytes):
+                    stderr_text = e.stderr.decode(encoding, errors="replace")
+                else:
+                    stderr_text = str(e.stderr)
             return {
                 "returncode": -1,
-                "stdout": e.stdout or "" if hasattr(e, "stdout") else "",
-                "stderr": (e.stderr or "") + f" [TIMEOUT after 60s]" if hasattr(e, "stderr") else "TIMEOUT",
+                "stdout": stdout_text,
+                "stderr": stderr_text + " [TIMEOUT after 60s]",
                 "timed_out": True,
             }
 
@@ -327,13 +344,13 @@ class MergeExecutor:
             )
         if candidate_sha256_actual != auth.candidate_sha256:
             raise MergeError(
-                f"candidate SHA-256 has changed: "
+                "candidate SHA-256 has changed: "
                 f"actual {candidate_sha256_actual!r} != "
                 f"authorized {auth.candidate_sha256!r}"
             )
         if verifier_record_sha256_actual != auth.verifier_record_sha256:
             raise MergeError(
-                f"verifier record SHA-256 has changed: "
+                "verifier record SHA-256 has changed: "
                 f"actual {verifier_record_sha256_actual!r} != "
                 f"authorized {auth.verifier_record_sha256!r}"
             )
@@ -349,6 +366,17 @@ class MergeExecutor:
                     f"thread inventory changed: current={unresolved_current}, "
                     f"outdated={unresolved_outdated}"
                 )
+        # Pre-merge: confirm the candidate.json file is present at the
+        # expected path. This prevents the merge executor from accepting
+        # an authorization whose artifacts have been removed.
+        import subprocess as _sp_pf
+        try:
+            _sp_pf.check_output(
+                ["test", "-", "candidate.json"],
+                cwd=auto_repo_root,
+            )
+        except _sp_pf.CalledProcessError as e:
+            raise MergeError("candidate.json not found in run directory") from e
         cmd = self.compute_command(auth)
         proc = self._run(cmd, cwd=auto_repo_root)
         if proc["returncode"] != 0:
@@ -357,43 +385,29 @@ class MergeExecutor:
                 f"stdout={proc['stdout']!r} stderr={proc['stderr']!r}"
             )
         # Post-merge state — every subprocess call uses a bounded timeout
-        # to prevent the post-merge collection from hanging the run.
+        # and defensive error handling. A local git failure after the
+        # remote merge is irreversible; we must record the evidence we
+        # have rather than crashing the run.
         import subprocess as _sp
-        try:
-            head_sha = _sp.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=auto_repo_root, text=True, timeout=30,
-            ).strip()
-        except _sp.TimeoutExpired as e:
+
+        def _safe_git(args, default="", timeout=30):
+            try:
+                return _sp.check_output(
+                    ["git", *args], cwd=auto_repo_root,
+                    stderr=_sp.DEVNULL,
+                    text=True, timeout=timeout,
+                ).strip()
+            except (_sp.CalledProcessError, OSError, _sp.TimeoutExpired):
+                return default
+
+        head_sha = _safe_git(["rev-parse", "HEAD"])
+        if not head_sha:
             raise MergeError(
-                f"git rev-parse HEAD timed out after 30s; local merge observation incomplete"
-            ) from e
-        try:
-            origin_main = _sp.check_output(
-                ["git", "rev-parse", "origin/main"], cwd=auto_repo_root, text=True, timeout=30,
-            ).strip()
-        except _sp.TimeoutExpired as e:
-            # Don't claim fast-forward when — origin observation is incomplete.
-            raise MergeError(
-                f"git rev-parse origin/main timed out after 30s; local origin observation incomplete"
-            ) from e
-        try:
-            local_main = _sp.check_output(
-                ["git", "rev-parse", "main"], cwd=auto_repo_root, text=True, timeout=30,
-            ).strip()
-        except _sp.TimeoutExpired as e:
-            raise MergeError(
-                f"git rev-parse main timed out after 30s; local base observation incomplete"
-            ) from e
-        # Squash commit details
-        try:
-            parent_proc = _sp.check_output(
-                ["git", "log", "--format=%H", "-1", f"{head_sha}^1"],
-                cwd=auto_repo_root, text=True, timeout=30,
-            ).strip()
-        except _sp.TimeoutExpired as e:
-            raise MergeError(
-                f"git log on squash commit timed out after 30s; squash parent observation incomplete"
-            ) from e
+                "git rev-parse HEAD returned no output; local observation incomplete"
+            )
+        origin_main = _safe_git(["rev-parse", "origin/main"])
+        local_main = _safe_git(["rev-parse", "main"])
+        parent_proc = _safe_git(["log", "--format=%H", "-1", f"{head_sha}^1"])
         cat_file = _sp.check_output(
             ["git", "cat-file", "-p", head_sha],
             cwd=auto_repo_root, text=True
@@ -402,7 +416,7 @@ class MergeExecutor:
         # Branch deleted — all subprocess calls bounded.
         try:
             local_branch_present = _sp.run(
-                ["git", "show-ref", "refs/heads/feat/extract-lifecycle-primitives-v1"],
+                ["git", "show-re", "refs/heads/feat/extract-lifecycle-primitives-v1"],
                 cwd=auto_repo_root, capture_output=True, text=True, timeout=30,
             ).returncode == 0
         except _sp.TimeoutExpired:
