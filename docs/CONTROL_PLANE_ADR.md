@@ -274,7 +274,7 @@ also used body hashes, footer hashes and sidecars in ways that
 required manual interpretation.
 
 Repair: every accepted control-plane artifact uses the same digest
-contract (C-21, C-22). All four artifacts — readiness certificate,
+contract (C-21, C-22). All five artifacts — readiness certificate,
 candidate, verifier record, merge authorization, merge record —
 are written and read through one module.
 

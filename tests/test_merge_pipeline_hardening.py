@@ -1453,5 +1453,204 @@ class EndToEndFlowTests(unittest.TestCase):
                 self.assertFalse(record.unauthorized_actions_not_taken["force_push"])
 
 
+# =============================================================
+#  Section M — Hardening repair tests (post-PR-4)
+# =============================================================
+
+
+class HardeningRepairTests(unittest.TestCase):
+    """Regression tests for the C-22, C-24, C-28 hardening repairs."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+        self.repo = self.tmpdir / "repo"
+        self.state = self.tmpdir / "state"
+        self.evidence = self.tmpdir / "evidence"
+        for d in (self.repo, self.state, self.evidence):
+            d.mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _build_artifacts(self):
+        candidate_payload = {"head": {"head_sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"}, "files": []}
+        candidate_blob = json.dumps(candidate_payload, sort_keys=True, separators=(",", ":"))
+        candidate_digest = hashlib.sha256(candidate_blob.encode()).hexdigest()
+        verifier_payload = {"verdict": "VERIFIED", "defects": [], "candidate_sha256": candidate_digest}
+        verifier_blob = json.dumps(verifier_payload, sort_keys=True, separators=(",", ":"))
+        verifier_digest = hashlib.sha256(verifier_blob.encode()).hexdigest()
+        auth = self.evidence / "authorization.json"
+        write_artifact(auth, {
+            "schema_version": "autocoder.merge_authorization.v1",
+            "run_id": "test",
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 3,
+            "authorized_head": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+            "candidate_sha256": candidate_digest,
+            "verifier_record_sha256": verifier_digest,
+            "base_branch": "main",
+            "feature_branch": "feat/test",
+            "merge_method": "squash",
+            "delete_branch": True,
+            "require_match_head_commit": True,
+            "author": "HUMAN_OPERATOR",
+        })
+        cand = self.evidence / "candidate.json"
+        write_artifact(cand, candidate_payload)
+        ver = self.evidence / "verifier.json"
+        write_artifact(ver, verifier_payload)
+        rec = self.evidence / "merge-record.json"
+        return {"auth": auth, "cand": cand, "ver": ver, "rec": rec}
+
+    def _inputs(self, paths, **overrides):
+        live_pr_payload = overrides.pop("live_pr_payload", {
+            "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+            "baseRefName": "main", "mergeable": "MERGEABLE",
+            "autoMergeRequest": None,
+        })
+        live_ci_state = overrides.pop("live_ci_state", {"all_required_passing": True, "coderabbit_passing": True})
+        live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
+        live_thread_inventory = overrides.pop("live_thread_inventory", {"unresolved_current": 0, "unresolved_outdated": 0})
+        working_tree_clean = overrides.pop("working_tree_clean", True)
+        return MergeTransactionInputs(
+            authorization_artifact_path=paths["auth"],
+            candidate_artifact_path=paths["cand"],
+            verifier_artifact_path=paths["ver"],
+            merge_record_artifact_path=paths["rec"],
+            repository_checkout=self.repo,
+            run_state_root=self.state,
+            evidence_root=self.evidence,
+            live_pr_payload=live_pr_payload,
+            live_ci_state=live_ci_state,
+            live_review_state=live_review_state,
+            live_thread_inventory=live_thread_inventory,
+            working_tree_clean=working_tree_clean,
+        )
+
+    def test_normalized_path_collisions_block(self):
+        """C-24: paths that resolve to the same directory (after symlink/./..) collide."""
+        # The validator runs BEFORE artifact reads, so we can use a
+        # totally synthetic inputs that does not require any artifacts.
+        alias_dir = self.tmpdir / "alias_evidence"
+        try:
+            alias_dir.symlink_to(self.tmpdir / "state")
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks not supported on this filesystem")
+        # Inputs with evidence_root == alias of run_state_root.
+        inputs = MergeTransactionInputs(
+            authorization_artifact_path=self.tmpdir / "auth.json",
+            candidate_artifact_path=self.tmpdir / "cand.json",
+            verifier_artifact_path=self.tmpdir / "ver.json",
+            merge_record_artifact_path=self.tmpdir / "rec.json",
+            repository_checkout=self.tmpdir / "repo",
+            run_state_root=self.tmpdir / "state",
+            evidence_root=alias_dir,
+            live_pr_payload={},
+            live_ci_state={},
+            live_review_state={},
+            live_thread_inventory={},
+            working_tree_clean=True,
+        )
+        runner_calls = []
+        def fake_runner(*args, **kwargs):
+            runner_calls.append((args, kwargs))
+            return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+            side_effect=fake_runner,
+        ):
+            with self.assertRaises(MergeInputsCollide):
+                execute_guarded_merge_transaction(inputs)
+        self.assertEqual(runner_calls, [])
+
+    def test_artifact_path_collision_blocks(self):
+        """C-24: the four artifact paths must also be distinct from each other."""
+        paths = self._build_artifacts()
+        # Make the merge record path collide with the authorization path.
+        paths["rec"] = paths["auth"].parent / paths["auth"].name
+        inputs = self._inputs(paths)
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+            return_value={"returncode": 0, "stdout": "", "stderr": "", "timed_out": False},
+        ):
+            with self.assertRaises(MergeInputsCollide):
+                execute_guarded_merge_transaction(inputs)
+
+    def test_missing_candidate_head_sha_blocks(self):
+        """C-22: candidate payload missing head.head_sha is a hard failure (C-22)."""
+        paths = self._build_artifacts()
+        # Write a candidate with no head.head_sha.
+        write_artifact(paths["cand"], {"files": []})
+        # Recompute the digest so the authorization matches the new file.
+        cand_blob = json.dumps({"files": []}, sort_keys=True, separators=(",", ":"))
+        cand_digest = hashlib.sha256(cand_blob.encode()).hexdigest()
+        # Authorization now points to a different digest; this is a
+        # different failure mode. Patch the verifier to match.
+        write_artifact(paths["ver"], {"verdict": "VERIFIED", "defects": [], "candidate_sha256": cand_digest})
+        # Update authorization's candidate_sha256 to match.
+        auth = json.loads(open(paths["auth"]).read())
+        auth["candidate_sha256"] = cand_digest
+        with open(paths["auth"], "w") as f:
+            f.write(json.dumps(auth, sort_keys=True, separators=(",", ":")))
+        # Move the sidecar (no, just regenerate it).
+        # Actually the sidecar is now invalid. Recreate the artifact fully.
+        write_artifact(paths["auth"], auth)
+        inputs = self._inputs(paths)
+        with self.assertRaises(MergeAuthorizationMalformed) as ctx:
+            execute_guarded_merge_transaction(inputs)
+        self.assertIn("head.head_sha", str(ctx.exception).lower())
+
+    def test_missing_verifier_candidate_sha256_blocks(self):
+        """C-22: verifier record missing candidate_sha256 is a hard failure."""
+        paths = self._build_artifacts()
+        # Build a candidate that matches the existing digest.
+        cand_payload = {"head": {"head_sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"}, "files": []}
+        cand_blob = json.dumps(cand_payload, sort_keys=True, separators=(",", ":"))
+        cand_digest = hashlib.sha256(cand_blob.encode()).hexdigest()
+        write_artifact(paths["cand"], cand_payload)
+        # Verifier missing candidate_sha256.
+        write_artifact(paths["ver"], {"verdict": "VERIFIED", "defects": []})
+        # Update authorization.
+        auth = json.loads(open(paths["auth"]).read())
+        auth["candidate_sha256"] = cand_digest
+        with open(paths["auth"], "w") as f:
+            f.write(json.dumps(auth, sort_keys=True, separators=(",", ":")))
+        write_artifact(paths["auth"], auth)
+        inputs = self._inputs(paths)
+        with self.assertRaises(MergeAuthorizationMalformed) as ctx:
+            execute_guarded_merge_transaction(inputs)
+        self.assertIn("candidate_sha256", str(ctx.exception).lower())
+
+    def test_c28_reconciliation_failure_writes_record_before_raising(self):
+        """C-28: a failed reconciliation still writes the merge record."""
+        paths = self._build_artifacts()
+        inputs = self._inputs(paths)
+        # Mock the merge subprocess to succeed, but make the
+        # reconciliation fail by stubbing it to raise.
+        def fake_reconcile(**kwargs):
+            raise MergeError("simulated reconciliation failure")
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+            return_value={"returncode": 0, "stdout": "", "stderr": "", "timed_out": False},
+        ):
+            with mock.patch(
+                "autocoder_orchestration.merge_authorization.reconcile_after_merge",
+                side_effect=fake_reconcile,
+            ):
+                with self.assertRaises(MergeError):
+                    execute_guarded_merge_transaction(inputs)
+        # The merge record MUST exist on disk despite the failure.
+        self.assertTrue(paths["rec"].exists())
+        self.assertTrue(Path(str(paths["rec"]) + ".sha256").exists())
+        # The record's unavailable_observations should include the
+        # reconciliation failure.
+        record = read_artifact(paths["rec"]).payload
+        self.assertTrue(any(
+            "reconcile_after_merge failed" in s
+            for s in record["unavailable_observations"]
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

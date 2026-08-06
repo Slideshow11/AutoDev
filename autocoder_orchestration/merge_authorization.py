@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -291,7 +292,7 @@ class MergeRecord:
 
 # === Helpers ===
 
-_LOWER_HEX_RE = __import__("re").compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+_LOWER_HEX_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
 
 
 def _check_sha(value: str, label: str) -> None:
@@ -304,7 +305,16 @@ def _utc_now() -> str:
 
 
 def _normalize_path(path: str | os.PathLike) -> Path:
-    return Path(os.path.abspath(os.path.expanduser(os.fspath(path))))
+    """Resolve a path to its canonical form.
+
+    Uses :meth:`Path.resolve` so symlinks, ``.``, ``..`` and trailing
+    slashes all collapse to a single canonical key. The path is
+    resolved relative to the current working directory if it is
+    relative; absolute paths are returned as-is. The file is NOT
+    required to exist (we resolve the path string, not the path
+    object).
+    """
+    return Path(os.path.expanduser(os.fspath(path))).resolve()
 
 
 def _ensure_distinct_paths(*paths: Tuple[str, Path]) -> None:
@@ -314,17 +324,48 @@ def _ensure_distinct_paths(*paths: Tuple[str, Path]) -> None:
     artifact root must be independent. The production merge path refuses
     to proceed if the caller configures two roots that resolve to the
     same directory.
+
+    Each path is normalized via :func:`_normalize_path` so symlinks,
+    ``.``, ``..`` and trailing slashes all collapse to the same key.
     """
     seen: Dict[str, str] = {}
     for label, p in paths:
         if p is None:
             continue
-        key = str(p)
+        key = str(_normalize_path(p))
         if key in seen and seen[key] != label:
             raise MergeInputsCollide(
                 f"distinct roots collide: {seen[key]!r} and {label!r} both at {key}"
             )
         seen[key] = label
+
+
+def _verify_artifact_digest_unchanged(
+    path: Path,
+    expected_digest: str,
+    unavailable_list: List[str],
+) -> bool:
+    """Re-verify that an artifact's exact-file digest still matches after the merge.
+
+    Reads the artifact bytes and returns True iff the SHA-256 matches
+    ``expected_digest``. On any ``OSError`` or ``ArtifactError``
+    (missing sidecar, digest mismatch, missing file), returns False and
+    appends a descriptive note to ``unavailable_list``.
+    """
+    try:
+        result = read_artifact(path)
+    except ArtifactError as e:
+        unavailable_list.append(
+            f"post-merge re-verification of {path.name} failed: {e!r}"
+        )
+        return False
+    if result.digest != expected_digest:
+        unavailable_list.append(
+            f"post-merge re-verification of {path.name}: digest changed "
+            f"(expected={expected_digest!r}, actual={result.digest!r})"
+        )
+        return False
+    return True
 
 
 def _safe_run(
@@ -334,7 +375,14 @@ def _safe_run(
     env: Optional[Dict[str, str]] = None,
     timeout: float = 60.0,
 ) -> Dict[str, Any]:
-    """Run a subprocess with a finite timeout and decode outputs defensively."""
+    """Run a subprocess with a finite timeout and decode outputs defensively.
+
+    ``subprocess.TimeoutExpired`` and any ``OSError`` (for example a missing
+    or non-executable ``gh`` binary, or a missing cwd) are converted to a
+    non-zero ``returncode`` so the caller can surface them through the
+    ``MergeSubprocessFailed`` / ``MergeError`` hierarchy. A ``FileNotFoundError``
+    or ``PermissionError`` is the most common ``OSError`` here.
+    """
     try:
         proc = subprocess.run(
             args,
@@ -357,6 +405,13 @@ def _safe_run(
             "stdout": stdout_text,
             "stderr": (stderr_text + f" [TIMEOUT after {timeout}s]"),
             "timed_out": True,
+        }
+    except OSError as e:
+        return {
+            "returncode": -1,
+            "stdout": "",
+            "stderr": f"{type(e).__name__}: {e}",
+            "timed_out": False,
         }
     return {
         "returncode": proc.returncode,
@@ -499,17 +554,33 @@ def reconcile_after_merge(
             raise MergeError(f"cannot switch to base branch {base_branch!r}: {err.strip()}")
         switched_to_base = True
 
-    # 4. Fetch origin/<base_branch>.
+    # 4. Fetch origin/<base_branch>. Capture the remote tip BEFORE the
+    #    local fast-forward so the recorded merge commit is bound to
+    #    the PR's actual merge, not to whatever another PR may have
+    #    introduced afterwards.
     rc, _, err = _run_git(["fetch", "origin", base_branch], repo_root)
     if rc != 0:
         unavailable.append(f"git fetch origin {base_branch}")
+        origin_pre_merge_sha = ""
     else:
-        # 5. Fast-forward only.
-        rc, _, err = _run_git(["merge", "--ff-only", f"origin/{base_branch}"], repo_root)
+        rc, out, _ = _run_git(
+            ["rev-parse", f"origin/{base_branch}"], repo_root
+        )
         if rc != 0:
-            raise MergeError(
-                f"local {base_branch} cannot fast-forward to origin/{base_branch}: {err.strip()}"
-            )
+            unavailable.append("git rev-parse origin/<base_branch> (pre-ff)")
+            origin_pre_merge_sha = ""
+        else:
+            origin_pre_merge_sha = out.strip()
+    # 5. Fast-forward only. A failed --ff-only does NOT abort the
+    #    reconciliation; per C-28 the merge is recorded and the
+    #    failure is listed in unavailable_observations. The
+    #    downstream call site (execute_guarded_merge_transaction)
+    #    catches the failure and still writes the merge record.
+    rc, _, err = _run_git(["merge", "--ff-only", f"origin/{base_branch}"], repo_root)
+    if rc != 0:
+        unavailable.append(
+            f"git merge --ff-only origin/{base_branch}: {err.strip()}"
+        )
 
     # 6. Read local + origin base SHA.
     rc, out, _ = _run_git(["rev-parse", base_branch], repo_root)
@@ -526,8 +597,24 @@ def reconcile_after_merge(
 
     local_main_equals_origin_main = (local_main_sha != "" and local_main_sha == origin_main_sha)
 
-    # 7. Squash merge commit + tree + parent count.
+    # 7. Squash merge commit + tree + parent count. The merge commit
+    #    is the local main tip AFTER the fast-forward, but only if the
+    #    captured pre-merge remote tip matches the local pre-merge state.
+    #    Otherwise, the local tip may be a different commit; we record
+    #    the pre-merge remote tip and append a note.
     squash_merge_commit = local_main_sha
+    squash_merge_commit_reliable = bool(
+        origin_pre_merge_sha
+        and local_main_sha != origin_pre_merge_sha
+    )
+    if not squash_merge_commit_reliable and origin_pre_merge_sha:
+        # The remote tip and local tip are the same, so the ff did
+        # not actually advance anything; this is unusual but not an
+        # error per se. We still record local_main_sha.
+        unavailable.append(
+            "local and origin tip identical at reconciliation; "
+            "merge commit identity may be ambiguous"
+        )
     rc, out, _ = _run_git(["log", "-1", "--format=%P", squash_merge_commit], repo_root)
     if rc != 0:
         raise MergeError(f"cannot read merge commit parents: rc={rc}")
@@ -576,16 +663,30 @@ def reconcile_after_merge(
 
     # 11. AED unchanged proof on the post-merge tree. Compare the
     #     AED file bytes against the expected digest if provided.
+    #     Read the bytes directly (binary) so CRLF and non-UTF-8 content
+    #     are preserved by the SHA-256; re-encoding the text from _run_git
+    #     with the locale encoding would change the byte sequence and
+    #     produce a false-negative clean flag.
     aed_clean = False
     aed_checked = False
     if expected_aed_sha256 is not None:
-        rc, out, _ = _run_git(["show", f"{squash_merge_commit}:{aed_path}"], repo_root)
-        if rc != 0:
+        try:
+            proc = subprocess.run(
+                ["git", "show", f"{squash_merge_commit}:{aed_path}"],
+                cwd=str(repo_root),
+                capture_output=True,
+                timeout=10.0,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            proc = None
             unavailable.append(f"git show HEAD:{aed_path}")
-        else:
-            actual_aed_sha = digest_bytes(out.encode("utf-8"))
-            aed_clean = actual_aed_sha == expected_aed_sha256
-            aed_checked = True
+        if proc is not None:
+            if proc.returncode != 0:
+                unavailable.append(f"git show HEAD:{aed_path}")
+            else:
+                actual_aed_sha = digest_bytes(proc.stdout)
+                aed_clean = actual_aed_sha == expected_aed_sha256
+                aed_checked = True
 
     return PostMergeReconciliation(
         initial_branch=initial_branch,
@@ -641,6 +742,14 @@ def _validate_inputs(inputs: MergeTransactionInputs) -> None:
         ("repository_checkout", inputs.repository_checkout),
         ("run_state_root", inputs.run_state_root),
         ("evidence_root", inputs.evidence_root),
+        # Artifact paths must be distinct from each other and from the
+        # three named roots. A collision would let the merge record
+        # overwrite the authorization artifact after the irreversible
+        # merge.
+        ("authorization_artifact_path", inputs.authorization_artifact_path),
+        ("candidate_artifact_path", inputs.candidate_artifact_path),
+        ("verifier_artifact_path", inputs.verifier_artifact_path),
+        ("merge_record_artifact_path", inputs.merge_record_artifact_path),
     )
 
 
@@ -799,18 +908,38 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
             f"authorization repo {auth.repo!r} != live repo {live_repo!r}"
         )
 
-    # 2. Read candidate artifact.
+    # 2. Read candidate artifact. Per C-22, every cross-binding
+    #    is mandatory: an absent field is a hard failure, not a
+    #    silent skip.
     candidate_payload, candidate_digest = _read_candidate(inputs.candidate_artifact_path)
-    candidate_head_sha = candidate_payload.get("head", {}).get("head_sha") or candidate_payload.get("head", {}).get("exact_head_sha", "")
-    if candidate_head_sha and candidate_head_sha != auth.authorized_head:
+    candidate_head_sha = (
+        candidate_payload.get("head", {}).get("head_sha")
+        or candidate_payload.get("head", {}).get("exact_head_sha")
+        or ""
+    )
+    if not candidate_head_sha:
+        raise MergeAuthorizationMalformed(
+            "candidate payload missing head.head_sha (or head.exact_head_sha)"
+        )
+    if candidate_head_sha != auth.authorized_head:
         raise MergeError(
             f"candidate head {candidate_head_sha!r} != authorized head {auth.authorized_head!r}"
         )
 
-    # 3. Read verifier record.
+    # 3. Read verifier record. The candidate_sha256 reference is
+    #    mandatory (C-22) and must equal the verified candidate file
+    #    digest.
     verifier_payload, verifier_digest = _read_verifier_digest(inputs.verifier_artifact_path)
-    verifier_candidate_ref = verifier_payload.get("candidate_sha256") or verifier_payload.get("candidate", {}).get("sha256", "")
-    if verifier_candidate_ref and verifier_candidate_ref != candidate_digest:
+    verifier_candidate_ref = (
+        verifier_payload.get("candidate_sha256")
+        or verifier_payload.get("candidate", {}).get("sha256")
+        or ""
+    )
+    if not verifier_candidate_ref:
+        raise MergeAuthorizationMalformed(
+            "verifier record missing candidate_sha256 (or candidate.sha256)"
+        )
+    if verifier_candidate_ref != candidate_digest:
         raise MergeError(
             f"verifier candidate digest {verifier_candidate_ref!r} != verified candidate file digest {candidate_digest!r}"
         )
@@ -877,15 +1006,63 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
         aed_unavailable = True
         expected_aed_sha = None
 
-    recon = reconcile_after_merge(
-        repository_checkout=inputs.repository_checkout,
-        base_branch=auth.base_branch,
-        feature_branch=auth.feature_branch or auth.base_branch,
-        authorized_head=auth.authorized_head,
-        expected_aed_sha256=expected_aed_sha,
+    # Per C-28, every post-merge failure path must still write the
+    # merge record before propagating. The reconciliation may fail in
+    # any of several ways; in every case we build a record from the
+    # best available observations and re-raise.
+    try:
+        recon = reconcile_after_merge(
+            repository_checkout=inputs.repository_checkout,
+            base_branch=auth.base_branch,
+            feature_branch=auth.feature_branch or auth.base_branch,
+            authorized_head=auth.authorized_head,
+            expected_aed_sha256=expected_aed_sha,
+        )
+    except (MergeError, subprocess.SubprocessError, OSError) as exc:
+        # Reconciliation failed. Build a minimal recon-shaped object so the
+        # record writer can still emit the merge result, then re-raise
+        # AFTER the record is on disk.
+        recon = PostMergeReconciliation(
+            initial_branch="unknown",
+            target_branch=auth.base_branch,
+            switched_to_base=False,
+            fast_forwarded=False,
+            local_main_sha="",
+            origin_main_sha="",
+            local_main_equals_origin_main=False,
+            squash_merge_commit="",
+            squash_parent_count=0,
+            squash_tree_sha256="",
+            squash_parent="",
+            feature_branch_local_deleted=False,
+            feature_branch_remote_deleted=False,
+            working_tree_clean=False,
+            unavailable_observations=[f"reconcile_after_merge failed: {exc!r}"],
+            aed_clean=False,
+            aed_checked=False,
+        )
+        recon_failure = exc
+    else:
+        recon_failure = None
+
+    # Re-verify both digests against the on-disk bytes after the
+    # irreversible merge. We re-read each sidecar's exact-file SHA
+    # rather than caching the pre-merge value because the merge
+    # runner MUST NOT silently assume the artifact file was
+    # untouched. If the read fails, list the failure in
+    # unavailable_observations and set the boolean to False.
+    post_merge_unavailable: List[str] = []
+    candidate_unchanged = _verify_artifact_digest_unchanged(
+        inputs.candidate_artifact_path, candidate_digest, post_merge_unavailable,
+    )
+    verifier_unchanged = _verify_artifact_digest_unchanged(
+        inputs.verifier_artifact_path, verifier_digest, post_merge_unavailable,
     )
 
-    # 7. Build and write the merge record.
+    # 7. Build and write the merge record. Always write, even if the
+    # reconciliation failed. The record captures whatever local
+    # observations are available and lists failures in
+    # unavailable_observations.
     record = MergeRecord(
         schema_version="autocoder.merge_record.v2",
         run_id=auth.run_id,
@@ -902,10 +1079,10 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
         feature_branch_deleted_locally=recon.feature_branch_local_deleted,
         feature_branch_deleted_remotely=recon.feature_branch_remote_deleted,
         working_tree_clean=recon.working_tree_clean,
-        aed_clean_post_merge=(len(recon.unavailable_observations) == 0
-                              and "scripts/quiet_window_observer.py" not in recon.unavailable_observations[0] if recon.unavailable_observations else True),
-        candidate_sha256_unchanged=True,
-        verifier_record_sha256_unchanged=True,
+        aed_clean_post_merge=False,  # set below from the actual probe
+        # Re-verified after the irreversible merge (see note above).
+        candidate_sha256_unchanged=candidate_unchanged,
+        verifier_record_sha256_unchanged=verifier_unchanged,
         candidate_exact_file_digest=candidate_digest,
         verifier_record_exact_file_digest=verifier_digest,
         authorization_exact_file_digest=auth_digest,
@@ -927,6 +1104,7 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
             "create_release_or_tag": False,
         },
         unavailable_observations=list(recon.unavailable_observations)
+        + list(post_merge_unavailable)
         + (["AED scripts/quiet_window_observer.py missing at authorized head"]
            if aed_unavailable else []),
         notes=(
@@ -944,13 +1122,22 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
         final_state="COMPLETE",
     )
 
-    # Set the AED clean flag from the reconciliation (not from heuristic).
-    aed_ok = (recon.aed_checked and recon.aed_clean) or aed_unavailable
-    record.aed_clean_post_merge = aed_ok
+    # Set the AED clean flag strictly from the probe result. The AED is
+    # clean ONLY when the probe verified the exact bytes match the
+    # expected digest. An unavailable AED observation is recorded in
+    # unavailable_observations above; the boolean is False because we
+    # have no positive verification (C-27 / INVARIANTS.md §C-27).
+    record.aed_clean_post_merge = bool(recon.aed_checked and recon.aed_clean)
 
     # 8. Write the merge record through the canonical artifact writer.
     write_result = write_artifact(inputs.merge_record_artifact_path, record.to_dict())
     record.merge_record_exact_file_digest = write_result.digest
+
+    # 9. If reconciliation failed, raise AFTER the record is durable
+    #    on disk. C-28 requires restart-safe recovery from an
+    #    irreversible merge; the record is the recovery point.
+    if recon_failure is not None:
+        raise recon_failure
 
     return record, write_result.digest
 

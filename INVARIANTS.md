@@ -563,12 +563,11 @@ a worker is informational only.
   `test_block`, `test_state_persisted_across_reload`.
 
 
-# AED Autocoder Orchestration — Invariant Ledger (v1)
+# AED Autocoder Orchestration — Invariant Ledger (v1, continued)
 
-This document is the canonical, versioned description of the
-behavioural invariants enforced by the AutoDev orchestration
-control plane. The control plane drives a single PR through
-qualification and merge.
+This document continues the supervisor invariant ledger with the
+orchestration control plane invariants. The control plane drives
+a single PR through qualification and merge.
 
 ## C-21 — One canonical artifact digest
 
@@ -605,7 +604,8 @@ exact-file digest or raises.
   `test_reader_rejects_malformed_sidecar`,
   `test_reader_rejects_symlink_*`, `test_reader_rejects_insecure_mode`,
   `test_reader_rejects_appended_footer_text`,
-  `test_mandatory_sidecar_blocks_merge_runner`.
+  `test_missing_candidate_digest_blocks_merge_runner`,
+  `test_missing_verifier_digest_blocks_merge_runner`.
 
 ## C-23 — No legacy footer artifacts in the production merge path
 

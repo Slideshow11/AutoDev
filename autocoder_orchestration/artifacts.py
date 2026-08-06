@@ -174,7 +174,14 @@ class ArtifactWriteResult:
 
 
 def _ensure_private_dir(path: Path) -> None:
-    """Ensure ``path`` exists, is a directory, and has mode 0700."""
+    """Ensure ``path`` exists, is a directory, and has mode 0700.
+
+    A missing parent of ``path`` is created with ``parents=True`` so a
+    first-time caller does not have to construct the evidence tree by
+    hand. Any filesystem-level failure (``OSError``) is wrapped as an
+    :class:`ArtifactError` so the merge path can surface it through the
+    declared error hierarchy.
+    """
     if path.exists():
         if not path.is_dir() or path.is_symlink():
             raise ArtifactError(f"parent path is not a private directory: {path}")
@@ -183,7 +190,10 @@ def _ensure_private_dir(path: Path) -> None:
         except OSError:
             pass
     else:
-        path.mkdir(mode=0o700, parents=False)
+        try:
+            path.mkdir(mode=0o700, parents=True)
+        except OSError as e:
+            raise ArtifactError(f"cannot create private directory {path!r}: {e!r}") from e
 
 
 def _ensure_private_file(path: Path) -> None:
@@ -254,12 +264,25 @@ def _atomic_write_with_sidecar(
         suffix=".tmp",
         dir=str(parent),
     )
-    # Sidecar temp file
-    sidecar_fd, sidecar_tmp = tempfile.mkstemp(
-        prefix=f".{sidecar_path.name}.",
-        suffix=".tmp",
-        dir=str(parent),
-    )
+    try:
+        # Sidecar temp file. If mkstemp fails here, the artifact temp
+        # file above is cleaned up explicitly so we never leak
+        # `.artifact.*.tmp` files on repeated partial failures.
+        sidecar_fd, sidecar_tmp = tempfile.mkstemp(
+            prefix=f".{sidecar_path.name}.",
+            suffix=".tmp",
+            dir=str(parent),
+        )
+    except OSError:
+        try:
+            os.close(artifact_fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(artifact_tmp)
+        except OSError:
+            pass
+        raise
 
     try:
         # Write + flush + fsync the artifact

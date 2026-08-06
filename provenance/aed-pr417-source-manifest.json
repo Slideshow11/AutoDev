@@ -203,8 +203,8 @@
     },
     {
       "destination_path": "INVARIANTS.md",
-      "destination_sha256": "4ff23ef0e5da4f189711e87331bb99e993d6ffde020ab25330e24b767f701a4a",
-      "destination_size_bytes": 29574,
+      "destination_sha256": "c6d9ac4f88457ef91f81ca610bd011dd2dbb38f861069706551f47a1705f5051",
+      "destination_size_bytes": 29614,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_documentation_addition",
@@ -265,7 +265,7 @@
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     }
   ],
-  "last_modification_note": "Post-PR-3 merge hardening: INVARIANTS.md extended with C-21..C-29; docs/CONTROL_PLANE_ADR.md extended with ADR-001 post-merge hardening section.",
+  "last_modification_note": "Post-PR-4 review repair: INVARIANTS.md continued-header change (title -> \"continued\"); fix asserting-test name reference (test_mandatory_sidecar_blocks_merge_runner -> test_missing_candidate_digest_blocks_merge_runner + test_missing_verifier_digest_blocks_merge_runner); docs/CONTROL_PLANE_ADR.md fixed \"four artifacts\" -> \"five artifacts\".",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -287,5 +287,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-06T13:17:00Z"
+  "updated_at_utc": "2026-08-06T13:55:00Z"
 }
