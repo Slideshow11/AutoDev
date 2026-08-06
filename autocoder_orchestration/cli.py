@@ -86,20 +86,159 @@ EXIT_INTERNAL = 5
 
 # Author login used by CodeRabbit on this repository. The CLI filters
 # latestReviews by this identity so a human review cannot satisfy the
-# CodeRabbit guard.
+# CodeRabbit guard. GitHub App bot logins are conventionally suffixed
+# with "[bot]" in some APIs and not in others; the comparison
+# normalizes by stripping one terminal "[bot]" suffix from both sides
+# before equality, so the gate works for both forms.
 CODERABBIT_AUTHOR_LOGIN = "coderabbitai"
+
+
+def _normalize_coderabbit_login(login: object) -> str:
+    """Strip one terminal ``[bot]`` suffix and lower-case the result.
+
+    The GitHub GraphQL ``latestReviews.author.login`` field can return
+    either ``coderabbitai`` (for bot accounts) or ``coderabbitai[bot]``
+    (for GitHub Apps) depending on the installation. Stripping the
+    suffix lets the same constant match both forms while a plain
+    substring or ``startswith`` comparison would over-match
+    similarly-named accounts.
+    """
+    if not isinstance(login, str):
+        return ""
+    s = login.lower().strip()
+    if s.endswith("[bot]"):
+        s = s[:-5].rstrip()
+    return s
+
+
+def _filter_coderabbit_review_state(reviews_data: dict) -> Optional[str]:
+    """Extract the latest CodeRabbit review state from a GraphQL payload.
+
+    Returns the latest review whose author matches
+    :data:`CODERABBIT_AUTHOR_LOGIN` (with ``[bot]`` suffix tolerated),
+    or ``None`` if no matching review exists. The state is left
+    unavailable when the payload is empty or no CodeRabbit review is
+    found, so the guarded transaction fails closed (C-25).
+    """
+    target = _normalize_coderabbit_login(CODERABBIT_AUTHOR_LOGIN)
+    nodes = (
+        reviews_data.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+        .get("latestReviews", {})
+        .get("nodes", [])
+    )
+    for node in nodes:
+        author_login = node.get("author", {}).get("login") or ""
+        if _normalize_coderabbit_login(author_login) == target:
+            return node.get("state")
+    return None
+
+
+# Maximum number of pages to walk through the CodeRabbit review
+# inventory. 10 pages × 100 = 1000 reviews is well above any realistic
+# PR's review count, and bounds total latency.
+_CODERABBIT_MAX_PAGES = 10
+
+
+def _fetch_coderabbit_review_state(
+    gh_executable: str,
+    *,
+    owner: str,
+    name: str,
+    pr_number: int,
+) -> Optional[str]:
+    """Fetch the latest CodeRabbit review state with pagination.
+
+    Uses GraphQL variables for the owner, name, and PR number so the
+    query is well-formed regardless of how the CLI was invoked. Walks
+    every page of ``latestReviews`` via ``pageInfo.hasNextPage`` until
+    a CodeRabbit review is found or the inventory is exhausted, so
+    even an early review at position N is reachable. Returns the
+    state of the matching review, or ``None`` if no CodeRabbit review
+    exists in the inventory (fail-closed C-25).
+    """
+    query = (
+        "query($owner:String!,$name:String!,$pr:Int!,$cursor:String){"
+        "repository(owner:$owner,name:$name){"
+        "pullRequest(number:$pr){"
+        "latestReviews(first:100, after:$cursor){"
+        "pageInfo { hasNextPage endCursor }"
+        "nodes { author { login } state }"
+        "}}}"
+    )
+    cursor = "null"
+    has_next = True
+    page_count = 0
+    matched_state: Optional[str] = None
+    while has_next:
+        page_count += 1
+        if page_count > _CODERABBIT_MAX_PAGES:
+            break
+        proc = subprocess.run(
+            [
+                gh_executable, "api", "graphql",
+                "-f", f"query={query}",
+                "-F", f"owner={owner}",
+                "-F", f"name={name}",
+                "-F", f"pr={pr_number}",
+                "-F", f"cursor={cursor}",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return matched_state
+        try:
+            doc = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return matched_state
+        page = (
+            doc.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("latestReviews", {})
+        )
+        if not page:
+            return matched_state
+        # Filter for CodeRabbit matches on this page.
+        match = _filter_coderabbit_review_state(doc)
+        if match is not None and matched_state is None:
+            matched_state = match
+        page_info = page.get("pageInfo", {})
+        has_next = bool(page_info.get("hasNextPage"))
+        cursor = page_info.get("endCursor") or "null"
+    return matched_state
 
 
 def _resolve_evidence_root(args: argparse.Namespace, store) -> Path:
     """Resolve the canonical evidence root for this CLI invocation.
 
-    Per C-24 the three named roots must be independent. When the
-    operator passes --evidence-root, that path is used. Otherwise we
-    default to a sibling directory of the run-state root, never to
-    the state root itself.
+    Per C-24 the three named roots must be independent. The persisted
+    ``RunContext.evidence_root`` is the canonical source — the CLI
+    reads it from the run-state store when available. The operator
+    may pass ``--evidence-root`` to override the persisted path;
+    conflicting overrides are rejected so a non-canonical evidence
+    root can never be silently used.
     """
-    if getattr(args, "evidence_root", None):
-        return Path(str(args.evidence_root))
+    persisted: Optional[str] = None
+    try:
+        rc = store.read_optional("run_context.json")
+        if rc is not None:
+            persisted = rc.get("evidence_root") if isinstance(rc, dict) else None
+    except Exception:
+        persisted = None
+
+    override = getattr(args, "evidence_root", None)
+    if override and persisted and Path(str(override)).resolve() != Path(str(persisted)).resolve():
+        raise MergeInputsCollide(
+            f"--evidence-root {override!r} conflicts with persisted "
+            f"RunContext.evidence_root {persisted!r}"
+        )
+
+    if override:
+        return Path(str(override))
+    if persisted:
+        return Path(str(persisted))
     state_root_path = Path(str(store.state_root))
     return state_root_path.parent / "evidence"
 
@@ -516,7 +655,14 @@ def cmd_merge(args: argparse.Namespace) -> int:
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    auth = MergeAuthorization.from_dict(auth_result.payload)
+    try:
+        auth = MergeAuthorization.from_dict(auth_result.payload)
+    except (ValueError, TypeError, MergeAuthorizationMalformed) as e:
+        return _emit(
+            {"error": f"merge authorization malformed: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     authorization_path = paths["authorization"]
     candidate_path = paths["candidate"]
     verifier_path = paths["verifier"]
@@ -634,29 +780,19 @@ def cmd_merge(args: argparse.Namespace) -> int:
 
     # Fetch the latest CodeRabbit review state. Filter reviews by the
     # configured CodeRabbit author login so a human review cannot
-    # satisfy the CodeRabbit guard. Leave the field unavailable when no
-    # matching review exists.
-    live_review_state = {"latest_coderabbit_state": None}
+    # satisfy the CodeRabbit guard. Leave the field unavailable when
+    # no matching review exists. The filter normalizes "coderabbitai"
+    # and "coderabbitai[bot]" to the same identity.
+    live_review_state: Dict[str, Optional[str]] = {"latest_coderabbit_state": None}
     try:
-        rev_proc = subprocess.run(
-            ["gh", "api", "graphql", "-f",
-             "query={{repository(owner:{owner},name:{repo}){{pullRequest(number:{pr}){{latestReviews(first:10){{nodes{{author{{login}} state}}}}}}}}}}".format(
-                 owner=ctx.repo_owner, repo=ctx.repo_name, pr=auth.pr_number,
-             )],
-            capture_output=True, text=True, timeout=30,
+        match_state = _fetch_coderabbit_review_state(
+            "gh",
+            owner=ctx.repo_owner,
+            name=ctx.repo_name,
+            pr_number=auth.pr_number,
         )
-        if rev_proc.returncode == 0:
-            rd = json.loads(rev_proc.stdout)
-            nodes = (rd.get("data", {}).get("repository", {}).get("pullRequest", {})
-                       .get("latestReviews", {}).get("nodes", []))
-            coderabbit_match = next(
-                (n for n in nodes
-                 if (n.get("author", {}).get("login") or "")
-                 .lower() == CODERABBIT_AUTHOR_LOGIN.lower()),
-                None,
-            )
-            if coderabbit_match is not None:
-                live_review_state["latest_coderabbit_state"] = coderabbit_match.get("state")
+        if match_state is not None:
+            live_review_state["latest_coderabbit_state"] = match_state
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
         # Timeout or transient failure: keep latest_coderabbit_state None
         # so the CodeRabbit guard fails closed.
@@ -771,7 +907,14 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    record = MergeRecord.from_dict(record_result.payload)
+    try:
+        record = MergeRecord.from_dict(record_result.payload)
+    except (ValueError, TypeError, MergeAuthorizationMalformed) as e:
+        return _emit(
+            {"error": f"merge record malformed: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     if not record.local_main_equals_origin_main:
         return _emit(
             {"error": "local main does not match origin/main"},

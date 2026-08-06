@@ -67,9 +67,15 @@ class CanonicalArtifactWriterTests(unittest.TestCase):
         result = write_artifact(p, {"a": 1, "b": [1, 2, 3]})
         self.assertTrue(result.artifact_path.exists())
         body = p.read_bytes()
+        # No legacy footer text in the artifact body (per C-23).
         self.assertNotIn(b"# sha256:", body)
-        # No trailing newline after JSON (deterministic, compact)
-        self.assertFalse(body.endswith(b"\n# sha256"))
+        # No trailing junk after the JSON document: the body must
+        # end with the closing brace (or with no newline before it).
+        body_str = body.decode("utf-8")
+        self.assertTrue(
+            body_str.endswith("}"),
+            f"artifact body does not end with '}}': {body_str[-40:]!r}",
+        )
         json.loads(body)  # parses as JSON
 
     # 2
@@ -852,7 +858,9 @@ class TimeoutAmbiguityTests(unittest.TestCase):
                 # reconciliation raised. But the runner was invoked exactly once.
                 with self.assertRaises(MergeError):
                     execute_guarded_merge_transaction(inputs)
-        self.assertEqual(call_count[0], 2)  # merge runner + live re-query
+        # Merge subprocess + live re-query + post-merge mergeCommit
+        # OID fetch = 3 gh invocations on this path.
+        self.assertEqual(call_count[0], 3)
 
     def test_timeout_plus_server_side_open_is_not_reported_as_merged(self):
         paths = self._build_artifacts()
@@ -955,21 +963,49 @@ class RestartRecoveryTests(unittest.TestCase):
         self.assertIn("local git observation failed", loaded["unavailable_observations"])
 
     def test_authorization_and_merge_records_survive_process_restart(self):
-        # Simulate a restart by writing the records, killing the process
-        # implicitly (close+reopen), and reading them back.
-        auth = self.evidence / "authorization.json"
-        write_artifact(auth, {
-            "schema_version": "autocoder.merge_authorization.v1",
-            "run_id": "test",
-            "repo": "Slideshow11/AutoDev",
-            "pr_number": 3,
-            "authorized_head": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
-            "candidate_sha256": "a" * 64,
-            "verifier_record_sha256": "b" * 64,
-        })
-        # Simulate restart: read back.
-        result = read_artifact(auth)
-        self.assertEqual(result.payload["pr_number"], 3)
+        """The authorization and merge records must round-trip through
+        a simulated restart: write the record via the canonical writer,
+        close the file handle (mimicking process exit), reopen the
+        file, and reconstruct the typed dataclass via the production
+        ``from_dict`` classmethods. The reconstructed objects must be
+        equal to the originals and pass the same artifact guards.
+        """
+        from dataclasses import asdict
+        auth_path = self.evidence / "authorization.json"
+        rec_path = self.evidence / "merge-record.json"
+        # Write a real MergeAuthorization + MergeRecord pair.
+        auth = MergeAuthorization(
+            schema_version="autocoder.merge_authorization.v1",
+            run_id="test",
+            repo="Slideshow11/AutoDev",
+            pr_number=3,
+            authorized_head="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+            candidate_sha256="a" * 64,
+            verifier_record_sha256="b" * 64,
+        )
+        write_artifact(auth_path, auth.to_dict())
+        rec = MergeRecord(
+            run_id="test",
+            repo="Slideshow11/AutoDev",
+            pr_number=3,
+            authorized_head="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+            squash_merge_commit="a" * 40,
+            merge_commit_parent="b" * 40,
+            final_state="COMPLETE",
+        )
+        write_artifact(rec_path, rec.to_dict())
+        # Simulate restart: reopen from disk and reconstruct.
+        auth_read = MergeAuthorization.from_dict(
+            read_artifact(auth_path).payload
+        )
+        rec_read = MergeRecord.from_dict(read_artifact(rec_path).payload)
+        # The reconstructed dataclasses must equal the originals.
+        self.assertEqual(asdict(auth_read), asdict(auth))
+        self.assertEqual(asdict(rec_read), asdict(rec))
+        # The reconstructed records must pass their own validators
+        # (otherwise the artifact is not loadable as a typed value).
+        self.assertEqual(auth_read.pr_number, 3)
+        self.assertEqual(rec_read.final_state, "COMPLETE")
 
 
 # =============================================================

@@ -551,6 +551,7 @@ def reconcile_after_merge(
     base_branch: str,
     feature_branch: str,
     authorized_head: str,
+    pr_merge_commit_oid: Optional[str] = None,
     aed_path: str = "scripts/quiet_window_observer.py",
     expected_aed_sha256: Optional[str] = None,
 ) -> PostMergeReconciliation:
@@ -641,22 +642,79 @@ def reconcile_after_merge(
 
     local_main_equals_origin_main = (local_main_sha != "" and local_main_sha == origin_main_sha)
 
-    # 7. Squash merge commit + tree + parent count. The merge commit
-    #    is the local main tip AFTER the fast-forward, but only if the
-    #    captured pre-merge remote tip matches the local pre-merge state.
-    #    Otherwise, the local tip may be a different commit; we record
-    #    the pre-merge remote tip and append a note.
-    squash_merge_commit = local_main_sha
-    squash_merge_commit_reliable = bool(
-        origin_pre_merge_sha
-        and local_main_sha != origin_pre_merge_sha
-    )
-    if not squash_merge_commit_reliable and origin_pre_merge_sha:
-        # The remote tip and local tip are the same, so the ff did
-        # not actually advance anything; this is unusual but not an
-        # error per se. We still record local_main_sha.
+    # 7. Squash merge commit + tree + parent count. Per the explicit
+    #    mergeCommit identity contract, the canonical source is the
+    #    pr_merge_commit_oid parameter (fetched via gh pr view --json
+    #    mergeCommit AFTER GitHub reports merged=true). Fall back to
+    #    local_main_sha only when the explicit OID is unavailable;
+    #    the unavailable_observations list records which source was
+    #    used. We never infer the PR merge from tree equality.
+    squash_merge_commit: str = ""
+    if pr_merge_commit_oid:
+        # Validate the explicit OID is exactly 40 lowercase hex chars.
+        if _LOWER_HEX_40_RE.match(pr_merge_commit_oid):
+            # Verify the OID exists locally after fetch.
+            rc_obj, _, _ = _run_git(
+                ["cat-file", "-t", pr_merge_commit_oid], repo_root
+            )
+            if rc_obj == 0:
+                # Verify it is reachable from origin/<base_branch>.
+                rc_anc, _, _ = _run_git(
+                    [
+                        "merge-base", "--is-ancestor",
+                        pr_merge_commit_oid, f"origin/{base_branch}",
+                    ],
+                    repo_root,
+                )
+                if rc_anc == 0:
+                    squash_merge_commit = pr_merge_commit_oid
+                else:
+                    unavailable.append(
+                        f"pr_merge_commit_oid {pr_merge_commit_oid[:12]} "
+                        f"is not reachable from origin/{base_branch}"
+                    )
+                    squash_merge_commit = local_main_sha
+                    unavailable.append(
+                        "fallback to local_main_sha for squash_merge_commit; "
+                        "mergeCommit OID not reachable from base"
+                    )
+            else:
+                unavailable.append(
+                    f"pr_merge_commit_oid {pr_merge_commit_oid[:12]} not "
+                    "found locally after fetch"
+                )
+                squash_merge_commit = local_main_sha
+                unavailable.append(
+                    "fallback to local_main_sha for squash_merge_commit; "
+                    "mergeCommit OID not in local repo"
+                )
+        else:
+            unavailable.append(
+                f"pr_merge_commit_oid {pr_merge_commit_oid!r} is not a "
+                "valid 40-character lowercase hex SHA"
+            )
+            squash_merge_commit = local_main_sha
+            unavailable.append(
+                "fallback to local_main_sha for squash_merge_commit; "
+                "mergeCommit OID failed validation"
+            )
+    else:
+        # No explicit OID supplied (provider didn't return mergeCommit).
+        # Record the unavailable observation and fall back to
+        # local_main_sha WITHOUT claiming it is the PR merge.
         unavailable.append(
-            "local and origin tip identical at reconciliation; "
+            "pr_merge_commit_oid not supplied by provider; "
+            "squash_merge_commit identity is ambiguous"
+        )
+        squash_merge_commit = local_main_sha
+    squash_merge_commit_reliable = bool(
+        pr_merge_commit_oid
+        and _LOWER_HEX_40_RE.match(pr_merge_commit_oid)
+        and squash_merge_commit == pr_merge_commit_oid
+    )
+    if not squash_merge_commit_reliable and pr_merge_commit_oid:
+        unavailable.append(
+            "pr_merge_commit_oid did not pass validation; "
             "merge commit identity may be ambiguous"
         )
 
@@ -1082,6 +1140,27 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
                 "refusing to proceed (fail closed)"
             )
 
+    # Fetch the explicit mergeCommit OID. Per the explicit identity
+    # contract, the PR's merge commit is observed server-side; we do
+    # NOT infer it from local_main_sha or origin_main_sha.
+    pr_merge_commit_oid: Optional[str] = None
+    try:
+        oid_proc = _safe_run(
+            [inputs.gh_executable, "pr", "view", str(auth.pr_number),
+             "--repo", auth.repo,
+             "--json", "mergeCommit"],
+            timeout=15.0,
+        )
+        if oid_proc["returncode"] == 0 and oid_proc["stdout"].strip():  # type: ignore[index]
+            oid_doc = json.loads(oid_proc["stdout"])  # type: ignore[index]
+            mc = oid_doc.get("mergeCommit")
+            if isinstance(mc, dict):
+                pr_merge_commit_oid = str(mc.get("oid") or "") or None
+            elif isinstance(mc, str):
+                pr_merge_commit_oid = mc or None
+    except (json.JSONDecodeError, OSError):
+        pr_merge_commit_oid = None
+
     # 6. Branch-independent post-merge reconciliation. Compute the
     #    expected AED sha256 from the bytes returned by git show.
     #    A missing AED file is recorded as an unavailable observation,
@@ -1109,6 +1188,7 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
             base_branch=auth.base_branch,
             feature_branch=auth.feature_branch or auth.base_branch,
             authorized_head=auth.authorized_head,
+            pr_merge_commit_oid=pr_merge_commit_oid,
             expected_aed_sha256=expected_aed_sha,
         )
     except (MergeError, subprocess.SubprocessError, OSError) as exc:
