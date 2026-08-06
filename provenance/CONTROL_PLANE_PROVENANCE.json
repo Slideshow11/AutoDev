@@ -160,7 +160,7 @@
       "autocoder_orchestration/controller.py",
       "autocoder_orchestration/cli.py"
     ],
-    "tests_added": 203,
+    "tests_added": 209,
     "ADR_added": "docs/CONTROL_PLANE_ADR.md",
     "invariants_added": 20
   },
@@ -183,15 +183,15 @@
     "Full review-provider extraction (reconciliation adapter)"
   ],
   "test_inventory": {
+    "tests/test_autocoder_orchestration_candidate.py": 14,
+    "tests/test_autocoder_orchestration_cli.py": 4,
     "tests/test_autocoder_orchestration_context.py": 22,
-    "tests/test_autocoder_orchestration_state_machine.py": 42,
-    "tests/test_autocoder_orchestration_store.py": 22,
-    "tests/test_autocoder_orchestration_readiness.py": 31,
+    "tests/test_autocoder_orchestration_controller.py": 14,
     "tests/test_autocoder_orchestration_observer.py": 16,
+    "tests/test_autocoder_orchestration_readiness.py": 31,
     "tests/test_autocoder_orchestration_reconciliation.py": 22,
-    "tests/test_autocoder_orchestration_candidate.py": 13,
-    "tests/test_autocoder_orchestration_verifier.py": 21,
-    "tests/test_autocoder_orchestration_controller.py": 10,
-    "tests/test_autocoder_orchestration_cli.py": 4
+    "tests/test_autocoder_orchestration_state_machine.py": 42,
+    "tests/test_autocoder_orchestration_store.py": 23,
+    "tests/test_autocoder_orchestration_verifier.py": 21
   }
 }
