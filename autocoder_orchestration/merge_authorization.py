@@ -49,6 +49,8 @@ class MergeAuthorization:
     authorized_head: str
     candidate_sha256: str
     verifier_record_sha256: str
+    base_branch: str = "main"
+    feature_branch: str = ""
     merge_method: str = "squash"
     delete_branch: bool = True
     require_match_head_commit: bool = True
@@ -62,6 +64,17 @@ class MergeAuthorization:
             raise ValueError(
                 f"unsupported merge authorization schema: {self.schema_version!r}"
             )
+        # Git branch names often contain "/" (e.g. "feat/test"). Reject
+        # only path-traversal and shell-special characters.
+        if (
+            not isinstance(self.feature_branch, str)
+            or not self.feature_branch
+            or ".." in self.feature_branch
+            or self.feature_branch.startswith("/")
+            or chr(92) in self.feature_branch  # backslash
+            or chr(10) in self.feature_branch  # newline
+        ):
+            raise ValueError("feature_branch must be a non-empty git branch name")
         if not isinstance(self.pr_number, int) or self.pr_number <= 0:
             raise ValueError("pr_number must be a positive integer")
         if len(self.authorized_head) != 40 and len(self.authorized_head) != 64:
@@ -84,6 +97,8 @@ class MergeAuthorization:
             "authorized_head": self.authorized_head,
             "candidate_sha256": self.candidate_sha256,
             "verifier_record_sha256": self.verifier_record_sha256,
+            "base_branch": self.base_branch,
+            "feature_branch": self.feature_branch,
             "merge_method": self.merge_method,
             "delete_branch": self.delete_branch,
             "require_match_head_commit": self.require_match_head_commit,
@@ -105,6 +120,8 @@ class MergeAuthorization:
             authorized_head=str(payload["authorized_head"]),
             candidate_sha256=str(payload["candidate_sha256"]),
             verifier_record_sha256=str(payload["verifier_record_sha256"]),
+            base_branch=str(payload.get("base_branch", "main")),
+            feature_branch=str(payload.get("feature_branch", "")),
             merge_method=str(payload.get("merge_method", "squash")),
             delete_branch=bool(payload.get("delete_branch", True)),
             require_match_head_commit=bool(payload.get("require_match_head_commit", True)),

@@ -194,3 +194,57 @@ class TestSchemaVersion:
         data = store.read_strict("test.json")
         assert data["_schema_version"] == "autocoder.state_store.v1"
         assert data["_revision"] == 1
+
+
+class TestCompareAndSwapConcurrency:
+    """Concurrent CAS operations: only one caller succeeds for a given
+    expected revision.
+    """
+
+    def test_concurrent_cas_only_one_succeeds(self, tmp_path) -> None:
+        """Two callers CAS on the same expected revision. Exactly one
+        succeeds; the other receives StateRevisionMismatch.
+
+        Uses subprocess to run two child processes, since the CAS uses
+        fcntl advisory locks which require actual distinct processes.
+        """
+        import subprocess, sys, tempfile
+        store_root = str(tmp_path / "state")
+        os.makedirs(store_root)
+        # Initialize the counter
+        store = StateStore(store_root)
+        store.write_atomic("counter.json", {"value": 0})
+
+        worker_script = (
+            "import sys\n"
+            "sys.path.insert(0, \'\')\n"
+            "import os\n"
+            "from autocoder_orchestration.store import StateStore, StateRevisionMismatch\n"
+            "store = StateStore(sys.argv[1])\n"
+            "try:\n"
+            "    store.compare_and_swap(\"counter.json\", {\"value\": int(sys.argv[2])}, expected_revision=1)\n"
+            "    print(\"ok\")\n"
+            "except StateRevisionMismatch as e:\n"
+            "    print(f\"mismatch: {e}\")\n"
+        )
+        # Write the worker script
+        worker_path = str(tmp_path / "worker.py")
+        with open(worker_path, "w") as f:
+            f.write(worker_script)
+
+        results = []
+        for i in range(2):
+            proc = subprocess.run(
+                [sys.executable, worker_path, store_root, str(i + 1)],
+                capture_output=True, text=True, timeout=30,
+            )
+            stdout = proc.stdout.strip()
+            results.append("ok" if stdout == "ok" else "mismatch")
+
+        # Exactly one ok, one mismatch
+        results.sort()
+        assert results == ["mismatch", "ok"], f"results: {results}"
+        # Final revision is 2
+        final = store.read_strict("counter.json")
+        assert final["_revision"] == 2
+        assert final["value"] in (1, 2)

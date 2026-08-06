@@ -238,11 +238,128 @@ class Controller:
         self.save_state_machine(next_sm)
         return next_sm
 
-    def verifier_started(self, *, head_observed: str, verifier_identity: Dict[str, Any]) -> StateMachine:
+    def verifier_started(
+        self,
+        *,
+        head_observed: str,
+        verifier_identity: Dict[str, Any],
+        verifier_executable_path: Optional[str] = None,
+        verifier_executable_sha256: Optional[str] = None,
+        trusted_verifier_source_commit: Optional[str] = None,
+        verifier_executable_no_write_credentials: bool = True,
+    ) -> StateMachine:
         """AWAITING_INDEPENDENT_VERIFICATION -> VERIFYING.
 
-        Validates the transition before writing the artifact.
+        Production boundary: enforces VerifierRoleGuard rules before
+        transitioning. All required evidence is supplied explicitly;
+        no caller may default write_credentials_present to True.
+
+        Required evidence:
+        - head_observed matches the context's authorized head;
+        - verifier_executable_path is non-empty and absolute;
+        - verifier_executable_sha256 is a valid 64-char lowercase hex;
+        - trusted_verifier_source_commit is a valid 64-char lowercase hex;
+        - the implementation lease is no longer active in the store;
+        - the verifier identity differs from any recorded
+          implementation worker identity;
+        - the handoff file exists and its SHA matches the persisted
+          _sha256 sidecar.
+
+        The handoff is read from the state store.
         """
+        # Validate required inputs evidence
+        if not verifier_executable_path or not os.path.isabs(verifier_executable_path):
+            raise ControllerError(
+                f"verifier_executable_path must be a nonempty absolute path, got {verifier_executable_path!r}"
+            )
+        if not verifier_executable_sha256 or (
+            len(verifier_executable_sha256) != 40
+            and len(verifier_executable_sha256) != 64
+        ) or not all(c in "0123456789abcdef" for c in verifier_executable_sha256):
+            raise ControllerError(
+                f"verifier_executable_sha256 must be 40 or 64 lowercase hex chars, got {verifier_executable_sha256!r}"
+            )
+        if not trusted_verifier_source_commit or (
+            len(trusted_verifier_source_commit) != 40
+            and len(trusted_verifier_source_commit) != 64
+        ) or not all(c in "0123456789abcdef" for c in trusted_verifier_source_commit):
+            raise ControllerError(
+                f"trusted_verifier_source_commit must be 40 or 64 lowercase hex chars, got {trusted_verifier_source_commit!r}"
+            )
+        # Credential absence is REQUIRED to be True; we cannot accept
+        # callers leaving this default.
+        if not verifier_executable_no_write_credentials:
+            raise ControllerError(
+                "verifier has write credentials; refusing to enter VERIFYING"
+            )
+        # Implementation lease must not still be held
+        try:
+            lease = self.store.read_lease()
+        except StateStoreError:
+            lease = None
+        if isinstance(lease, ProcessIdentity):
+            verifier_pid = int(verifier_identity.get("pid", 0)) if isinstance(verifier_identity, dict) else 0
+            verifier_start_id = str(verifier_identity.get("start_id", "")) if isinstance(verifier_identity, dict) else ""
+            if (
+                verifier_pid == lease.pid
+                and verifier_start_id == lease.start_id
+            ):
+                raise ControllerError(
+                    "implementation lease is still held by the verifier; refusing to enter VERIFYING"
+                )
+        # Handoff evidence
+        handoff_payload = self.store.read_optional("verifier-handoff.json")
+        if handoff_payload is None:
+            raise ControllerError(
+                "verifier handoff not found in store; refusing to enter VERIFYING"
+            )
+        try:
+            handoff = VerifierHandoff.from_dict(handoff_payload)
+        except (ValueError, TypeError) as e:
+            raise ControllerError(f"verifier handoff is malformed: {e!r}")
+        # Persisted _sha256 must match the recomputed digest
+        persisted_sha = handoff_payload.get("_sha256")
+        recomputed_sha = handoff.compute_sha256()
+        if persisted_sha is None or persisted_sha != recomputed_sha:
+            raise ControllerError(
+                f"verifier handoff digest mismatch: persisted {persisted_sha!r}, "
+                f"recomputed {recomputed_sha!r}"
+            )
+        # Candidate must be unchanged since the handoff was written
+        cand_payload = self.store.read_optional("candidate.json")
+        if cand_payload is None:
+            raise ControllerError("candidate not found in store")
+        if "_sha256" not in cand_payload:
+            raise ControllerError("candidate is missing _sha256 sidecar")
+        if cand_payload["_sha256"] != handoff.candidate_sha256:
+            raise ControllerError(
+                f"candidate sha256 changed since handoff: "
+                f"handoff {handoff.candidate_sha256!r}, current {cand_payload['_sha256']!r}"
+            )
+        # Exact head must match unchanged
+        if handoff.exact_head != head_observed:
+            raise ControllerError(
+                f"handoff head {handoff.exact_head!r} != head_observed {head_observed!r}"
+            )
+        if handoff.exact_head != self.context.current_authorized_head:
+            raise ControllerError(
+                f"handoff head {handoff.exact_head!r} != authorized head "
+                f"{self.context.current_authorized_head!r}"
+            )
+        # Run the role guard
+        guard = VerifierRoleGuard(handoff, self.store)
+        identity = ProcessIdentity(
+            pid=int(verifier_identity.get("pid", 0)),
+            start_id=str(verifier_identity.get("start_id", "")),
+        )
+        ok, reason = guard.validate(
+            verifier_identity=identity,
+            verifier_executable_path=verifier_executable_path,
+            write_credentials_present=False,
+        )
+        if not ok:
+            raise ControllerError(f"verifier role guard rejected: {reason}")
+        # All checks passed. Apply the transition.
         sm = self._require_state_for_event()
         next_sm = sm.transition(
             STATE_VERIFYING,
@@ -250,7 +367,13 @@ class Controller:
             head_observed=head_observed,
             head_required=self.context.current_authorized_head,
         )
-        self.store.write_atomic("verifier_process.json", {"verifier_process": dict(verifier_identity)})
+        self.store.write_atomic("verifier_process.json", {
+            "verifier_process": dict(verifier_identity),
+            "verifier_executable_path": verifier_executable_path,
+            "verifier_executable_sha256": verifier_executable_sha256,
+            "trusted_verifier_source_commit": trusted_verifier_source_commit,
+            "verifier_role_guard_passed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        })
         self.save_state_machine(next_sm)
         return next_sm
 

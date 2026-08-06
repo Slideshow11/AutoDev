@@ -160,7 +160,7 @@
       "autocoder_orchestration/controller.py",
       "autocoder_orchestration/cli.py"
     ],
-    "tests_added": 199,
+    "tests_added": 203,
     "ADR_added": "docs/CONTROL_PLANE_ADR.md",
     "invariants_added": 20
   },

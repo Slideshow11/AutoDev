@@ -193,7 +193,8 @@ class TestMergeAuthorization:
             authorized_head=H1,
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
-        )
+            feature_branch="feat/test",
+            )
         assert auth.merge_method == "squash"
 
     def test_invalid_head_rejected(self) -> None:
@@ -206,8 +207,8 @@ class TestMergeAuthorization:
                 authorized_head="bad",
                 candidate_sha256="c" * 64,
                 verifier_record_sha256="d" * 64,
+            feature_branch="feat/test",
             )
-
     def test_invalid_pr_number_rejected(self) -> None:
         with pytest.raises(ValueError):
             MergeAuthorization(
@@ -218,8 +219,8 @@ class TestMergeAuthorization:
                 authorized_head=H1,
                 candidate_sha256="c" * 64,
                 verifier_record_sha256="d" * 64,
+            feature_branch="feat/test",
             )
-
     def test_invalid_method_rejected(self) -> None:
         with pytest.raises(ValueError):
             MergeAuthorization(
@@ -231,8 +232,8 @@ class TestMergeAuthorization:
                 candidate_sha256="c" * 64,
                 verifier_record_sha256="d" * 64,
                 merge_method="invalid",
+            feature_branch="feat/test",
             )
-
     def test_authorization_roundtrip(self) -> None:
         auth = MergeAuthorization(
             schema_version="autocoder.merge_authorization.v1",
@@ -243,7 +244,8 @@ class TestMergeAuthorization:
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
             next_wave_authorization={"next_wave_id": "wave-2"},
-        )
+            feature_branch="feat/test",
+            )
         d = auth.to_dict()
         restored = MergeAuthorization.from_dict(d)
         assert restored.run_id == auth.run_id
@@ -261,7 +263,8 @@ class TestMergeExecutor:
             authorized_head=H1,
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
-        )
+            feature_branch="feat/test",
+            )
         exec = MergeExecutor()
         cmd = exec.compute_command(auth)
         assert cmd[0] == "gh"
@@ -282,7 +285,8 @@ class TestMergeExecutor:
             authorized_head=H1,
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
-        )
+            feature_branch="feat/test",
+            )
         exec = MergeExecutor()
         with pytest.raises(Exception, match="admin"):
             exec.compute_command(auth, allow_extra_flags={"admin": True})
@@ -296,7 +300,8 @@ class TestMergeExecutor:
             authorized_head=H1,
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
-        )
+            feature_branch="feat/test",
+            )
         exec = MergeExecutor()
         with pytest.raises(Exception, match="[Aa]uto"):
             exec.compute_command(auth, allow_extra_flags={"auto": True})
@@ -310,7 +315,8 @@ class TestMergeExecutor:
             authorized_head=H1,
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
-        )
+            feature_branch="feat/test",
+            )
         exec = MergeExecutor()
         with pytest.raises(Exception, match="[Mm]erge commit"):
             exec.compute_command(auth, allow_extra_flags={"merge": True})
@@ -324,7 +330,8 @@ class TestMergeExecutor:
             authorized_head=H1,
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
-        )
+            feature_branch="feat/test",
+            )
         exec = MergeExecutor()
         with pytest.raises(Exception, match="[Rr]ebase"):
             exec.compute_command(auth, allow_extra_flags={"rebase": True})
@@ -339,7 +346,8 @@ class TestMergeExecutor:
             candidate_sha256="c" * 64,
             verifier_record_sha256="d" * 64,
             require_match_head_commit=False,
-        )
+        feature_branch="feat/test",
+            )
         exec = MergeExecutor()
         with pytest.raises(Exception, match="match_head_commit"):
             exec.compute_command(auth)
@@ -357,4 +365,5 @@ class TestMergeExecutor:
                 candidate_sha256="c" * 64,
                 verifier_record_sha256="d" * 64,
                 merge_method="rebase",
+            feature_branch="feat/test",
             )

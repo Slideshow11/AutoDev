@@ -250,15 +250,45 @@ class StateStore:
         return StateRevision(path=safe, revision=payload["_revision"])
 
     def compare_and_swap(self, rel_path: str, payload: dict, expected_revision: int) -> StateRevision:
+        """Atomically update ``rel_path`` only if its current revision
+        equals ``expected_revision``.
+
+        The operation is wrapped in a stable advisory lock keyed by
+        a dedicated coordination-lock inode. The lock covers:
+        - revision read
+        - expected-revision comparison
+        - new-state construction
+        - durable write
+        - revision update
+        A concurrent caller attempting the same CAS will block on
+        the lock until the original caller finishes.
+        """
         safe = _safe_path(rel_path)
         full = Path(self.state_root) / safe
-        existing = self.read_strict(rel_path)
-        existing_rev = int(existing.get("_revision", 0))
-        if existing_rev != expected_revision:
-            raise StateRevisionMismatch(
-                f"revision mismatch: expected {expected_revision}, found {existing_rev}"
-            )
-        return self.write_atomic(safe, payload)
+        # Coordination lock file (separate from the lease lock).
+        coord_lock_path = Path(self.state_root) / f".{safe}.cas.lock"
+        fd = None
+        try:
+            fd = os.open(str(coord_lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as e:
+            if fd is not None:
+                os.close(fd)
+            raise StateStoreError(f"cannot acquire CAS coordination lock for {safe}: {e}")
+        try:
+            existing = self.read_strict(rel_path)
+            existing_rev = int(existing.get("_revision", 0))
+            if existing_rev != expected_revision:
+                raise StateRevisionMismatch(
+                    f"revision mismatch: expected {expected_revision}, found {existing_rev}"
+                )
+            return self.write_atomic(safe, payload)
+        finally:
+            os.close(fd)
+            try:
+                os.unlink(coord_lock_path)
+            except OSError:
+                pass
 
     def append_journal(self, rel_path: str, entry: dict) -> None:
         safe = _safe_path(rel_path)
