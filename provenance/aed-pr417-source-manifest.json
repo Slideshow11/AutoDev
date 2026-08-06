@@ -29,9 +29,9 @@
       "source_path": "scripts/local/pyproject.toml",
       "destination_path": "pyproject.toml",
       "source_sha256": "8fc7e1319f879c71f1e272b4a56d56951aa2b223366d238e96b114540c125532",
-      "destination_sha256": "a7ef1909c28aa6bb4b05900080af089bf058a89e3f85e7c5f9cdb744006c9a41",
+      "destination_sha256": "b4420e9353948d46d893c5fb75be9bf96e73485ddfbec8c84f3fa34efb643b40",
       "source_size_bytes": 1304,
-      "destination_size_bytes": 1868,
+      "destination_size_bytes": 2061,
       "transformation_classification": "packaging_metadata_only",
       "transformation_explanation": "Moved from scripts/local/pyproject.toml to the standalone repository root; updated the docstring and the [tool.setuptools.packages.find] exclude list to reflect the new layout. Distribution name and runtime dependency on tomli for Python <3.11 are preserved."
     },
@@ -226,8 +226,8 @@
       "source_path": null,
       "destination_path": "INVARIANTS.md",
       "source_sha256": null,
-      "destination_sha256": "ccd502ba201b831d51a3eaf3fa8028cd284bdafbcf17da5059030d604669bd29",
-      "destination_size_bytes": 13116,
+      "destination_sha256": "2ca7bc70c784a08887c1f6f7058247f7da4241b3490f19d8cf6843e81a46f464",
+      "destination_size_bytes": 21672,
       "transformation_classification": "standalone_documentation_addition",
       "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
     },
