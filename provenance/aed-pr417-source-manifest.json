@@ -281,9 +281,27 @@
       "source_sha256": null,
       "transformation_classification": "standalone_documentation_addition",
       "transformation_explanation": "Newly authored for the standalone repository. Provides canonical artifact path helpers shared across init/authorize/merge/post-merge."
+    },
+    {
+      "destination_path": "tests/test_coderabbit_identity_filter.py",
+      "destination_sha256": "52044892596979638983f2b8a58f0b5edf3c37f7d25f749241cc7b6d8746d669",
+      "destination_size_bytes": 11360,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression tests for CodeRabbit identity and explicit mergeCommit identity contracts."
+    },
+    {
+      "destination_path": "tests/test_explicit_merge_commit_identity.py",
+      "destination_sha256": "54dc99a2c6229bf21dbcd27a297950c0741267020f2255fd1a8d093cc25fa043",
+      "destination_size_bytes": 11473,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression tests for CodeRabbit identity and explicit mergeCommit identity contracts."
     }
   ],
-  "last_modification_note": "PR #4 review repair round 3: repaired 18 formal review-body findings + 3 doc fixes. Added autocoder_orchestration/canonical_paths.py. Manifest now has 29 files (17 source, 12 standalone).",
+  "last_modification_note": "PR #4 review repair round 4 (post-directive \u00a73/\u00a74): repaired CodeRabbit identity contract (coderabbitai vs [bot]) and explicit mergeCommit identity contract. Added two new test files with 31 total manifest entries (17 source, 14 standalone).",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -305,5 +323,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-06T16:35:00Z"
+  "updated_at_utc": "2026-08-06T21:30:00Z"
 }
