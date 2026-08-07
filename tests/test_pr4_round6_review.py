@@ -1,5 +1,6 @@
-"""Round-6 review, Round-7 proof-repair, and Round-8 final-loop
-discipline tests for PR #4.
+"""Round-6 review, Round-7 proof-repair, Round-8 final-loop,
+Round-9 review-diagnostic, and Round-10 live-verifier-fix tests
+for PR #4.
 
 These tests cover:
 
@@ -19,6 +20,20 @@ Round-8 directive's three fresh threads:
   _paginate_latest_reviews / _paginate_connection /
   _inspect_coderabbit path; mock only the GraphQL/network
   boundary.
+Round-9 directive's two fresh threads:
+* PRRT_kwDOTtyQLc6XXFOx -- safe offenders diagnostic; no
+  offenders[0] indexing before the length assertion.
+* PRRT_kwDOTtyQLc6XXFO3 -- test docstring correction for
+  unexpected-cursor test (hasNextPage=True).
+Round-10 directive's live-verifier qualification defects:
+* Multi-page check-run collector now embeds ``?per_page=``
+  query params in the URL (the prior ``-F`` field form
+  returns HTTP 404 on real ``gh api`` invocations).
+* Test helpers (_two_page, _run, fake_run_gh) now extract
+  page=N from both URL form and legacy field form.
+* ``Round9SafeDiagnosticsTests`` and
+  ``Round9PaginatorPreservationTests`` preserved and
+  extended.
 """
 from __future__ import annotations
 
