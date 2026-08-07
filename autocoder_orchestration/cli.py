@@ -430,16 +430,41 @@ def cmd_build_candidate(args: argparse.Namespace) -> int:
         candidate = builder.build(cert, args.local_checkout)
     except CandidateError as e:
         return _emit(
-            {"error": f"candidate build failed: {e}"},
+            {"error": f"candidate build failed: {e!r}"},
             json_mode=args.json,
             exit_code=EXIT_GUARD,
         )
+    # Persist the canonical candidate artifact to the evidence root
+    # via the canonical-paths helper. The guarded merge transaction
+    # consumes ``canonical_paths(evidence_root).candidate``; writing
+    # only to state_root would break that contract.
+    from .artifacts import write_artifact
+    rc_for_evidence = store.read_optional("run_context.json")
+    ctx_for_evidence = (
+        RunContext.from_dict(rc_for_evidence) if rc_for_evidence else None
+    )
+    if ctx_for_evidence is None:
+        return _emit(
+            {"error": "no run context on file"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    paths = _canonical_artifact_paths(Path(ctx_for_evidence.evidence_root))
+    paths["candidate"].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    write_artifact(paths["candidate"], candidate.to_dict())
+    # Keep the state-root copy as a secondary observable for audit,
+    # never as the merge-input source. The canonical evidence root is
+    # authoritative; the merge transaction must never read state-root.
     store.write_atomic("candidate.json", candidate.to_dict())
     store.write_atomic("candidate.sha256", {"sha256": candidate.compute_sha256()})
     return _emit(
         {
             "run_id": args.run_id,
             "candidate_sha256": candidate.compute_sha256(),
+            "canonical_candidate_path": str(paths["candidate"]),
+            "canonical_candidate_sha256": write_artifact(
+                paths["candidate"], candidate.to_dict()
+            ).digest,
         },
         json_mode=args.json,
         exit_code=EXIT_OK,
@@ -849,17 +874,45 @@ def cmd_merge(args: argparse.Namespace) -> int:
     # Persist the COMPLETE state transition on the run-state side, so a
     # subsequent restart sees the controller in COMPLETE even if the
     # CLI process exits before a separate post-merge verify invocation.
+    #
+    # Per the explicit fail-closed COMPLETE contract:
+    # * The merge record was already durably written above.
+    # * If ``report_complete()`` raises (ControllerError / StateStoreError /
+    #   any persistence failure), the CLI returns a NONZERO exit code.
+    # * The merge record remains durable so a subsequent retry can
+    #   recover by re-applying report_complete() idempotently.
+    # * The CLI does NOT report success in this case.
     final_state = record.final_state
-    state_warning: Optional[str] = None
+    complete_state_warning: Optional[str] = None
     try:
         controller = Controller(ctx, store)
         sm = controller.report_complete()
         final_state = sm.current_state
-    except (ControllerError, StateStoreError) as e:
-        # The merge record is already durable. The state transition is
-        # best-effort bookkeeping; surface as a warning but still
-        # report success because the merge was completed.
-        state_warning = f"state-machine transition failed: {e!r}"
+    except (ControllerError, StateStoreError, OSError) as e:
+        # The merge record is durable on disk; the durable COMPLETE
+        # transition failed. This is NOT a successful completion —
+        # return a controlled nonzero result so the caller can retry.
+        # The durable merge record preserves the recovery information
+        # so a follow-up ``report_complete()`` retry can persist the
+        # COMPLETE transition idempotently.
+        complete_state_warning = (
+            f"durable COMPLETE transition failed: {e!r}; merge record "
+            f"at {rec_digest} is durable; retry report_complete() to "
+            "persist COMPLETE idempotently."
+        )
+
+    if complete_state_warning is not None:
+        return _emit(
+            {
+                "error": complete_state_warning,
+                "run_id": auth.run_id,
+                "squash_merge_commit": record.squash_merge_commit,
+                "merge_record_digest": rec_digest,
+                "complete_state_persisted": False,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
 
     payload = {
         "run_id": auth.run_id,
@@ -867,8 +920,6 @@ def cmd_merge(args: argparse.Namespace) -> int:
         "squash_merge_commit": record.squash_merge_commit,
         "merge_record_digest": rec_digest,
     }
-    if state_warning is not None:
-        payload["warning"] = state_warning
     return _emit(
         payload,
         json_mode=args.json,
@@ -921,7 +972,7 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
             json_mode=args.json,
             exit_code=EXIT_GUARD,
         )
-    if not record.autodev_clean_post_merge:
+    if not record.aed_clean_post_merge:
         return _emit(
             {"error": "autodev working tree not clean"},
             json_mode=args.json,
@@ -936,7 +987,14 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
         )
     ctx = RunContext.from_dict(rc)
     controller = Controller(ctx, store)
-    sm = controller.report_complete()
+    try:
+        sm = controller.report_complete()
+    except (ControllerError, StateStoreError, OSError) as e:
+        return _emit(
+            {"error": f"durable COMPLETE transition failed: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     return _emit(
         {"run_id": args.run_id, "state": sm.current_state},
         json_mode=args.json,

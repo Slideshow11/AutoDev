@@ -56,6 +56,10 @@ from .artifacts import (
     read_artifact,
     digest_bytes,
 )
+from .merge_lock import (
+    LockUnavailable as MergeLockUnavailable,
+    merge_lock as _merge_lock,
+)
 
 
 # === Errors ===
@@ -387,15 +391,20 @@ def _verify_artifact_digest_unchanged(
     """Re-verify that an artifact's exact-file digest still matches after the merge.
 
     Reads the artifact bytes and returns True iff the SHA-256 matches
-    ``expected_digest``. On any ``OSError`` or ``ArtifactError``
+    ``expected_digest``. On any ``OSError`` (e.g. PermissionError,
+    IsADirectoryError, FileNotFoundError) or ``ArtifactError``
     (missing sidecar, digest mismatch, missing file), returns False and
-    appends a descriptive note to ``unavailable_list``.
+    appends a descriptive note to ``unavailable_list``. The
+    exception must NEVER escape this helper — the durable merge
+    record is being written after the irreversible remote merge, and
+    any escaping exception can leave the post-merge record in a
+    half-written state.
     """
     try:
         result = read_artifact(path)
-    except ArtifactError as e:
+    except (ArtifactError, OSError) as e:
         unavailable_list.append(
-            f"post-merge re-verification of {path.name} failed: {e!r}"
+            f"post-merge re-verification of {path.name} failed: {type(e).__name__}: {e!r}"
         )
         return False
     if result.digest != expected_digest:
@@ -1042,6 +1051,31 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
     the record is written with the server-side observations.
     """
     _validate_inputs(inputs)
+
+    # Acquire the cross-process merge lock. The lock is held for the
+    # entire transaction and released on every code path. A second
+    # process attempting to merge on the same evidence root will
+    # raise MergeLockUnavailable immediately (the caller may retry).
+    try:
+        with _merge_lock(inputs.evidence_root) as _lock_ctx:
+            return _execute_guarded_merge_transaction_locked(inputs)
+    except MergeLockUnavailable as e:
+        # Surface as a MergeError subclass so CLI handlers map it
+        # to the controlled guard-failed exit code.
+        raise MergeError(
+            f"another process holds the merge lock for "
+            f"{inputs.evidence_root}: {e!r}"
+        ) from e
+
+
+def _execute_guarded_merge_transaction_locked(
+    inputs: MergeTransactionInputs,
+) -> Tuple[MergeRecord, str]:
+    """Inner transaction body that runs while holding the merge lock.
+
+    See ``execute_guarded_merge_transaction`` for the full contract.
+    This function MUST be called only inside the lock context.
+    """
 
     # Validate the live PR payload shape before any binding check. A
     # missing or malformed key is a MergeError, not a KeyError, so

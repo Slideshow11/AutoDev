@@ -299,9 +299,54 @@
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
       "transformation_explanation": "Newly authored regression tests for CodeRabbit identity and explicit mergeCommit identity contracts."
+    },
+    {
+      "destination_path": "autocoder_orchestration/merge_lock.py",
+      "destination_sha256": "3558d7f810258e027fef801061575260e0b345257ab990374327abe3bc49bfb4",
+      "destination_size_bytes": 5402,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+    },
+    {
+      "destination_path": "tests/test_canonical_evidence_flow.py",
+      "destination_sha256": "968dcce07e7cac778d9cb2e13ec75cfdce29525c31a52b49781d656cb308f3c2",
+      "destination_size_bytes": 10363,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+    },
+    {
+      "destination_path": "tests/test_cross_process_merge_lock.py",
+      "destination_sha256": "40a81c36158f46dbacd855e7e8427514ba922d6a9e9305a5c95fb740da570ef3",
+      "destination_size_bytes": 6190,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+    },
+    {
+      "destination_path": "tests/test_durable_complete_fails_closed.py",
+      "destination_sha256": "76cc32b45e68c93054993766d68491b099ae3172ea75ea40b3706251a84e7bdb",
+      "destination_size_bytes": 9578,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+    },
+    {
+      "destination_path": "tests/test_verify_artifact_digest_oserror.py",
+      "destination_sha256": "f6177bc9b1f229b3e08d4b9e579aa9a2962a7520617137079af49d6d07226e70",
+      "destination_size_bytes": 5113,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
     }
   ],
-  "last_modification_note": "PR #4 review repair round 4 (post-directive \u00a73/\u00a74): repaired CodeRabbit identity contract (coderabbitai vs [bot]) and explicit mergeCommit identity contract. Added two new test files with 31 total manifest entries (17 source, 14 standalone).",
+  "last_modification_note": "PR #4 review repair round 5: \u00a73.1, \u00a73.2, \u00a73.3, \u00a73.5, concurrency invariant. Added merge_lock.py + 4 new test files. Manifest now has 36 entries (17 source, 19 standalone).",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -323,5 +368,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-06T21:30:00Z"
+  "updated_at_utc": "2026-08-06T23:00:00Z"
 }

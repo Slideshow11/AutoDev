@@ -97,6 +97,8 @@ from .merge_authorization import (
     MergeRecord,
     MergeError,
 )
+from .artifacts import write_artifact as _write_artifact
+from .canonical_paths import canonical_paths as _canonical_paths
 
 
 class ControllerError(Exception):
@@ -213,6 +215,10 @@ class Controller:
         )
         cand_payload = candidate.to_dict()
         cand_payload["_sha256"] = candidate.compute_sha256()
+        # Canonical evidence-root copy (authoritative merge input).
+        # The merge transaction reads only the canonical path; the
+        # state-root copy is a secondary observable for audit only.
+        self._write_canonical("candidate", cand_payload)
         self.store.write_atomic("candidate.json", cand_payload)
         self.store.write_atomic("candidate.sha256", {"sha256": cand_payload["_sha256"]})
         self.save_state_machine(next_sm)
@@ -377,6 +383,20 @@ class Controller:
         self.save_state_machine(next_sm)
         return next_sm
 
+    def _write_canonical(self, kind: str, payload: dict) -> str:
+        """Write ``payload`` to the canonical evidence-root artifact path.
+
+        The state-root copy is kept as a secondary observable for
+        audit; the canonical evidence-root copy is authoritative.
+        The guarded merge transaction reads only the canonical
+        path; the state-root copy must never become a second input.
+        """
+        paths = _canonical_paths(Path(self.context.evidence_root))
+        target = paths[kind]
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        result = _write_artifact(target, payload)
+        return result.digest
+
     def verifier_failed(self, *, head_observed: str, verifier_record: Dict[str, Any]) -> StateMachine:
         """VERIFYING -> VERIFICATION_FAILED."""
         sm = self._require_state_for_event()
@@ -386,6 +406,9 @@ class Controller:
             head_observed=head_observed,
             head_required=self.context.current_authorized_head,
         )
+        # Canonical evidence-root copy (authoritative merge input).
+        self._write_canonical("verifier", verifier_record)
+        # State-root copy is a secondary observable for audit only.
         self.store.write_atomic("verifier-record.json", verifier_record)
         self.save_state_machine(next_sm)
         return next_sm
@@ -399,6 +422,9 @@ class Controller:
             head_observed=head_observed,
             head_required=self.context.current_authorized_head,
         )
+        # Canonical evidence-root copy (authoritative merge input).
+        self._write_canonical("verifier", verifier_record)
+        # State-root copy is a secondary observable for audit only.
         self.store.write_atomic("verifier-record.json", verifier_record)
         self.save_state_machine(next_sm)
         return next_sm
