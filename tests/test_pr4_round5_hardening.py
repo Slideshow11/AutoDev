@@ -63,11 +63,12 @@ class OptimizedPythonRefusalTests(unittest.TestCase):
         """Spawning the verifier with ``-O`` exits with a
         controlled SystemExit and emits the refusal banner.
         No verifier artifact can be written."""
+        fake_record = Path(tempfile.gettempdir()) / "aed-r5b-fake.json"
         proc = subprocess.run(
             [sys.executable, "-O",
              str(REPO_ROOT / "scripts" / "independent_verifier_v2.py"),
              "--qualification-head", "a" * 40,
-             "--incident-record", "/tmp/aed-r5b-fake.json"],
+             "--incident-record", str(fake_record)],
             capture_output=True, text=True,
         )
         self.assertEqual(proc.returncode, 1,
@@ -81,11 +82,12 @@ class OptimizedPythonRefusalTests(unittest.TestCase):
         run at import time."""
         env = os.environ.copy()
         env["PYTHONOPTIMIZE"] = "1"
+        fake_record = Path(tempfile.gettempdir()) / "aed-r5b-fake.json"
         proc = subprocess.run(
             [sys.executable,
              str(REPO_ROOT / "scripts" / "independent_verifier_v2.py"),
              "--qualification-head", "a" * 40,
-             "--incident-record", "/tmp/aed-r5b-fake.json"],
+             "--incident-record", str(fake_record)],
             capture_output=True, text=True, env=env,
         )
         self.assertEqual(proc.returncode, 1,
@@ -135,29 +137,13 @@ class OptimizedPythonRefusalTests(unittest.TestCase):
 class ProducerIdentityTests(unittest.TestCase):
     """The persisted ``verifier`` field must be derived from
     the executing module. No record may claim a producer that
-    did not generate it."""
+    did not generate it.
 
-    def test_verifier_field_derived_from_module(self):
-        """The verifier record's ``verifier`` field is derived
-        from ``Path(__file__).stem`` of the executing module.
-        Source inspection: the field MUST use the f-string."""
-        src = (REPO_ROOT / "scripts" / "independent_verifier_v2.py").read_text()
-        self.assertRegex(
-            src,
-            r'"verifier":\s*f"scripts\.\{Path\(__file__\)\.stem\}"',
-            "verifier field must be derived from Path(__file__).stem",
-        )
-
-    def test_verifier_module_path_is_absolute(self):
-        """The verifier record's ``verifier_module_path`` is the
-        absolute resolved path to the executing module."""
-        src = (REPO_ROOT / "scripts" / "independent_verifier_v2.py").read_text()
-        self.assertIn(
-            '"verifier_module_path": str(Path(__file__).resolve())',
-            src,
-            "verifier_module_path must be the absolute resolved "
-            "path to the executing module",
-        )
+    Per round-6 directive 9c, the source-text identity tests
+    were removed. The persisted-payload coverage in
+    test_no_hardcoded_v3_v4_v5_string is sufficient and
+    behavior-preserving (it does not depend on the source-text
+    layout of the verifier module)."""
 
     def test_no_hardcoded_v3_v4_v5_string(self):
         """The verifier record's ``verifier`` field MUST NOT
@@ -167,7 +153,9 @@ class ProducerIdentityTests(unittest.TestCase):
         # Build a synthetic observations dict and call
         # _write_verifier; check the persisted record's
         # ``verifier`` field reflects the actual module path.
-        paths = {"verifier": Path(tempfile.mkdtemp()) / "verifier.json"}
+        evidence_root = Path(tempfile.mkdtemp())
+        from autocoder_orchestration.canonical_paths import canonical_paths
+        paths = canonical_paths(evidence_root)
         paths["verifier"].parent.mkdir(parents=True, exist_ok=True)
         try:
             args = type("A", (), {"evidence_root": paths["verifier"].parent})()
@@ -239,7 +227,7 @@ class ProducerIdentityTests(unittest.TestCase):
                 "verifier_module_path must equal the actual executing module path",
             )
         finally:
-            shutil.rmtree(paths["verifier"].parent, ignore_errors=True)
+            shutil.rmtree(evidence_root, ignore_errors=True)
 
 
 class IncidentRecordPreciseFailureTests(unittest.TestCase):
@@ -315,7 +303,9 @@ class IncidentRecordPreciseFailureTests(unittest.TestCase):
             "repo": "o/r", "pr_number": 1,
         })()
         from autocoder_orchestration.artifacts import ArtifactError
-        with self.assertRaises((VerificationFailure, ArtifactError)) as ctx:
+        # Per round-6 directive 9f the deterministic read_artifact
+        # failure path must be asserted as ArtifactError only.
+        with self.assertRaises(ArtifactError) as ctx:
             VERIFIER._verify_incident_record(args)
         msg = str(ctx.exception).lower()
         # The failure is specifically about the digest mismatch.
@@ -409,8 +399,14 @@ class RealLaterPagePaginationTests(unittest.TestCase):
                     "reviewDecision": decision,
                 }}}}
             cursor = variables["cursor"]
-            idx = 0 if cursor == "null" else 1
-            page = pages[idx]
+            cursor_index = {"null": 0}
+            for i in range(1, len(pages)):
+                cursor_index[f"CURSOR_{i}"] = i
+            if cursor not in cursor_index:
+                raise AssertionError(
+                    f"paginator sent an unexpected cursor: {cursor!r}"
+                )
+            idx = cursor_index[cursor]
             return {"data": {"repository": {"pullRequest": {
                 "latestReviews": {
                     "pageInfo": {
@@ -421,7 +417,7 @@ class RealLaterPagePaginationTests(unittest.TestCase):
                         ),
                     },
                     "totalCount": sum(len(p["nodes"]) for p in pages),
-                    "nodes": page["nodes"],
+                    "nodes": pages[idx]["nodes"],
                 },
             }}}}
 
@@ -471,8 +467,14 @@ class RealLaterPagePaginationTests(unittest.TestCase):
                               "2026-08-06T09:00:00Z"),
             ]},
         ]
-        with self.assertRaises(VerificationFailure):
+        with self.assertRaises(VerificationFailure) as ctx:
             self._drive_paginator(pages, "APPROVED", self._args())
+        # Per round-6 directive 9a, the failure must identify
+        # the latest-review-state gate, not just any failure.
+        msg = str(ctx.exception)
+        self.assertIn("CHANGES_REQUESTED", msg,
+            f"failure must name the latest-review-state gate; "
+            f"got: {msg!r}")
 
     def test_older_changes_requested_newer_approved_passes(self):
         pages = [

@@ -400,12 +400,6 @@ def _paginate_connection(
             break
         cursor = page_info["endCursor"]
     _gate(
-        total is not None,
-        f"{label} totalCount completeness",
-        f"{label} pagination completed without a totalCount; "
-        f"the response was missing totalCount on every page",
-    )
-    _gate(
         len(nodes) == total,
         f"{label} pagination completeness",
         f"collected {len(nodes)} != totalCount {total}; "
@@ -554,26 +548,28 @@ def _fetch_pr(args, qual) -> dict:
 
 @_step("Inspect exact-head CI on the qualification head (paginates ALL pages)")
 def _inspect_ci(args, qual) -> dict:
-    raw = _run_gh([
-        "api", f"repos/{args.repo}/commits/{qual}/check-runs",
-        "-q", ".",
-        "--paginate",
-    ])
-    # ``--paginate`` emits one JSON document per page; the
-    # helper returns a list. The repository-wide total_count
-    # appears on every page in object responses but is not
-    # returned by the list response shape. We require an
-    # explicit ``total_count`` from the API; defaulting to
-    # ``len(runs)`` would make the completeness assertion
-    # tautological (always true). When the response is an
-    # object, we accept ``total_count``; when it is a list,
-    # ``total_count`` is absent and we FAIL CLOSED.
-    if isinstance(raw, list):
-        runs = raw
-        total_count = None
-    else:
-        runs = raw.get("check_runs", [])
-        total_count = raw.get("total_count")
+    """Collect every check-run on the qualification head via a
+    single canonical collector.
+
+    Implementation note: ``gh api ... --paginate`` emits one
+    JSON document per page and ``json.loads`` cannot parse the
+    concatenated output as a single object. We therefore
+    request pages explicitly with ``?per_page=100&page=N`` and
+    aggregate them in Python. The collector:
+
+    * binds every request to qualification_head;
+    * collects every page until the page returns fewer than
+      ``per_page`` items;
+    * requires an explicit ``total_count`` on every page;
+    * requires every page's total_count to agree;
+    * requires ``len(collected runs) == total_count``;
+    * rejects a check-run whose head_sha differs from
+      qualification_head;
+    * rejects malformed page shapes;
+    * rejects duplicate run IDs that would otherwise mask
+      a missing intermediate page.
+    """
+    runs, total_count = _collect_check_runs(args, qual)
     print(f"check-runs total: {total_count}, collected: {len(runs)}")
     for r in runs:
         print(f"  {r['name']}: {r.get('conclusion') or r.get('status')}")
@@ -584,10 +580,6 @@ def _inspect_ci(args, qual) -> dict:
             f"check-run {r['name']!r} head_sha={head_sha!r} "
             f"!= qualification_head={qual!r}",
         )
-    # FAIL CLOSED on completeness (per round-4 P0 and round-5
-    # outside-diff comment). The reported ``total_count`` MUST
-    # be present; defaulting to ``len(runs)`` would make the
-    # equality assertion tautological.
     _gate(
         total_count is not None,
         "exact-head CI",
@@ -597,7 +589,7 @@ def _inspect_ci(args, qual) -> dict:
     _gate(
         total_count > 0,
         "exact-head CI",
-        f"check-runs response reported total_count == 0",
+        "check-runs response reported total_count == 0",
     )
     _gate(
         len(runs) == total_count,
@@ -626,6 +618,110 @@ def _inspect_ci(args, qual) -> dict:
     )
     print(f"OK: all 6 required jobs are green on qualification head {qual}")
     return {"runs": runs, "total_count": total_count}
+
+
+# Check-run pagination constants.
+_CHECK_RUN_PAGE_SIZE = 100
+_CHECK_RUN_MAX_PAGES = 20
+
+
+def _collect_check_runs(args, qual) -> tuple:
+    """Single canonical collector for every check-run on the
+    qualification head.
+
+    Returns ``(runs, total_count)`` where ``total_count`` is
+    the repository-side total reported by the API on every
+    page (consistent across pages). The collector refuses to
+    fall back to ``len(runs)`` -- ``total_count`` must be
+    explicitly present and equal across pages.
+
+    Each page is fetched via ``gh api ... ?per_page=...&page=N``
+    so the helper survives multi-page JSON output. The
+    collector also rejects malformed page shapes and any
+    duplicated runs that would otherwise mask a missing
+    intermediate page.
+    """
+    runs: List[dict] = []
+    total_count = None
+    seen_ids: set = set()
+    page_n = 0
+    while True:
+        page_n += 1
+        if page_n > _CHECK_RUN_MAX_PAGES:
+            raise VerificationFailure(
+                f"check-run pagination exceeded "
+                f"{_CHECK_RUN_MAX_PAGES} pages; aborting"
+            )
+        # Each request is bound to qualification_head (the
+        # path includes the 40-char SHA). We do NOT use
+        # ``--paginate`` because its concatenated JSON output
+        # cannot be parsed by a single ``json.loads`` call.
+        try:
+            data = _run_gh([
+                "api", f"repos/{args.repo}/commits/{qual}/check-runs",
+                "-q", ".",
+                "-F", f"per_page={_CHECK_RUN_PAGE_SIZE}",
+                "-F", f"page={page_n}",
+            ])
+        except json.JSONDecodeError as e:
+            raise VerificationFailure(
+                f"check-runs page {page_n} returned invalid JSON: "
+                f"{e!r}; failing closed"
+            ) from e
+        # Malformed page shape: must be a dict with
+        # ``check_runs`` (a list) and ``total_count``.
+        if not isinstance(data, dict):
+            raise VerificationFailure(
+                f"check-runs page {page_n} returned a non-dict "
+                f"payload: {type(data).__name__}"
+            )
+        page_runs = data.get("check_runs")
+        if not isinstance(page_runs, list):
+            raise VerificationFailure(
+                f"check-runs page {page_n} missing 'check_runs' list"
+            )
+        page_total = data.get("total_count")
+        if page_total is None:
+            raise VerificationFailure(
+                f"check-runs page {page_n} omitted total_count; "
+                f"completeness cannot be proven"
+            )
+        # Every page must agree on the repository-side total.
+        if total_count is None:
+            total_count = page_total
+        else:
+            if page_total != total_count:
+                raise VerificationFailure(
+                    f"check-runs page {page_n} reported "
+                    f"total_count={page_total}; previous pages "
+                    f"reported total_count={total_count}"
+                )
+        # Reject duplicate runs that would mask a missing
+        # intermediate page.
+        for r in page_runs:
+            rid = r.get("id")
+            if rid is not None and rid in seen_ids:
+                raise VerificationFailure(
+                    f"check-run id={rid} appeared on multiple "
+                    f"pages; pagination is ambiguous"
+                )
+            if rid is not None:
+                seen_ids.add(rid)
+            runs.append(r)
+        # Stop when GitHub returns fewer than ``per_page`` items.
+        # BEFORE returning, verify that the collected count equals
+        # the server-reported total. This is the completeness
+        # invariant; failing closed here prevents the inspect
+        # layer from asserting tautological completeness.
+        if len(page_runs) < _CHECK_RUN_PAGE_SIZE:
+            if len(runs) != total_count:
+                raise VerificationFailure(
+                    f"check-run pagination completeness: "
+                    f"collected {len(runs)} != total_count {total_count}; "
+                    f"a check-run beyond page 1 would be invisible"
+                )
+            break
+    return runs, total_count
 
 
 @_step("Inspect live CodeRabbit review decision (fail-closed)")
