@@ -347,12 +347,21 @@
     },
     {
       "destination_path": "scripts/independent_verifier_v2.py",
-      "destination_sha256": "4c59c233bdce449c79c71a53bfec9bc2a3c439877c7a6afe5e3eae10bdcc3bd3",
-      "destination_size_bytes": 15850,
+      "destination_sha256": "f8dfc82fe031ed8d806e1d73d97ff2859338643e49e1c3df3ade454dcef7a685",
+      "destination_size_bytes": 30345,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
       "transformation_explanation": "Independent exact-head verifier for PR #4 strict-window qualification. Reads --qualification-head as immutable input; every check (live PR head, CI query SHA, strict-window observations, candidate.exact_head, verifier.qualification_head) is bound to that single head. No EXPECTED_HEADS, no historical equivalence. Run via 'python scripts/independent_verifier_v2.py --qualification-head <40-hex-sha>'."
+    },
+    {
+      "destination_path": "tests/test_pr4_round3_review.py",
+      "destination_sha256": "ade5a711fb4ffe2512d1f44373bf83ae5ed1e133d49d9c4f5eccd2ed889eb844",
+      "destination_size_bytes": 26824,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression tests for PR #4 round-3 review findings: canonical-write failure injection with retry, CLI does not duplicate canonical write, verifier measured-evidence lineage, cross-process holder/contender PID identity. The PID test catches the parent-os.getpid()-interpolation defect."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",

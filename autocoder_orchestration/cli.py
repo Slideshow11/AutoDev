@@ -51,6 +51,7 @@ from .store import StateStore, StateStoreError, ProcessIdentity, current_process
 from .controller import Controller, ControllerError
 from .readiness import ReadinessEngine, ReadinessDecision, ReadinessCertificate
 from .observer import ObservationLog, Observation
+from .artifacts import ArtifactError, write_artifact, read_artifact
 from .candidate import (
     Candidate,
     CandidateBuilder,
@@ -482,9 +483,27 @@ def cmd_build_candidate(args: argparse.Namespace) -> int:
     # surface produced them. The duplicate canonical write that
     # used to follow is removed.
     controller = Controller(ctx, store)
-    controller.build_candidate(
-        candidate, head_observed=str(ctx.current_authorized_head or ""),
-    )
+    try:
+        controller.build_candidate(
+            candidate, head_observed=str(ctx.current_authorized_head or ""),
+        )
+    except (ControllerError, StateStoreError, StateError,
+            ArtifactError) as e:
+        # Pre-merge failures return controlled state / guard
+        # exits. A canonical-write failure (``ArtifactError``) is
+        # a state failure: the run has not transitioned and a
+        # retry can resume cleanly.
+        if isinstance(e, ArtifactError):
+            return _emit(
+                {"error": f"canonical candidate write failed: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_STATE,
+            )
+        return _emit(
+            {"error": f"candidate transition rejected: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     # Capture the canonical artifact digest for the response
     # payload from the canonical evidence root that the merge
     # transaction will re-read. This is a single read; no
@@ -807,44 +826,35 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
     )
     auth_payload = auth.to_dict()
     auth_payload["_sha256"] = auth.compute_sha256()
-    # Safe ordering: call Controller.authorize_merge FIRST. The
-    # Controller validates the state transition and the
-    # authorized head BEFORE writing anything. If validation
-    # fails, ControllerError is raised and we return without
-    # persisting the canonical authorization.json. The merge
-    # transaction cannot then consume a rejected authorization.
+    # The Controller owns the complete safe transaction:
+    # validate inputs -> validate state -> validate head ->
+    # canonical write -> state-root write -> state transition.
+    # A failure at ANY step leaves the run at
+    # AWAITING_MERGE_AUTHORIZATION so a retry can succeed
+    # without re-entering an already-committed transition.
     controller = Controller(ctx, store)
     try:
         sm = controller.authorize_merge(auth)
-    except (ControllerError, StateStoreError) as e:
-        # A precondition failed (transition rejected, head
-        # mismatch, etc.). Return a controlled nonzero exit code
-        # and DO NOT persist the canonical authorization.json.
+    except (ControllerError, StateStoreError, StateError,
+            ArtifactError) as e:
+        # Catch every precondition / write failure. The
+        # canonical authorization.json MUST NOT appear when
+        # authorization is rejected, so a follow-up retry
+        # can re-authorize cleanly.
+        if isinstance(e, ArtifactError):
+            return _emit(
+                {"error": f"authorization canonical write failed: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_STATE,
+            )
         return _emit(
             {"error": f"authorization transition rejected: {e!r}"},
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    except StateError as e:
-        # ``InvalidTransition`` is raised by the state machine
-        # when the controller's state cannot reach the target.
-        # Without this handler the CLI would emit an uncaught
-        # traceback and a subsequent ``cmd_merge`` could still
-        # consume rejected authorization evidence if the CLI
-        # ever wrote the artifact before the raise.
-        return _emit(
-            {"error": f"authorization transition rejected: {e!r}"},
-            json_mode=args.json,
-            exit_code=EXIT_STATE,
-        )
-    # Preconditions passed AND the controller wrote the
-    # state-root ``merge-authorization.json``. Now persist the
-    # canonical evidence-root ``authorization.json`` so the merge
-    # transaction will re-read the same artifact at the same
-    # canonical path.
-    paths["authorization"].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    from .artifacts import write_artifact
-    write_artifact(paths["authorization"], auth_payload)
+    # Controller wrote both canonical authorization.json and
+    # the state-root merge-authorization.json, then committed
+    # MERGE_AUTHORIZED. No duplicate canonical write here.
     return _emit(
         {
             "run_id": args.run_id,
@@ -1130,7 +1140,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         controller = Controller(ctx, store)
         sm = controller.report_complete()
         final_state = sm.current_state
-    except (ControllerError, StateStoreError, OSError) as e:
+    except (ControllerError, StateStoreError, StateError, OSError) as e:
         # The merge record is durable on disk; the durable COMPLETE
         # transition failed. This is NOT a successful completion —
         # return a controlled nonzero result so the caller can retry.
@@ -1233,7 +1243,7 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     controller = Controller(ctx, store)
     try:
         sm = controller.report_complete()
-    except (ControllerError, StateStoreError, OSError) as e:
+    except (ControllerError, StateStoreError, StateError, OSError) as e:
         return _emit(
             {"error": f"durable COMPLETE transition failed: {e!r}"},
             json_mode=args.json,

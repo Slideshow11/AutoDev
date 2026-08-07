@@ -532,7 +532,7 @@ class CrossProcessLockHolderPidTests(unittest.TestCase):
             "sys.stdout.flush()\n"
         )
         contender_script = (
-            "import sys\n"
+            "import os, sys\n"
             f"sys.path.insert(0, {repo_root!r})\n"
             "from autocoder_orchestration.merge_lock import (\n"
             "    LockUnavailable, merge_lock,\n"
@@ -545,7 +545,7 @@ class CrossProcessLockHolderPidTests(unittest.TestCase):
             "    sys.stdout.write(\n"
             "        'CONTENDER_BLOCKED '\n"
             "        f'holder_pid={exc.holder_pid} '\n"
-            f"        f'contender_pid={os.getpid()}\\n'\n"
+            "        f'contender_pid={os.getpid()}\\n'\n"
             "    )\n"
             "    sys.stdout.flush()\n"
             "    sys.exit(0)\n"

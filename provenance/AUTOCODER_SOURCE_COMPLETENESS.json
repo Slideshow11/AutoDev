@@ -843,9 +843,9 @@
   },
   "extracted_manifest_match": {
     "manifest_file": "provenance/aed-pr417-source-manifest.json",
-    "manifest_files_count": 37,
+    "manifest_files_count": 38,
     "manifest_source_files_count": 17,
-    "manifest_standalone_additions_count": 20,
+    "manifest_standalone_additions_count": 21,
     "all_manifest_source_paths_classified_as_extracted": true,
     "manifest_records": [
       {
@@ -7591,9 +7591,9 @@
   ],
   "metrics": {
     "extracted_manifest_match": {
-      "manifest_files_count": 37,
+      "manifest_files_count": 38,
       "manifest_source_files_count": 17,
-      "manifest_standalone_additions_count": 20
+      "manifest_standalone_additions_count": 21
     }
   }
 }
