@@ -383,30 +383,30 @@
     },
     {
       "destination_path": "tests/test_pr4_round5_hardening.py",
-      "destination_sha256": "2427fb3e0b0721c3e63aeedaaf1643cc6fed2952863a75584c1c31e9dbbd3bc3",
-      "destination_size_bytes": 34780,
+      "destination_sha256": "8d8ca0447d781cc453ae1a608e943bd0efd5dc05f4ea2f8fa1d2696c2d78c2ad",
+      "destination_size_bytes": 34977,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Round-6 directive 9a-9i: tempfile paths replace hardcoded /tmp (9b); removed source-text identity tests (9c); canonical_paths for verifier-output tests (9d); explicit cursor mapping for any number of pages (9e); ArtifactError only for deterministic read_artifact failure (9f); latest-review-state gate diagnostic (9a)."
+      "transformation_explanation": "Round-8 nitpick: optimize-python negative-existence test wraps the Path composition inside the assertFalse call so the BinOp is structurally contained inside the assertFalse Call (not a separate variable). The prior line-arithmetic exemption was wrong for this case; the AST containment check now correctly exempts the BinOp."
     },
     {
       "destination_path": "tests/test_pr4_round6_review.py",
-      "destination_sha256": "85198ba6b43c38ea00586c8d5a6eda14fbad2c641baac16bbf800c7bb575bb6e",
-      "destination_size_bytes": 47033,
+      "destination_sha256": "b2029c7b9b4f92dde8c5bec69d6001302ecc58b4f0b81dfa578fd008f15b589f",
+      "destination_size_bytes": 53857,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Round-7 directive: comprehensive rewrite addressing PRRT_kwDOTtyQLc6XV61A (production _inspect_ci tests for failing-required-job and missing-required-job, plus a positive _inspect_ci control), XV61D (regex detects both single- and double-quoted /tmp/*.json literals), XV61F (AST-based verifier.json path composition detector with exemption for negative-existence assertFalse patterns), XV61O (assertRaises(VerificationFailure) with specific diagnostic assertions), nitpicks (consolidated _make_page comprehensions, removed unused calls list, real 100-run two/three-page tests, _drive_paginator extracted to module-level helper)."
+      "transformation_explanation": "Round-8 directive: comprehensive rewrite addressing PRRT_kwDOTtyQLc6XWVRw (_inspect_ci production-gate tests remove inert downstream-gate patches; positive control directly captures _inspect_ci's actual return value and asserts total_count == 106, len(runs) == 106, all six required jobs present and successful, multi-page collector was actually traversed), XWVR0 (AST containment for assertFalse exemption replaces line arithmetic; body[0] is the only docstring candidate; multiline legitimate assertFalse exemptions are detected; five direct regression cases added), XWVR3 (real _paginate_latest_reviews/_paginate_connection/_inspect_coderabbit path is exercised; only _run_gh_graphql is mocked; the actual cursor value the paginator sent is asserted; a real-paginator successful multi-page control test is retained)."
     },
     {
       "destination_path": "tests/test_pr4_round6_d0_fixture.py",
-      "destination_sha256": "c794c923a31e0f1a2638b20e5ea3a5040b1b9db17341321ed6dda94a265278a6",
-      "destination_size_bytes": 26624,
+      "destination_sha256": "ea4d5f44be52fc1cf4eb6d8e3e2a24e2ebd540d0cb1193e32cc27aeb7e4be24e",
+      "destination_size_bytes": 26718,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Round-7 directive proof repair: tests/test_pr4_round6_d0_fixture.py addresses PRRT_kwDOTtyQLc6XV60h (git rev-parse uses check=True so failures raise immediately), XV604 (control test captures swallowed exception into diagnostics, counts exact gh pr merge argv via _count_gh_pr_merge_calls, asserts pr number / repo / --squash / --match-head-commit / --delete-branch / no forbidden flags). Negative test counts gh_pr_merge_invocation_count == 0 and asserts the digest mismatch diagnostic. Failed-verdict test binds authorization to the FAILED record's exact digest so the verdict guard fires, NOT the digest guard, and asserts the FAILED verdict diagnostic. The authorization, candidate, and live_pr_payload.head.sha reference the real committed head (init_head) returned by _init_real_git_repo."
+      "transformation_explanation": "Round-8 nitpick: shared _is_gh_pr_merge matcher requires exact argv adjacency (argv[0]=='gh', argv[1]=='pr', argv[2]=='merge') and safely handles calls without positional arguments. _count_gh_pr_merge_calls and _find_gh_pr_merge_call now delegate to the shared matcher."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",

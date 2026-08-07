@@ -1,48 +1,24 @@
-"""Round-6 review and Round-7 proof-repair tests for PR #4.
+"""Round-6 review, Round-7 proof-repair, and Round-8 final-loop
+discipline tests for PR #4.
 
-These tests cover the round-6 directive's findings plus the
-round-7 directive's proof-repair findings:
+These tests cover:
 
-Round-6:
-
-* Multi-page check-run collector (PRRT_kwDOTtyQLc6XUSYu):
-  one-page, two-page, three-page responses all succeed;
-  failing required job on page 2 causes failure; missing
-  required job cannot be hidden on a later page; total_count
-  missing fails closed; conflicting total_count across pages
-  fails closed; collected count != total_count fails closed;
-  malformed page object fails closed; every collected head_sha
-  must equal qualification_head; no raw JSONDecodeError
-  escapes as an uncontrolled traceback.
-
-* F541 lint (PRRT_kwDOTtyQLc6XUSY4): no remaining f-string
-  prefixes on fixed-message strings in the verifier.
-
-* Nine findings from the a4a2eec review
-  (PRR_kwDOTtyQLc8AAAABIyEy9w): 9a-9i.
-
-Round-7 (proof repair, PRR_kwDOTtyQLc8AAAABIy-M0Q):
-
-* PRRT_kwDOTtyQLc6XV61A: the failing-required-job and
-  missing-required-job tests exercise VERIFIER._inspect_ci
-  (the production verifier gate) rather than local
-  arithmetic over _collect_check_runs output. A positive
-  _inspect_ci control test is added.
-
-* PRRT_kwDOTtyQLc6XV61D: the /tmp hardcoded-literal regex
-  detects both single- and double-quoted literals.
-
-* PRRT_kwDOTtyQLc6XV61F: the hardcoded verifier.json
-  detector uses AST BinOp / Constant matching, not docstring
-  stripping.
-
-* PRRT_kwDOTtyQLc6XV61O: assertRaises(Exception) is replaced
-  with the specific production failure type
-  (VerificationFailure).
-
-Plus various nitpick fixes (docstring typos, _make_page
-consolidation, two/three-page pagination tests, args stub
-uniformity, _drive_paginator extraction).
+Round-6 directive's findings (multi-page CI, F541, 9a-9i).
+Round-7 directive's proof-repair findings (XV61A, XV61D,
+XV61F, XV61O).
+Round-8 directive's three fresh threads:
+* PRRT_kwDOTtyQLc6XWVRw -- _inspect_ci production-gate
+  tests: remove inert downstream-gate patches and broad
+  exception swallowing; the positive control must directly
+  call VERIFIER._inspect_ci and assert the actual return
+  value proves total_count == 106, len(runs) == 106, all
+  six required jobs present and successful.
+* PRRT_kwDOTtyQLc6XWVR0 -- AST containment for assertFalse
+  exemption + body[0] docstring check.
+* PRRT_kwDOTtyQLc6XWVR3 -- exercise the real
+  _paginate_latest_reviews / _paginate_connection /
+  _inspect_coderabbit path; mock only the GraphQL/network
+  boundary.
 """
 from __future__ import annotations
 
@@ -271,7 +247,6 @@ class MultiPageCheckRunCollectorTests(unittest.TestCase):
             for i in range(1, 101)
         ]
         a = {"total_count": 105, "check_runs": page1_runs}
-        # Page 2 omits package-smoke entirely.
         b = {"total_count": 105, "check_runs": [
             {"id": 101, "name": "test (3.10)",
              "conclusion": "success", "head_sha": "a" * 40},
@@ -303,10 +278,7 @@ class MultiPageCheckRunCollectorTests(unittest.TestCase):
             self.assertIn("total_count", str(ctx.exception).lower())
 
     def test_conflicting_total_count_across_pages_fails_closed(self):
-        """Conflicting total_count between pages fails closed.
-        Page 1 returns a full page (100 runs) so the collector
-        issues page 2; page 2 reports a different total_count.
-        """
+        """Conflicting total_count between pages fails closed."""
         runs = [
             {"id": i, "name": f"job-{i}", "conclusion": "success",
              "head_sha": "a" * 40}
@@ -355,9 +327,7 @@ class MultiPageCheckRunCollectorTests(unittest.TestCase):
 
     def test_duplicate_run_ids_fail_closed(self):
         """A duplicate run id across pages indicates ambiguous
-        pagination; the collector fails closed. Page 1 returns
-        100 runs (id=1..100) so the collector requests page 2;
-        page 2 contains id=1 again."""
+        pagination; the collector fails closed."""
         runs_page1 = [
             {"id": i, "name": f"job-{i}", "conclusion": "success",
              "head_sha": "a" * 40} for i in range(1, 101)
@@ -401,27 +371,33 @@ class MultiPageCheckRunCollectorTests(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
-# _inspect_ci production tests.
+# _inspect_ci production tests (Round-7 PRRT_kwDOTtyQLc6XV61A +
+# Round-8 PRRT_kwDOTtyQLc6XWVRw).
 # ----------------------------------------------------------------------
 
 
 class InspectCiTests(unittest.TestCase):
     """Production-gate tests for ``_inspect_ci``.
 
-    These tests invoke ``VERIFIER._inspect_ci(args, qual)``
-    directly. They mock only the network/page source so the
-    production per-run gates, required-job gate, and
-    CI-completeness gate all run.
-
-    Per round-7 finding PRRT_kwDOTtyQLc6XV61A, the prior
-    failing-required-job and missing-required-job tests
-    performed test-local set/filter arithmetic over
-    ``_collect_check_runs`` output instead of exercising
-    the production ``_inspect_ci`` gate. These tests
-    exercise the production gate directly.
+    Per round-7 finding PRRT_kwDOTtyQLc6XV61A and round-8
+    finding PRRT_kwDOTtyQLc6XWVRw:
+    * The tests mock only the real network/data boundary
+      (``_run_gh``).
+    * No inert downstream-gate patches.
+    * No broad ``except Exception: pass``.
+    * The positive control directly invokes
+      ``VERIFIER._inspect_ci`` and asserts the actual
+      return value proves ``total_count == 106``,
+      ``len(runs) == 106``, all six required jobs are
+      represented and pass the production success gate,
+      and the multi-page collector was actually traversed.
     """
 
     QUAL = "a" * 40
+    REQUIRED_JOBS = {
+        "test (3.10)", "test (3.11)", "test (3.12)",
+        "package-smoke", "provenance", "committed-state-scan",
+    }
 
     def _make_args(self):
         return type("A", (), {
@@ -432,35 +408,27 @@ class InspectCiTests(unittest.TestCase):
                 .read_bytes()
             ).hexdigest(),
             "incident_record": Path(tempfile.gettempdir()) /
-                                "aed-r7-inspect-incident.json",
+                                "aed-r8-inspect-incident.json",
             "strict_window_obs": Path(tempfile.gettempdir()) /
-                                  "aed-r7-inspect-obs.jsonl",
+                                  "aed-r8-inspect-obs.jsonl",
             "evidence_root": Path(tempfile.gettempdir()) /
-                              "aed-r7-inspect-evidence",
+                              "aed-r8-inspect-evidence",
         })()
 
     def _two_page(self, a, b):
         return _two_page(a, b)
 
-    def _run_inspect(self, pages, *, args=None):
-        """Drive ``VERIFIER._inspect_ci`` with mocked pages."""
-        args = args or self._make_args()
-        with mock.patch.object(VERIFIER, "_run_gh",
-                                side_effect=self._two_page(*pages)):
-            return VERIFIER._inspect_ci(args, self.QUAL)
-
     def test_failing_required_job_on_page_2_causes_failure(self):
-        """Per round-7 finding PRRT_kwDOTtyQLc6XV61A: invoke
-        the production ``_inspect_ci`` with two pages where
-        all required jobs are present on page 1, except
-        package-smoke which appears only on page 2 with
-        conclusion=failure. The verifier MUST raise
-        VerificationFailure and the diagnostic MUST identify
-        ``package-smoke`` as a failed required job.
+        """Per round-7 finding PRRT_kwDOTtyQLc6XV61A and round-8
+        finding PRRT_kwDOTtyQLc6XWVRw: invoke the production
+        ``_inspect_ci`` with two pages where package-smoke
+        appears only on page 2 with conclusion=failure. The
+        verifier MUST raise VerificationFailure and the
+        diagnostic MUST identify ``package-smoke`` and
+        indicate a failed required job.
 
-        All downstream gates (AED, verifier, strict window,
-        candidate, incident) are stubbed; only the CI
-        production gate runs against the mocked pages."""
+        Only ``_run_gh`` is mocked. No inert downstream-gate
+        patches. No broad exception swallowing."""
         page1_runs = [
             {"id": i, "name": f"job-{i}", "conclusion": "success",
              "head_sha": self.QUAL}
@@ -484,15 +452,8 @@ class InspectCiTests(unittest.TestCase):
         args = self._make_args()
         with mock.patch.object(VERIFIER, "_run_gh",
                                 side_effect=self._two_page(a, b)):
-            with mock.patch.object(VERIFIER, "_verify_aed",
-                                    return_value={"measured_sha256":
-                                                    "a" * 64,
-                                                    "expected_sha256":
-                                                    "a" * 64,
-                                                    "manifest_sha256":
-                                                    "a" * 64}):
-                with self.assertRaises(VerificationFailure) as ctx:
-                    VERIFIER._inspect_ci(args, self.QUAL)
+            with self.assertRaises(VerificationFailure) as ctx:
+                VERIFIER._inspect_ci(args, self.QUAL)
         msg = str(ctx.exception).lower()
         self.assertIn("package-smoke", msg,
             f"failure must name package-smoke; got: {msg!r}")
@@ -501,16 +462,15 @@ class InspectCiTests(unittest.TestCase):
             f"got: {msg!r}")
 
     def test_missing_required_job_causes_failure(self):
-        """Per round-7 finding PRRT_kwDOTtyQLc6XV61A: invoke
-        the production ``_inspect_ci`` with two pages where
-        every required job is present and succeeds except
-        package-smoke, which is absent from all pages. The
-        verifier MUST raise VerificationFailure and the
-        diagnostic MUST identify package-smoke as missing.
+        """Per round-7 finding PRRT_kwDOTtyQLc6XV61A and
+        round-8 finding PRRT_kwDOTtyQLc6XWVRw: invoke the
+        production ``_inspect_ci`` with two pages where
+        package-smoke is absent from all pages. The verifier
+        MUST raise VerificationFailure and the diagnostic
+        MUST identify package-smoke as missing.
 
-        All downstream gates (AED, verifier, strict window,
-        candidate, incident) are stubbed; only the CI
-        production gate runs against the mocked pages."""
+        Only ``_run_gh`` is mocked. No inert downstream-gate
+        patches. No broad exception swallowing."""
         page1_runs = [
             {"id": i, "name": f"job-{i}", "conclusion": "success",
              "head_sha": self.QUAL}
@@ -532,15 +492,8 @@ class InspectCiTests(unittest.TestCase):
         args = self._make_args()
         with mock.patch.object(VERIFIER, "_run_gh",
                                 side_effect=self._two_page(a, b)):
-            with mock.patch.object(VERIFIER, "_verify_aed",
-                                    return_value={"measured_sha256":
-                                                    "a" * 64,
-                                                    "expected_sha256":
-                                                    "a" * 64,
-                                                    "manifest_sha256":
-                                                    "a" * 64}):
-                with self.assertRaises(VerificationFailure) as ctx:
-                    VERIFIER._inspect_ci(args, self.QUAL)
+            with self.assertRaises(VerificationFailure) as ctx:
+                VERIFIER._inspect_ci(args, self.QUAL)
         msg = str(ctx.exception).lower()
         self.assertIn("package-smoke", msg,
             f"failure must name missing package-smoke; "
@@ -550,13 +503,23 @@ class InspectCiTests(unittest.TestCase):
             f"got: {msg!r}")
 
     def test_two_page_positive_inspect_ci_control(self):
-        """Positive control: invoke ``_inspect_ci`` with two
-        pages where every required job is present, succeeds,
-        and all head_sha values equal qualification_head.
-        ``_inspect_ci`` MUST succeed (no VerificationFailure
-        raised by the per-job gates; downstream gates that
-        read AED / verifier / etc. may not be set up in this
-        test but the CI-completeness gate must pass)."""
+        """Per round-8 finding PRRT_kwDOTtyQLc6XWVRw: positive
+        control. Invoke ``_inspect_ci`` with two pages where
+        every required job is present, succeeds, and every
+        head_sha equals qualification_head. Capture the
+        production return value and assert:
+        * total_count == 106
+        * len(runs) == 106
+        * all six required job names are present
+        * all six required jobs satisfy the production success
+          gate (conclusion in success/skipped/neutral)
+        * the complete multi-page collector was traversed
+          (i.e. both pages were visited)
+
+        No inert downstream-gate patches. No broad
+        exception swallowing. The test captures
+        ``_inspect_ci``'s actual return value.
+        """
         page1_runs = [
             {"id": i, "name": f"job-{i}", "conclusion": "success",
              "head_sha": self.QUAL}
@@ -577,74 +540,51 @@ class InspectCiTests(unittest.TestCase):
             {"id": 106, "name": "committed-state-scan",
              "conclusion": "success", "head_sha": self.QUAL},
         ]}
-        # Stub out the downstream gates (AED, verifier, etc.)
-        # so the CI-completeness gate is the only one that
-        # runs against the mocked pages.
+        # Track every call into the mocked _run_gh so we can
+        # prove both pages were visited by the production
+        # multi-page collector.
+        calls = []
+        def fake_run_gh(args_list, *, env=None):
+            calls.append(args_list)
+            for a_token in args_list:
+                if isinstance(a_token, str) and a_token.startswith("page="):
+                    n = int(a_token.split("=", 1)[1])
+                    return [a, b][n - 1]
+            raise AssertionError(f"no page= in {args_list!r}")
+        args = self._make_args()
         with mock.patch.object(VERIFIER, "_run_gh",
-                                side_effect=self._two_page(a, b)):
-            with mock.patch.object(VERIFIER, "_verify_aed",
-                                    return_value={"measured_sha256":
-                                                    "a" * 64,
-                                                    "expected_sha256":
-                                                    "a" * 64,
-                                                    "manifest_sha256":
-                                                    "a" * 64}):
-                with mock.patch.object(VERIFIER, "_verify_strict_window",
-                                        return_value={"span_seconds": 200.0,
-                                                       "observation_count":
-                                                       5,
-                                                       "observation_head_sha":
-                                                       self.QUAL}):
-                    with mock.patch.object(VERIFIER, "_verify_candidate",
-                                            return_value={"candidate_digest":
-                                                            "d" * 64,
-                                                            "candidate_exact_head":
-                                                            self.QUAL,
-                                                            "candidate_pr_number":
-                                                            4}):
-                        with mock.patch.object(VERIFIER,
-                                                "_verify_incident_record",
-                                                return_value={"incident_digest":
-                                                               "e" * 64,
-                                                               "incident_class":
-                                                               "FORCE_PUSH",
-                                                               "force_push_mechanism":
-                                                               "force-with-lease",
-                                                               "restored_head_sha":
-                                                               "f" * 40,
-                                                               "no_repeat_permitted":
-                                                               True}):
-                            # _inspect_ci does not actually
-                            # return; it raises after the CI
-                            # gate if downstream gates fail.
-                            # If the CI gate passes and the
-                            # downstream gates are stubbed,
-                            # the downstream gate call sites
-                            # may still raise (state machine,
-                            # etc.). We only assert the CI gate
-                            # passes, not the rest.
-                            try:
-                                VERIFIER._inspect_ci(self._make_args(),
-                                                      self.QUAL)
-                            except VerificationFailure as e:
-                                # The CI gate itself must NOT
-                                # have fired (no CI failure
-                                # diagnostic).
-                                msg = str(e).lower()
-                                self.assertNotIn("check-run", msg,
-                                    f"positive control CI gate "
-                                    f"must NOT fire; got: {msg!r}")
-                                self.assertNotIn("pagination",
-                                                  msg)
-                                self.assertNotIn("required", msg)
-                                self.assertNotIn("missing", msg)
-                                self.assertNotIn("failed", msg)
-                            except Exception:
-                                # Downstream gates may fail in
-                                # the test; we only care that
-                                # the CI gate itself did not
-                                # fail.
-                                pass
+                                side_effect=fake_run_gh):
+            result = VERIFIER._inspect_ci(args, self.QUAL)
+        # total_count == 106 from the production return value.
+        self.assertEqual(result["total_count"], 106,
+            f"production total_count must equal 106; "
+            f"got: {result['total_count']!r}")
+        # len(runs) == 106.
+        runs = result["runs"]
+        self.assertEqual(len(runs), 106,
+            f"production runs must contain 106 entries; "
+            f"got: {len(runs)!r}")
+        # All six required jobs are represented.
+        seen_names = {r["name"] for r in runs}
+        self.assertTrue(self.REQUIRED_JOBS.issubset(seen_names),
+            f"all six required jobs must be represented; "
+            f"missing: {self.REQUIRED_JOBS - seen_names!r}")
+        # All six required jobs satisfy the production
+        # success gate (conclusion in success/skipped/neutral).
+        required_runs = [r for r in runs
+                          if r["name"] in self.REQUIRED_JOBS]
+        for r in required_runs:
+            self.assertIn(
+                r["conclusion"], ("success", "skipped", "neutral"),
+                f"required job {r['name']!r} has conclusion "
+                f"{r['conclusion']!r}; production success "
+                f"gate must pass",
+            )
+        # The complete multi-page collector was traversed:
+        # both pages were visited (call_count >= 2).
+        self.assertGreaterEqual(len(calls), 2,
+            f"production multi-page collector must visit "
+            f"both pages; got {len(calls)} _run_gh call(s)")
 
 
 # ----------------------------------------------------------------------
@@ -728,7 +668,7 @@ class NoHardcodedTmpPathsTests(unittest.TestCase):
 
     def test_detects_single_quoted_tmp_literals(self):
         """Single-quoted /tmp/*.json literals in test code are
-        flagged. (Round-7 finding PRRT_kwDOTtyQLc6XV61D.)"""
+        flagged."""
         offenders = _find_tmp_literal_offenders(
             "'/tmp/aed-r5b-fake.json'")
         self.assertEqual(offenders, ["'/tmp/aed-r5b-fake.json'"])
@@ -746,10 +686,7 @@ class NoHardcodedTmpPathsTests(unittest.TestCase):
 
 
 def _find_tmp_literal_offenders(src: str):
-    """Find /tmp/*.json literals in either quote style.
-    Round-7 finding PRRT_kwDOTtyQLc6XV61D: the prior regex
-    only detected double-quoted literals; this version
-    detects both."""
+    """Find /tmp/*.json literals in either quote style."""
     return re.findall(r"""['\"]/tmp/[^'\"]*\.json['\"]""", src)
 
 
@@ -771,7 +708,7 @@ class OptimizedPythonRefusalTests(unittest.TestCase):
     def test_optimized_python_is_refused(self):
         """The verifier refuses to run under ``python -O`` and
         the refusal banner appears on stderr."""
-        fake_record = Path(tempfile.gettempdir()) / "aed-r7-fake.json"
+        fake_record = Path(tempfile.gettempdir()) / "aed-r8-fake.json"
         proc = subprocess.run(
             [sys.executable, "-O",
              str(REPO_ROOT / "scripts" / "independent_verifier_v2.py"),
@@ -788,7 +725,7 @@ class OptimizedPythonRefusalTests(unittest.TestCase):
         verifier at import time."""
         env = os.environ.copy()
         env["PYTHONOPTIMIZE"] = "1"
-        fake_record = Path(tempfile.gettempdir()) / "aed-r7-fake.json"
+        fake_record = Path(tempfile.gettempdir()) / "aed-r8-fake.json"
         proc = subprocess.run(
             [sys.executable,
              str(REPO_ROOT / "scripts" / "independent_verifier_v2.py"),
@@ -801,19 +738,29 @@ class OptimizedPythonRefusalTests(unittest.TestCase):
 
 
 # ----------------------------------------------------------------------
-# canonical_paths detector (PRRT_kwDOTtyQLc6XV61F).
+# canonical_paths detector (Round-7 PRRT_kwDOTtyQLc6XV61F +
+# Round-8 PRRT_kwDOTtyQLc6XWVR0).
 # ----------------------------------------------------------------------
 
 
 class NoHardcodedVerifierJsonPathTests(unittest.TestCase):
-    """Round-7 finding PRRT_kwDOTtyQLc6XV61F: the prior
-    ``verifier.json`` detector was vacuous; use AST to find
-    direct path composition with the literal
-    ``verifier.json`` filename, independent of whitespace or
-    quote style."""
+    """Round-7 finding PRRT_kwDOTtyQLc6XV61F: AST BinOp /
+    Constant matching for path composition with
+    ``verifier.json``.
+
+    Round-8 finding PRRT_kwDOTtyQLc6XWVR0:
+    * AST containment for assertFalse exemption (no line
+      arithmetic).
+    * Docstring detection restricted to ``node.body[0]``.
+    * Regression cases for multiline legitimate
+      ``assertFalse`` exemptions; hardcoded paths
+      immediately before an ``assertFalse`` are still
+      detected; docstrings are ignored; mid-body standalone
+      strings do NOT create false docstring exemptions.
+    """
 
     def test_no_hardcoded_verifier_json_path_in_tests(self):
-        """Search the test source for direct Path /
+        """Search the test source for direct path /
         hardcoded string composition with ``verifier.json``."""
         for test_file in (
             REPO_ROOT / "tests" / "test_pr4_round4_review.py",
@@ -835,34 +782,172 @@ class NoHardcodedVerifierJsonPathTests(unittest.TestCase):
         self.assertIn("canonical_paths", src,
             "test_pr4_round5_hardening must use canonical_paths")
 
+    def test_multiline_assertFalse_exempt_is_exempt(self):
+        """Round-8 regression case 1: a multiline legitimate
+        negative-existence assertion
+        ``self.assertFalse(\n    (evidence_root / ``"verifier.json"``).exists()\n)``
+        MUST be exempt because the candidate BinOp is
+        structurally contained inside the assertFalse Call.
+        """
+        src = (
+            "def f(self):\n"
+            "    self.assertFalse(\n"
+            "        (evidence_root / \"verifier.json\").exists(),\n"
+            "        \"no verifier.json\",\n"
+            "    )\n"
+        )
+        # Parse, then build a fake test_file object that
+        # contains this source via Path.write_text in a
+        # tempdir.
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="aed-r8-ast-"))
+        try:
+            test_file = tmp / "synthetic_test.py"
+            test_file.write_text(src)
+            offenders = _find_verifier_json_offenders(test_file)
+            self.assertEqual(
+                offenders, [],
+                f"multiline legitimate negative-existence "
+                f"assertion must be exempt; offenders: {offenders!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_hardcoded_path_immediately_before_assertFalse_is_detected(self):
+        """Round-8 regression case 2: a hardcoded verifier
+        path immediately BEFORE an assertFalse call (NOT
+        inside it) MUST still be detected. This is the case
+        where the prior line-arithmetic exemption wrongly
+        excused the offender."""
+        src = (
+            "def f(self):\n"
+            "    verifier_json = evidence_root / \"verifier.json\"\n"
+            "    self.assertFalse(\n"
+            "        verifier_json.exists(),\n"
+            "        \"no verifier.json\",\n"
+            "    )\n"
+        )
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="aed-r8-ast2-"))
+        try:
+            test_file = tmp / "synthetic_test.py"
+            test_file.write_text(src)
+            offenders = _find_verifier_json_offenders(test_file)
+            self.assertEqual(
+                len(offenders), 1,
+                f"hardcoded path immediately before assertFalse "
+                f"must STILL be detected (line {offenders[0][0]}); "
+                f"offenders: {offenders!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_normal_hardcoded_verifier_path_is_detected(self):
+        """Round-8 regression case 3: a normal hardcoded
+        verifier path elsewhere in the code is detected."""
+        src = (
+            "def f():\n"
+            "    path = evidence_root / \"verifier.json\"\n"
+            "    return path\n"
+        )
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="aed-r8-ast3-"))
+        try:
+            test_file = tmp / "synthetic_test.py"
+            test_file.write_text(src)
+            offenders = _find_verifier_json_offenders(test_file)
+            self.assertEqual(
+                len(offenders), 1,
+                f"normal hardcoded path must be detected; "
+                f"offenders: {offenders!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_docstring_mentioning_verifier_path_is_ignored(self):
+        """Round-8 regression case 4: a docstring containing
+        ``/ "verifier.json"`` is ignored."""
+        src = (
+            "def f():\n"
+            "    \"\"\"Some docstring mentioning\n"
+            "    evidence_root / \"verifier.json\"\n"
+            "    but only in prose.\"\"\"\n"
+            "    return None\n"
+        )
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="aed-r8-ast4-"))
+        try:
+            test_file = tmp / "synthetic_test.py"
+            test_file.write_text(src)
+            offenders = _find_verifier_json_offenders(test_file)
+            self.assertEqual(
+                offenders, [],
+                f"docstring mention must be ignored; offenders: "
+                f"{offenders!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_mid_body_string_does_not_create_docstring_exemption(self):
+        """Round-8 regression case 5: a mid-body standalone
+        string expression is NOT a docstring and MUST NOT
+        create a docstring exemption for a hardcoded
+        verifier path elsewhere in the same body."""
+        src = (
+            "def f():\n"
+            "    \"unrelated string expression\"\n"
+            "    path = evidence_root / \"verifier.json\"\n"
+            "    return path\n"
+        )
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="aed-r8-ast5-"))
+        try:
+            test_file = tmp / "synthetic_test.py"
+            test_file.write_text(src)
+            offenders = _find_verifier_json_offenders(test_file)
+            self.assertEqual(
+                len(offenders), 1,
+                f"mid-body standalone string must NOT create "
+                f"docstring exemption; offenders: {offenders!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 def _find_verifier_json_offenders(test_file: Path):
     """Return list of (line, col, line_text) for each direct
     path composition with the literal ``verifier.json`` in
     non-docstring code.
 
-    Round-7 finding PRRT_kwDOTtyQLc6XV61F: the prior detector
-    was vacuous (only matched exact substrings ``/"verifier.json"``
-    with no whitespace). This version uses AST BinOp / Constant
-    matching and is independent of whitespace or quote style.
+    Round-8 finding PRRT_kwDOTtyQLc6XWVR0:
+    * The assertFalse exemption is determined by AST
+      containment: a candidate BinOp whose expression is
+      STRUCTURALLY CONTAINED inside an ``assertFalse(...)``
+      call (including multiline calls) is exempt. The
+      expression lives inside the assertFalse if the
+      ``Call`` node's source range covers the candidate
+      node's line range.
+    * Docstring detection is restricted to ``node.body[0]``
+      -- a mid-body string literal is NOT a docstring.
 
     Exemptions:
-    * the literal appears inside a docstring;
+    * the literal appears inside a docstring (the leading
+      statement of Module / ClassDef / FunctionDef /
+      AsyncFunctionDef);
     * the path is used in a NEGATIVE-existence assertion
-      (``assertFalse(... .exists())``). The test_optimized_
-      python_produces_no_verified_artifact test uses
-      ``evidence_root / "verifier.json"`` to assert the file
-      was NOT created by the verifier; this is a legitimate
-      use of the literal.
+      (``assertFalse(... .exists())``). AST containment
+      decides this rather than line arithmetic.
     """
     src = test_file.read_text()
     try:
         tree = ast.parse(src)
     except SyntaxError:
         return [("syntax_error", 0, src)]
-    # Find every assertFalse call site so we can exempt paths
-    # used to verify non-existence.
-    negative_lines = set()
+    # Identify every assertFalse Call; the candidate BinOp
+    # is exempt when it is structurally contained inside
+    # such a Call (i.e. the candidate's line range lies
+    # within the Call's line range).
+    assertfalse_call_ranges = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
@@ -871,7 +956,9 @@ def _find_verifier_json_offenders(test_file: Path):
                 and func.attr == "assertFalse"
             )
             if is_assertfalse:
-                negative_lines.add(getattr(node, "lineno", -1))
+                c_start = node.lineno
+                c_end = getattr(node, "end_lineno", c_start)
+                assertfalse_call_ranges.append((c_start, c_end))
     offenders = []
     for node in ast.walk(tree):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -885,51 +972,72 @@ def _find_verifier_json_offenders(test_file: Path):
                 line_text = lines[line - 1] if 0 < line <= len(lines) else ""
                 if _is_in_docstring(tree, line):
                     continue
-                # Exempt lines that are part of an
-                # assertFalse(... .exists()) call -- those
-                # legitimately assert the file does NOT exist.
-                if any((line - i) <= 0 <= (line + 5 - i) for i in negative_lines):
+                # AST containment: candidate must lie
+                # INSIDE the assertFalse Call's source range.
+                if any(c_start <= line <= c_end
+                        for (c_start, c_end) in assertfalse_call_ranges):
                     continue
                 offenders.append((line, col, line_text))
     return offenders
 
 
 def _is_in_docstring(tree, lineno: int) -> bool:
-    """Conservative check: is line ``lineno`` inside any
-    function or class docstring?"""
+    """Conservative docstring check: ``lineno`` is inside the
+    docstring of a Module / ClassDef / FunctionDef /
+    AsyncFunctionDef body IFF it lies within the source
+    range of the leading statement of that body and that
+    statement is a string expression.
+
+    Per round-8 finding PRRT_kwDOTtyQLc6XWVR0, only
+    ``node.body[0]`` is considered; mid-body string
+    literals do NOT create a docstring exemption.
+    """
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
                               ast.ClassDef, ast.Module)):
-            doc = ast.get_docstring(node, clean=False)
-            if doc is None:
+            body = getattr(node, "body", None)
+            if not body:
                 continue
-            # Walk AST for the docstring ExprStmt location.
-            # Find the first string constant inside the
-            # function body whose line range covers ``lineno``.
-            for child in ast.iter_child_nodes(node):
-                if (isinstance(child, ast.Expr)
-                        and isinstance(child.value, ast.Constant)
-                        and isinstance(child.value.value, str)):
-                    cs_line = child.lineno
-                    cs_end = getattr(child, "end_lineno", cs_line)
-                    if cs_line <= lineno <= cs_end:
-                        return True
+            child = body[0]
+            if not (isinstance(child, ast.Expr)
+                    and isinstance(child.value, ast.Constant)
+                    and isinstance(child.value.value, str)):
+                continue
+            cs_line = child.lineno
+            cs_end = getattr(child, "end_lineno", cs_line)
+            if cs_line <= lineno <= cs_end:
+                return True
     return False
 
 
 # ----------------------------------------------------------------------
-# Cursor mapping tests (module-level helper).
+# Cursor mapping tests (Round-7 PRRT_kwDOTtyQLc6XV61O +
+# Round-8 PRRT_kwDOTtyQLc6XWVR3).
 # ----------------------------------------------------------------------
 
 
 class CursorMappingTests(unittest.TestCase):
-    """Finding 9e: cursor-to-page mapping supports any number
-    of pages."""
+    """Round-7 finding PRRT_kwDOTtyQLc6XV61O: cursor-to-page
+    mapping supports any number of pages.
+
+    Round-8 finding PRRT_kwDOTtyQLc6XWVR3: exercise the real
+    ``_paginate_latest_reviews`` /
+    ``_paginate_connection`` / ``_inspect_coderabbit`` path.
+    Mock only the GraphQL/network boundary
+    (``_run_gh_graphql``). Build a fixture where the
+    reviewDecision request succeeds, the first
+    latestReviews page is accepted, hasNextPage=True,
+    endCursor carries the cursor that the production
+    paginator must propagate, and the subsequent
+    network-boundary call identifies the unexpected cursor.
+    The resulting VerificationFailure propagates through
+    the real paginator.
+    """
 
     def test_four_pages_explicit_cursor_mapping(self):
         """Four pages with explicit cursor mapping. The real
-        paginator walks all four pages; the unexpected cursor
-        path raises a clear AssertionError."""
+        paginator walks all four pages; the unexpected
+        cursor path raises a clear AssertionError."""
         def _review(i):
             return {"state": "APPROVED" if i == 3 else "OTHER",
                     "submittedAt": f"2026-08-07T1{i}:00:00Z",
@@ -942,35 +1050,134 @@ class CursorMappingTests(unittest.TestCase):
         result = _drive_paginator(pages, "APPROVED", args)
         self.assertEqual(result["latest_coderabbit_state"], "APPROVED")
 
-    def test_unexpected_cursor_raises_verification_failure(self):
-        """An unexpected cursor MUST raise
-        VerificationFailure, not silently reuse a page.
+    def test_real_paginator_succeeds_across_two_pages(self):
+        """Real-paginator control (Round-8 finding
+        PRRT_kwDOTtyQLc6XWVR3): two pages where page 1 has
+        no CodeRabbit, page 2 has the matching APPROVED.
+        Mock only ``_run_gh_graphql``. The real paginator
+        walks both pages using the page-1 cursor. The
+        CodeRabbit APPROVED on page 2 is selected as the
+        newest."""
+        def fake_run_gh_graphql(query, variables):
+            if "reviewDecision" in query:
+                return {"data": {"repository": {"pullRequest": {
+                    "reviewDecision": "APPROVED",
+                }}}}
+            cursor = variables["cursor"]
+            cursor_index = {"null": 0, "CURSOR_1": 1}
+            if cursor not in cursor_index:
+                raise AssertionError(
+                    f"paginator sent an unexpected cursor: "
+                    f"{cursor!r}"
+                )
+            idx = cursor_index[cursor]
+            pages = [
+                {"nodes": [
+                    {"state": "APPROVED",
+                     "submittedAt": "2026-08-01T09:00:00Z",
+                     "author": {"login": "some-human"}},
+                ]},
+                {"nodes": [
+                    {"state": "APPROVED",
+                     "submittedAt": "2026-08-07T10:00:00Z",
+                     "author": {"login": "coderabbitai"}},
+                ]},
+            ]
+            return {"data": {"repository": {"pullRequest": {
+                "latestReviews": {
+                    "pageInfo": {
+                        "hasNextPage": idx + 1 < len(pages),
+                        "endCursor": (
+                            f"CURSOR_{idx + 1}"
+                            if idx + 1 < len(pages) else None
+                        ),
+                    },
+                    "totalCount": 2,
+                    "nodes": pages[idx]["nodes"],
+                },
+            }}}}
 
-        Per round-7 finding PRRT_kwDOTtyQLc6XV61O: use
-        ``assertRaises(VerificationFailure)`` instead of
-        bare ``Exception``. The diagnostic proves the
-        cursor/page/pagination failure, not a generic
-        no-op.
-        """
         args = type("A", (), {"repo": "o/r", "pr_number": 4})()
-        # Mock _paginate_latest_reviews to raise an explicit
-        # AssertionError on unexpected cursors (mirroring the
-        # production code path that asserts the cursor map).
-        def fake_paginate(args):
+        cursors_seen = []
+        def capturing_fake(query, variables):
+            cursors_seen.append(variables.get("cursor"))
+            return fake_run_gh_graphql(query, variables)
+        with mock.patch.object(VERIFIER, "_run_gh_graphql",
+                               side_effect=capturing_fake):
+            result = VERIFIER._inspect_coderabbit(args)
+        self.assertEqual(result["latest_coderabbit_state"], "APPROVED")
+        # Two pagination calls: one with cursor=null, one
+        # with cursor=CURSOR_1.
+        self.assertIn("null", cursors_seen)
+        self.assertIn("CURSOR_1", cursors_seen)
+
+    def test_real_paginator_unexpected_cursor_fails_via_network(self):
+        """Real-paginator failure (Round-8 finding
+        PRRT_kwDOTtyQLc6XWVR3): the production paginator
+        sends a cursor on the second call that is NOT in
+        its expected cursor map. Mock only
+        ``_run_gh_graphql`` -- the mock returns
+        ``hasNextPage=False`` so the paginator does not
+        loop; the actual unexpected cursor propagates as a
+        VerificationFailure through the real paginator.
+
+        The test asserts the actual cursor value the
+        production paginator sent on the first request and
+        that the resulting failure propagates the exact
+        cursor value.
+        """
+        cursors_seen = []
+
+        def fake_run_gh_graphql(query, variables):
+            cursors_seen.append(variables.get("cursor"))
+            if "reviewDecision" in query:
+                return {"data": {"repository": {"pullRequest": {
+                    "reviewDecision": "APPROVED",
+                }}}}
+            # First call: accepted, returns a cursor that the
+            # production paginator does NOT expect.
+            cursor = variables.get("cursor")
+            if cursor == "null":
+                return {"data": {"repository": {"pullRequest": {
+                    "latestReviews": {
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "UNEXPECTED_CURSOR",
+                        },
+                        "totalCount": 5,
+                        "nodes": [
+                            {"state": "APPROVED",
+                             "submittedAt": "2026-08-07T10:00:00Z",
+                             "author": {"login": "coderabbitai"}},
+                        ],
+                    },
+                }}}}
+            # Subsequent calls: identify the unexpected
+            # cursor and raise VerificationFailure -- the
+            # production paginator must propagate this.
             raise VerificationFailure(
-                "paginator sent an unexpected cursor: "
-                "'UNEXPECTED_CURSOR'"
+                f"paginator sent an unexpected cursor: {cursor!r}"
             )
-        with mock.patch.object(VERIFIER, "_paginate_latest_reviews",
-                                side_effect=fake_paginate):
+
+        args = type("A", (), {"repo": "o/r", "pr_number": 4})()
+        with mock.patch.object(VERIFIER, "_run_gh_graphql",
+                               side_effect=fake_run_gh_graphql):
             with self.assertRaises(VerificationFailure) as ctx:
                 VERIFIER._inspect_coderabbit(args)
+        # The first request was made (proves the production
+        # paginator executed; the failure was not
+        # manufactured before the paginator ran).
+        self.assertIn("null", cursors_seen)
+        # The production paginator sent the unexpected
+        # cursor; the mock propagated the failure.
+        self.assertIn("UNEXPECTED_CURSOR", cursors_seen)
+        # The diagnostic identifies the unexpected cursor.
         msg = str(ctx.exception).lower()
         self.assertIn("cursor", msg,
             f"failure must name the cursor; got: {msg!r}")
         self.assertIn("unexpected_cursor", msg,
-            f"failure must reference the unexpected cursor "
-            f"value; got: {msg!r}")
+            f"failure must reference the actual cursor value "
+            f"the production paginator sent; got: {msg!r}")
 
 
 # ----------------------------------------------------------------------
@@ -1008,7 +1215,7 @@ class TightenedArtifactErrorOnlyTests(unittest.TestCase):
             ArtifactDigestMismatch,
             write_artifact,
         )
-        tmp = Path(tempfile.mkdtemp(prefix="aed-r7-9f-"))
+        tmp = Path(tempfile.mkdtemp(prefix="aed-r8-9f-"))
         try:
             body_path = tmp / "incident.json"
             body_bytes = json.dumps({

@@ -122,9 +122,12 @@ class OptimizedPythonRefusalTests(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 1)
             # No verifier.json produced under optimized Python.
-            verifier_json = evidence_root / "verifier.json"
+            # Per round-8 finding PRRT_kwDOTtyQLc6XWVR0: the
+            # negative-existence assertion is wrapped so the
+            # BinOp is structurally contained inside the
+            # assertFalse call (NOT a separate variable).
             self.assertFalse(
-                verifier_json.exists(),
+                (evidence_root / "verifier.json").exists(),
                 f"verifier.json was written under python -O; "
                 f"this is a fail-open vulnerability. "
                 f"files in evidence_root: "

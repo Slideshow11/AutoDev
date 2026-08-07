@@ -301,35 +301,45 @@ def _build_d0_fixture(verifier_payload_override=None):
             original_verifier_digest, fixtures)
 
 
+def _is_gh_pr_merge(call) -> bool:
+    """True when the captured ``_safe_run`` call is the exact
+    ``gh pr merge`` command. Per round-8 directive (matched
+    by adjacency, not membership):
+    * argv[0] == "gh"
+    * argv[1] == "pr"
+    * argv[2] == "merge"
+    The function safely handles calls without positional
+    arguments and non-list argv values.
+    """
+    if not call.args:
+        return False
+    argv = call.args[0]
+    if not isinstance(argv, (list, tuple)):
+        return False
+    argv = list(argv)
+    return (
+        len(argv) >= 3
+        and argv[0] == "gh"
+        and argv[1] == "pr"
+        and argv[2] == "merge"
+    )
+
+
 def _count_gh_pr_merge_calls(safe_run_mock) -> int:
     """Count invocations of the ``gh pr merge`` command in a
     mock of ``_safe_run``. Other ``_safe_run`` calls (e.g.
     ``gh pr view --json mergeCommit``) are NOT counted. This
     is the controlling invariant for the D0 proof."""
-    count = 0
-    for call in safe_run_mock.call_args_list:
-        # call.args[0] is the argv list passed to _safe_run.
-        argv = call.args[0]
-        # argv may be a list/tuple; we want to find ``pr`` and
-        # ``merge`` adjacent.
-        if not isinstance(argv, (list, tuple)):
-            continue
-        if "pr" in argv and "merge" in argv:
-            # Confirm the argv is a gh invocation, not
-            # accidentally matched.
-            if argv and argv[0] in ("gh",):
-                count += 1
-    return count
+    return sum(1 for call in safe_run_mock.call_args_list
+                if _is_gh_pr_merge(call))
 
 
 def _find_gh_pr_merge_call(safe_run_mock) -> list:
     """Return the argv list of the gh pr merge call, or an
     empty list if none was issued."""
     for call in safe_run_mock.call_args_list:
-        argv = call.args[0]
-        if isinstance(argv, (list, tuple)) and len(argv) >= 4:
-            if argv[0] == "gh" and "pr" in argv and "merge" in argv:
-                return list(argv)
+        if _is_gh_pr_merge(call):
+            return list(call.args[0])
     return []
 
 
