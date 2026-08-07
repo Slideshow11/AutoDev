@@ -366,6 +366,11 @@ def test_all_migrated_records_have_matching_destination_bytes(audit, manifest):
 
 
 def test_manifest_match_count(audit, manifest):
+    """The audit's extracted_manifest_match counts must match
+    the actual manifest contents. The audit also has
+    duplicate copies of these counts in metrics; both
+    sections must agree (round-10 directive consistency
+    check)."""
     mm = audit["extracted_manifest_match"]
     assert mm["manifest_files_count"] == len(manifest["files"])
     assert mm["manifest_source_files_count"] == sum(
@@ -373,6 +378,28 @@ def test_manifest_match_count(audit, manifest):
     )
     assert mm["manifest_standalone_additions_count"] == sum(
         1 for f in manifest["files"] if not f.get("source_path")
+    )
+    # Pre-publish consistency: the audit's metrics block
+    # contains duplicate counts that must equal the
+    # extracted_manifest_match counts.
+    metrics_mm = audit.get("metrics", {}).get("extracted_manifest_match", {})
+    assert metrics_mm.get("manifest_files_count") == mm["manifest_files_count"], (
+        f"audit metrics.manifest_files_count "
+        f"{metrics_mm.get('manifest_files_count')} != "
+        f"extracted_manifest_match.manifest_files_count "
+        f"{mm['manifest_files_count']}"
+    )
+    assert metrics_mm.get("manifest_source_files_count") == mm["manifest_source_files_count"], (
+        f"audit metrics.manifest_source_files_count "
+        f"{metrics_mm.get('manifest_source_files_count')} != "
+        f"extracted_manifest_match.manifest_source_files_count "
+        f"{mm['manifest_source_files_count']}"
+    )
+    assert metrics_mm.get("manifest_standalone_additions_count") == mm["manifest_standalone_additions_count"], (
+        f"audit metrics.manifest_standalone_additions_count "
+        f"{metrics_mm.get('manifest_standalone_additions_count')} != "
+        f"extracted_manifest_match.manifest_standalone_additions_count "
+        f"{mm['manifest_standalone_additions_count']}"
     )
 
 

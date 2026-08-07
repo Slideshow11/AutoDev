@@ -986,7 +986,10 @@
         "destination_sha256": "75fd2f9ca74764dcc064b24bec9ac86cce2b32ce1c49869a78e27bda773b61ab",
         "source_size_bytes": 86428,
         "destination_size_bytes": 91496,
-        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates so the launch fails like any other launch failure rather than terminating the daemon. The production code is therefore no longer byte-identical to the source."
+        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates so the launch fails like any other launch failure rather than terminating the daemon. The production code is therefore no longer byte-identical to the source.",
+        "source_build": "aed-pr417-b57fcaad",
+        "destination_build": "autodev-current",
+        "explanation": "Source and destination intentionally represent different builds. The source is from AED PR #417 at commit b57fcaad. The destination is the current AutoDev build at the post-round-10 HEAD. The destination is no longer byte-identical because: (1) round-14 extended launch_worker with try/except guards around build_resume_prompt and worker_command template substitution; (2) the destination has additional regex-mode evidence for the launcher contract."
       },
       {
         "source_path": "scripts/local/autocoder_supervisor/validate.py",
@@ -1006,7 +1009,10 @@
         "destination_sha256": "276f952bffc44da970910ee17af1125ee1158e8e7555c88fc4b78d9e3d85ed42",
         "source_size_bytes": 39831,
         "destination_size_bytes": 66588,
-        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. The test file is no longer byte-identical to the AED source."
+        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. The test file is no longer byte-identical to the AED source.",
+        "source_build": "aed-pr417-b57fcaad",
+        "destination_build": "autodev-current",
+        "explanation": "Source and destination intentionally represent different builds. Round-14 added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates."
       },
       {
         "source_path": "tests/test_autocoder_supervisor_packaging.py",
@@ -7594,9 +7600,9 @@
     "extracted_manifest_match": {
       "manifest_files_count": 44,
       "manifest_source_files_count": 17,
-      "manifest_standalone_additions_count": 26
+      "manifest_standalone_additions_count": 27
     },
-    "total_source_paths_in_manifest": 18,
-    "manifest_standalone_additions": 26
+    "total_source_paths_in_manifest": 17,
+    "manifest_standalone_additions": 27
   }
 }

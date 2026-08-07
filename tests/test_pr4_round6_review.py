@@ -65,17 +65,23 @@ def _two_page(a, b):
     either URL form or the legacy ``-F page=N`` field form,
     so the test remains compatible with the production
     collector's actual subprocess invocation."""
+    import re
     def _run(al, *, env=None):
         for a_token in al:
-            if isinstance(a_token, str):
-                # URL form: .../check-runs?per_page=100&page=N
-                if "page=" in a_token:
-                    # Find the LAST page= occurrence (avoid
-                    # matching per_page=).
-                    import re
-                    m = re.search(r"[?&]page=(\d+)", a_token)
-                    if m:
-                        return [a, b][int(m.group(1)) - 1]
+            if not isinstance(a_token, str):
+                continue
+            if "page=" not in a_token:
+                continue
+            # URL form: .../check-runs?per_page=100&page=N
+            m = re.search(r"[?&]page=(\d+)", a_token)
+            if m:
+                return [a, b][int(m.group(1)) - 1]
+            # Legacy field form: -F page=N or a standalone
+            # ``page=N`` argument.
+            for piece in a_token.split():
+                if piece.startswith("page="):
+                    n = int(piece.split("=", 1)[1])
+                    return [a, b][n - 1]
         raise AssertionError(f"no page= in {al!r}")
     return _run
 
@@ -157,11 +163,18 @@ class MultiPageCheckRunCollectorTests(unittest.TestCase):
         def fake_run_gh(args_list, *, env=None):
             page = 1
             for a_t in args_list:
-                if isinstance(a_t, str):
-                    # URL form: .../check-runs?per_page=100&page=N
-                    m = re.search(r"[?&]page=(\d+)", a_t)
-                    if m:
-                        page = int(m.group(1))
+                if not isinstance(a_t, str):
+                    continue
+                # URL form: .../check-runs?per_page=100&page=N
+                m = re.search(r"[?&]page=(\d+)", a_t)
+                if m:
+                    page = int(m.group(1))
+                    continue
+                # Legacy field form: -F page=N
+                for piece in a_t.split():
+                    if piece.startswith("page="):
+                        page = int(piece.split("=", 1)[1])
+                        break
             idx = page - 1
             if idx >= len(pages):
                 return {"check_runs": [], "total_count": 0}
@@ -555,10 +568,17 @@ class InspectCiTests(unittest.TestCase):
         def fake_run_gh(args_list, *, env=None):
             calls.append(args_list)
             for a_token in args_list:
-                if isinstance(a_token, str):
-                    m = re.search(r"[?&]page=(\d+)", a_token)
-                    if m:
-                        n = int(m.group(1))
+                if not isinstance(a_token, str):
+                    continue
+                # URL form: .../check-runs?per_page=100&page=N
+                m = re.search(r"[?&]page=(\d+)", a_token)
+                if m:
+                    n = int(m.group(1))
+                    return [a, b][n - 1]
+                # Legacy field form: -F page=N
+                for piece in a_token.split():
+                    if piece.startswith("page="):
+                        n = int(piece.split("=", 1)[1])
                         return [a, b][n - 1]
             raise AssertionError(f"no page= in {args_list!r}")
         args = self._make_args()
