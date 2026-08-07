@@ -398,6 +398,15 @@
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
       "transformation_explanation": "Newly authored round-6 review regression tests: multi-page check-run collector (one/two/three pages, failing on page 2, missing on page 2, missing total_count, conflicting total_count, malformed page, duplicate run IDs, every collected head_sha, no raw JSONDecodeError); F541 ruff check; latest-review-state diagnostic; tempfile paths; redundant source-text removal; canonical_paths; 4-page cursor mapping; ArtifactError only."
+    },
+    {
+      "destination_path": "tests/test_pr4_round6_d0_fixture.py",
+      "destination_sha256": "10f01983c3439cfe3647397a2ee25de09388394b54d032cc833913dda46fa4cc",
+      "destination_size_bytes": 17178,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Round-6 directive 9g: complete D0 behavioral proof with comprehensive fixture (real Git repo, valid candidate, valid verifier, valid MergeAuthorization, valid live PR payload matching the authorization, MERGEABLE/CLEAN/no-auto-merge, zero unresolved threads, working tree clean). Three tests: control (original verifier advances to _safe_run with call_count >= 1), replacement-digest-mismatch (verifier replaced AFTER authorization with structurally-acceptable record; only a non-critical field differs; guarded merge rejects with verifier digest mismatch diagnostic; _safe_run is never invoked), failed-verdict (the verifier_failed FAILED record path remains un-authorizable)."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",
