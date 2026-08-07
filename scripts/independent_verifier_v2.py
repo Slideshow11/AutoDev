@@ -43,12 +43,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -67,6 +68,10 @@ DEFAULT_AED_EXPECTED_SHA = (
     "9897bd3b780fd03561b6d9f10302ced2e549cb5f3288aebadddddaa1c70f42ae"
 )
 CODERABBIT_AUTHOR_LOGIN = "coderabbitai"
+
+# Hard page cap so a misbehaving pagination never loops forever.
+PAGINATION_MAX_PAGES = 20
+GRAPHQL_TIMEOUT_SECONDS = 120
 
 
 def _step(name):
@@ -109,10 +114,164 @@ def _run_gh(args, *, env=None):
     return json.loads(out)
 
 
-def _run_gh_graphql(query: str, *, variables: Optional[Dict[str, Any]] = None) -> dict:
-    """Run a ``gh api graphql`` query via a tempfile. Supports
-    variables via -F. ``variables`` is encoded into the query as
-    GraphQL variables when needed for paginated queries.
+# ---------------------------------------------------------------------------
+# Query builders
+#
+# Each builder is a small, directly-testable helper that produces a
+# syntactically-valid GraphQL document. They use GraphQL variables (via
+# ``-F`` flags the caller passes) so neither owner nor PR number is
+# interpolated into the document.
+# ---------------------------------------------------------------------------
+
+def _build_review_threads_query() -> str:
+    """Build the paginated ``reviewThreads`` query.
+
+    The document has exactly four scopes:
+      query Threads
+        repository
+          pullRequest
+            reviewThreads
+
+    plus the inner scopes for ``pageInfo``, ``comments``,
+    ``nodes``, and the per-comment ``author{login}``.
+
+    Output is a balanced GraphQL document; see
+    ``tests/test_pr4_round4_query_builder.py`` for the regression
+    that asserts brace / scope balance.
+    """
+    return """
+query Threads($owner: String!, $name: String!, $pr: Int!, $first: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      reviewThreads(first: $first, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        totalCount
+        nodes {
+          id
+          isResolved
+          isOutdated
+          path
+          comments(first: 50) {
+            nodes {
+              id
+              author {
+                login
+              }
+              body
+              createdAt
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _build_latest_reviews_query() -> str:
+    """Build the paginated ``latestReviews`` query.
+
+    Output has exactly four scopes:
+      query Reviews
+        repository
+          pullRequest
+            latestReviews
+
+    plus ``pageInfo``, ``nodes``, and per-node ``author{login}``.
+    """
+    return """
+query Reviews($owner: String!, $name: String!, $pr: Int!, $first: Int!, $cursor: String) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      latestReviews(first: $first, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          state
+          submittedAt
+          author {
+            login
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _build_review_decision_query() -> str:
+    """Build the one-shot ``reviewDecision`` query.
+
+    Used by ``_inspect_coderabbit`` to re-fetch the live
+    PR-level ``reviewDecision``. This is a separate query
+    from the paginated ``latestReviews`` so a malicious or
+    misconfigured reviewer list cannot also forge a
+    ``reviewDecision``.
+    """
+    return """
+query Decision($owner: String!, $name: String!, $pr: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $pr) {
+      reviewDecision
+    }
+  }
+}
+"""
+
+
+# Compile-time regex used to validate balanced GraphQL braces.
+_GRAPHQL_BRACE_RE = re.compile(r"[{}]")
+
+
+def _assert_graphql_balanced(doc: str, label: str) -> None:
+    """``label`` is the test/log identifier; ``doc`` is the
+    rendered GraphQL document. Fail loudly on unbalanced scopes
+    so the bug class from PRRT_kwDOTtyQLc6XRdiR cannot return."""
+    opens = doc.count("{")
+    closes = doc.count("}")
+    assert opens == closes, (
+        f"GraphQL document {label!r} is unbalanced: "
+        f"{opens} opens, {closes} closes"
+    )
+    depth = 0
+    for ch in doc:
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+        assert depth >= 0, (
+            f"GraphQL document {label!r} has a closing brace before "
+            f"an opening one"
+        )
+    assert depth == 0, (
+        f"GraphQL document {label!r} does not fully close (depth={depth})"
+    )
+
+
+# Compile-time validation: every built-in document MUST be balanced.
+for _name, _builder in [
+    ("review_threads_query", _build_review_threads_query),
+    ("latest_reviews_query", _build_latest_reviews_query),
+    ("review_decision_query", _build_review_decision_query),
+]:
+    _assert_graphql_balanced(_builder(), _name)
+
+
+def _run_gh_graphql(query: str, *, variables: Dict[str, Any]) -> dict:
+    """Run a ``gh api graphql`` query via a tempfile. Variables
+    are passed via ``-F key=value``. The query itself is never
+    interpolated with caller data; all caller-supplied
+    identifiers reach GitHub as typed GraphQL variables.
+
+    A finite timeout is enforced so a network stall fails the
+    verifier instead of blocking forever.
     """
     base_env = {**os.environ, "HOME": os.path.expanduser("~")}
     with tempfile.NamedTemporaryFile(
@@ -121,11 +280,18 @@ def _run_gh_graphql(query: str, *, variables: Optional[Dict[str, Any]] = None) -
         f.write(query)
         qpath = f.name
     cmd = ["gh", "api", "graphql", "-F", f"query=@{qpath}"]
-    if variables:
-        for k, v in variables.items():
-            cmd.extend(["-F", f"{k}={v}"])
+    for k, v in variables.items():
+        cmd.extend(["-F", f"{k}={v}"])
     try:
-        proc = subprocess.run(cmd, env=base_env, capture_output=True, text=True)
+        try:
+            proc = subprocess.run(
+                cmd, env=base_env, capture_output=True, text=True,
+                timeout=GRAPHQL_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise AssertionError(
+                f"gh api graphql timed out after {e.timeout}s"
+            ) from e
     finally:
         os.unlink(qpath)
     if proc.returncode != 0:
@@ -133,143 +299,94 @@ def _run_gh_graphql(query: str, *, variables: Optional[Dict[str, Any]] = None) -
     return json.loads(proc.stdout)
 
 
-def _paginate_check_runs(args, qual) -> List[dict]:
-    """Collect ALL check-runs on the qualification head.
+def _paginate_connection(
+    args, query_builder, *, variables_base: Dict[str, Any],
+    page_size: int = 100, label: str = "connection",
+) -> Tuple[List[dict], int]:
+    """Generic paginator for any GraphQL connection whose
+    ``nodes`` carry the data we want and whose result includes
+    ``pageInfo{hasNextPage endCursor} totalCount``.
 
-    The check-runs API returns at most 100 entries per page. We
-    paginate via ``per_page=100`` until the returned ``total_count``
-    matches the count of items we collected, and we assert the
-    last page has no further results. Every collected run's
-    ``head_sha`` MUST equal the qualification head.
-    """
-    runs: List[dict] = []
-    page = 1
-    total_count: Optional[int] = None
-    while True:
-        data = _run_gh([
-            "api", f"repos/{args.repo}/commits/{qual}/check-runs",
-            "-q", ".",  # raw JSON
-            "--paginate",
-        ])
-        # gh's --paginate walks every page already, so the loop
-        # runs once. Each page's response is an array of
-        # check-runs; collect them.
-        if isinstance(data, list):
-            page_runs = data
-        else:
-            # Some gh versions return {check_runs: [...], total_count: N}
-            page_runs = data.get("check_runs", [])
-            total_count = data.get("total_count", total_count)
-        for r in page_runs:
-            head_sha = str(r.get("head_sha") or r.get("head", {}).get("sha") or "")
-            if head_sha and head_sha.lower() != qual:
-                raise AssertionError(
-                    f"check-run {r.get('name')!r} head_sha={head_sha!r} "
-                    f"!= qualification_head={qual!r}"
-                )
-            runs.append(r)
-        if not page_runs:
-            break
-        # --paginate already walks every page, so the loop
-        # exhausts after one iteration.
-        break
-    return runs
-
-
-def _paginate_review_threads(args, qual) -> List[dict]:
-    """Collect ALL review threads on the PR. Assert
-    ``collected_count == totalCount`` BEFORE any semantic
-    cleanliness assertion.
+    Returns ``(nodes, total_count)``. Always requires
+    ``totalCount`` to be present (per round-4 finding
+    PRRT_kwDOTtyQLc6XRdia: completeness must FAIL CLOSED if
+    ``totalCount`` is absent).
     """
     nodes: List[dict] = []
     total: Optional[int] = None
     cursor = "null"
-    first_n = 100
     page = 0
     while True:
         page += 1
-        query = (
-            "query Threads($owner:String!,$name:String!,$pr:Int!,$first:Int!,$cursor:String){"
-            f"repository(owner:$owner,name:$name){{"
-            f"pullRequest(number:$pr){{"
-            f"reviewThreads(first:$first, after:$cursor){{"
-            "pageInfo{hasNextPage endCursor}"
-            "totalCount"
-            "nodes{id isResolved isOutdated path comments(first:50){nodes{id author{login} body createdAt}}}"
-            "}}}}}}"
-        )
-        result = _run_gh_graphql(query, variables={
-            "owner": args.repo.split("/")[0],
-            "name": args.repo.split("/")[1],
-            "pr": str(args.pr_number),
-            "first": str(first_n),
-            "cursor": cursor,
-        })
+        if page > PAGINATION_MAX_PAGES:
+            raise AssertionError(
+                f"{label} pagination exceeded {PAGINATION_MAX_PAGES} "
+                f"pages; aborting to avoid an infinite loop"
+            )
+        variables = dict(variables_base)
+        variables["first"] = str(page_size)
+        variables["cursor"] = cursor
+        query = query_builder()
+        result = _run_gh_graphql(query, variables=variables)
         data = (result.get("data", {})
                     .get("repository", {})
                     .get("pullRequest", {})
-                    .get("reviewThreads", {}))
-        total = data.get("totalCount", total)
+                    .get(label, {}))
+        # totalCount is REQUIRED for fail-closed completeness.
+        page_total = data.get("totalCount")
+        if page_total is None:
+            raise AssertionError(
+                f"{label} response omitted totalCount; "
+                f"pagination completeness cannot be proven; "
+                f"failing closed to avoid an invisible partial inventory"
+            )
+        if total is None:
+            total = page_total
+        else:
+            assert page_total == total, (
+                f"{label} totalCount changed across pages: "
+                f"{total} -> {page_total}"
+            )
         page_nodes = data.get("nodes", [])
         nodes.extend(page_nodes)
-        if not data.get("pageInfo", {}).get("hasNextPage"):
+        page_info = data.get("pageInfo", {})
+        if not page_info.get("hasNextPage"):
             break
-        cursor = data["pageInfo"]["endCursor"]
-        if page > 20:
-            raise AssertionError(
-                f"reviewThreads pagination exceeded 20 pages; "
-                f"aborting to avoid an infinite loop"
-            )
-    if total is not None:
-        assert len(nodes) == total, (
-            f"reviewThreads pagination completeness: "
-            f"collected {len(nodes)} != totalCount {total}; "
-            f"unresolved thread on page > 1 would be invisible"
-        )
-    return nodes
+        cursor = page_info["endCursor"]
+    assert total is not None, (
+        f"{label} pagination completed without a totalCount; "
+        f"the response was missing totalCount on every page"
+    )
+    assert len(nodes) == total, (
+        f"{label} pagination completeness: "
+        f"collected {len(nodes)} != totalCount {total}; "
+        f"a node on a later page would be invisible"
+    )
+    return nodes, total
 
 
-def _paginate_latest_reviews(args) -> List[dict]:
-    """Collect ALL ``latestReviews`` entries so the CodeRabbit
-    presence check cannot miss a CodeRabbit review that fell
-    outside the first page.
-    """
-    nodes: List[dict] = []
-    cursor = "null"
-    page = 0
-    first_n = 100
-    while True:
-        page += 1
-        query = (
-            "query Reviews($owner:String!,$name:String!,$pr:Int!,$first:Int!,$cursor:String){"
-            f"repository(owner:$owner,name:$name){{"
-            f"pullRequest(number:$pr){{"
-            f"latestReviews(first:$first, after:$cursor){{"
-            "pageInfo{hasNextPage endCursor}"
-            "nodes{state submittedAt author{login}}"
-            "}}}}}}"
-        )
-        result = _run_gh_graphql(query, variables={
+def _paginate_review_threads(args) -> Tuple[List[dict], int]:
+    return _paginate_connection(
+        args, _build_review_threads_query,
+        variables_base={
             "owner": args.repo.split("/")[0],
             "name": args.repo.split("/")[1],
             "pr": str(args.pr_number),
-            "first": str(first_n),
-            "cursor": cursor,
-        })
-        data = (result.get("data", {})
-                    .get("repository", {})
-                    .get("pullRequest", {})
-                    .get("latestReviews", {}))
-        page_nodes = data.get("nodes", [])
-        nodes.extend(page_nodes)
-        if not data.get("pageInfo", {}).get("hasNextPage"):
-            break
-        cursor = data["pageInfo"]["endCursor"]
-        if page > 20:
-            raise AssertionError(
-                "latestReviews pagination exceeded 20 pages; aborting"
-            )
-    return nodes
+        },
+        label="reviewThreads",
+    )
+
+
+def _paginate_latest_reviews(args) -> Tuple[List[dict], int]:
+    return _paginate_connection(
+        args, _build_latest_reviews_query,
+        variables_base={
+            "owner": args.repo.split("/")[0],
+            "name": args.repo.split("/")[1],
+            "pr": str(args.pr_number),
+        },
+        label="latestReviews",
+    )
 
 
 def main(argv=None):
@@ -292,9 +409,11 @@ def main(argv=None):
     )
     p.add_argument("--aed-expected-sha", default=DEFAULT_AED_EXPECTED_SHA)
     p.add_argument(
-        "--incident-record", type=Path,
-        default=Path("/var/tmp/autodev-evidence/AED_AUTODEV_P4_FORCE_PUSH_INCIDENT.json"),
-        help="Path to the force-push incident record (canonical artifact).",
+        "--incident-record", type=Path, required=True,
+        help=("Path to the force-push incident record (canonical "
+              "artifact with mandatory .sha256 sidecar). Required; "
+              "the verifier does not silently default to a shared "
+              "/var/tmp path."),
     )
     args = p.parse_args(argv)
     qual = args.qualification_head.strip().lower()
@@ -317,7 +436,7 @@ def main(argv=None):
     observations["aed"] = _verify_aed(args)
     observations["strict_window"] = _verify_strict_window(args, qual)
     observations["candidate"] = _verify_candidate(args, qual)
-    observations["incident"] = _verify_incident_record(args, qual)
+    observations["incident"] = _verify_incident_record(args)
 
     _write_verifier(args, qual, observations)
 
@@ -328,7 +447,7 @@ def main(argv=None):
     return 0
 
 
-@_step("Fetch live PR state for exact head")
+@_step("Fetch live PR state for exact head (positive readiness)")
 def _fetch_pr(args, qual) -> dict:
     data = _run_gh([
         "pr", "view", str(args.pr_number), "--repo", args.repo,
@@ -346,14 +465,30 @@ def _fetch_pr(args, qual) -> dict:
     assert data.get("isDraft") is False, (
         f"PR is a draft; verifier must reject; isDraft={data.get('isDraft')!r}"
     )
+    # POSITIVE mergeability contract (per round-4 finding
+    # PRRT_kwDOTtyQLc6XRdig). The verifier requires an explicit
+    # positive readiness value -- UNKNOWN / CONFLICTING both
+    # fail. This is consistent with the production guarded-merge
+    # path: a real merge is unsafe until mergeability is
+    # confirmed, and a verifier that allows UNKNOWN would pass
+    # a PR whose readiness has not yet been computed.
     mergeable = data.get("mergeable")
-    assert mergeable != "CONFLICTING", (
-        f"PR is not mergeable; mergeable={mergeable!r}, "
-        f"mergeStateStatus={data.get('mergeStateStatus')!r}"
+    assert mergeable == "MERGEABLE", (
+        f"PR mergeability is not positively confirmed; "
+        f"mergeable={mergeable!r}, "
+        f"mergeStateStatus={data.get('mergeStateStatus')!r}; "
+        f"UNKNOWN and CONFLICTING both fail"
     )
+    # POSITIVE mergeStateStatus contract. GitHub returns
+    # CLEAN / HAS_HOOKS / UNSTABLE for an actively-mergeable PR;
+    # UNKNOWN means mergeability has not been computed yet and
+    # the verifier MUST reject it.
     merge_state_status = data.get("mergeStateStatus")
-    assert merge_state_status not in ("DIRTY", "BLOCKED", "BEHIND"), (
-        f"PR mergeStateStatus={merge_state_status!r}; verifier must reject"
+    ACCEPTED_STATES = ("CLEAN", "HAS_HOOKS", "UNSTABLE")
+    assert merge_state_status in ACCEPTED_STATES, (
+        f"PR mergeStateStatus={merge_state_status!r} is not in "
+        f"the positive set {ACCEPTED_STATES}; UNKNOWN and "
+        f"DIRTY/BLOCKED/BEHIND both fail"
     )
     auto_merge = data.get("autoMergeRequest")
     assert auto_merge is None, (
@@ -365,20 +500,11 @@ def _fetch_pr(args, qual) -> dict:
 
 @_step("Inspect exact-head CI on the qualification head (paginates ALL pages)")
 def _inspect_ci(args, qual) -> dict:
-    # The check-runs API returns at most 100 entries per page.
-    # ``--paginate`` walks every page; we then assert each
-    # collected run's ``head_sha`` matches the qualification
-    # head. Pagination-completeness is asserted via
-    # ``collected_count == total_count`` before any semantic
-    # readiness claim.
     raw = _run_gh([
         "api", f"repos/{args.repo}/commits/{qual}/check-runs",
         "-q", ".",
         "--paginate",
     ])
-    # ``--paginate`` returns a JSON array of all check-runs when
-    # ``-q .`` extracts them; some gh versions return an object
-    # with ``check_runs`` and ``total_count``. Handle both.
     if isinstance(raw, list):
         runs = raw
         total_count = len(runs)
@@ -391,13 +517,19 @@ def _inspect_ci(args, qual) -> dict:
         head_sha = str(r.get("head_sha") or r.get("head", {}).get("sha") or "")
         if head_sha and head_sha.lower() != qual:
             raise AssertionError(
-                f"check-run {r['name']!r} bound to head_sha={head_sha!r}, "
-                f"not the qualification head {qual!r}"
+                f"check-run {r['name']!r} head_sha={head_sha!r} "
+                f"!= qualification_head={qual!r}"
             )
+    # FAIL CLOSED on completeness (per round-4 P0).
+    # total_count must be present and must equal collected count.
+    assert total_count > 0, (
+        f"check-runs response omitted total_count; "
+        f"completeness cannot be proven"
+    )
     assert len(runs) == total_count, (
         f"check-runs pagination completeness: "
         f"collected {len(runs)} != total_count {total_count}; "
-        f"check-run beyond page 1 would be invisible"
+        f"a check-run beyond page 1 would be invisible"
     )
     required_jobs = {
         "test (3.10)", "test (3.11)", "test (3.12)",
@@ -417,83 +549,86 @@ def _inspect_ci(args, qual) -> dict:
 def _inspect_coderabbit(args) -> dict:
     """Fail-closed live CodeRabbit gate.
 
-    Re-fetches CodeRabbit state from GitHub at verification time.
-    The verifier must NOT rely on the strict-window historical
-    coderabbit_pass as a substitute for this live check.
-
-    Required conditions (all must hold):
-      * reviewDecision != "CHANGES_REQUESTED"
-      * latestReviews contains a CodeRabbit review (matching
-        the production identity contract) whose state is
-        acceptable.
+    Per round-4 finding PRRT_kwDOTtyQLc6XRdiz: do NOT rely on
+    connection order. Collect ALL matching CodeRabbit reviews,
+    sort explicitly by submittedAt, and select the newest one.
     """
     target_login = _normalize_login(CODERABBIT_AUTHOR_LOGIN)
-    decision = None
-    coderabbit_states: List[str] = []
-    # Paginate ALL latestReviews so a CodeRabbit review beyond
-    # page 1 cannot be missed.
-    reviews_nodes = _paginate_latest_reviews(args)
+    reviews_nodes, _ = _paginate_latest_reviews(args)
+    # Collect every matching CodeRabbit review object so we can
+    # sort by submittedAt and tolerate null/deleted authors
+    # without crashing. A null author is "no matching identity".
+    coderabbit_reviews: List[dict] = []
     for r in reviews_nodes:
         author_obj = r.get("author") or {}
         author_login = author_obj.get("login") or ""
         if _normalize_login(author_login) == target_login:
-            coderabbit_states.append(r["state"])
-
-    # reviewDecision is also re-fetched. Either source failing
-    # the gate fails the verifier.
-    query = (
-        'query {\n'
-        f'  repository(owner:"{args.repo.split("/")[0]}", name:"{args.repo.split("/")[1]}") {{\n'
-        f'    pullRequest(number:{args.pr_number}) {{\n'
-        '      reviewDecision\n'
-        '    }\n'
-        '  }\n'
-        '}\n'
+            coderabbit_reviews.append(r)
+    # Sort explicitly by submittedAt; never trust connection
+    # order. submittedAt is required; missing submittedAt would
+    # be ambiguous and we fail closed.
+    for r in coderabbit_reviews:
+        assert r.get("submittedAt"), (
+            f"CodeRabbit review missing submittedAt: {r!r}"
+        )
+    coderabbit_reviews.sort(
+        key=lambda r: r.get("submittedAt", ""),
+        reverse=True,
     )
-    result = _run_gh_graphql(query)
+    # Re-fetch reviewDecision via its own one-shot query. This
+    # isolates the per-PR decision from the latestReviews list
+    # so the two cannot be forged together.
+    query = _build_review_decision_query()
+    result = _run_gh_graphql(query, variables={
+        "owner": args.repo.split("/")[0],
+        "name": args.repo.split("/")[1],
+        "pr": str(args.pr_number),
+    })
     decision = (result.get("data", {})
                      .get("repository", {})
                      .get("pullRequest", {})
                      .get("reviewDecision"))
-
     print(f"reviewDecision: {decision}")
-    print(f"live CodeRabbit states (paginated): {coderabbit_states!r}")
+    states = [r["state"] for r in coderabbit_reviews]
+    print(f"matching CodeRabbit reviews (sorted by submittedAt desc): "
+          f"{[(r.get('submittedAt'), r.get('state')) for r in coderabbit_reviews]}")
 
-    assert decision != "CHANGES_REQUESTED", (
-        f"live reviewDecision is {decision!r}; verifier must fail closed"
-    )
     assert decision is not None, (
         "live reviewDecision is None; no review decision is available"
     )
-    assert coderabbit_states, (
+    assert decision != "CHANGES_REQUESTED", (
+        f"live reviewDecision is {decision!r}; verifier must fail closed"
+    )
+    assert coderabbit_reviews, (
         "no live CodeRabbit review found across all paginated "
         "latestReviews; the production identity contract requires "
         "coderabbitai or coderabbitai[bot]"
     )
-    # The most recent CodeRabbit state must be APPROVED.
-    latest_state = coderabbit_states[0]  # latestReviews is reverse-chronological
+    latest = coderabbit_reviews[0]
+    latest_state = latest["state"]
     assert latest_state == "APPROVED", (
-        f"latest live CodeRabbit review is {latest_state!r}; "
+        f"newest live CodeRabbit review is {latest_state!r}; "
         f"verifier must require APPROVED"
     )
     return {
         "review_decision": decision,
-        "coderabbit_states": coderabbit_states,
+        "coderabbit_states": states,
         "latest_coderabbit_state": latest_state,
+        "latest_coderabbit_submitted_at": latest.get("submittedAt"),
     }
 
 
-@_step("Inspect every review thread (paginates ALL pages)")
+@_step("Inspect every review thread (paginates ALL pages, totalCount required)")
 def _inspect_threads(args) -> dict:
-    nodes = _paginate_review_threads(args)
-    print(f"total threads: {len(nodes)}, "
+    nodes, total = _paginate_review_threads(args)
+    print(f"total threads: {total}, "
           f"resolved: {sum(1 for n in nodes if n['isResolved'])}, "
           f"unresolved: {sum(1 for n in nodes if not n['isResolved'])}, "
           f"unresolved_outdated: {sum(1 for n in nodes if not n['isResolved'] and n['isOutdated'])}")
     unresolved = [n for n in nodes if not n["isResolved"]]
     assert not unresolved, f"unresolved threads: {unresolved}"
     print(f"OK: every review thread on PR #{args.pr_number} is resolved")
-    return {"nodes": nodes, "count": len(nodes)}
+    return {"nodes": nodes, "count": total}
 
 
 @_step("Verify AED unchanged: scripts/quiet_window_observer.py (exactly one manifest match)")
@@ -504,8 +639,6 @@ def _verify_aed(args) -> dict:
     print(f"actual:   {measured_sha}")
     print(f"expected: {args.aed_expected_sha}")
     assert measured_sha == args.aed_expected_sha, "AED sha mismatch"
-    # Manifest lookup: require EXACTLY ONE matching entry.
-    # Missing and duplicate entries both fail verification.
     manifest_path = REPO_ROOT / "provenance" / "aed-pr417-source-manifest.json"
     with manifest_path.open() as f:
         m = json.load(f)
@@ -595,39 +728,33 @@ def _verify_candidate(args, qual) -> dict:
     }
 
 
-@_step("Inspect the force-push incident record (canonical artifact, --incident-record)")
-def _verify_incident_record(args, qual) -> dict:
-    """Read the incident record as a canonical artifact through
-    ``read_artifact``. The historical incident itself remains
-    honestly recorded; this verifier does not erase or rewrite
-    any fact about the original force-with-lease. The verifier
-    adds canonical digest + sidecar validation, accepts the
-    ``--incident-record`` CLI argument (no hardcoded path), and
-    normalizes a ``null`` ``force_push_mechanism`` to ``""``
-    before lowercasing."""
+@_step("Inspect the force-push incident record (canonical artifact, --incident-record required)")
+def _verify_incident_record(args) -> dict:
+    """Read the incident record as a canonical artifact.
+
+    Per round-4 finding PRRT_kwDOTtyQLc6XRdi5: the verifier MUST
+    NOT manufacture, repair, or migrate the sidecar it is about
+    to verify. ``--incident-record`` is REQUIRED (no
+    ``/var/tmp`` default) and the sidecar MUST already exist
+    on disk with a valid digest. ``read_artifact`` performs the
+    verification; any failure (missing sidecar, digest
+    mismatch, malformed sidecar, insecure mode, legacy footer)
+    fails the verifier closed.
+
+    The historical incident body is preserved verbatim; the
+    verifier never modifies either the body or the sidecar.
+    """
     p = args.incident_record
     assert p.exists(), f"incident record missing: {p}"
-    # Migrate the legacy record into canonical form IF the
-    # sidecar is missing. This preserves the historical body
-    # bytes verbatim; we only add the sidecar that ``read_artifact``
-    # requires for canonical verification. The historical record
-    # is preserved; we are not erasing or rewriting the fact that
-    # force-with-lease occurred.
     sidecar_path = Path(str(p) + ".sha256")
-    if not sidecar_path.exists():
-        body_bytes = p.read_bytes()
-        digest = hashlib.sha256(body_bytes).hexdigest()
-        sidecar_path.write_text(digest + "\n")
-        # Restore mode bits (sidecar inherits a fresh mode);
-        # we keep 0644 only if it matches the file, else 0600.
-        try:
-            import stat as _stat
-            mode = p.stat().st_mode & 0o777
-            if mode == 0:
-                mode = 0o600
-            sidecar_path.chmod(mode)
-        except OSError:
-            pass
+    assert sidecar_path.exists(), (
+        f"incident sidecar missing: {sidecar_path}; "
+        f"the verifier does not create sidecars. The canonical "
+        f"sidecar must be produced by the artifact producer, "
+        f"not the verifier."
+    )
+    # ``read_artifact`` performs the canonical verification:
+    # sidecar presence, digest equality, mode, and footer check.
     record = read_artifact(p)
     payload = record.payload
     print(f"incident record digest: {record.digest}")
@@ -665,6 +792,7 @@ def _write_verifier(args, qual, observations) -> None:
     cr = observations["coderabbit"]
     pr = observations["pr"]
     ci = observations["ci"]
+    threads_total = observations["threads"]["count"]
 
     verifier_record = {
         "schema_version": "autocoder.verifier_record.v2",
@@ -681,7 +809,8 @@ def _write_verifier(args, qual, observations) -> None:
         "live_ci_collected_count": len(ci["runs"]),
         "live_review_decision": cr["review_decision"],
         "latest_coderabbit_state": cr["latest_coderabbit_state"],
-        "thread_total_count": observations["threads"]["count"],
+        "latest_coderabbit_submitted_at": cr.get("latest_coderabbit_submitted_at"),
+        "thread_total_count": threads_total,
         "thread_unresolved_count": sum(
             1 for n in observations["threads"]["nodes"]
             if not n["isResolved"]
@@ -701,7 +830,7 @@ def _write_verifier(args, qual, observations) -> None:
         "verdict": "VERIFIED",
         "defects": [],
         "verified_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "verifier": "scripts.independent_verifier_v3",
+        "verifier": "scripts.independent_verifier_v4",
         "checks": {
             "live_pr_head_matches": str(pr.get("headRefOid", "")).lower() == qual,
             "exact_head_ci_all_pass": all(
@@ -720,6 +849,10 @@ def _write_verifier(args, qual, observations) -> None:
             "merge_state_clean": pr.get("state") == "OPEN" and pr.get("mergedAt") is None,
             "auto_merge_absent": pr.get("autoMergeRequest") is None,
             "pr_not_draft": pr.get("isDraft") is False,
+            "pr_mergeable": pr.get("mergeable") == "MERGEABLE",
+            "pr_merge_state_status_acceptable": pr.get("mergeStateStatus") in (
+                "CLEAN", "HAS_HOOKS", "UNSTABLE",
+            ),
             "force_push_incident_recorded": incident["force_push_mechanism"] != "",
         },
     }

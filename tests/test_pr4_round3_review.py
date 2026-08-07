@@ -15,13 +15,20 @@ Coverage:
   ``cmd_merge_authorize`` after a prior canonical-write failure
   succeeds.
 
-* StateError handling in the post-merge COMPLETE recovery path.
+* CLI does not duplicate canonical write -- the canonical
+  authorization.json write happens only inside
+  ``Controller.authorize_merge``, never in the CLI module.
+
+* Cross-process merge lock with contender PID actually obtained
+  in the subprocess, not interpolated in the parent.
 
 * Verifier record measured evidence lineage -- every field is
   populated from a helper return value, not a hardcoded literal.
 
-* Cross-process merge lock with contender PID actually obtained
-  in the subprocess, not interpolated in the parent.
+Note: the StateError post-merge COMPLETE recovery regression
+that round-3 documentation mentioned is implemented in
+``tests/test_pr4_round4_review.py::StateErrorRecoveryTests``.
+That is where the corresponding coverage lives.
 """
 from __future__ import annotations
 
@@ -373,34 +380,25 @@ class CanonicalAuthorizationIntegrityTests(unittest.TestCase):
             shutil.rmtree(tmpdir, ignore_errors=True)
 
 
-class VerifierLiveCodeRabbitGateTests(unittest.TestCase):
-    """The independent verifier must require live CodeRabbit
-    approval, not just print it. These tests exercise the
-    verifier's _inspect_coderabbit step against synthetic
-    payloads to prove the gate fails closed."""
+class ProductionCLIFilterRegressionTests(unittest.TestCase):
+    """Regression for the production CLI's CodeRabbit identity
+    filter. The verifier-level tests live in
+    ``tests/test_pr4_round4_review.py::LiveCodeRabbitGateTests``
+    which loads ``scripts/independent_verifier_v2.py`` directly
+    and exercises ``_inspect_coderabbit`` with mocked GraphQL
+    responses.
 
-    def test_inspect_coderabbit_rejects_changes_requested(self):
-        """``_inspect_coderabbit`` MUST fail closed when the
-        live ``reviewDecision`` is ``CHANGES_REQUESTED``."""
-        # Import the verifier module via subprocess to avoid
-        # sys.path / module-cache pollution.
-        verifier_path = (
-            Path(__file__).resolve().parent.parent
-            / "scripts" / "independent_verifier_v2.py"
-        )
-        # Construct a synthetic GraphQL response: reviewDecision
-        # = CHANGES_REQUESTED, no CodeRabbit review.
-        # We patch ``_run_gh_graphql`` to return the synthetic
-        # payload, then invoke main() with --qualification-head
-        # and assert the verifier fails closed.
-        # This is a smoke test; the per-asset code paths are
-        # covered in scripts/independent_verifier_v2.py itself.
-        # We verify only that the step is fail-closed via the
-        # production module's decision logic.
+    This class retains a smaller CLI-filter regression that
+    predates the verifier-level test infrastructure.
+    """
+
+    def test_production_cli_filter_rejects_empty_changes_requested(self):
+        """The production CLI filter returns ``None`` for an
+        empty / CHANGES_REQUESTED payload, so the CodeRabbit
+        guard fails closed. This test covers the production CLI
+        only -- the verifier-level coverage is in
+        ``LiveCodeRabbitGateTests``."""
         from autocoder_orchestration.cli import _filter_coderabbit_review_state
-
-        # 1. Empty / CHANGES_REQUESTED payload -> no matching
-        #    CodeRabbit identity, the production CLI returns None.
         payload = {
             "data": {"repository": {"pullRequest": {
                 "reviewDecision": "CHANGES_REQUESTED",

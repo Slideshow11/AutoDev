@@ -347,21 +347,30 @@
     },
     {
       "destination_path": "scripts/independent_verifier_v2.py",
-      "destination_sha256": "f8dfc82fe031ed8d806e1d73d97ff2859338643e49e1c3df3ade454dcef7a685",
-      "destination_size_bytes": 30345,
+      "destination_sha256": "9bd901068451d85c4658c55eccd153be4aee969ca924221b7c77fd5f9e1a89bb",
+      "destination_size_bytes": 33940,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
-      "transformation_explanation": "Independent exact-head verifier for PR #4 strict-window qualification. Reads --qualification-head as immutable input; every check (live PR head, CI query SHA, strict-window observations, candidate.exact_head, verifier.qualification_head) is bound to that single head. No EXPECTED_HEADS, no historical equivalence. Run via 'python scripts/independent_verifier_v2.py --qualification-head <40-hex-sha>'."
+      "transformation_explanation": "Independent exact-head verifier for PR #4 strict-window qualification. Reads --qualification-head and --incident-record as required inputs. Every check (live PR head, CI query SHA, paginated reviewThreads, paginated latestReviews, every required CI check-run head_sha, every strict-window observation pr_head_sha, candidate.exact_head, verifier.qualification_head, AED file measured sha256, incident-record digest) is bound to that single 40-char SHA. v4 round-4 repairs: GraphQL query builders produce balanced documents; totalCount is required (fails closed when absent); live PR readiness requires positive mergeable==MERGEABLE and mergeStateStatus in (CLEAN, HAS_HOOKS, UNSTABLE); the newest CodeRabbit review is selected by submittedAt sorting rather than connection order; the verifier does NOT create or migrate the incident-record sidecar. The verifier fails closed on every fail-open vector. Run via 'python scripts/independent_verifier_v2.py --qualification-head <40-hex-sha> --incident-record <path>'."
     },
     {
       "destination_path": "tests/test_pr4_round3_review.py",
-      "destination_sha256": "ade5a711fb4ffe2512d1f44373bf83ae5ed1e133d49d9c4f5eccd2ed889eb844",
-      "destination_size_bytes": 26824,
+      "destination_sha256": "b7bcb57555c0032fb4dba17330210d49000de1a39c8672498ec6386e8cb29da9",
+      "destination_size_bytes": 26624,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
       "transformation_explanation": "Newly authored regression tests for PR #4 round-3 review findings: canonical-write failure injection with retry, CLI does not duplicate canonical write, verifier measured-evidence lineage, cross-process holder/contender PID identity. The PID test catches the parent-os.getpid()-interpolation defect."
+    },
+    {
+      "destination_path": "tests/test_pr4_round4_review.py",
+      "destination_sha256": "d7a32af3032011eef6e153045dd74b9e53b614ed8582a88753e57545d5d6ced3",
+      "destination_size_bytes": 32909,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored regression tests for PR #4 round-4 review findings: balanced GraphQL query builders, totalCount-required pagination, positive live PR readiness, explicit-latest CodeRabbit review via submittedAt sorting, incident-record self-authentication removed (verifier does not create sidecars), StateError post-merge COMPLETE recovery, failed-verifier canonical semantics. Loads scripts/independent_verifier_v2.py as a module and exercises _inspect_coderabbit and _verify_incident_record with mocked GraphQL responses rather than relying on source inspection alone."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",
