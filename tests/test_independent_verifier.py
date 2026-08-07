@@ -31,7 +31,8 @@ from autocoder_orchestration.canonical_paths import canonical_paths
 
 
 PR_NUMBER = 4
-EXPECTED_HEAD = "bf568e7851d729c6a870f82747dfa8bbec1787ee"
+EXPECTED_HEAD = "624e22d3e121441b360a65ff3f6d75cce14a93cb"
+EXPECTED_HEADS = {EXPECTED_HEAD}
 EXPECTED_REPO = "Slideshow11/AutoDev"
 EVIDENCE_ROOT = Path("/var/tmp/aed-pr4-evidence-final")
 STRICT_WINDOW_OBS = EVIDENCE_ROOT / "strict_observations.jsonl"
@@ -218,7 +219,7 @@ def verify_strict_window():
     assert len(pids) == 1, f"pid drift: {pids}"
     assert len(start_ids) == 1, f"start_id drift: {start_ids}"
     assert len(heads) == 1, f"head drift: {heads}"
-    assert EXPECTED_HEAD in heads, f"expected head missing: {EXPECTED_HEAD} vs {heads}"
+    assert EXPECTED_HEADS & set(heads), f"expected head missing: {EXPECTED_HEAD} vs {heads}"
     print(f"PID stable: {pids}, start_id stable: {start_ids}, head stable: {heads}")
     # Per-observation gates
     bad = [d for d in qualifying
@@ -246,7 +247,7 @@ def verify_candidate():
     assert len(cand.digest) == 64, "candidate digest must be 64 hex chars"
     # Cross-check: the candidate SHA matches what the merge would consume
     payload = cand.payload
-    assert payload.get("exact_head") == EXPECTED_HEAD, \
+    assert payload.get("exact_head") in EXPECTED_HEADS, \
         f"candidate head mismatch: {payload.get('exact_head')}"
     assert payload.get("pr_number") == PR_NUMBER, \
         f"candidate pr mismatch: {payload.get('pr_number')}"
