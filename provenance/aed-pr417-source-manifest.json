@@ -347,15 +347,15 @@
     },
     {
       "destination_path": "tests/test_independent_verifier.py",
-      "destination_sha256": "8f00ce271b5377c4692a4eb6c2b95e31c9389af8a75c132cd230389756196761",
-      "destination_size_bytes": 13401,
+      "destination_sha256": "2e1b41677de28a26533b565f4d15e777cf9e83073851c259741f6618dc017abd",
+      "destination_size_bytes": 13537,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
       "transformation_explanation": "Newly authored end-to-end independent verifier that re-derives every gate from public sources for PR #4 strict-window canary. Run via 'python tests/test_independent_verifier.py'."
     }
   ],
-  "last_modification_note": "PR #4 review repair round 6: added tests/test_independent_verifier.py. Manifest now has 37 entries (17 source, 20 standalone). Qualification complete; state = AWAITING_MERGE_AUTHORIZATION.",
+  "last_modification_note": "PR #4 review repair round 6 (final): regenerated manifest hashes after the scanner cleanup of absolute paths in tests/test_independent_verifier.py. Qualification complete; state = AWAITING_MERGE_AUTHORIZATION.",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
