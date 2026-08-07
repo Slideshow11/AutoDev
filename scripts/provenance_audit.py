@@ -266,24 +266,25 @@ def main() -> int:
             manifest = json.load(f)
         _validate_audit_consistency(audit)
         canonical_metrics = compute_manifest_metrics(manifest)
-        canonical_record_source_paths = {
-            r["source_path"] for r in
-            compute_extracted_manifest_records(manifest)
-        }
+        # Compare the complete normalized manifest_records
+        # list, not just source_path sets. Comparing the
+        # full list preserves detection of changed fields,
+        # ordering, and duplicate records.
+        canonical_records = compute_extracted_manifest_records(manifest)
         mm = audit["extracted_manifest_match"]
         for key, canonical_value in canonical_metrics.items():
             if mm.get(key) != canonical_value:
                 raise ProvenanceAuditError(
                     f"audit drift: extracted_manifest_match.{key}={mm.get(key)} "
                     f"!= canonical {key}={canonical_value} from manifest")
-        audit_record_source_paths = {
-            r.get("source_path") for r in mm.get("manifest_records", [])
-        }
-        if audit_record_source_paths != canonical_record_source_paths:
+        audit_records = mm.get("manifest_records", [])
+        if audit_records != canonical_records:
             raise ProvenanceAuditError(
-                f"audit manifest_records source_paths diverge from manifest: "
-                f"audit={sorted(audit_record_source_paths)} "
-                f"manifest={sorted(canonical_record_source_paths)}")
+                f"audit manifest_records diverge from manifest: "
+                f"record_count(audit)={len(audit_records)} "
+                f"record_count(manifest)={len(canonical_records)}; "
+                f"first divergence: "
+                f"{next(((i, a, c) for i, (a, c) in enumerate(zip(audit_records, canonical_records)) if a != c), 'ordering-or-duplicate mismatch')}")
         print("OK: audit consistency check passed")
         return 0
     return 2
