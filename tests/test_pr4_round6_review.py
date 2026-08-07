@@ -23,7 +23,6 @@ Round-8 directive's three fresh threads:
 from __future__ import annotations
 
 import ast
-import hashlib
 import importlib.util
 import json
 import os
@@ -400,19 +399,14 @@ class InspectCiTests(unittest.TestCase):
     }
 
     def _make_args(self):
+        # Per round-9 finding (nitpick on _make_args):
+        # ``_inspect_ci`` only reads ``args.repo`` (via
+        # ``_collect_check_runs``). Retain only that field;
+        # the previous fixture hashed a repository file on
+        # every call (aed_expected_sha) and included unused
+        # aed_path, strict_window_obs, and evidence_root.
         return type("A", (), {
             "repo": "o/r", "qualification_head": self.QUAL,
-            "aed_path": REPO_ROOT / "scripts" / "quiet_window_observer.py",
-            "aed_expected_sha": hashlib.sha256(
-                (REPO_ROOT / "scripts" / "quiet_window_observer.py")
-                .read_bytes()
-            ).hexdigest(),
-            "incident_record": Path(tempfile.gettempdir()) /
-                                "aed-r8-inspect-incident.json",
-            "strict_window_obs": Path(tempfile.gettempdir()) /
-                                  "aed-r8-inspect-obs.jsonl",
-            "evidence_root": Path(tempfile.gettempdir()) /
-                              "aed-r8-inspect-evidence",
         })()
 
     def _two_page(self, a, b):
@@ -757,6 +751,13 @@ class NoHardcodedVerifierJsonPathTests(unittest.TestCase):
       immediately before an ``assertFalse`` are still
       detected; docstrings are ignored; mid-body standalone
       strings do NOT create false docstring exemptions.
+
+    Round-9 directive (PRRT_kwDOTtyQLc6XXFOx): the
+    containment check uses AST node-id descendant tracking
+    (not line-range overlap). A regression case proves the
+    detection works for an offender that shares a line with
+    an ``assertFalse`` call WITHOUT being one of its
+    arguments.
     """
 
     def test_no_hardcoded_verifier_json_path_in_tests(self):
@@ -833,11 +834,14 @@ class NoHardcodedVerifierJsonPathTests(unittest.TestCase):
             test_file = tmp / "synthetic_test.py"
             test_file.write_text(src)
             offenders = _find_verifier_json_offenders(test_file)
+            # Per round-9 finding PRRT_kwDOTtyQLc6XXFOx: the
+            # diagnostic must be safe for ALL possible offender
+            # collections, including []. Do not dereference
+            # offenders[0] before the length assertion runs.
             self.assertEqual(
                 len(offenders), 1,
                 f"hardcoded path immediately before assertFalse "
-                f"must STILL be detected (line {offenders[0][0]}); "
-                f"offenders: {offenders!r}",
+                f"must STILL be detected; offenders={offenders!r}",
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
@@ -913,6 +917,34 @@ class NoHardcodedVerifierJsonPathTests(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_offender_sharing_line_with_assertFalse_but_not_argument(self):
+        """Round-9 regression case 6: an offender that
+        shares a line with an ``assertFalse`` call WITHOUT
+        being one of its arguments must still be detected.
+        The line-range overlap check would have wrongly
+        exempted it; the AST node-id descendant tracking
+        correctly exempts only descendants of the
+        ``assertFalse`` Call.
+        """
+        src = (
+            "def f(self):\n"
+            "    p = root / \"verifier.json\"; self.assertFalse(p.exists())\n"
+        )
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="aed-r9-share-"))
+        try:
+            test_file = tmp / "synthetic_test.py"
+            test_file.write_text(src)
+            offenders = _find_verifier_json_offenders(test_file)
+            self.assertEqual(
+                len(offenders), 1,
+                f"offender on the same line as assertFalse but "
+                f"not as its argument MUST be detected; "
+                f"offenders: {offenders!r}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 def _find_verifier_json_offenders(test_file: Path):
     """Return list of (line, col, line_text) for each direct
@@ -943,11 +975,14 @@ def _find_verifier_json_offenders(test_file: Path):
         tree = ast.parse(src)
     except SyntaxError:
         return [("syntax_error", 0, src)]
-    # Identify every assertFalse Call; the candidate BinOp
-    # is exempt when it is structurally contained inside
-    # such a Call (i.e. the candidate's line range lies
-    # within the Call's line range).
-    assertfalse_call_ranges = []
+    # Per round-9 directive (PRRT_kwDOTtyQLc6XXFOx): track
+    # descendant node identities of every assertFalse Call.
+    # A candidate BinOp is exempt IFF its node identity is
+    # IN that descendant set (true AST containment, not
+    # line-range overlap). ``ast.walk`` keeps every node
+    # alive through ``tree``, so ``id()`` values stay
+    # stable for the duration of the scan.
+    exempt_node_ids = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             func = node.func
@@ -956,9 +991,8 @@ def _find_verifier_json_offenders(test_file: Path):
                 and func.attr == "assertFalse"
             )
             if is_assertfalse:
-                c_start = node.lineno
-                c_end = getattr(node, "end_lineno", c_start)
-                assertfalse_call_ranges.append((c_start, c_end))
+                for descendant in ast.walk(node):
+                    exempt_node_ids.add(id(descendant))
     offenders = []
     for node in ast.walk(tree):
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
@@ -972,10 +1006,9 @@ def _find_verifier_json_offenders(test_file: Path):
                 line_text = lines[line - 1] if 0 < line <= len(lines) else ""
                 if _is_in_docstring(tree, line):
                     continue
-                # AST containment: candidate must lie
-                # INSIDE the assertFalse Call's source range.
-                if any(c_start <= line <= c_end
-                        for (c_start, c_end) in assertfalse_call_ranges):
+                # AST containment: candidate node identity
+                # must be in the assertFalse descendant set.
+                if id(node) in exempt_node_ids:
                     continue
                 offenders.append((line, col, line_text))
     return offenders
@@ -1113,18 +1146,24 @@ class CursorMappingTests(unittest.TestCase):
 
     def test_real_paginator_unexpected_cursor_fails_via_network(self):
         """Real-paginator failure (Round-8 finding
-        PRRT_kwDOTtyQLc6XWVR3): the production paginator
-        sends a cursor on the second call that is NOT in
-        its expected cursor map. Mock only
-        ``_run_gh_graphql`` -- the mock returns
-        ``hasNextPage=False`` so the paginator does not
-        loop; the actual unexpected cursor propagates as a
-        VerificationFailure through the real paginator.
+        PRRT_kwDOTtyQLc6XWVR3, Round-9 finding
+        PRRT_kwDOTtyQLc6XXFO3):
 
-        The test asserts the actual cursor value the
-        production paginator sent on the first request and
-        that the resulting failure propagates the exact
-        cursor value.
+        * ONLY ``_run_gh_graphql`` is mocked.
+        * Page 1 returns ``hasNextPage=True`` and supplies
+          an ``endCursor`` of ``"UNEXPECTED_CURSOR"``.
+        * The production paginator must forward that
+          ``endCursor`` on its second request.
+        * The second mocked network call rejects the
+          propagated cursor and raises ``VerificationFailure``.
+        * That ``VerificationFailure`` propagates through
+          the real ``_paginate_latest_reviews`` /
+          ``_paginate_connection`` / ``_inspect_coderabbit``
+          chain.
+        * The test asserts the actual cursor value the
+          production paginator sent (proving the paginator
+          ran, not that the mock manufactured the failure
+          before the paginator executed).
         """
         cursors_seen = []
 
@@ -1248,6 +1287,162 @@ class TightenedArtifactErrorOnlyTests(unittest.TestCase):
             self.assertIn("digest", str(ctx.exception).lower())
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class Round9SafeDiagnosticsTests(unittest.TestCase):
+    """Round-9 directive (PRRT_kwDOTtyQLc6XXFOx): the
+    diagnostic for an offenders-length assertion must be
+    safe for ALL possible offender collections, including
+    ``[]``.
+
+    Prove:
+    * expected offender found -> test passes;
+    * simulated/mutated detector returns ``[]`` -> failure
+      is a normal ``AssertionError``;
+    * the failure is NOT ``IndexError``;
+    * the diagnostic includes the full offenders
+      representation safely.
+    """
+
+    def test_assertEqual_safe_when_offenders_is_empty(self):
+        """When the detector returns ``[]`` (the regression
+        case), the diagnostic f-string must NOT raise
+        ``IndexError``; the assertion produces a normal
+        ``AssertionError`` instead."""
+        # Simulated empty offenders collection.
+        offenders: list = []
+        # The exact f-string from the round-8 source code,
+        # now expected to be safe.
+        try:
+            self.assertEqual(
+                len(offenders), 1,
+                f"hardcoded path immediately before assertFalse "
+                f"must STILL be detected; offenders={offenders!r}",
+            )
+        except AssertionError as e:
+            # The expected failure type is AssertionError,
+            # NOT IndexError.
+            msg = str(e)
+            self.assertIn("offenders=[]", msg,
+                f"diagnostic must safely include the offenders "
+                f"representation; got: {msg!r}")
+            self.assertIn("must STILL be detected", msg,
+                f"diagnostic must describe the regression; "
+                f"got: {msg!r}")
+        except IndexError as e:
+            self.fail(
+                f"the diagnostic raised IndexError instead of "
+                f"AssertionError; the diagnostic must be safe "
+                f"for empty offenders. Got: {e!r}"
+            )
+
+    def test_assertEqual_safe_when_offenders_has_one(self):
+        """When the detector returns exactly one offender,
+        the assertion passes and the diagnostic is not
+        evaluated.
+        """
+        offenders = [(42, 0, "test code")]
+        self.assertEqual(
+            len(offenders), 1,
+            f"hardcoded path immediately before assertFalse "
+            f"must STILL be detected; offenders={offenders!r}",
+        )
+
+    def test_assertEqual_safe_when_offenders_has_many(self):
+        """When the detector returns multiple offenders, the
+        diagnostic safely reports all of them.
+        """
+        offenders = [(1, 0, "a"), (2, 0, "b"), (3, 0, "c")]
+        try:
+            self.assertEqual(
+                len(offenders), 1,
+                f"hardcoded path immediately before assertFalse "
+                f"must STILL be detected; offenders={offenders!r}",
+            )
+        except AssertionError as e:
+            msg = str(e)
+            self.assertIn("offenders=[", msg,
+                f"diagnostic must include the offenders list; "
+                f"got: {msg!r}")
+        except IndexError as e:
+            self.fail(
+                f"the diagnostic raised IndexError instead of "
+                f"AssertionError; got: {e!r}"
+            )
+
+
+class Round9PaginatorPreservationTests(unittest.TestCase):
+    """Round-9 directive (PRRT_kwDOTtyQLc6XXFO3): the
+    unexpected-cursor test must preserve the real
+    production-paginator behavioral proof. The previous
+    docstring was inaccurate; this regression group
+    preserves the actual test behavior and the real
+    paginator path is exercised.
+    """
+
+    def test_real_paginator_unexpected_cursor_preserves_behavior(self):
+        """Re-run the production-paginator behavioral proof
+        in case of test rot. The test must:
+        * NOT patch _paginate_latest_reviews or
+          _paginate_connection;
+        * mock only _run_gh_graphql;
+        * page 1 returns hasNextPage=True with endCursor
+          "UNEXPECTED_CURSOR";
+        * the production paginator must forward that
+          cursor on the second request;
+        * the second mocked network call rejects the
+          unexpected cursor;
+        * VerificationFailure propagates through the real
+          paginator."""
+        cursors_seen = []
+
+        def fake_run_gh_graphql(query, variables):
+            cursors_seen.append(variables.get("cursor"))
+            if "reviewDecision" in query:
+                return {"data": {"repository": {"pullRequest": {
+                    "reviewDecision": "APPROVED",
+                }}}}
+            cursor = variables.get("cursor")
+            if cursor == "null":
+                return {"data": {"repository": {"pullRequest": {
+                    "latestReviews": {
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "UNEXPECTED_CURSOR",
+                        },
+                        "totalCount": 5,
+                        "nodes": [
+                            {"state": "APPROVED",
+                             "submittedAt": "2026-08-07T10:00:00Z",
+                             "author": {"login": "coderabbitai"}},
+                        ],
+                    },
+                }}}}
+            raise VerificationFailure(
+                f"paginator sent an unexpected cursor: {cursor!r}"
+            )
+
+        args = type("A", (), {"repo": "o/r", "pr_number": 4})()
+        with mock.patch.object(VERIFIER, "_run_gh_graphql",
+                                side_effect=fake_run_gh_graphql):
+            with self.assertRaises(VerificationFailure) as ctx:
+                VERIFIER._inspect_coderabbit(args)
+        # First call cursor is None (passed as "null").
+        self.assertIn("null", cursors_seen)
+        # First page had hasNextPage=True and an endCursor.
+        # The production paginator must forward it on the
+        # second request.
+        self.assertIn("UNEXPECTED_CURSOR", cursors_seen)
+        # The diagnostic identifies the cursor.
+        msg = str(ctx.exception).lower()
+        self.assertIn("cursor", msg,
+            f"failure must name the cursor; got: {msg!r}")
+        self.assertIn("unexpected_cursor", msg,
+            f"failure must reference the unexpected cursor; "
+            f"got: {msg!r}")
+        # The production paginator is NOT patched.
+        # (Proven by the fact that the production paginator
+        # raised a different cursor sent than the first call.)
 
 
 if __name__ == "__main__":
