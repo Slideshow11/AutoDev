@@ -329,8 +329,8 @@
     },
     {
       "destination_path": "tests/test_durable_complete_fails_closed.py",
-      "destination_sha256": "7f69e0822d31aa3c956eece0b3534c4239ee76f185511741d87bbf35c41ec5e7",
-      "destination_size_bytes": 9628,
+      "destination_sha256": "931e34d9490df33da0808f0180025d6afc88a18644f76569bc274b75ba555cc5",
+      "destination_size_bytes": 19884,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",

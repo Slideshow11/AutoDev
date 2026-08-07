@@ -567,7 +567,20 @@ def cmd_apply_verifier_result(args: argparse.Namespace) -> int:
 
 
 def cmd_merge_authorize(args: argparse.Namespace) -> int:
-    """Record a human merge authorization."""
+    """Record a human merge authorization.
+
+    The candidate and verifier artifacts that bound this
+    authorization MUST be the canonical evidence-root artifacts
+    that ``cmd_merge`` later consumes. The state-root copies
+    (``<state_root>/candidate.json`` and ``<state_root>/verifier-record.json``)
+    exist solely as secondary audit observables and are NOT merge
+    authorization inputs; this command MUST NOT read them when
+    building the authorization. Reading the canonical artifacts
+    via ``read_artifact`` validates the exact-file digest and the
+    sidecar; that digest is the value bound into the
+    authorization. Authorization therefore binds the same digests
+    that the merge transaction will re-read.
+    """
     store = StateStore(args.state_root)
     rc = store.read_optional("run_context.json")
     if rc is None:
@@ -577,38 +590,83 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
             exit_code=EXIT_STATE,
         )
     ctx = RunContext.from_dict(rc)
-    cand_payload = store.read_optional("candidate.json")
-    if cand_payload is None:
+
+    # Resolve the canonical evidence root BEFORE reading any
+    # candidate/verifier evidence. Per C-24 the evidence root is
+    # independent of the state root, so this resolution MUST happen
+    # before any read. All four control-plane artifacts live here.
+    evidence_root = _resolve_evidence_root(args, store)
+    paths = _canonical_artifact_paths(evidence_root)
+
+    # Read the candidate from the canonical evidence root through
+    # the canonical artifact reader. ``read_artifact`` verifies
+    # the sidecar digest and raises on any failure.
+    from .artifacts import (
+        ArtifactError,
+        read_artifact as _read_canonical_artifact,
+    )
+    try:
+        candidate_result = _read_canonical_artifact(paths["candidate"])
+    except FileNotFoundError:
         return _emit(
-            {"error": "no candidate on file"},
+            {
+                "error": (
+                    f"no canonical candidate at {paths['candidate']}; "
+                    "authorization cannot bind a non-canonical artifact"
+                ),
+            },
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    cand = Candidate.from_dict(cand_payload)
+    except ArtifactError as e:
+        return _emit(
+            {"error": f"canonical candidate unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    cand = Candidate.from_dict(candidate_result.payload)
     if cand.exact_head != ctx.current_authorized_head:
         return _emit(
             {"error": "candidate head does not match current authorized head"},
             json_mode=args.json,
             exit_code=EXIT_GUARD,
         )
-    vr = store.read_optional("verifier-record.json")
-    if vr is None:
+
+    # Read the verifier record from the canonical evidence root.
+    try:
+        verifier_result = _read_canonical_artifact(paths["verifier"])
+    except FileNotFoundError:
         return _emit(
-            {"error": "no verifier record on file"},
+            {
+                "error": (
+                    f"no canonical verifier at {paths['verifier']}; "
+                    "authorization cannot bind a non-canonical artifact"
+                ),
+            },
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    vr_sha = hashlib.sha256(
-        json.dumps(vr, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    except ArtifactError as e:
+        return _emit(
+            {"error": f"canonical verifier unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+
+    # Bind the EXACT-FILE DIGESTS returned by ``read_artifact``
+    # (already validated against the on-disk sidecar). These are
+    # the same digests the merge transaction will re-read; the
+    # state-root copies are intentionally ignored.
+    candidate_digest = candidate_result.digest
+    verifier_digest = verifier_result.digest
     auth = MergeAuthorization(
         schema_version="autocoder.merge_authorization.v1",
         run_id=args.run_id,
         repo=f"{ctx.repo_owner}/{ctx.repo_name}",
         pr_number=args.pr_number,
         authorized_head=args.authorized_head,
-        candidate_sha256=cand.compute_sha256(),
-        verifier_record_sha256=vr_sha,
+        candidate_sha256=candidate_digest,
+        verifier_record_sha256=verifier_digest,
         merge_method=args.method,
         delete_branch=not args.keep_branch,
         require_match_head_commit=True,
@@ -619,17 +677,24 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
     )
     auth_payload = auth.to_dict()
     auth_payload["_sha256"] = auth.compute_sha256()
-    # Persist the canonical authorization artifact under the evidence
-    # root (one canonical filename across initialize/authorize/merge/post-merge).
-    evidence_root = _resolve_evidence_root(args, store)
-    paths = _canonical_artifact_paths(evidence_root)
+    # Persist the canonical authorization artifact under the
+    # evidence root. Authorization and merge use the SAME canonical
+    # paths so the digests bound here are the ones the merge
+    # transaction will re-verify.
     paths["authorization"].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     from .artifacts import write_artifact
     write_artifact(paths["authorization"], auth_payload)
     controller = Controller(ctx, store)
     sm = controller.authorize_merge(auth)
     return _emit(
-        {"run_id": args.run_id, "state": sm.current_state},
+        {
+            "run_id": args.run_id,
+            "state": sm.current_state,
+            "candidate_digest_source": "canonical_evidence_root",
+            "verifier_digest_source": "canonical_evidence_root",
+            "candidate_digest": candidate_digest,
+            "verifier_digest": verifier_digest,
+        },
         json_mode=args.json,
         exit_code=EXIT_OK,
     )

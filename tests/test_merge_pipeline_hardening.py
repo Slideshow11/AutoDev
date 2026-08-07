@@ -17,6 +17,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Dict, List, Optional
 from unittest import mock
 
 from autocoder_orchestration.artifacts import (
@@ -1290,23 +1291,113 @@ class BranchIndependentTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    # --- Git isolation helpers ----------------------------------------
+    #
+    # Every Git subprocess in this fixture MUST run with an isolated
+    # environment that prevents ambient global config, ambient system
+    # config, and ambient hooks or signing from interfering with the
+    # fixture. The isolation contract is:
+    #   GIT_CONFIG_GLOBAL=/dev/null
+    #   GIT_CONFIG_SYSTEM=/dev/null
+    #   GIT_CONFIG_NOSYSTEM=1
+    #   commit.gpgsign=false  (per-command AND repo-local)
+    #   core.hooksPath=/dev/null (per-command AND repo-local)
+    # Every helper below applies these guarantees and is the only
+    # sanctioned way to run Git in this test class.
+
+    @staticmethod
+    def _git_env(extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """Return an isolated env dict for Git subprocesses.
+
+        Ambient global and system Git configuration cannot influence
+        subprocesses that receive this env. Caller-supplied overrides
+        win (None means leave the inherited env alone; the helper
+        only adds the isolation vars when they are missing).
+        """
+        base = os.environ.copy()
+        # Override ambient signing/hooks through per-command -c
+        # flags rather than mutating the environment, so subprocess
+        # invocations are explicit and auditable.
+        isolation = {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_SYSTEM": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        # Apply ambient-supplied overrides first; the isolation vars
+        # win over both ambient and caller-supplied.
+        if extra:
+            base.update(extra)
+        base.update(isolation)
+        return base
+
+    @staticmethod
+    def _git_no_sign_no_hooks_args() -> List[str]:
+        """Return ``-c commit.gpgsign=false -c core.hooksPath=/dev/null``."""
+        return [
+            "-c", "commit.gpgsign=false",
+            "-c", "core.hooksPath=/dev/null",
+        ]
+
+    def _git(self, repo: Path, *args: str, env: Optional[Dict[str, str]] = None) -> None:
+        """Run a Git subprocess inside the isolated environment.
+
+        Always prepends the per-command signing/hooks overrides
+        and supplies the isolation env. Used for every write-path
+        Git command in the fixture.
+        """
+        cmd = ["git", "-C", str(repo)] + self._git_no_sign_no_hooks_args() + list(args)
+        subprocess.check_call(cmd, env=self._git_env(env),
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+
+    def _git_output(self, repo: Path, *args: str, env: Optional[Dict[str, str]] = None) -> str:
+        """Capture stdout from an isolated Git subprocess."""
+        cmd = ["git", "-C", str(repo)] + self._git_no_sign_no_hooks_args() + list(args)
+        return subprocess.check_output(cmd, env=self._git_env(env), text=True).strip()
+
+    def _disable_signing_and_hooks_locally(self, repo: Path) -> None:
+        """Persist repo-local ``commit.gpgsign=false`` and
+        ``core.hooksPath=/dev/null`` so even ambient *post-creation*
+        configuration cannot re-enable them.
+        """
+        # These writes happen through the helper to ensure the
+        # config command itself is isolated.
+        self._git(repo, "config", "--local", "commit.gpgsign", "false")
+        self._git(repo, "config", "--local", "core.hooksPath", os.devnull)
+
     def _make_repo(self):
-        # Create a temp git repo with main + feat branches.
+        """Create a temp git repo with main + feat branches.
+
+        Every Git subprocess runs through ``_git`` or ``_git_output``
+        so the isolation contract is enforced uniformly. The repo's
+        own ``.git/config`` also records ``commit.gpgsign=false``
+        and ``core.hooksPath=/dev/null`` so an ambient process
+        cannot re-enable them after initialization.
+        """
         repo = self.tmpdir / "repo"
         repo.mkdir()
-        subprocess.check_call(["git", "init", "-q", "-b", "main", str(repo)],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.check_call(["git", "-C", str(repo), "config", "user.email", "test@example.com"])
-        subprocess.check_call(["git", "-C", str(repo), "config", "user.name", "Test"])
+        # ``git init -b main`` requires Git 2.28+; the CI runner
+        # in this repository already pins a newer Git version. The
+        # -b flag is the documented contract; we deliberately avoid
+        # the older ``git init && git checkout -b main`` fallback so
+        # a missing-bug from older Git versions cannot mask
+        # ambient-config leakage.
+        self._git(repo, "init", "-q", "-b", "main", str(repo))
+        self._git(repo, "config", "user.email", "test@example.com")
+        self._git(repo, "config", "user.name", "Test")
+        # Disable ambient signing/hooks locally BEFORE the first
+        # commit. The per-command overrides above also apply, but
+        # the repo-local config means a hostile ambient env cannot
+        # re-enable either behavior post-init.
+        self._disable_signing_and_hooks_locally(repo)
         (repo / "README").write_text("hello")
-        subprocess.check_call(["git", "-C", str(repo), "add", "README"])
-        subprocess.check_call(["git", "-C", str(repo), "commit", "-q", "-m", "init"])
-        subprocess.check_call(["git", "-C", str(repo), "checkout", "-q", "-b", "feat/test"])
+        self._git(repo, "add", "README")
+        self._git(repo, "commit", "-q", "-m", "init")
+        self._git(repo, "checkout", "-q", "-b", "feat/test")
         (repo / "FEATURE").write_text("feature")
-        subprocess.check_call(["git", "-C", str(repo), "add", "FEATURE"])
-        subprocess.check_call(["git", "-C", str(repo), "commit", "-q", "-m", "feat"])
-        feat_sha = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+        self._git(repo, "add", "FEATURE")
+        self._git(repo, "commit", "-q", "-m", "feat")
+        feat_sha = self._git_output(repo, "rev-parse", "HEAD")
         return repo, feat_sha
 
     def test_current_feature_branch_safely_switched_to_base_before_ff(self):
@@ -1314,19 +1405,20 @@ class BranchIndependentTests(unittest.TestCase):
         # Currently on feat/test; reconcile_after_merge must switch to main.
         # Set up a fake remote where main has been fast-forwarded to
         # include the feat/test changes (simulating post-merge state).
-        subprocess.check_call(["git", "-C", str(repo), "remote", "add", "origin", str(repo)])
+        # Every Git subprocess below runs through the isolated
+        # helpers so ambient config cannot influence the fixture.
+        self._git(repo, "remote", "add", "origin", str(repo))
         # First push both branches as-is so origin/main is at the init
         # commit and origin/feat/test has the feature commit.
-        subprocess.check_call(["git", "-C", str(repo), "push", "-q", "origin", "main:refs/heads/main"])
-        subprocess.check_call(["git", "-C", str(repo), "push", "-q", "origin", "feat/test:refs/heads/feat/test"])
+        self._git(repo, "push", "-q", "origin", "main:refs/heads/main")
+        self._git(repo, "push", "-q", "origin", "feat/test:refs/heads/feat/test")
         # Now simulate the merge: fast-forward origin/main to feat/test.
-        subprocess.check_call(["git", "-C", str(repo), "fetch", "origin"])
-        subprocess.check_call(["git", "-C", str(repo), "push", "-q", "origin", "feat/test:refs/heads/main", "--force"])
+        self._git(repo, "fetch", "origin")
+        self._git(repo, "push", "-q", "origin", "feat/test:refs/heads/main", "--force")
         # Back to feat/test locally.
-        subprocess.check_call(["git", "-C", str(repo), "checkout", "-q", "feat/test"])
+        self._git(repo, "checkout", "-q", "feat/test")
         # Authorized head is the feat/test commit.
-        feat_sha = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-parse", "feat/test"], text=True).strip()
+        feat_sha = self._git_output(repo, "rev-parse", "feat/test")
         recon = reconcile_after_merge(
             repository_checkout=repo,
             base_branch="main",
@@ -1338,8 +1430,140 @@ class BranchIndependentTests(unittest.TestCase):
         self.assertEqual(recon.target_branch, "main")
         self.assertTrue(recon.local_main_equals_origin_main)
         # The squash tree must match the authorized head tree.
-        self.assertEqual(recon.squash_tree_sha256, recon.squash_merge_commit and
-                         subprocess.check_output(["git", "-C", str(repo), "rev-parse", f"{feat_sha}^{{tree}}"], text=True).strip())
+        #
+        # Both observations must be non-empty AND equal. The
+        # previous expression ``recon.squash_merge_commit and
+        # subprocess.check_output(...)`` evaluated to ``""`` when
+        # ``squash_merge_commit`` was empty, so the assertion
+        # compared two empty strings and trivially passed — exactly
+        # the failure mode this test must detect. The new shape
+        # computes the expected tree unconditionally and asserts
+        # both observations are non-empty before comparing them.
+        expected_tree = self._git_output(repo, "rev-parse", f"{feat_sha}^{{tree}}")
+        self.assertTrue(
+            recon.squash_merge_commit,
+            "recon.squash_merge_commit must be non-empty after a "
+            "successful squash merge reconciliation",
+        )
+        self.assertTrue(
+            recon.squash_tree_sha256,
+            "recon.squash_tree_sha256 must be non-empty after a "
+            "successful squash merge reconciliation",
+        )
+        self.assertEqual(recon.squash_tree_sha256, expected_tree)
+
+    # --- Hostile-ambient regression for the _make_repo isolation ---
+
+    def test_make_repo_under_hostile_ambient_git_config(self) -> None:
+        """Prove ``_make_repo`` initializes and commits successfully
+        when the ambient HOME/global Git configuration would
+        otherwise fail the fixture.
+
+        The hostile ambient config:
+          * enables ``commit.gpgsign=true`` (would fail commit
+            because there is no signing key);
+          * points ``core.hooksPath`` at a directory whose
+            ``pre-commit`` hook exits 41 (would fail commit).
+
+        If the ``_git`` / ``_git_output`` helpers in
+        ``BranchIndependentTests`` did not actually isolate every
+        Git subprocess, this test would fail at the first
+        ``commit -q -m "init"`` with either a gpg-signing error
+        or a ``pre-commit`` exit-code-41 error.
+
+        The isolation contract is:
+          * env: GIT_CONFIG_GLOBAL=/dev/null,
+                 GIT_CONFIG_SYSTEM=/dev/null,
+                 GIT_CONFIG_NOSYSTEM=1
+          * per-command: -c commit.gpgsign=false
+                         -c core.hooksPath=/dev/null
+          * repo-local: commit.gpgsign=false,
+                        core.hooksPath=/dev/null
+        """
+        host_home = self.tmpdir / "hostile-home"
+        host_home.mkdir()
+        hooks_dir = host_home / "hooks"
+        hooks_dir.mkdir()
+        # Failing pre-commit hook.
+        pre_commit = hooks_dir / "pre-commit"
+        pre_commit.write_text("#!/bin/sh\nexit 41\n")
+        pre_commit.chmod(0o755)
+        # Global Git config that enables gpgsign and points
+        # hooksPath at the failing hook directory.
+        (host_home / ".gitconfig").write_text(
+            "[user]\n"
+            "    email = ambient@example.com\n"
+            "    name = Ambient\n"
+            "[commit]\n"
+            "    gpgsign = true\n"
+            "[core]\n"
+            f"    hooksPath = {hooks_dir}\n"
+        )
+
+        # Pre-condition sanity: an UNISOLATED git invocation
+        # with HOME pointing at this hostile config DOES fail.
+        # This proves the hostile config is real and would
+        # break the fixture without isolation. We use a separate
+        # tmpdir for the control run so the assertion cannot
+        # accidentally pollute the fixture.
+        control_dir = self.tmpdir / "control-repo"
+        control_dir.mkdir()
+        hostile_env = {**os.environ, "HOME": str(host_home)}
+        control_proc = subprocess.run(
+            ["git", "init", "-q", "-b", "main", str(control_dir)],
+            capture_output=True, text=True, env=hostile_env,
+        )
+        self.assertEqual(control_proc.returncode, 0,
+                         f"control git init failed: {control_proc.stderr}")
+        (control_dir / "README").write_text("control")
+        subprocess.run(
+            ["git", "-C", str(control_dir), "add", "README"],
+            capture_output=True, text=True, env=hostile_env,
+        )
+        control_commit = subprocess.run(
+            ["git", "-C", str(control_dir), "commit", "-q", "-m", "ctrl"],
+            capture_output=True, text=True, env=hostile_env,
+        )
+        # The control commit MUST fail because the hostile
+        # config is in effect. If it somehow succeeds, the
+        # hostile-config probe is not actually hostile, and the
+        # fixture's isolation claim is not provable by this test.
+        self.assertNotEqual(
+            control_commit.returncode, 0,
+            "hostile ambient control commit unexpectedly succeeded; "
+            "the test fixture cannot prove isolation if the hostile "
+            "ambient config is not actually hostile",
+        )
+
+        # Now invoke the production fixture under the SAME
+        # hostile HOME. The fixture's isolation helpers MUST
+        # prevent the hostile config from influencing the
+        # subprocesses.
+        original_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(host_home)
+        try:
+            repo, feat_sha = self._make_repo()
+        finally:
+            if original_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = original_home
+
+        # Sanity: the fixture successfully created a repo with
+        # a feature branch on top of init. If isolation failed,
+        # the first ``git commit -q -m "init"`` would have
+        # raised CalledProcessError because the hostile pre-commit
+        # hook exits 41.
+        self.assertTrue(repo.exists())
+        self.assertEqual(len(feat_sha), 40)
+        self.assertNotEqual(feat_sha, "0" * 40)
+
+        # And the repo-local config MUST record the isolation
+        # values, not the ambient ones. Git lowercases keys when
+        # listing, so check case-insensitively.
+        cfg = self._git_output(repo, "config", "--local", "--list").lower()
+        self.assertIn("commit.gpgsign=false", cfg)
+        self.assertIn(f"core.hookspath={os.devnull}", cfg)
 
     def test_dirty_working_tree_blocks_branch_switching(self):
         repo, _ = self._make_repo()
@@ -1482,6 +1706,13 @@ class EndToEndFlowTests(unittest.TestCase):
                 )
                 record, rec_digest = execute_guarded_merge_transaction(inputs)
                 self.assertEqual(record.final_state, "COMPLETE")
+                # The record's state_transition text explicitly
+                # attributes the COMPLETE transition to cmd_merge
+                # rather than to the transaction itself.
+                self.assertIn(
+                    "COMPLETE transition is durably persisted by cmd_merge",
+                    record.state_transition,
+                )
                 # The merge record was written through the canonical writer.
                 self.assertTrue(rec_path.exists())
                 sidecar = Path(str(rec_path) + ".sha256")

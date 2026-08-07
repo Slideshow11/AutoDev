@@ -1039,8 +1039,15 @@ def execute_guarded_merge_transaction(inputs: MergeTransactionInputs) -> Tuple[M
          finite timeout;
       5. resolves timeout or ambiguity against the live PR state;
       6. reconciles local Git (branch-independent);
-      7. writes the merge record through the canonical artifact writer;
-      8. transitions the state machine to COMPLETE.
+      7. writes the merge record through the canonical artifact writer.
+
+    It does NOT itself transition the state machine to ``COMPLETE``.
+    That durable transition is performed by the calling CLI command
+    (``cmd_merge``) via ``Controller.report_complete()`` AFTER this
+    function returns successfully. The merge record is therefore the
+    recovery point: a failed or interrupted COMPLETE transition can
+    be retried by re-applying ``report_complete()`` to the durable
+    record.
 
     Returns the merged ``MergeRecord`` and its exact-file digest.
 
@@ -1324,7 +1331,8 @@ def _execute_guarded_merge_transaction_locked(
         ),
         state_transition=(
             "AWAITING_MERGE_AUTHORIZATION -> MERGE_AUTHORIZED -> "
-            "POST_MERGE_VERIFYING -> COMPLETE"
+            "POST_MERGE_VERIFYING (COMPLETE transition is durably "
+            "persisted by cmd_merge via Controller.report_complete())"
         ),
         final_state="COMPLETE",
     )
