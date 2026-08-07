@@ -6,30 +6,39 @@ merge transaction in flight at any time per evidence root, so the
 invariants hold across process boundaries (not just threads).
 
 Implementation:
-- Lock file at ``<evidence_root>/.merge.lock`` with ``O_CREAT | O_RDWR``.
-- ``fcntl.flock(LOCK_EX | LOCK_NB)`` — non-blocking exclusive lock; an
-  immediate ``LockUnavailable`` is raised if another process holds it.
-- File is created with mode 0700; the locked fd is inherited by
-  subprocesses via os.set_inheritable when applicable.
-- On ``__exit__`` (or GC), the lock is released by ``LOCK_UN`` and
-  closed. The lock file persists across calls so its inode is stable.
-- Stale-holder detection: a separate ``.merge.lock.stale`` epoch file
-  is bumped by every successful acquisition. If a holder does not
-  bump its epoch within ``stale_timeout_seconds``, the next caller
-  may break the lock (this is the AED-canonical pattern).
+- Lock file at ``<evidence_root>/.merge.lock`` with ``O_CREAT | O_RDWR``
+  and mode 0600.
+- ``fcntl.flock(LOCK_EX | LOCK_NB)`` -- non-blocking exclusive lock;
+  an immediate ``LockUnavailable`` is raised if another process
+  holds it.
+- The file is created with mode 0600 (NOT inherited via
+  ``os.set_inheritable``; that call is intentionally omitted
+  because subprocesses must not inherit the holder's fd).
+- The holder PID is written into the lock file ONLY after
+  ``flock`` succeeds, so a contender can never overwrite the
+  real holder's metadata. A contender that opens the file before
+  acquiring ``flock`` will fail to acquire ``flock`` and will
+  observe the actual holder's PID, not its own.
+- The holder PID is truncated to length 0 and ``ftruncate``d /
+  ``write``n / ``fsync``d after ``flock`` succeeds, so a short
+  PID cannot leave trailing bytes from a prior holder.
+- On ``__exit__`` (or GC), the lock is released by ``LOCK_UN``
+  and closed. The lock file persists across calls so its inode
+  is stable.
+- Held locks are NOT broken by the next caller. A stale lock is
+  detected only by the holder's ability to acquire it; the
+  design assumes processes holding the lock are short-lived.
 
-This module is intentionally small. It does not depend on any other
-orchestration module. The merge transaction acquires the lock
-inside ``execute_guarded_merge_transaction`` and releases it on
-every code path (success, failure, exception).
+This module is intentionally small. It does not depend on any
+other orchestration module. The merge transaction acquires the
+lock inside ``execute_guarded_merge_transaction`` and releases
+it on every code path (success, failure, exception).
 """
 from __future__ import annotations
 
 import contextlib
-import errno
 import fcntl
 import os
-import time
 from pathlib import Path
 from typing import Optional
 
@@ -52,10 +61,14 @@ class LockAcquisitionError(MergeLockError):
 
 
 def _holder_pid(lock_path: Path) -> Optional[int]:
-    """Best-effort read of the holder PID recorded in the lock file."""
+    """Best-effort read of the holder PID recorded in the lock file.
+
+    Reads up to 32 bytes and parses the leading decimal integer.
+    Returns None if the file is empty or unparseable.
+    """
     try:
         with open(lock_path, "rb") as f:
-            buf = f.read(16)
+            buf = f.read(32)
         text = buf.decode("ascii", errors="replace").strip()
         if not text:
             return None
@@ -65,30 +78,21 @@ def _holder_pid(lock_path: Path) -> Optional[int]:
 
 
 @contextlib.contextmanager
-def merge_lock(
-    evidence_root: Path,
-    *,
-    stale_timeout_seconds: float = 300.0,
-):
+def merge_lock(evidence_root: Path):
     """Acquire a cross-process exclusive merge lock for ``evidence_root``.
 
-    Acquires the lock with ``LOCK_EX | LOCK_NB``. On contention raises
-    ``LockUnavailable`` immediately (the caller may retry). On
-    success yields the ``(lock_fd, lock_path)`` tuple; on exit the
-    lock is released and the fd is closed.
+    Acquires the lock with ``LOCK_EX | LOCK_NB``. On contention
+    raises ``LockUnavailable`` immediately; the holder PID read
+    at that moment is the actual holder, not the contender.
 
-    The caller MUST NOT nest ``merge_lock`` calls in the same process;
-    a second acquisition in the same process would deadlock.
+    The caller MUST NOT nest ``merge_lock`` calls in the same
+    process; a second acquisition in the same process would
+    deadlock.
     """
     lock_dir = Path(evidence_root)
     lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_path = lock_dir / ".merge.lock"
-    stale_epoch_path = lock_dir / ".merge.lock.stale"
 
-    # Detect a stale holder: if the epoch file is older than the
-    # stale_timeout, the lock is presumed abandoned. We do NOT break
-    # the lock automatically — that would be unsafe — but we log it
-    # via the holder_pid returned in LockUnavailable.
     holder_pid: Optional[int] = None
     fd = None
     try:
@@ -97,26 +101,36 @@ def merge_lock(
             os.O_CREAT | os.O_RDWR,
             0o600,
         )
-        # Record the holder PID before flock so a concurrent reader
-        # can identify who holds it.
-        try:
-            os.write(fd, f"{os.getpid()}\n".encode("ascii"))
-            os.fsync(fd)
-        except OSError:
-            pass
+        # Attempt to acquire the exclusive lock FIRST. Only the
+        # actual holder writes the PID. A contender that opens
+        # the file before flock will fail to acquire flock and
+        # will read the holder PID from the file -- never its own.
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as e:
+            # Lock not acquired. Read the actual holder's PID.
+            # The contender MUST NOT modify the file: the holder
+            # may be in the middle of writing its own PID.
             holder_pid = _holder_pid(lock_path)
             raise LockUnavailable(lock_path, holder_pid=holder_pid) from e
-        # Update the stale epoch so future callers know the lock is
-        # held by a live process.
+        # Lock acquired. NOW we can record the holder PID. Truncate
+        # to length 0 first so a shorter PID cannot leave trailing
+        # bytes from a prior holder, then write, then fsync.
         try:
-            now = time.time()
-            with open(stale_epoch_path, "w", encoding="ascii") as ef:
-                ef.write(f"{now}\n")
+            os.ftruncate(fd, 0)
         except OSError:
             pass
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+        except OSError:
+            pass
+        try:
+            os.write(fd, f"{os.getpid()}\n".encode("ascii"))
+            os.fsync(fd)
+        except OSError as e:
+            raise LockAcquisitionError(
+                f"failed to record holder PID: {e!r}"
+            ) from e
         yield fd, lock_path
     finally:
         if fd is not None:

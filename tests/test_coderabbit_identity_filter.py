@@ -42,42 +42,6 @@ def _reviews_payload(login_to_state: list[tuple[str, str]]) -> dict:
     }
 
 
-def _build_inputs_payload(tmpdir: Path):
-    """Minimal MergeTransactionInputs-shaped dict for cmd_merge."""
-    return {
-        "authorization_artifact_path": tmpdir / "authorization.json",
-        "candidate_artifact_path": tmpdir / "candidate.json",
-        "verifier_artifact_path": tmpdir / "verifier.json",
-        "merge_record_artifact_path": tmpdir / "merge-record.json",
-        "repository_checkout": tmpdir / "repo",
-        "run_state_root": tmpdir / "state",
-        "evidence_root": tmpdir / "evidence",
-        "live_pr_payload": {
-            "state": "open",
-            "merged": False,
-            "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
-            "baseRefName": "main",
-            "mergeable": "MERGEABLE",
-            "autoMergeRequest": None,
-            "isDraft": False,
-            "mergeStateStatus": "CLEAN",
-            "repo": "Slideshow11/AutoDev",
-        },
-        "live_ci_state": {
-            "all_required_passing": True,
-            "coderabbit_passing": True,
-        },
-        "live_review_state": {
-            "latest_coderabbit_state": "APPROVED",
-        },
-        "live_thread_inventory": {
-            "unresolved_current": 0,
-            "unresolved_outdated": 0,
-        },
-        "working_tree_clean": True,
-    }
-
-
 class NormalizeCoderabbitLoginTests(unittest.TestCase):
     """The normalized-identity contract is the only comparison key."""
 
@@ -128,21 +92,10 @@ class CoderabbitReviewFilterTests(unittest.TestCase):
     """The CLI's filter must accept the right identity and reject others."""
 
     def _run_review_filter(self, payload: dict) -> str | None:
-            """Invoke the review-filter block via subprocess and return the
-            resolved ``latest_coderabbit_state`` value (or ``None``).
-
-            Uses ``python -c`` with an absolute path-to-module via
-            ``importlib.util`` so the subprocess does not need a
-            pre-existing cwd.
-            """
-            import importlib.util
-            import json as _json
-            import subprocess as _sp
-            cli_module = importlib.import_module("autocoder_orchestration.cli")
-            result = _json.dumps(cli_module._filter_coderabbit_review_state(payload))
-            # Avoid running a subprocess at all: directly invoke the
-            # function and return its result.
-            return _json.loads(result) if result != "null" else None
+        """Return the resolved ``latest_coderabbit_state`` value
+        by invoking the production filter directly."""
+        from autocoder_orchestration import cli as cli_module
+        return cli_module._filter_coderabbit_review_state(payload)
 
     def test_coderabbitai_bare_login_recognized(self) -> None:
         """The GraphQL login ``coderabbitai`` satisfies the gate."""
@@ -194,6 +147,29 @@ class CoderabbitReviewFilterTests(unittest.TestCase):
         payload = _reviews_payload([])
         result = self._run_review_filter(payload)
         self.assertIsNone(result)
+
+    def test_null_author_does_not_raise_and_returns_none(self) -> None:
+        """GitHub returns ``"author": None`` for reviews whose
+        reviewer account has been deleted. The filter MUST treat
+        a null author as "no matching identity" without raising,
+        so the CodeRabbit guard fails closed when a deleted
+        account's review is present."""
+        # Construct the payload directly to include ``author: None``
+        # which the helper's tuple-based builder does not model.
+        payload = {
+            "data": {"repository": {"pullRequest": {
+                "latestReviews": {"nodes": [
+                    {"author": None, "state": "APPROVED"},
+                ]},
+            }}},
+        }
+        result = self._run_review_filter(payload)
+        self.assertIsNone(
+            result,
+            "null author must NOT satisfy the CodeRabbit filter; "
+            "the deleted reviewer's APPROVED state must not leak "
+            "into the gate",
+        )
 
 
 class PagedReviewWalkTests(unittest.TestCase):

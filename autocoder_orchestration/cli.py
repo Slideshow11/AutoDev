@@ -29,6 +29,7 @@ from .context import RunContext, make_run_context, generate_run_id
 from .canonical_paths import canonical_paths as _canonical_artifact_paths
 from .state_machine import (
     StateMachine,
+    StateError,
     STATE_PLANNED,
     STATE_IMPLEMENTING,
     STATE_AWAITING_CI,
@@ -119,6 +120,12 @@ def _filter_coderabbit_review_state(reviews_data: dict) -> Optional[str]:
     or ``None`` if no matching review exists. The state is left
     unavailable when the payload is empty or no CodeRabbit review is
     found, so the guarded transaction fails closed (C-25).
+
+    GitHub returns ``"author": null`` for reviews whose reviewer
+    account has been deleted. The filter MUST treat a null author
+    as "no matching identity" without raising -- it returns
+    ``None`` for that node, which propagates as "no matching
+    CodeRabbit review" through the rest of the CLI.
     """
     target = _normalize_coderabbit_login(CODERABBIT_AUTHOR_LOGIN)
     nodes = (
@@ -129,7 +136,13 @@ def _filter_coderabbit_review_state(reviews_data: dict) -> Optional[str]:
         .get("nodes", [])
     )
     for node in nodes:
-        author_login = node.get("author", {}).get("login") or ""
+        # Normalize a null author to an empty mapping before reading
+        # ``login``. GitHub returns ``"author": null`` for deleted
+        # accounts; an ``AttributeError`` here would escape the
+        # CLI as an uncaught traceback, defeating the fail-closed
+        # contract.
+        author_obj = node.get("author") or {}
+        author_login = author_obj.get("login") or ""
         if _normalize_coderabbit_login(author_login) == target:
             return node.get("state")
     return None
@@ -219,14 +232,34 @@ def _resolve_evidence_root(args: argparse.Namespace, store) -> Path:
     may pass ``--evidence-root`` to override the persisted path;
     conflicting overrides are rejected so a non-canonical evidence
     root can never be silently used.
+
+    Fail-closed behavior (per PR #4 round-2 review):
+
+    * If the run context exists but cannot be read (I/O failure),
+      parsed (malformed JSON), or trusted (``StateStoreError``),
+      the call MUST NOT silently substitute a fallback evidence
+      root. Falling back to ``state_root.parent / "evidence"`` on
+      a transient read failure would route ``cmd_merge`` to a
+      different evidence root than the one ``cmd_merge_authorize``
+      bound into the authorization, defeating the digest contract.
+      Instead, the failure is propagated as ``StateStoreError`` so
+      the CLI's existing error handler returns a controlled state
+      failure with exit code EXIT_STATE.
+
+    * The fallback derivation is permitted only when the run
+      context is genuinely absent (``read_optional`` returns
+      ``None``). A missing run context is the documented "first
+      invocation" path: there is no persisted evidence root to
+      diverge from.
     """
+    # Distinguish "absent" from "unreadable". ``read_optional``
+    # returns None only when the file is missing. Any other failure
+    # (parse error, I/O error, StateStore validation failure) must
+    # propagate so the CLI fails closed.
+    rc = store.read_optional("run_context.json")
     persisted: Optional[str] = None
-    try:
-        rc = store.read_optional("run_context.json")
-        if rc is not None:
-            persisted = rc.get("evidence_root") if isinstance(rc, dict) else None
-    except Exception:
-        persisted = None
+    if rc is not None:
+        persisted = rc.get("evidence_root") if isinstance(rc, dict) else None
 
     override = getattr(args, "evidence_root", None)
     if override and persisted and Path(str(override)).resolve() != Path(str(persisted)).resolve():
@@ -239,6 +272,10 @@ def _resolve_evidence_root(args: argparse.Namespace, store) -> Path:
         return Path(str(override))
     if persisted:
         return Path(str(persisted))
+    # Genuinely absent run context: the documented first-invocation
+    # fallback is permitted because no persisted evidence root can
+    # diverge from the requested root. State this explicitly so the
+    # audit log records the derivation.
     state_root_path = Path(str(store.state_root))
     return state_root_path.parent / "evidence"
 
@@ -434,37 +471,36 @@ def cmd_build_candidate(args: argparse.Namespace) -> int:
             json_mode=args.json,
             exit_code=EXIT_GUARD,
         )
-    # Persist the canonical candidate artifact to the evidence root
-    # via the canonical-paths helper. The guarded merge transaction
-    # consumes ``canonical_paths(evidence_root).candidate``; writing
-    # only to state_root would break that contract.
-    from .artifacts import write_artifact
-    rc_for_evidence = store.read_optional("run_context.json")
-    ctx_for_evidence = (
-        RunContext.from_dict(rc_for_evidence) if rc_for_evidence else None
+    # Single canonical producer. ``Controller.build_candidate``
+    # writes the canonical evidence-root ``candidate.json`` (with
+    # the ``_sha256``-enriched payload the merge transaction
+    # expects) and the state-root ``candidate.json`` audit copy.
+    # It also performs the ``READY_FOR_CANDIDATE -> CANDIDATE_FROZEN``
+    # state transition through the established safe order. Routing
+    # through the Controller guarantees identical canonical bytes
+    # for identical candidate data, regardless of which public
+    # surface produced them. The duplicate canonical write that
+    # used to follow is removed.
+    controller = Controller(ctx, store)
+    controller.build_candidate(
+        candidate, head_observed=str(ctx.current_authorized_head or ""),
     )
-    if ctx_for_evidence is None:
-        return _emit(
-            {"error": "no run context on file"},
-            json_mode=args.json,
-            exit_code=EXIT_STATE,
-        )
-    paths = _canonical_artifact_paths(Path(ctx_for_evidence.evidence_root))
-    paths["candidate"].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    write_artifact(paths["candidate"], candidate.to_dict())
-    # Keep the state-root copy as a secondary observable for audit,
-    # never as the merge-input source. The canonical evidence root is
-    # authoritative; the merge transaction must never read state-root.
-    store.write_atomic("candidate.json", candidate.to_dict())
-    store.write_atomic("candidate.sha256", {"sha256": candidate.compute_sha256()})
+    # Capture the canonical artifact digest for the response
+    # payload from the canonical evidence root that the merge
+    # transaction will re-read. This is a single read; no
+    # ``write_artifact`` call is duplicated.
+    from .artifacts import read_artifact as _read_canonical
+    from .canonical_paths import canonical_paths as _cp
+    canonical_candidate_path = _cp(Path(ctx.evidence_root))["candidate"]
+    canonical_candidate_digest = _read_canonical(
+        canonical_candidate_path,
+    ).digest
     return _emit(
         {
             "run_id": args.run_id,
             "candidate_sha256": candidate.compute_sha256(),
-            "canonical_candidate_path": str(paths["candidate"]),
-            "canonical_candidate_sha256": write_artifact(
-                paths["candidate"], candidate.to_dict()
-            ).digest,
+            "canonical_candidate_path": str(canonical_candidate_path),
+            "canonical_candidate_sha256": canonical_candidate_digest,
         },
         json_mode=args.json,
         exit_code=EXIT_OK,
@@ -472,7 +508,24 @@ def cmd_build_candidate(args: argparse.Namespace) -> int:
 
 
 def cmd_handoff_verifier(args: argparse.Namespace) -> int:
-    """Write a verifier handoff record for the current run."""
+    """Write a verifier handoff record for the current run.
+
+    The verifier handoff is COORDINATION metadata. It records
+    which external verifier worker was asked to run, against
+    which exact candidate digest, and from which trusted
+    verifier package version. The verifier worker reads this
+    handoff, runs its independent verification, and writes a
+    separate canonical evidence-root ``verifier.json`` (the
+    authoritative merge input).
+
+    The handoff is NEVER read by ``cmd_merge_authorize`` or
+    ``cmd_merge``. ``cmd_merge_authorize`` binds the digest of
+    the canonical evidence-root ``verifier.json``; the
+    merge transaction re-verifies that digest. The handoff
+    therefore cannot influence merge authorization under any
+    sequence of writes. This is the architectural separation
+    that makes the handoff safe to remain in state-root.
+    """
     store = StateStore(args.state_root)
     cert_payload = store.read_optional("readiness.json")
     if cert_payload is None:
@@ -580,6 +633,24 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
     sidecar; that digest is the value bound into the
     authorization. Authorization therefore binds the same digests
     that the merge transaction will re-read.
+
+    Safe ordering (per PR #4 round-2 review):
+
+    1. Validate the authorization preconditions (state machine is
+       in AWAITING_MERGE_AUTHORIZATION, authorized head matches
+       ``ctx.current_authorized_head``, candidate + verifier carry
+       ``verdict == VERIFIED`` and a qualifying verdict binding).
+    2. Build ``MergeAuthorization`` only after every precondition
+       passes.
+    3. Persist the canonical authorization artifact via
+       ``Controller.authorize_merge(auth)`` — which itself
+       validates the transition BEFORE writing.
+    4. Persist the canonical evidence-root ``authorization.json``
+       only after the controller call returns successfully.
+
+    A rejected authorization leaves NO canonical
+    ``authorization.json`` on disk. ``cmd_merge`` cannot consume
+    rejected authorization evidence.
     """
     store = StateStore(args.state_root)
     rc = store.read_optional("run_context.json")
@@ -624,7 +695,22 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    cand = Candidate.from_dict(candidate_result.payload)
+    cand_payload = candidate_result.payload
+    try:
+        cand = Candidate.from_dict(cand_payload)
+    except (ValueError, TypeError, KeyError) as e:
+        # The canonical artifact bytes have been validated against
+        # the sidecar by ``read_artifact``, but the payload schema
+        # may still be malformed (wrong schema_version, missing
+        # fields, mistyped values). Convert this to a controlled
+        # state failure with EXIT_STATE; a correctly signed
+        # malformed candidate MUST NEVER cause an uncaught
+        # traceback.
+        return _emit(
+            {"error": f"canonical candidate schema invalid: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     if cand.exact_head != ctx.current_authorized_head:
         return _emit(
             {"error": "candidate head does not match current authorized head"},
@@ -653,6 +739,50 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
             exit_code=EXIT_STATE,
         )
 
+    # Semantic verdict gate (per PR #4 round-2 review).
+    #
+    # ``canonical verifier.json`` may be the LAST WRITTEN record,
+    # irrespective of verdict. ``verifier_failed`` writes the same
+    # canonical path; a failing attempt can therefore overwrite a
+    # passing one if a verifier process retries. ``cmd_merge_authorize``
+    # must independently inspect the record's verdict and reject any
+    # artifact whose ``verdict`` is not exactly ``VERIFIED``.
+    #
+    # The two acceptable shapes for a passing record are:
+    #   ``{"verdict": "VERIFIED", ...}`` (top-level), or
+    #   ``{"verdict": "VERIFIED", "defects": [], ...}``.
+    # Any other verdict value (including missing, "FAILED",
+    # "ERROR", "INCONCLUSIVE", or the ``_verdict_failed`` flag set
+    # by ``Controller.verifier_failed``) is rejected.
+    verdict = verifier_result.payload.get("verdict")
+    if verdict != "VERIFIED":
+        return _emit(
+            {
+                "error": (
+                    f"canonical verifier at {paths['verifier']} has "
+                    f"verdict {verdict!r}; authorization requires "
+                    "exactly verdict == 'VERIFIED'; a failed or "
+                    "absent verification MUST NOT become merge "
+                    "evidence"
+                ),
+                "verifier_verdict": verdict,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_GUARD,
+        )
+    if verifier_result.payload.get("_verdict_failed") is True:
+        return _emit(
+            {
+                "error": (
+                    f"canonical verifier at {paths['verifier']} is "
+                    "tagged as a failed attempt; authorization "
+                    "MUST NOT bind its digest"
+                ),
+            },
+            json_mode=args.json,
+            exit_code=EXIT_GUARD,
+        )
+
     # Bind the EXACT-FILE DIGESTS returned by ``read_artifact``
     # (already validated against the on-disk sidecar). These are
     # the same digests the merge transaction will re-read; the
@@ -677,15 +807,44 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
     )
     auth_payload = auth.to_dict()
     auth_payload["_sha256"] = auth.compute_sha256()
-    # Persist the canonical authorization artifact under the
-    # evidence root. Authorization and merge use the SAME canonical
-    # paths so the digests bound here are the ones the merge
-    # transaction will re-verify.
+    # Safe ordering: call Controller.authorize_merge FIRST. The
+    # Controller validates the state transition and the
+    # authorized head BEFORE writing anything. If validation
+    # fails, ControllerError is raised and we return without
+    # persisting the canonical authorization.json. The merge
+    # transaction cannot then consume a rejected authorization.
+    controller = Controller(ctx, store)
+    try:
+        sm = controller.authorize_merge(auth)
+    except (ControllerError, StateStoreError) as e:
+        # A precondition failed (transition rejected, head
+        # mismatch, etc.). Return a controlled nonzero exit code
+        # and DO NOT persist the canonical authorization.json.
+        return _emit(
+            {"error": f"authorization transition rejected: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    except StateError as e:
+        # ``InvalidTransition`` is raised by the state machine
+        # when the controller's state cannot reach the target.
+        # Without this handler the CLI would emit an uncaught
+        # traceback and a subsequent ``cmd_merge`` could still
+        # consume rejected authorization evidence if the CLI
+        # ever wrote the artifact before the raise.
+        return _emit(
+            {"error": f"authorization transition rejected: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    # Preconditions passed AND the controller wrote the
+    # state-root ``merge-authorization.json``. Now persist the
+    # canonical evidence-root ``authorization.json`` so the merge
+    # transaction will re-read the same artifact at the same
+    # canonical path.
     paths["authorization"].parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     from .artifacts import write_artifact
     write_artifact(paths["authorization"], auth_payload)
-    controller = Controller(ctx, store)
-    sm = controller.authorize_merge(auth)
     return _emit(
         {
             "run_id": args.run_id,
@@ -708,9 +867,16 @@ def cmd_merge(args: argparse.Namespace) -> int:
     authorization / candidate / verifier artifacts, fetches live
     GitHub evidence, repeats every exact-head and integrity guard,
     invokes the guarded ``gh pr merge`` command once with a finite
-    timeout, reconciles post-merge state, writes the merge record
-    through the canonical artifact writer, and transitions the state
-    machine to ``COMPLETE``.
+    timeout, reconciles post-merge state, and writes the merge
+    record through the canonical artifact writer.
+
+    After the transaction returns, ``cmd_merge`` itself persists
+    the COMPLETE state transition by calling
+    ``Controller.report_complete()``. The transaction does NOT
+    transition to COMPLETE; the durable state change is this
+    command's responsibility. If ``report_complete`` raises, the
+    merge record remains durable for retry and ``cmd_merge``
+    returns EXIT_STATE.
 
     Production flows MUST NOT bypass this function. No production code
     may call ``MergeExecutor().compute_command`` and ``_run`` directly.
@@ -860,7 +1026,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
             live_ci_state["checks"] = checks
             required = {"test (3.10)", "test (3.11)", "test (3.12)",
                         "package-smoke", "provenance", "committed-state-scan"}
-            passing = {c["name"] for c in checks if c.get("state") == "SUCCESS"}
+            passing = {
+                name for c in checks
+                if c.get("state") == "SUCCESS"
+                # A check object without a ``name`` key cannot
+                # contribute to the passing set; skip it so a
+                # KeyError does not escape this handler.
+                for name in [c.get("name")]
+                if name
+            }
             live_ci_state["all_required_passing"] = required.issubset(passing)
             live_ci_state["coderabbit_passing"] = "CodeRabbit" in passing
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
@@ -888,8 +1062,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # so the CodeRabbit guard fails closed.
         pass
 
-    # Working tree clean? Re-measure after the branch switch and fast-forward
-    # so a post-merge dirty tree is reported as post-merge dirty.
+    # Working tree clean? Measured BEFORE execute_guarded_merge_transaction
+    # runs -- the measurement is a pre-flight guard, not a post-merge
+    # reconciliation check. A post-merge dirty tree is detected by the
+    # reconciliation inside execute_guarded_merge_transaction itself,
+    # and surfaced via the merge record's working_tree_clean field.
     working_tree_clean = False
     try:
         wt_clean_proc = subprocess.run(
@@ -962,8 +1139,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # COMPLETE transition idempotently.
         complete_state_warning = (
             f"durable COMPLETE transition failed: {e!r}; merge record "
-            f"at {rec_digest} is durable; retry report_complete() to "
-            "persist COMPLETE idempotently."
+            f"at {merge_record_path} is durable; "
+            f"merge_record_digest={rec_digest}; "
+            "retry report_complete() to persist COMPLETE idempotently."
         )
 
     if complete_state_warning is not None:
@@ -972,6 +1150,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "error": complete_state_warning,
                 "run_id": auth.run_id,
                 "squash_merge_commit": record.squash_merge_commit,
+                "merge_record_path": str(merge_record_path),
                 "merge_record_digest": rec_digest,
                 "complete_state_persisted": False,
             },

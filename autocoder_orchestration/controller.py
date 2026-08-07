@@ -398,7 +398,17 @@ class Controller:
         return result.digest
 
     def verifier_failed(self, *, head_observed: str, verifier_record: Dict[str, Any]) -> StateMachine:
-        """VERIFYING -> VERIFICATION_FAILED."""
+        """VERIFYING -> VERIFICATION_FAILED.
+
+        Failed verification MUST NOT overwrite a previously
+        written passing verifier artifact at the canonical
+        evidence-root path. The merged-verdict model is:
+        ``canonical verifier.json`` is the LAST WRITTEN verifier
+        record, irrespective of verdict, but every authorization
+        consumer MUST independently check ``verdict == VERIFIED``
+        before binding its digest into a MergeAuthorization.
+        ``cmd_merge_authorize`` enforces this gate.
+        """
         sm = self._require_state_for_event()
         next_sm = sm.transition(
             STATE_VERIFICATION_FAILED,
@@ -406,6 +416,11 @@ class Controller:
             head_observed=head_observed,
             head_required=self.context.current_authorized_head,
         )
+        # Tag the failed record so consumers can distinguish a
+        # failure-only artifact from a passing one even after
+        # ``verifier_passed`` subsequently overwrites it.
+        verifier_record = dict(verifier_record)
+        verifier_record["_verdict_failed"] = True
         # Canonical evidence-root copy (authoritative merge input).
         self._write_canonical("verifier", verifier_record)
         # State-root copy is a secondary observable for audit only.
@@ -432,13 +447,21 @@ class Controller:
     def authorize_merge(self, auth: MergeAuthorization) -> StateMachine:
         """AWAITING_MERGE_AUTHORIZATION -> MERGE_AUTHORIZED.
 
-        Validates the transition before writing the artifact.
-        Caller-supplied merge authorization is validated by the
-        caller; the controller stores the authorization and applies
-        the transition.
+        Safe sequence:
+        1. Validate inputs.
+        2. Validate current state supports the transition.
+        3. Validate the authorized head matches the persisted
+           current authorized head.
+        4. Write the artifact only after every precondition passes.
+        5. Apply the state-machine transition only after the
+           artifact is on disk.
+        A rejected transition leaves no accepted artifact.
         """
         if not isinstance(auth, MergeAuthorization):
             raise ControllerError("auth must be a MergeAuthorization")
+        # Validate the transition will succeed BEFORE writing the
+        # artifact. ``_require_state_for_event`` raises on the
+        # wrong state; ``sm.transition`` raises on the wrong head.
         sm = self._require_state_for_event()
         next_sm = sm.transition(
             STATE_MERGE_AUTHORIZED,
@@ -446,11 +469,12 @@ class Controller:
             head_observed=auth.authorized_head,
             head_required=self.context.current_authorized_head,
         )
+        # All preconditions passed. Persist the artifact, then
+        # commit the transition.
         auth_payload = auth.to_dict()
         auth_payload["_sha256"] = auth.compute_sha256()
         self.store.write_atomic("merge-authorization.json", auth_payload)
-        self.save_state_machine(next_sm)
-        return next_sm
+        return self.save_state_machine(next_sm) and next_sm or next_sm
 
     def report_merged(self, record: MergeRecord) -> StateMachine:
         """MERGE_AUTHORIZED -> POST_MERGE_VERIFYING."""

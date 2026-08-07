@@ -15,6 +15,7 @@ parent directory.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypedDict
 
 AUTHORIZATION_FILENAME = "authorization.json"
 CANDIDATE_FILENAME = "candidate.json"
@@ -22,7 +23,20 @@ VERIFIER_FILENAME = "verifier.json"
 MERGE_RECORD_FILENAME = "merge-record.json"
 
 
-def canonical_paths(evidence_root: Path) -> dict:
+class CanonicalPaths(TypedDict):
+    """TypedDict of the four canonical artifact paths.
+
+    The same four keys are used everywhere a canonical path is
+    needed: ``cli.py``, ``controller.py``, ``merge_authorization.py``,
+    and the regression tests.
+    """
+    authorization: Path
+    candidate: Path
+    verifier: Path
+    merge_record: Path
+
+
+def canonical_paths(evidence_root: Path) -> CanonicalPaths:
     """Return the canonical artifact paths for a given evidence root."""
     p = Path(evidence_root)
     return {

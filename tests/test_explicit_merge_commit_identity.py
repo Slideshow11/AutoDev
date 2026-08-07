@@ -256,6 +256,31 @@ class SquashMergeIdentityTests(unittest.TestCase):
         )
         self.assertEqual(recon.squash_merge_commit, alt_sha)
         self.assertNotEqual(recon.squash_merge_commit, new_local)
+        # The recorded parent count, parent SHA, and tree SHA
+        # MUST come from the explicit OID, not local_main_sha.
+        # A regression that read the parent or tree from the
+        # local main commit would still pass the assertions
+        # above; the assertions below bind the reconciliation
+        # result to the exact git-reported values for ``alt_sha``.
+        rev_list = run(
+            ["git", "rev-list", "--parents", "-n", "1", alt_sha],
+            cwd=self.repo, capture_output=True, text=True,
+        ).stdout.strip().split()
+        alt_parent_count = len(rev_list) - 1
+        alt_parent_sha = rev_list[1]
+        alt_tree_sha = run(
+            ["git", "rev-parse", f"{alt_sha}^{{tree}}"],
+            cwd=self.repo, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertEqual(recon.squash_parent_count, alt_parent_count,
+            "squash_parent_count must come from the explicit "
+            "OID, not from local_main_sha")
+        self.assertEqual(recon.squash_parent, alt_parent_sha,
+            "squash_parent must be the explicit OID's parent, "
+            "not local_main_sha")
+        self.assertEqual(recon.squash_tree_sha256, alt_tree_sha,
+            "squash_tree_sha256 must be the explicit OID's tree, "
+            "not local_main_sha")
 
 
 class LowerHex40ValidationTests(unittest.TestCase):

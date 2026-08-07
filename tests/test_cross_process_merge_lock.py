@@ -84,10 +84,16 @@ class CrossProcessMergeLockTests(unittest.TestCase):
         cleanly with a controlled error. This is the production
         scenario: the supervisor launches a merge worker; a
         concurrent worker must back off."""
+        # Resolve the repository root ONCE. The subprocess
+        # scripts MUST be able to import autocoder_orchestration,
+        # so sys.path has to point at the actual repo root --
+        # not at self.tmpdir.parent (which is the system temp
+        # directory and would fail the imports).
+        repo_root = str(Path(__file__).resolve().parent.parent)
         # The first subprocess holds the lock for a measurable interval.
         holder_script = (
             "import sys, time\n"
-            f"sys.path.insert(0, {str(self.tmpdir.parent)!r})\n"
+            f"sys.path.insert(0, {repo_root!r})\n"
             "from autocoder_orchestration.merge_lock import merge_lock\n"
             f"with merge_lock({str(self.tmpdir)!r}):\n"
             "    time.sleep(2.0)\n"
@@ -96,7 +102,7 @@ class CrossProcessMergeLockTests(unittest.TestCase):
         # The second subprocess attempts to acquire the lock immediately.
         contender_script = (
             "import sys\n"
-            f"sys.path.insert(0, {str(self.tmpdir.parent)!r})\n"
+            f"sys.path.insert(0, {repo_root!r})\n"
             "from autocoder_orchestration.merge_lock import (\n"
             "    LockUnavailable, merge_lock,\n"
             ")\n"
@@ -122,6 +128,16 @@ class CrossProcessMergeLockTests(unittest.TestCase):
         )
         # Wait for the holder to release.
         holder_out, holder_err = holder.communicate(timeout=10)
+
+        # Holder subprocess MUST exit successfully. A holder
+        # failure would be reported as a misleading
+        # "contender acquired" downstream. We assert the exit
+        # status explicitly here.
+        self.assertEqual(
+            holder.returncode, 0,
+            f"holder subprocess failed (rc={holder.returncode}); "
+            f"stdout={holder_out!r} stderr={holder_err!r}",
+        )
 
         self.assertIn("CONTENDER_BLOCKED", contender.stdout,
             f"contender stdout: {contender.stdout!r}\nstderr: {contender.stderr!r}")

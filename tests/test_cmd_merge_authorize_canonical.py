@@ -248,19 +248,39 @@ class CmdMergeAuthorizeCanonicalEvidenceTests(unittest.TestCase):
             "state-root copy influenced the authorization",
         )
         # And the digests MUST NOT equal the state-root digests.
+        # ``StateStore.write_atomic`` mutates the payload dict in
+        # place (adds ``_revision``, ``_schema_version``,
+        # ``_written_at``) before serializing, so the dict literal
+        # above is NOT what ``StateStore`` wrote to disk. We MUST
+        # hash the actual on-disk bytes to compute the state-root
+        # digest; otherwise a regressed implementation could
+        # secretly bind the state-root digest while the test
+        # compares against the wrong baseline.
         import hashlib
+        state_root_cand_bytes = (
+            self.run_state_root / "candidate.json"
+        ).read_bytes()
         state_root_cand_digest = hashlib.sha256(
-            json.dumps(
-                bogus_state_root_candidate, sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
+            state_root_cand_bytes,
         ).hexdigest()
+        state_root_verifier_bytes = (
+            self.run_state_root / "verifier-record.json"
+        ).read_bytes()
         state_root_verifier_digest = hashlib.sha256(
-            json.dumps(
-                bogus_state_root_verifier, sort_keys=True,
-                separators=(",", ":"),
-            ).encode()
+            state_root_verifier_bytes,
         ).hexdigest()
+        self.assertNotEqual(
+            canonical_cand_digest, state_root_cand_digest,
+            "sanity: canonical and state-root digests must differ "
+            "in this test; if they are equal the test setup did "
+            "not actually distinguish them",
+        )
+        self.assertNotEqual(
+            canonical_verifier_digest, state_root_verifier_digest,
+            "sanity: canonical and state-root digests must differ "
+            "in this test; if they are equal the test setup did "
+            "not actually distinguish them",
+        )
         self.assertNotEqual(
             auth_payload["candidate_sha256"], state_root_cand_digest,
             "authorization candidate digest equals the state-root "

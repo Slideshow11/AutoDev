@@ -361,6 +361,13 @@ class ExactFileDigestTests(unittest.TestCase):
         WRONG_CAND = "f" * 64
         candidate = self.tmpdir / "candidate.json"
         write_artifact(candidate, {"head": {"head_sha": AH}, "files": []})
+        # Compute the actual candidate file digest. The verifier
+        # binds to THIS digest so its verifier-to-candidate
+        # check passes; the authorization-to-candidate check
+        # then runs and rejects WRONG_CAND. The assertions check
+        # the authorization-specific message, NOT the verifier
+        # message.
+        actual_candidate_digest = digest_bytes(candidate.read_bytes())
         # Authorization points at a different digest than the file on disk.
         authorization = self.tmpdir / "authorization.json"
         write_artifact(authorization, {
@@ -372,14 +379,15 @@ class ExactFileDigestTests(unittest.TestCase):
             "candidate_sha256": WRONG_CAND,
             "verifier_record_sha256": "b" * 64,
         })
-        # Verifier agrees that WRONG_CAND is the candidate digest, so its
-        # candidate_sha256 matches authorization. The mismatch being
-        # tested is between WRONG_CAND and the verified candidate file
-        # digest on disk.
+        # Verifier binds to the actual candidate digest so its
+        # candidate binding guard passes. The mismatch being
+        # tested is between WRONG_CAND (authorization) and the
+        # verified candidate file digest on disk -- reached via
+        # the authorization-to-candidate guard.
         verifier = self.tmpdir / "verifier.json"
         write_artifact(verifier, {
             "verdict": "VERIFIED", "defects": [],
-            "candidate_sha256": WRONG_CAND,
+            "candidate_sha256": actual_candidate_digest,
         })
         merge_record = self.tmpdir / "merge-record.json"
         inputs = MergeTransactionInputs(
@@ -407,17 +415,20 @@ class ExactFileDigestTests(unittest.TestCase):
             with self.assertRaises(MergeError) as ctx:
                 execute_guarded_merge_transaction(inputs)
         safe_run.assert_not_called()
-        # The exception MUST mention some digest mismatch path involving
-        # the WRONG_CAND we put in authorization, since the candidate
-        # file on disk has a different digest.
-        msg = str(ctx.exception)
-        self.assertIn(WRONG_CAND, msg)
-        self.assertIn("digest", msg.lower())
-        # Sanity: a digest mismatch was indeed detected at this layer,
-        # not at some other earlier check.
+        # The exception MUST mention the authorization-specific
+        # digest mismatch (between WRONG_CAND in authorization and
+        # the verified candidate file digest). The earlier
+        # verifier-to-candidate guard has already passed because
+        # the verifier binds to the actual candidate digest.
+        msg = str(ctx.exception).lower()
+        self.assertIn(WRONG_CAND, str(ctx.exception))
+        self.assertIn("authorization", msg)
+        self.assertIn("digest", msg)
+        # Sanity: a digest mismatch was indeed detected at this
+        # layer, not at some other earlier check.
         self.assertNotEqual(
             WRONG_CAND,
-            digest_bytes(candidate.read_bytes()),
+            actual_candidate_digest,
         )
 
     # 19: mismatched verifier candidate binding blocks
@@ -820,10 +831,24 @@ class TimeoutAmbiguityTests(unittest.TestCase):
         paths = self._build_artifacts()
         inputs = self._inputs(paths)
 
-        # Mock the subprocess to time out, then server-side says merged.
+        # Mock the subprocess. We track two counters:
+        # ``merge_call_count`` counts only invocations whose argv
+        # targets ``pr merge`` (the actual guarded transaction);
+        # ``call_count`` counts every recorded invocation so the
+        # test does not silently lose assertions when the
+        # reconciliation adds new ``gh`` queries. The
+        # ``test_merge_operation_invokes_runner_exactly_once``
+        # pattern is reused here.
+        merge_call_count = [0]
         call_count = [0]
-        def fake_safe_run(*args, **kwargs):
+        def fake_safe_run(args, *a, **kw):
             call_count[0] += 1
+            # Inspect argv for ``pr merge``. The runner passes
+            # ``["gh", "pr", "merge", ...]``; live re-queries use
+            # ``["gh", "pr", "view", ...]`` or similar.
+            joined = " ".join(str(x) for x in args)
+            if " merge " in f" {joined} " or joined.endswith(" merge"):
+                merge_call_count[0] += 1
             if call_count[0] == 1:
                 # The merge runner — time out.
                 return {"returncode": -1, "stdout": "", "stderr": "[TIMEOUT]", "timed_out": True}
@@ -859,9 +884,16 @@ class TimeoutAmbiguityTests(unittest.TestCase):
                 # reconciliation raised. But the runner was invoked exactly once.
                 with self.assertRaises(MergeError):
                     execute_guarded_merge_transaction(inputs)
-        # Merge subprocess + live re-query + post-merge mergeCommit
-        # OID fetch = 3 gh invocations on this path.
-        self.assertEqual(call_count[0], 3)
+        # Exactly ONE ``gh pr merge`` invocation occurred on this
+        # path. The total ``call_count`` may include additional
+        # live-evidence re-queries; we assert the merge filter
+        # explicitly so a future query addition cannot break the
+        # one-merge-call invariant.
+        self.assertEqual(
+            merge_call_count[0], 1,
+            f"expected exactly one 'gh pr merge' invocation; "
+            f"got {merge_call_count[0]} (total gh calls: {call_count[0]})",
+        )
 
     def test_timeout_plus_server_side_open_is_not_reported_as_merged(self):
         paths = self._build_artifacts()
@@ -1029,8 +1061,15 @@ class ConcurrencyTests(unittest.TestCase):
         self.tmp.cleanup()
 
     @unittest.skip(
-        "The guarded transaction has no cross-process merge lock yet. "
-        "Re-enable once serialization is implemented."
+        "Cross-process merge serialization is implemented in "
+        "tests/test_cross_process_merge_lock.py via "
+        "autocoder_orchestration.merge_lock.merge_lock. The "
+        "in-process thread-version of this test would require "
+        "main-thread mock.patch applications before starting "
+        "the worker threads; that fixture is not present here. "
+        "The skipped test is therefore superseded by the "
+        "two-process test in test_cross_process_merge_lock.py "
+        "which exercises the same production lock acquisition."
     )
     def test_concurrent_merge_attempts_cannot_both_invoke_runner(self):
         auth = self.evidence / "authorization.json"
@@ -1580,16 +1619,19 @@ class BranchIndependentTests(unittest.TestCase):
 
     def test_unrelated_branches_are_never_deleted(self):
         repo, _ = self._make_repo()
-        # Add an unrelated branch.
-        subprocess.check_call(["git", "-C", str(repo), "checkout", "-q", "main"])
+        # Add an unrelated branch. Every Git subprocess below
+        # routes through the isolated helpers so ambient
+        # commit.gpgsign or core.hooksPath cannot influence the
+        # fixture (see BranchIndependentTests._git contract).
+        self._git(repo, "checkout", "-q", "main")
         (repo / "OTHER").write_text("other")
-        subprocess.check_call(["git", "-C", str(repo), "add", "OTHER"])
-        subprocess.check_call(["git", "-C", str(repo), "commit", "-q", "-m", "other"])
-        subprocess.check_call(["git", "-C", str(repo), "checkout", "-q", "feat/test"])
+        self._git(repo, "add", "OTHER")
+        self._git(repo, "commit", "-q", "-m", "other")
+        self._git(repo, "checkout", "-q", "feat/test")
         # Set up fake remote.
-        subprocess.check_call(["git", "-C", str(repo), "remote", "add", "origin", str(repo)])
-        subprocess.check_call(["git", "-C", str(repo), "push", "-q", "origin", "main"])
-        subprocess.check_call(["git", "-C", str(repo), "push", "-q", "origin", "feat/test"])
+        self._git(repo, "remote", "add", "origin", str(repo))
+        self._git(repo, "push", "-q", "origin", "main")
+        self._git(repo, "push", "-q", "origin", "feat/test")
         # The feature_branch param is "feat/test" but we pass an UNRELATED
         # branch "feat/unrelated" to the reconciler. The reconciler must
         # NOT delete it.
@@ -1601,9 +1643,7 @@ class BranchIndependentTests(unittest.TestCase):
             authorized_head="0" * 40,
         )
         # No branch was deleted.
-        branches = subprocess.check_output(
-            ["git", "-C", str(repo), "branch", "--list"], text=True
-        )
+        branches = self._git_output(repo, "branch", "--list")
         self.assertIn("feat/test", branches)
         self.assertIn("main", branches)
 
@@ -1724,12 +1764,15 @@ class EndToEndFlowTests(unittest.TestCase):
                 self.assertEqual(len(record.authorization_exact_file_digest), 64)
                 self.assertEqual(len(record.candidate_exact_file_digest), 64)
                 self.assertEqual(len(record.verifier_record_exact_file_digest), 64)
-                # The unauthorized_actions_not_taken map records every
-                # forbidden action as False (the action was NOT taken).
+                # The ``unauthorized_actions_taken`` map records every
+                # forbidden action as False (the action was NOT
+                # taken). A value of True would indicate the
+                # action WAS observed; that is a security
+                # incident, not the steady-state.
                 for action in ("admin_bypass", "auto_merge",
                                "merge_commit_or_rebase_merge", "force_push"):
                     self.assertFalse(
-                        record.unauthorized_actions_not_taken[action], action,
+                        record.unauthorized_actions_taken[action], action,
                     )
 
 

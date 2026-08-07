@@ -158,9 +158,10 @@ class DurableCompleteFailsClosedTests(unittest.TestCase):
             "report_complete() failure must not produce exit code 0")
         self.assertEqual(exit_code, 4,  # EXIT_STATE
             f"expected EXIT_STATE=4; got {exit_code}")
-
-        # Restore for cleanup
-        Controller.report_complete = original_report_complete
+        # ``mock.patch.object`` already restores the original
+        # ``Controller.report_complete`` when the ``with`` block
+        # exits; the original manual restore assignment was
+        # redundant cleanup and has been removed.
 
     def test_merge_record_remains_durable_when_complete_fails(self) -> None:
         """When ``report_complete()`` raises, the merge record MUST
@@ -211,7 +212,9 @@ class DurableCompleteFailsClosedTests(unittest.TestCase):
             Controller, "report_complete", fail_report_complete
         ):
             exit_code = cli_module.cmd_post_merge_verify(args)
-        Controller.report_complete = original_report_complete
+        # ``mock.patch.object`` already restores ``Controller.report_complete``
+        # when the ``with`` block exits. The original manual
+        # restoration was redundant cleanup and has been removed.
 
         # Merge record MUST still exist for retry.
         self.assertTrue(
@@ -286,7 +289,7 @@ class DurableCompleteFailsClosedTests(unittest.TestCase):
         self._build_minimal_authorization(paths)
 
         # Seed candidate + verifier so cmd_merge reads them too.
-        for name, sha_digest in (
+        for name, _ in (
             ("candidate", "c" * 64),
             ("verifier", "d" * 64),
         ):
@@ -322,8 +325,10 @@ class DurableCompleteFailsClosedTests(unittest.TestCase):
 
         # Mock the production transaction so it returns the
         # merge record we just wrote, without exercising live
-        # gh / Git.
-        real_execute = execute_guarded_merge_transaction
+        # gh / Git. ``execute_guarded_merge_transaction`` is
+        # imported for the type annotation only; the CLI looks
+        # the symbol up by name on ``cli_module``, so the mock
+        # is sufficient.
 
         def fake_execute(inputs: MergeTransactionInputs):
             return rec, "fake-digest"
@@ -430,11 +435,6 @@ class DurableCompleteFailsClosedTests(unittest.TestCase):
             "report_complete raises; a follow-up retry cannot recover "
             "otherwise.",
         )
-
-        # Sanity: the function we mocked is the production one.
-        # Re-touch real_execute so static analyzers don't flag
-        # the import as unused.
-        del real_execute
 
 
 if __name__ == "__main__":

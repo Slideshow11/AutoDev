@@ -275,39 +275,39 @@
     },
     {
       "destination_path": "autocoder_orchestration/canonical_paths.py",
-      "destination_sha256": "608fd41ee43bbebaebbaf56502592c3df02dd1de4db1e21ef45d22d6d2802825",
-      "destination_size_bytes": 1169,
+      "destination_sha256": "11fe73024453dd35253484847f4bab4fb9311a7175a0bcfb30ebd0713e5981e3",
+      "destination_size_bytes": 1557,
       "source_path": null,
       "source_sha256": null,
-      "transformation_classification": "standalone_documentation_addition",
-      "transformation_explanation": "Newly authored for the standalone repository. Provides canonical artifact path helpers shared across init/authorize/merge/post-merge."
+      "transformation_classification": "standalone_source_addition",
+      "transformation_explanation": "Newly authored source addition: canonical artifact path helpers shared across init/authorize/merge/post-merge (TypedDict for static key checking)."
     },
     {
       "destination_path": "tests/test_coderabbit_identity_filter.py",
-      "destination_sha256": "52044892596979638983f2b8a58f0b5edf3c37f7d25f749241cc7b6d8746d669",
-      "destination_size_bytes": 11360,
+      "destination_sha256": "6c1c21c936a9283d177f9ab8f3383e1e71a198e931430e4ac8628aefb1860d5d",
+      "destination_size_bytes": 10530,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored regression tests for CodeRabbit identity and explicit mergeCommit identity contracts."
+      "transformation_explanation": "Newly authored regression tests for the CodeRabbit identity filter, including the null-author (deleted account) fail-closed case."
     },
     {
       "destination_path": "tests/test_explicit_merge_commit_identity.py",
-      "destination_sha256": "54dc99a2c6229bf21dbcd27a297950c0741267020f2255fd1a8d093cc25fa043",
-      "destination_size_bytes": 11473,
+      "destination_sha256": "f7e73990fb8e4898ea3444442b6a01f22dadb7bf28fef508f72694b9084b4f9c",
+      "destination_size_bytes": 12784,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored regression tests for CodeRabbit identity and explicit mergeCommit identity contracts."
+      "transformation_explanation": "Newly authored regression tests for the explicit mergeCommit identity contract, including parent count, parent SHA, and tree SHA assertions."
     },
     {
       "destination_path": "autocoder_orchestration/merge_lock.py",
-      "destination_sha256": "3558d7f810258e027fef801061575260e0b345257ab990374327abe3bc49bfb4",
-      "destination_size_bytes": 5402,
+      "destination_sha256": "9fb455c6c5f67a49faab68f6e549b30ea9d58fa6fe63a5fb1450443453a3f88d",
+      "destination_size_bytes": 6079,
       "source_path": null,
       "source_sha256": null,
-      "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+      "transformation_classification": "standalone_source_addition",
+      "transformation_explanation": "Newly authored source addition: cross-process merge lock via fcntl.flock. Holder PID is written only after flock succeeds, so a contender cannot overwrite the actual holder's metadata."
     },
     {
       "destination_path": "tests/test_canonical_evidence_flow.py",
@@ -316,25 +316,25 @@
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+      "transformation_explanation": "Newly authored regression test for the canonical-evidence producer/consumer flow: candidate, verifier, and merge-inputs all point at the canonical evidence-root paths."
     },
     {
       "destination_path": "tests/test_cross_process_merge_lock.py",
-      "destination_sha256": "841d2c5813fb1cd0454a6b4bccdcafe8502b571420705626ab6125214af88281",
-      "destination_size_bytes": 6230,
+      "destination_sha256": "d3c452de24ee1d775b2f11398c99799a6b43f172e3a2ce9643a53d5a877c422a",
+      "destination_size_bytes": 6971,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+      "transformation_explanation": "Newly authored cross-process regression test for the merge lock: two real subprocesses, the holder's PID is read by the contender, not the contender's own."
     },
     {
       "destination_path": "tests/test_durable_complete_fails_closed.py",
-      "destination_sha256": "931e34d9490df33da0808f0180025d6afc88a18644f76569bc274b75ba555cc5",
-      "destination_size_bytes": 19884,
+      "destination_sha256": "2ea9f1defa816682ed009fe9fc6661a0d2fcada781eae94fd7ffa8c9457dfb85",
+      "destination_size_bytes": 20114,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+      "transformation_explanation": "Newly authored regression tests for the durable COMPLETE fail-closed contract, including a direct cmd_merge regression."
     },
     {
       "destination_path": "tests/test_verify_artifact_digest_oserror.py",
@@ -343,16 +343,16 @@
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored regression test for \u00a73.1, \u00a73.2, \u00a73.5, and the cross-process merge lock contract."
+      "transformation_explanation": "Newly authored regression test for the OSError handling of artifact-digest re-verification."
     },
     {
-      "destination_path": "tests/test_independent_verifier.py",
-      "destination_sha256": "3ce9dc8be918d1c9cde671d56f4d5e5a9b13b22cbc3af76d64f1e540e8beabcf",
-      "destination_size_bytes": 13925,
+      "destination_path": "scripts/independent_verifier_v2.py",
+      "destination_sha256": "4c59c233bdce449c79c71a53bfec9bc2a3c439877c7a6afe5e3eae10bdcc3bd3",
+      "destination_size_bytes": 15850,
       "source_path": null,
       "source_sha256": null,
-      "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored end-to-end independent verifier that re-derives every gate from public sources for PR #4 strict-window canary. Run via 'python tests/test_independent_verifier.py'."
+      "transformation_classification": "standalone_source_addition",
+      "transformation_explanation": "Independent exact-head verifier for PR #4 strict-window qualification. Reads --qualification-head as immutable input; every check (live PR head, CI query SHA, strict-window observations, candidate.exact_head, verifier.qualification_head) is bound to that single head. No EXPECTED_HEADS, no historical equivalence. Run via 'python scripts/independent_verifier_v2.py --qualification-head <40-hex-sha>'."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",

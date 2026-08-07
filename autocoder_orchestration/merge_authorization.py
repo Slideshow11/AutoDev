@@ -229,7 +229,16 @@ class MergeRecord:
     authorization_exact_file_digest: str = ""
     merge_record_exact_file_digest: str = ""
     merge_timestamp: str = ""
-    unauthorized_actions_not_taken: Dict[str, bool] = field(default_factory=dict)
+    # ``unauthorized_actions_taken`` records every forbidden
+    # action observed during the merge lifecycle. A value of
+    # ``True`` means the action WAS taken (a security incident);
+    # ``False`` means the action was NOT taken (the audit
+    # contract is satisfied). Every key starts as ``False``; the
+    # transaction sets the relevant key to ``True`` only when it
+    # positively observes the corresponding behavior. The field
+    # is renamed from the legacy ``unauthorized_actions_not_taken``
+    # to remove the polarity ambiguity.
+    unauthorized_actions_taken: Dict[str, bool] = field(default_factory=dict)
     unavailable_observations: List[str] = field(default_factory=list)
     notes: str = ""
     state_transition: str = ""
@@ -260,7 +269,7 @@ class MergeRecord:
             "authorization_exact_file_digest": self.authorization_exact_file_digest,
             "merge_record_exact_file_digest": self.merge_record_exact_file_digest,
             "merge_timestamp": self.merge_timestamp,
-            "unauthorized_actions_not_taken": self.unauthorized_actions_not_taken,
+            "unauthorized_actions_taken": self.unauthorized_actions_taken,
             "unavailable_observations": list(self.unavailable_observations),
             "notes": self.notes,
             "state_transition": self.state_transition,
@@ -306,7 +315,7 @@ class MergeRecord:
             authorization_exact_file_digest=str(payload.get("authorization_exact_file_digest", "")),
             merge_record_exact_file_digest=str(payload.get("merge_record_exact_file_digest", "")),
             merge_timestamp=str(payload.get("merge_timestamp", "")),
-            unauthorized_actions_not_taken=dict(payload.get("unauthorized_actions_not_taken", {})),
+            unauthorized_actions_taken=dict(payload.get("unauthorized_actions_taken", {})),
             unavailable_observations=list(payload.get("unavailable_observations", [])),
             notes=str(payload.get("notes", "")),
             state_transition=str(payload.get("state_transition", "")),
@@ -1019,7 +1028,9 @@ def _repeat_exact_head_guards(
     #    merge authorization, never skips the comparison.
     if auth.candidate_sha256 != candidate_digest:
         raise MergeError(
-            "authorization candidate digest does not match verified candidate file digest"
+            f"authorization candidate digest {auth.candidate_sha256!r} "
+            f"does not match verified candidate file digest "
+            f"{candidate_digest!r}"
         )
     if auth.verifier_record_sha256 != verifier_digest:
         raise MergeError(
@@ -1302,7 +1313,11 @@ def _execute_guarded_merge_transaction_locked(
         authorization_exact_file_digest=auth_digest,
         merge_record_exact_file_digest="",  # filled after write
         merge_timestamp=_utc_now(),
-        unauthorized_actions_not_taken={
+        unauthorized_actions_taken={
+            # ``True`` here would indicate the action WAS
+            # taken. Every key starts at ``False``; the transaction
+            # flips a key to ``True`` only when it positively
+            # observes the corresponding behavior.
             "merge_other_sha": False,
             "additional_commit_after_authorization": False,
             "rebase": False,
