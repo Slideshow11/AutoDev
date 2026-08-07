@@ -1244,8 +1244,18 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     try:
         sm = controller.report_complete()
     except (ControllerError, StateStoreError, StateError, OSError) as e:
+        # The merge record is durable on disk; the durable
+        # COMPLETE transition failed. The recovery payload
+        # identifies both the merge-record PATH and DIGEST so a
+        # follow-up retry can locate the durable evidence
+        # without inspecting the state store directly. Round-5
+        # finding PRRT_kwDOTtyQLc6XSGfP.
         return _emit(
-            {"error": f"durable COMPLETE transition failed: {e!r}"},
+            {
+                "error": f"durable COMPLETE transition failed: {e!r}",
+                "merge_record_path": str(paths["merge_record"]),
+                "merge_record_sha256": record_result.digest,
+            },
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )

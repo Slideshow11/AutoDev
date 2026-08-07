@@ -347,12 +347,12 @@
     },
     {
       "destination_path": "scripts/independent_verifier_v2.py",
-      "destination_sha256": "9bd901068451d85c4658c55eccd153be4aee969ca924221b7c77fd5f9e1a89bb",
-      "destination_size_bytes": 33940,
+      "destination_sha256": "74e00c8d9090a8294211c9a360fb3deb5edd5b94f49d29e4cca8ca0c8bcb9fa8",
+      "destination_size_bytes": 39040,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
-      "transformation_explanation": "Independent exact-head verifier for PR #4 strict-window qualification. Reads --qualification-head and --incident-record as required inputs. Every check (live PR head, CI query SHA, paginated reviewThreads, paginated latestReviews, every required CI check-run head_sha, every strict-window observation pr_head_sha, candidate.exact_head, verifier.qualification_head, AED file measured sha256, incident-record digest) is bound to that single 40-char SHA. v4 round-4 repairs: GraphQL query builders produce balanced documents; totalCount is required (fails closed when absent); live PR readiness requires positive mergeable==MERGEABLE and mergeStateStatus in (CLEAN, HAS_HOOKS, UNSTABLE); the newest CodeRabbit review is selected by submittedAt sorting rather than connection order; the verifier does NOT create or migrate the incident-record sidecar. The verifier fails closed on every fail-open vector. Run via 'python scripts/independent_verifier_v2.py --qualification-head <40-hex-sha> --incident-record <path>'."
+      "transformation_explanation": "Independent exact-head verifier for PR #4 strict-window qualification. Reads --qualification-head and --incident-record as required inputs. Every check (live PR head, CI query SHA, paginated reviewThreads, paginated latestReviews, every required CI check-run head_sha, every strict-window observation pr_head_sha, candidate.exact_head, verifier.qualification_head, AED file measured sha256, incident-record digest) is bound to that single 40-char SHA. v5 round-5 repairs: totalCount requested by the latestReviews GraphQL query; every security-relevant gate uses a VerificationFailure exception (assert-based gates would be stripped under python -O); module-level __debug__ guard refuses to run under PYTHONOPTIMIZE; the verifier identity field is derived from the executing module path and __file__ stem; cmd_post_merge_verify recovery payload includes both the merge-record PATH and DIGEST. The verifier fails closed on every fail-open vector. Run via 'python scripts/independent_verifier_v2.py --qualification-head <40-hex-sha> --incident-record <path>'."
     },
     {
       "destination_path": "tests/test_pr4_round3_review.py",
@@ -365,8 +365,8 @@
     },
     {
       "destination_path": "tests/test_pr4_round4_review.py",
-      "destination_sha256": "d7a32af3032011eef6e153045dd74b9e53b614ed8582a88753e57545d5d6ced3",
-      "destination_size_bytes": 32909,
+      "destination_sha256": "7244dd7dc27335a3e84222d738d5446d05a01c56ad8fabe7912a925addf68754",
+      "destination_size_bytes": 33183,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",

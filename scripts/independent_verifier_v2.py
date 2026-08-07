@@ -52,6 +52,44 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
+# Module-level guard: refuse to run under python -O / PYTHONOPTIMIZE.
+# Per round-5 finding PRRT_kwDOTtyQLc6XSGep, every safety gate below
+# must use ``raise VerificationFailure(...)`` rather than ``assert``.
+# ``__debug__`` is False when the interpreter runs with -O or when
+# ``PYTHONOPTIMIZE`` is set in the environment. We refuse the run
+# outright so a malformed invocation cannot silently strip the gates.
+if not __debug__:
+    raise SystemExit(
+        "independent_verifier_v2 must not run under python -O or "
+        "PYTHONOPTIMIZE; assert-based gates would be stripped"
+    )
+
+
+class VerificationFailure(Exception):
+    """Raised when a security-relevant verifier gate rejects
+    live state. Used in place of ``assert`` so the gate cannot
+    be stripped by ``python -O`` or ``PYTHONOPTIMIZE``.
+
+    Every gate in this module that contributes to the
+    ``verdict == "VERIFIED"`` outcome MUST raise
+    ``VerificationFailure`` rather than ``assert`` so the
+    optimization-stripping fail-open path is impossible.
+    """
+
+
+def _gate(condition: bool, label: str, message: str) -> None:
+    """Raise ``VerificationFailure`` when ``condition`` is False.
+
+    Used in place of ``assert`` for every security-relevant gate
+    in this module. ``label`` identifies the gate (used in the
+    raised message) and ``message`` describes the specific
+    failure. The exception cannot be stripped by ``python -O``
+    or ``PYTHONOPTIMIZE``.
+    """
+    if not condition:
+        raise VerificationFailure(f"{label}: {message}")
+
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
@@ -192,6 +230,7 @@ query Reviews($owner: String!, $name: String!, $pr: Int!, $first: Int!, $cursor:
           hasNextPage
           endCursor
         }
+        totalCount
         nodes {
           state
           submittedAt
@@ -234,25 +273,28 @@ def _assert_graphql_balanced(doc: str, label: str) -> None:
     """``label`` is the test/log identifier; ``doc`` is the
     rendered GraphQL document. Fail loudly on unbalanced scopes
     so the bug class from PRRT_kwDOTtyQLc6XRdiR cannot return."""
-    opens = doc.count("{")
-    closes = doc.count("}")
-    assert opens == closes, (
-        f"GraphQL document {label!r} is unbalanced: "
-        f"{opens} opens, {closes} closes"
-    )
+    opens = _GRAPHQL_BRACE_RE.findall(doc).count("{")
+    closes = _GRAPHQL_BRACE_RE.findall(doc).count("}")
+    if opens != closes:
+        raise VerificationFailure(
+            f"GraphQL document {label!r} is unbalanced: "
+            f"{opens} opens, {closes} closes"
+        )
     depth = 0
     for ch in doc:
         if ch == "{":
             depth += 1
         elif ch == "}":
             depth -= 1
-        assert depth >= 0, (
-            f"GraphQL document {label!r} has a closing brace before "
-            f"an opening one"
+        if depth < 0:
+            raise VerificationFailure(
+                f"GraphQL document {label!r} has a closing brace before "
+                f"an opening one"
+            )
+    if depth != 0:
+        raise VerificationFailure(
+            f"GraphQL document {label!r} does not fully close (depth={depth})"
         )
-    assert depth == 0, (
-        f"GraphQL document {label!r} does not fully close (depth={depth})"
-    )
 
 
 # Compile-time validation: every built-in document MUST be balanced.
@@ -309,7 +351,8 @@ def _paginate_connection(
 
     Returns ``(nodes, total_count)``. Always requires
     ``totalCount`` to be present (per round-4 finding
-    PRRT_kwDOTtyQLc6XRdia: completeness must FAIL CLOSED if
+    PRRT_kwDOTtyQLc6XRdia and round-5 finding
+    PRRT_kwDOTtyQLc6XSGeg: completeness must FAIL CLOSED if
     ``totalCount`` is absent).
     """
     nodes: List[dict] = []
@@ -319,7 +362,7 @@ def _paginate_connection(
     while True:
         page += 1
         if page > PAGINATION_MAX_PAGES:
-            raise AssertionError(
+            raise VerificationFailure(
                 f"{label} pagination exceeded {PAGINATION_MAX_PAGES} "
                 f"pages; aborting to avoid an infinite loop"
             )
@@ -334,18 +377,21 @@ def _paginate_connection(
                     .get(label, {}))
         # totalCount is REQUIRED for fail-closed completeness.
         page_total = data.get("totalCount")
-        if page_total is None:
-            raise AssertionError(
-                f"{label} response omitted totalCount; "
-                f"pagination completeness cannot be proven; "
-                f"failing closed to avoid an invisible partial inventory"
-            )
+        _gate(
+            page_total is not None,
+            f"{label} totalCount completeness",
+            f"{label} response omitted totalCount; "
+            f"pagination completeness cannot be proven; "
+            f"failing closed to avoid an invisible partial inventory",
+        )
         if total is None:
             total = page_total
         else:
-            assert page_total == total, (
+            _gate(
+                page_total == total,
+                f"{label} totalCount consistency",
                 f"{label} totalCount changed across pages: "
-                f"{total} -> {page_total}"
+                f"{total} -> {page_total}",
             )
         page_nodes = data.get("nodes", [])
         nodes.extend(page_nodes)
@@ -353,14 +399,17 @@ def _paginate_connection(
         if not page_info.get("hasNextPage"):
             break
         cursor = page_info["endCursor"]
-    assert total is not None, (
+    _gate(
+        total is not None,
+        f"{label} totalCount completeness",
         f"{label} pagination completed without a totalCount; "
-        f"the response was missing totalCount on every page"
+        f"the response was missing totalCount on every page",
     )
-    assert len(nodes) == total, (
-        f"{label} pagination completeness: "
+    _gate(
+        len(nodes) == total,
+        f"{label} pagination completeness",
         f"collected {len(nodes)} != totalCount {total}; "
-        f"a node on a later page would be invisible"
+        f"a node on a later page would be invisible",
     )
     return nodes, total
 
@@ -455,44 +504,49 @@ def _fetch_pr(args, qual) -> dict:
     ])
     print(json.dumps(data, indent=2))
     live_head = str(data.get("headRefOid", "")).lower()
-    assert live_head == qual, (
-        f"live PR head {live_head!r} != qualification_head {qual!r}"
+    _gate(
+        live_head == qual,
+        "exact live PR head",
+        f"live PR head {live_head!r} != qualification_head {qual!r}",
     )
-    assert data.get("state") == "OPEN", (
-        f"PR state is {data.get('state')!r}, expected 'OPEN'"
+    _gate(
+        data.get("state") == "OPEN",
+        "PR state",
+        f"PR state is {data.get('state')!r}, expected 'OPEN'",
     )
-    assert data.get("mergedAt") is None, "PR is merged; verifier should fail"
-    assert data.get("isDraft") is False, (
-        f"PR is a draft; verifier must reject; isDraft={data.get('isDraft')!r}"
+    _gate(
+        data.get("mergedAt") is None,
+        "merged state",
+        f"PR is merged at {data.get('mergedAt')!r}; verifier should fail",
     )
-    # POSITIVE mergeability contract (per round-4 finding
-    # PRRT_kwDOTtyQLc6XRdig). The verifier requires an explicit
-    # positive readiness value -- UNKNOWN / CONFLICTING both
-    # fail. This is consistent with the production guarded-merge
-    # path: a real merge is unsafe until mergeability is
-    # confirmed, and a verifier that allows UNKNOWN would pass
-    # a PR whose readiness has not yet been computed.
+    _gate(
+        data.get("isDraft") is False,
+        "draft state",
+        f"PR is a draft; isDraft={data.get('isDraft')!r}",
+    )
     mergeable = data.get("mergeable")
-    assert mergeable == "MERGEABLE", (
+    _gate(
+        mergeable == "MERGEABLE",
+        "mergeability",
         f"PR mergeability is not positively confirmed; "
         f"mergeable={mergeable!r}, "
         f"mergeStateStatus={data.get('mergeStateStatus')!r}; "
-        f"UNKNOWN and CONFLICTING both fail"
+        f"UNKNOWN and CONFLICTING both fail",
     )
-    # POSITIVE mergeStateStatus contract. GitHub returns
-    # CLEAN / HAS_HOOKS / UNSTABLE for an actively-mergeable PR;
-    # UNKNOWN means mergeability has not been computed yet and
-    # the verifier MUST reject it.
     merge_state_status = data.get("mergeStateStatus")
     ACCEPTED_STATES = ("CLEAN", "HAS_HOOKS", "UNSTABLE")
-    assert merge_state_status in ACCEPTED_STATES, (
+    _gate(
+        merge_state_status in ACCEPTED_STATES,
+        "mergeStateStatus",
         f"PR mergeStateStatus={merge_state_status!r} is not in "
         f"the positive set {ACCEPTED_STATES}; UNKNOWN and "
-        f"DIRTY/BLOCKED/BEHIND both fail"
+        f"DIRTY/BLOCKED/BEHIND both fail",
     )
     auto_merge = data.get("autoMergeRequest")
-    assert auto_merge is None, (
-        f"autoMergeRequest must be None; got {auto_merge!r}"
+    _gate(
+        auto_merge is None,
+        "auto-merge absent",
+        f"autoMergeRequest must be None; got {auto_merge!r}",
     )
     print(f"OK: live PR head == qualification_head == {qual}")
     return data
@@ -505,31 +559,52 @@ def _inspect_ci(args, qual) -> dict:
         "-q", ".",
         "--paginate",
     ])
+    # ``--paginate`` emits one JSON document per page; the
+    # helper returns a list. The repository-wide total_count
+    # appears on every page in object responses but is not
+    # returned by the list response shape. We require an
+    # explicit ``total_count`` from the API; defaulting to
+    # ``len(runs)`` would make the completeness assertion
+    # tautological (always true). When the response is an
+    # object, we accept ``total_count``; when it is a list,
+    # ``total_count`` is absent and we FAIL CLOSED.
     if isinstance(raw, list):
         runs = raw
-        total_count = len(runs)
+        total_count = None
     else:
         runs = raw.get("check_runs", [])
-        total_count = raw.get("total_count", len(runs))
+        total_count = raw.get("total_count")
     print(f"check-runs total: {total_count}, collected: {len(runs)}")
     for r in runs:
         print(f"  {r['name']}: {r.get('conclusion') or r.get('status')}")
         head_sha = str(r.get("head_sha") or r.get("head", {}).get("sha") or "")
-        if head_sha and head_sha.lower() != qual:
-            raise AssertionError(
-                f"check-run {r['name']!r} head_sha={head_sha!r} "
-                f"!= qualification_head={qual!r}"
-            )
-    # FAIL CLOSED on completeness (per round-4 P0).
-    # total_count must be present and must equal collected count.
-    assert total_count > 0, (
-        f"check-runs response omitted total_count; "
-        f"completeness cannot be proven"
+        _gate(
+            not head_sha or head_sha.lower() == qual,
+            "exact-head CI",
+            f"check-run {r['name']!r} head_sha={head_sha!r} "
+            f"!= qualification_head={qual!r}",
+        )
+    # FAIL CLOSED on completeness (per round-4 P0 and round-5
+    # outside-diff comment). The reported ``total_count`` MUST
+    # be present; defaulting to ``len(runs)`` would make the
+    # equality assertion tautological.
+    _gate(
+        total_count is not None,
+        "exact-head CI",
+        "check-runs response omitted total_count; "
+        "completeness cannot be proven; failing closed",
     )
-    assert len(runs) == total_count, (
+    _gate(
+        total_count > 0,
+        "exact-head CI",
+        f"check-runs response reported total_count == 0",
+    )
+    _gate(
+        len(runs) == total_count,
+        "exact-head CI",
         f"check-runs pagination completeness: "
         f"collected {len(runs)} != total_count {total_count}; "
-        f"a check-run beyond page 1 would be invisible"
+        f"a check-run beyond page 1 would be invisible",
     )
     required_jobs = {
         "test (3.10)", "test (3.11)", "test (3.12)",
@@ -537,10 +612,18 @@ def _inspect_ci(args, qual) -> dict:
     }
     seen = {r["name"] for r in runs}
     missing = required_jobs - seen
-    assert not missing, f"missing required jobs: {missing}"
+    _gate(
+        not missing,
+        "required CI completeness",
+        f"missing required jobs: {missing}",
+    )
     failed = [r["name"] for r in runs
               if r.get("conclusion") not in ("success", "skipped", "neutral")]
-    assert not failed, f"failed jobs: {failed}"
+    _gate(
+        not failed,
+        "exact-head CI",
+        f"failed jobs: {failed}",
+    )
     print(f"OK: all 6 required jobs are green on qualification head {qual}")
     return {"runs": runs, "total_count": total_count}
 
@@ -568,8 +651,10 @@ def _inspect_coderabbit(args) -> dict:
     # order. submittedAt is required; missing submittedAt would
     # be ambiguous and we fail closed.
     for r in coderabbit_reviews:
-        assert r.get("submittedAt"), (
-            f"CodeRabbit review missing submittedAt: {r!r}"
+        _gate(
+            r.get("submittedAt"),
+            "CodeRabbit review submittedAt",
+            f"CodeRabbit review missing submittedAt: {r!r}",
         )
     coderabbit_reviews.sort(
         key=lambda r: r.get("submittedAt", ""),
@@ -593,22 +678,30 @@ def _inspect_coderabbit(args) -> dict:
     print(f"matching CodeRabbit reviews (sorted by submittedAt desc): "
           f"{[(r.get('submittedAt'), r.get('state')) for r in coderabbit_reviews]}")
 
-    assert decision is not None, (
-        "live reviewDecision is None; no review decision is available"
+    _gate(
+        decision is not None,
+        "CodeRabbit reviewDecision",
+        "live reviewDecision is None; no review decision is available",
     )
-    assert decision != "CHANGES_REQUESTED", (
-        f"live reviewDecision is {decision!r}; verifier must fail closed"
+    _gate(
+        decision != "CHANGES_REQUESTED",
+        "CodeRabbit reviewDecision",
+        f"live reviewDecision is {decision!r}; verifier must fail closed",
     )
-    assert coderabbit_reviews, (
+    _gate(
+        coderabbit_reviews,
+        "CodeRabbit presence",
         "no live CodeRabbit review found across all paginated "
         "latestReviews; the production identity contract requires "
-        "coderabbitai or coderabbitai[bot]"
+        "coderabbitai or coderabbitai[bot]",
     )
     latest = coderabbit_reviews[0]
     latest_state = latest["state"]
-    assert latest_state == "APPROVED", (
+    _gate(
+        latest_state == "APPROVED",
+        "CodeRabbit latest review state",
         f"newest live CodeRabbit review is {latest_state!r}; "
-        f"verifier must require APPROVED"
+        f"verifier must require APPROVED",
     )
     return {
         "review_decision": decision,
@@ -626,7 +719,11 @@ def _inspect_threads(args) -> dict:
           f"unresolved: {sum(1 for n in nodes if not n['isResolved'])}, "
           f"unresolved_outdated: {sum(1 for n in nodes if not n['isResolved'] and n['isOutdated'])}")
     unresolved = [n for n in nodes if not n["isResolved"]]
-    assert not unresolved, f"unresolved threads: {unresolved}"
+    _gate(
+        not unresolved,
+        "unresolved thread gate",
+        f"unresolved threads: {unresolved}",
+    )
     print(f"OK: every review thread on PR #{args.pr_number} is resolved")
     return {"nodes": nodes, "count": total}
 
@@ -638,7 +735,12 @@ def _verify_aed(args) -> dict:
     measured_sha = hashlib.sha256(raw).hexdigest()
     print(f"actual:   {measured_sha}")
     print(f"expected: {args.aed_expected_sha}")
-    assert measured_sha == args.aed_expected_sha, "AED sha mismatch"
+    _gate(
+        measured_sha == args.aed_expected_sha,
+        "AED digest",
+        f"measured_sha={measured_sha!r} != "
+        f"aed_expected_sha={args.aed_expected_sha!r}",
+    )
     manifest_path = REPO_ROOT / "provenance" / "aed-pr417-source-manifest.json"
     with manifest_path.open() as f:
         m = json.load(f)
@@ -646,14 +748,19 @@ def _verify_aed(args) -> dict:
         e for e in m["files"]
         if e["destination_path"] == "scripts/quiet_window_observer.py"
     ]
-    assert len(matches) == 1, (
+    _gate(
+        len(matches) == 1,
+        "AED manifest uniqueness",
         f"manifest must contain exactly one entry for "
-        f"scripts/quiet_window_observer.py; found {len(matches)}"
+        f"scripts/quiet_window_observer.py; found {len(matches)}",
     )
     manifest_sha = matches[0]["destination_sha256"]
     print(f"manifest: {manifest_sha}")
-    assert manifest_sha == args.aed_expected_sha, (
-        "manifest sha does not match the measured/expected AED sha"
+    _gate(
+        manifest_sha == args.aed_expected_sha,
+        "AED manifest digest",
+        f"manifest sha {manifest_sha!r} does not match the "
+        f"expected AED sha {args.aed_expected_sha!r}",
     )
     print("OK: AED sha matches measured, manifest, and PR-3 base")
     return {
@@ -669,29 +776,50 @@ def _verify_strict_window(args, qual) -> dict:
     data = [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
     qualifying = [d for d in data if d.get("qualifying")]
     print(f"total: {len(data)}, qualifying: {len(qualifying)}")
-    assert len(qualifying) >= 1, "no qualifying observations"
+    _gate(
+        len(qualifying) >= 1,
+        "strict-window observations",
+        "no qualifying observations in strict window record",
+    )
     span = qualifying[-1]["ts_monotonic"] - qualifying[0]["ts_monotonic"]
     print(f"span: {span:.3f} seconds (target: >= 180)")
-    assert span >= 180.0, "strict window < 180s"
+    _gate(
+        span >= 180.0,
+        "strict-window duration",
+        f"strict window span {span:.3f}s < 180s",
+    )
     pids = {d.get("supervisor_pid") for d in qualifying}
     start_ids = {d.get("process_start_identity") for d in qualifying}
     heads = {str(d.get("pr_head_sha", "")).lower() for d in qualifying}
-    assert len(pids) == 1, f"pid drift: {pids}"
-    assert len(start_ids) == 1, f"start_id drift: {start_ids}"
-    assert len(heads) == 1, f"head drift: {heads}"
+    _gate(len(pids) == 1, "strict-window supervisor_pid",
+          f"pid drift: {pids}")
+    _gate(len(start_ids) == 1, "strict-window process_start_identity",
+          f"start_id drift: {start_ids}")
+    _gate(len(heads) == 1, "strict-window head",
+          f"head drift: {heads}")
     obs_head = next(iter(heads))
-    assert obs_head == qual, (
+    _gate(
+        obs_head == qual,
+        "strict-window head binding",
         f"strict-window observation head {obs_head!r} != "
-        f"qualification head {qual!r}"
+        f"qualification head {qual!r}",
     )
     print(f"PID stable: {pids}, start_id stable: {start_ids}, head stable: {obs_head}")
     bad = [d for d in qualifying
            if not (d.get("head_ok") and d.get("all_ci_pass") and d.get("coderabbit_pass"))]
-    assert not bad, f"observations failing per-obs gates: {bad}"
+    _gate(
+        not bad,
+        "strict-window per-observation gates",
+        f"observations failing per-obs gates: {bad}",
+    )
     bad_threads = [d for d in qualifying
                   if d.get("threads", {}).get("unresolved", 0) != 0
                   or d.get("threads", {}).get("unresolved_outdated", 0) != 0]
-    assert not bad_threads, f"observations with unresolved threads: {bad_threads}"
+    _gate(
+        not bad_threads,
+        "strict-window threads-clean",
+        f"observations with unresolved threads: {bad_threads}",
+    )
     print("OK: strict window >= 180s, all invariants stable")
     return {
         "span_seconds": span,
@@ -703,22 +831,42 @@ def _verify_strict_window(args, qual) -> dict:
 @_step("Verify candidate + sidecar exact-file digests bound to qualification head")
 def _verify_candidate(args, qual) -> dict:
     paths = canonical_paths(args.evidence_root)
-    assert paths["candidate"].exists(), f"candidate missing: {paths['candidate']}"
+    _gate(
+        paths["candidate"].exists(),
+        "candidate artifact existence",
+        f"candidate missing: {paths['candidate']}",
+    )
     cand = read_artifact(paths["candidate"])
     sidecar = Path(str(paths["candidate"]) + ".sha256")
-    assert sidecar.exists(), f"sidecar missing: {sidecar}"
+    _gate(
+        sidecar.exists(),
+        "candidate sidecar existence",
+        f"sidecar missing: {sidecar}",
+    )
     sidecar_digest = sidecar.read_text().strip()
     print(f"candidate: {cand.digest}")
     print(f"sidecar:   {sidecar_digest}")
-    assert cand.digest == sidecar_digest, "candidate and sidecar digests differ"
-    assert len(cand.digest) == 64, "candidate digest must be 64 hex chars"
+    _gate(
+        cand.digest == sidecar_digest,
+        "candidate digest vs sidecar",
+        f"candidate digest {cand.digest!r} != sidecar digest {sidecar_digest!r}",
+    )
+    _gate(
+        len(cand.digest) == 64,
+        "candidate digest format",
+        f"candidate digest must be 64 hex chars; got {len(cand.digest)}",
+    )
     payload = cand.payload
     candidate_head = str(payload.get("exact_head", "")).lower()
-    assert candidate_head == qual, (
-        f"candidate.exact_head {candidate_head!r} != qualification head {qual!r}"
+    _gate(
+        candidate_head == qual,
+        "candidate exact_head binding",
+        f"candidate.exact_head {candidate_head!r} != qualification head {qual!r}",
     )
-    assert payload.get("pr_number") == args.pr_number, (
-        f"candidate pr mismatch: {payload.get('pr_number')}"
+    _gate(
+        payload.get("pr_number") == args.pr_number,
+        "candidate pr_number",
+        f"candidate pr_number {payload.get('pr_number')!r} != args.pr_number {args.pr_number!r}",
     )
     print(f"OK: candidate.exact_head == qualification_head == {qual}")
     return {
@@ -745,13 +893,19 @@ def _verify_incident_record(args) -> dict:
     verifier never modifies either the body or the sidecar.
     """
     p = args.incident_record
-    assert p.exists(), f"incident record missing: {p}"
+    _gate(
+        p.exists(),
+        "incident record existence",
+        f"incident record missing: {p}",
+    )
     sidecar_path = Path(str(p) + ".sha256")
-    assert sidecar_path.exists(), (
+    _gate(
+        sidecar_path.exists(),
+        "incident sidecar existence",
         f"incident sidecar missing: {sidecar_path}; "
         f"the verifier does not create sidecars. The canonical "
         f"sidecar must be produced by the artifact producer, "
-        f"not the verifier."
+        f"not the verifier.",
     )
     # ``read_artifact`` performs the canonical verification:
     # sidecar presence, digest equality, mode, and footer check.
@@ -763,10 +917,17 @@ def _verify_incident_record(args) -> dict:
     print(f"force_push_mechanism: {mechanism[:80]}")
     print(f"restored_head_sha: {payload.get('restored_head_sha')!r}")
     print(f"no_repeat_permitted: {payload.get('no_repeat_permitted')!r}")
-    assert "force" in mechanism.lower(), (
-        "incident record must record the force mechanism"
+    _gate(
+        "force" in mechanism.lower(),
+        "incident force_push_mechanism",
+        f"incident record must record the force mechanism; "
+        f"got {mechanism!r}",
     )
-    assert payload.get("no_repeat_permitted") is True, "must forbid repeat"
+    _gate(
+        payload.get("no_repeat_permitted") is True,
+        "incident no_repeat_permitted",
+        "must forbid repeat",
+    )
     print("OK: incident record is canonical, complete, and honest")
     return {
         "incident_digest": record.digest,
@@ -830,7 +991,11 @@ def _write_verifier(args, qual, observations) -> None:
         "verdict": "VERIFIED",
         "defects": [],
         "verified_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "verifier": "scripts.independent_verifier_v4",
+        "verifier": f"scripts.{Path(__file__).stem}",
+        "verifier_module_path": str(Path(__file__).resolve()),
+        "verifier_file_sha256": hashlib.sha256(
+            Path(__file__).read_bytes()
+        ).hexdigest(),
         "checks": {
             "live_pr_head_matches": str(pr.get("headRefOid", "")).lower() == qual,
             "exact_head_ci_all_pass": all(
@@ -861,13 +1026,31 @@ def _write_verifier(args, qual, observations) -> None:
     print(f"sidecar:    {Path(str(paths['verifier']) + '.sha256')}")
     print(f"digest:     {result.digest}")
     sidecar = Path(str(paths["verifier"]) + ".sha256")
-    assert sidecar.read_text().strip() == result.digest, "verifier sidecar mismatch"
+    _gate(
+        sidecar.read_text().strip() == result.digest,
+        "verifier sidecar",
+        f"verifier sidecar mismatch: {sidecar.read_text().strip()!r} != {result.digest!r}",
+    )
     reread = read_artifact(paths["verifier"])
-    assert reread.digest == result.digest
-    assert reread.payload.get("verdict") == "VERIFIED"
-    assert reread.payload.get("candidate_sha256") == cand_digest
-    assert reread.payload.get("qualification_head") == qual
-    assert reread.payload.get("aed_measured_sha256") == aed_measured
+    _gate(reread.digest == result.digest, "verifier reread digest",
+          f"reread digest {reread.digest!r} != written digest {result.digest!r}")
+    _gate(reread.payload.get("verdict") == "VERIFIED", "verifier verdict reread",
+          f"reread verdict {reread.payload.get('verdict')!r} != 'VERIFIED'")
+    _gate(
+        reread.payload.get("candidate_sha256") == cand_digest,
+        "verifier reread candidate_sha256",
+        f"reread candidate_sha256 {reread.payload.get('candidate_sha256')!r} != {cand_digest!r}",
+    )
+    _gate(
+        reread.payload.get("qualification_head") == qual,
+        "verifier reread qualification_head",
+        f"reread qualification_head {reread.payload.get('qualification_head')!r} != {qual!r}",
+    )
+    _gate(
+        reread.payload.get("aed_measured_sha256") == aed_measured,
+        "verifier reread aed_measured_sha256",
+        f"reread aed_measured_sha256 {reread.payload.get('aed_measured_sha256')!r} != {aed_measured!r}",
+    )
     print(f"OK: verifier.json + sidecar written; "
           f"verifier.qualification_head == {qual}")
 
