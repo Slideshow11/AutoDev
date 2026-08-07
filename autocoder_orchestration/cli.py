@@ -1162,6 +1162,14 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "squash_merge_commit": record.squash_merge_commit,
                 "merge_record_path": str(merge_record_path),
                 "merge_record_digest": rec_digest,
+                "recovery_required": True,
+                "recovery_action": (
+                    "merge_record is durable on disk; "
+                    "COMPLETE transition must be re-applied "
+                    "(e.g. retry cmd_post_merge_verify) before "
+                    "downstream automation can treat the run as "
+                    "completed"
+                ),
                 "complete_state_persisted": False,
             },
             json_mode=args.json,
@@ -1246,15 +1254,25 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     except (ControllerError, StateStoreError, StateError, OSError) as e:
         # The merge record is durable on disk; the durable
         # COMPLETE transition failed. The recovery payload
-        # identifies both the merge-record PATH and DIGEST so a
-        # follow-up retry can locate the durable evidence
-        # without inspecting the state store directly. Round-5
-        # finding PRRT_kwDOTtyQLc6XSGfP.
+        # identifies both the merge-record PATH and the verified
+        # exact-file DIGEST (returned by ``read_artifact``, which
+        # compares the body against its sidecar) so a follow-up
+        # retry can locate the durable evidence without
+        # inspecting the state store directly. Round-5 finding
+        # PRRT_kwDOTtyQLc6XSGfP.
         return _emit(
             {
                 "error": f"durable COMPLETE transition failed: {e!r}",
                 "merge_record_path": str(paths["merge_record"]),
                 "merge_record_sha256": record_result.digest,
+                "recovery_required": True,
+                "recovery_action": (
+                    "merge_record is durable on disk; "
+                    "COMPLETE transition must be re-applied "
+                    "(e.g. retry cmd_post_merge_verify) before "
+                    "downstream automation can treat the run as "
+                    "completed"
+                ),
             },
             json_mode=args.json,
             exit_code=EXIT_STATE,

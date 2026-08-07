@@ -371,6 +371,24 @@
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
       "transformation_explanation": "Newly authored regression tests for PR #4 round-4 review findings: balanced GraphQL query builders, totalCount-required pagination, positive live PR readiness, explicit-latest CodeRabbit review via submittedAt sorting, incident-record self-authentication removed (verifier does not create sidecars), StateError post-merge COMPLETE recovery, failed-verifier canonical semantics. Loads scripts/independent_verifier_v2.py as a module and exercises _inspect_coderabbit and _verify_incident_record with mocked GraphQL responses rather than relying on source inspection alone."
+    },
+    {
+      "destination_path": "autocoder_orchestration/cli.py",
+      "destination_sha256": "cb71850b6fe1f409eabaed9f21fa684b6ea5f9de8b86c4857ddc504491bde0bd",
+      "destination_size_bytes": 54485,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_source_addition",
+      "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive."
+    },
+    {
+      "destination_path": "tests/test_pr4_round5_hardening.py",
+      "destination_sha256": "2d71e0bce058ab4c423b6af1a5b1ad2741f7e6ab9d4425bd17513bd071075391",
+      "destination_size_bytes": 34621,
+      "source_path": null,
+      "source_sha256": null,
+      "transformation_classification": "standalone_test_addition",
+      "transformation_explanation": "Newly authored round-5 hardening regression tests: python -O refusal (subprocess), PYTHONOPTIMIZE refusal, no verified artifact under optimized Python, producer-identity derived from module path (no v3/v4 hardcoded), incident-record precise failure modes (missing sidecar, digest mismatch, correct record), real later-page CodeRabbit pagination with cursor propagation, full recovery contract with merge_record_path and merge_record_sha256, PRRT_kwDOTtyQLc6XPdD0 zero-gh-invocations proof."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",
