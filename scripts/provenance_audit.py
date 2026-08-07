@@ -21,16 +21,19 @@ the normal generation path.
 
 Usage::
 
-    python3 -m scripts.provenance_audit.regenerate
+    python3 -m scripts.provenance_audit regenerate
     # or
     python3 scripts/provenance_audit.py regenerate
 
-The CLI entry point is the audit.subcommand argument
-on the module's main().
+The canonical directly-invoked form is
+``python3 scripts/provenance_audit.py regenerate``. The
+``python3 -m scripts.provenance_audit`` form imports the
+module as ``scripts.provenance_audit``.
 """
 from __future__ import annotations
 
 import argparse
+import tempfile
 import hashlib
 import json
 import os
@@ -201,11 +204,36 @@ def _validate_audit_consistency(audit: dict) -> None:
 
 
 def write_audit(audit: dict, audit_path: Path = AUDIT_PATH) -> None:
-    """Write the audit atomically. The audit is
-    finalized only after the pre-publish consistency
-    check passes."""
-    with audit_path.open("w") as f:
-        json.dump(audit, f, indent=2)
+    """Atomically write the audit to disk.
+
+    The audit is finalized only after the pre-publish
+    consistency check passes. The serialization uses a
+    temporary file in the same directory as the target,
+    flushes + fsyncs it, then atomically promotes it
+    with ``os.replace``. A failure in any step cleans up
+    the temporary file. The output format is preserved
+    (UTF-8 JSON, indent=2, no trailing newline beyond
+    json.dump default)."""
+    _validate_audit_consistency(audit)
+    audit_path = Path(audit_path)
+    parent = audit_path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(parent), prefix=audit_path.name + ".", suffix=".tmp"
+    )
+    tmp = Path(tmp_path)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(audit, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, audit_path)
+    except Exception:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
 
 
 def main() -> int:
@@ -217,8 +245,14 @@ def main() -> int:
     regen.add_argument("--audit", type=Path, default=AUDIT_PATH)
     regen.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     check = sub.add_parser("check",
-                            help="Run the consistency check on the existing audit")
+                            help="Run the consistency check on the existing audit; "
+                                 "recompute canonical metrics from the live manifest "
+                                 "and reject the audit when either the metrics or "
+                                 "manifest_records differ from the recomputed manifest "
+                                 "values. Use this to detect drift between the audit "
+                                 "and the authoritative manifest.")
     check.add_argument("--audit", type=Path, default=AUDIT_PATH)
+    check.add_argument("--manifest", type=Path, default=MANIFEST_PATH)
     args = p.parse_args()
     if args.subcommand == "regenerate":
         audit = regenerate_audit(args.audit, args.manifest)
@@ -228,8 +262,29 @@ def main() -> int:
     elif args.subcommand == "check":
         with args.audit.open() as f:
             audit = json.load(f)
+        with args.manifest.open() as f:
+            manifest = json.load(f)
         _validate_audit_consistency(audit)
-        print(f"OK: audit consistency check passed")
+        canonical_metrics = compute_manifest_metrics(manifest)
+        canonical_record_source_paths = {
+            r["source_path"] for r in
+            compute_extracted_manifest_records(manifest)
+        }
+        mm = audit["extracted_manifest_match"]
+        for key, canonical_value in canonical_metrics.items():
+            if mm.get(key) != canonical_value:
+                raise ProvenanceAuditError(
+                    f"audit drift: extracted_manifest_match.{key}={mm.get(key)} "
+                    f"!= canonical {key}={canonical_value} from manifest")
+        audit_record_source_paths = {
+            r.get("source_path") for r in mm.get("manifest_records", [])
+        }
+        if audit_record_source_paths != canonical_record_source_paths:
+            raise ProvenanceAuditError(
+                f"audit manifest_records source_paths diverge from manifest: "
+                f"audit={sorted(audit_record_source_paths)} "
+                f"manifest={sorted(canonical_record_source_paths)}")
+        print("OK: audit consistency check passed")
         return 0
     return 2
 
