@@ -986,10 +986,7 @@
         "destination_sha256": "75fd2f9ca74764dcc064b24bec9ac86cce2b32ce1c49869a78e27bda773b61ab",
         "source_size_bytes": 86428,
         "destination_size_bytes": 91496,
-        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates so the launch fails like any other launch failure rather than terminating the daemon. The production code is therefore no longer byte-identical to the source.",
-        "source_build": "aed-pr417-b57fcaad",
-        "destination_build": "autodev-current",
-        "explanation": "Source and destination intentionally represent different builds. The source is from AED PR #417 at commit b57fcaad. The destination is the current AutoDev build at the post-round-10 HEAD. The destination is no longer byte-identical because: (1) round-14 extended launch_worker with try/except guards around build_resume_prompt and worker_command template substitution; (2) the destination has additional regex-mode evidence for the launcher contract."
+        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
       },
       {
         "source_path": "scripts/local/autocoder_supervisor/validate.py",
@@ -1009,10 +1006,7 @@
         "destination_sha256": "276f952bffc44da970910ee17af1125ee1158e8e7555c88fc4b78d9e3d85ed42",
         "source_size_bytes": 39831,
         "destination_size_bytes": 66588,
-        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. The test file is no longer byte-identical to the AED source.",
-        "source_build": "aed-pr417-b57fcaad",
-        "destination_build": "autodev-current",
-        "explanation": "Source and destination intentionally represent different builds. Round-14 added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates."
+        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. The test file is no longer byte-identical to the AED source."
       },
       {
         "source_path": "tests/test_autocoder_supervisor_packaging.py",
@@ -1023,6 +1017,276 @@
         "source_size_bytes": 11444,
         "destination_size_bytes": 13130,
         "transformation_explanation": "Updated SOURCE_PKG and SOURCE_MANIFEST to point at the standalone package and pyproject.toml at the repository root. Test semantics unchanged."
+      },
+      {
+        "source_path": null,
+        "destination_path": ".github/workflows/ci.yml",
+        "transformation_classification": "standalone_ci_addition",
+        "source_sha256": null,
+        "destination_sha256": "7325cbae28e9dfa36e66c908893c49f53df874269062ff6f71cb90e4965da244",
+        "source_size_bytes": null,
+        "destination_size_bytes": 4502,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": ".github/workflows/scan-forbidden.txt",
+        "transformation_classification": "standalone_ci_addition",
+        "source_sha256": null,
+        "destination_sha256": "ec2421fd1750f05ee05448eba9b57ba3626d2f1614e7879987ac821e2787e976",
+        "source_size_bytes": null,
+        "destination_size_bytes": 182,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": ".gitignore",
+        "transformation_classification": "standalone_ci_addition",
+        "source_sha256": null,
+        "destination_sha256": "dbfdf2f2ec64f0a41ff7db9d10eff319f83080ad33130722cd96e7a3b464638d",
+        "source_size_bytes": null,
+        "destination_size_bytes": 714,
+        "transformation_explanation": "Round-10 directive: standalone AutoDev addition. The .gitignore has been kept current with typical Python patterns (.ruff_cache/, __pycache__/, etc.) and is a runtime artifact configuration file. It is not extracted from AED; AutoDev carries its own .gitignore."
+      },
+      {
+        "source_path": null,
+        "destination_path": "INVARIANTS.md",
+        "transformation_classification": "standalone_documentation_addition",
+        "source_sha256": null,
+        "destination_sha256": "c6d9ac4f88457ef91f81ca610bd011dd2dbb38f861069706551f47a1705f5051",
+        "source_size_bytes": null,
+        "destination_size_bytes": 29614,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "README.md",
+        "transformation_classification": "standalone_documentation_addition",
+        "source_sha256": null,
+        "destination_sha256": "e2f596396b14f79423bf02c38a3ff90c5285438aeb24cbc1289f89f6ea2b99b5",
+        "source_size_bytes": null,
+        "destination_size_bytes": 3389,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "docs/AED_INTEGRATION.md",
+        "transformation_classification": "standalone_documentation_addition",
+        "source_sha256": null,
+        "destination_sha256": "033ebb0e6accf9b78c576938be9455faa56802460ad38e6c9d9c9c6e91b550b0",
+        "source_size_bytes": null,
+        "destination_size_bytes": 2769,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "provenance/EXTRACTION.md",
+        "transformation_classification": "standalone_documentation_addition",
+        "source_sha256": null,
+        "destination_sha256": "247a80599a1e7b77ab669a500c834ea535b9abe377dd31ac5e741206bbd4f6eb",
+        "source_size_bytes": null,
+        "destination_size_bytes": 6859,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "scripts/canonical_scanner.py",
+        "transformation_classification": "standalone_ci_addition",
+        "source_sha256": null,
+        "destination_sha256": "fd08bb25f60e4fcff28d0fdb74274c9f9d03a8676da8db2efce1ae5963cb4b72",
+        "source_size_bytes": null,
+        "destination_size_bytes": 15456,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "scripts/scanner-occurrence-allowlist.json",
+        "transformation_classification": "standalone_ci_addition",
+        "source_sha256": null,
+        "destination_sha256": "fb7f7f41305b921c2df2a52d11277c35b7ac36c1b1e6f427efcff8c8c0f773aa",
+        "source_size_bytes": null,
+        "destination_size_bytes": 36242,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_extraction_provenance.py",
+        "transformation_classification": "standalone_ci_addition",
+        "source_sha256": null,
+        "destination_sha256": "3546cf16ad831fcad957b23ca9a182af06289d46e782080cea549a48b2e8f276",
+        "source_size_bytes": null,
+        "destination_size_bytes": 48092,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "docs/CONTROL_PLANE_ADR.md",
+        "transformation_classification": "standalone_documentation_addition",
+        "source_sha256": null,
+        "destination_sha256": "84aa10973ad4aad267d910951ee00ac394e105ba66bbc9dce6c629a8d2cc0cf5",
+        "source_size_bytes": null,
+        "destination_size_bytes": 11412,
+        "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
+      },
+      {
+        "source_path": null,
+        "destination_path": "autocoder_orchestration/canonical_paths.py",
+        "transformation_classification": "standalone_source_addition",
+        "source_sha256": null,
+        "destination_sha256": "11fe73024453dd35253484847f4bab4fb9311a7175a0bcfb30ebd0713e5981e3",
+        "source_size_bytes": null,
+        "destination_size_bytes": 1557,
+        "transformation_explanation": "Newly authored source addition: canonical artifact path helpers shared across init/authorize/merge/post-merge (TypedDict for static key checking)."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_coderabbit_identity_filter.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "6c1c21c936a9283d177f9ab8f3383e1e71a198e931430e4ac8628aefb1860d5d",
+        "source_size_bytes": null,
+        "destination_size_bytes": 10530,
+        "transformation_explanation": "Newly authored regression tests for the CodeRabbit identity filter, including the null-author (deleted account) fail-closed case."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_explicit_merge_commit_identity.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "f7e73990fb8e4898ea3444442b6a01f22dadb7bf28fef508f72694b9084b4f9c",
+        "source_size_bytes": null,
+        "destination_size_bytes": 12784,
+        "transformation_explanation": "Newly authored regression tests for the explicit mergeCommit identity contract, including parent count, parent SHA, and tree SHA assertions."
+      },
+      {
+        "source_path": null,
+        "destination_path": "autocoder_orchestration/merge_lock.py",
+        "transformation_classification": "standalone_source_addition",
+        "source_sha256": null,
+        "destination_sha256": "9fb455c6c5f67a49faab68f6e549b30ea9d58fa6fe63a5fb1450443453a3f88d",
+        "source_size_bytes": null,
+        "destination_size_bytes": 6079,
+        "transformation_explanation": "Newly authored source addition: cross-process merge lock via fcntl.flock. Holder PID is written only after flock succeeds, so a contender cannot overwrite the actual holder's metadata."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_canonical_evidence_flow.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "3e4e4a428bd43e1595a00b28af413a53c366e9aff3ed55138c227ccc4825ff29",
+        "source_size_bytes": null,
+        "destination_size_bytes": 10413,
+        "transformation_explanation": "Newly authored regression test for the canonical-evidence producer/consumer flow: candidate, verifier, and merge-inputs all point at the canonical evidence-root paths."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_cross_process_merge_lock.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "d3c452de24ee1d775b2f11398c99799a6b43f172e3a2ce9643a53d5a877c422a",
+        "source_size_bytes": null,
+        "destination_size_bytes": 6971,
+        "transformation_explanation": "Newly authored cross-process regression test for the merge lock: two real subprocesses, the holder's PID is read by the contender, not the contender's own."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_durable_complete_fails_closed.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "2ea9f1defa816682ed009fe9fc6661a0d2fcada781eae94fd7ffa8c9457dfb85",
+        "source_size_bytes": null,
+        "destination_size_bytes": 20114,
+        "transformation_explanation": "Newly authored regression tests for the durable COMPLETE fail-closed contract, including a direct cmd_merge regression."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_verify_artifact_digest_oserror.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "27706c99c396998ec20717893b4fb4b92f9f410053a2f0cc6bbf882f34bcc802",
+        "source_size_bytes": null,
+        "destination_size_bytes": 5163,
+        "transformation_explanation": "Newly authored regression test for the OSError handling of artifact-digest re-verification."
+      },
+      {
+        "source_path": null,
+        "destination_path": "scripts/independent_verifier_v2.py",
+        "transformation_classification": "standalone_addition",
+        "source_sha256": null,
+        "destination_sha256": "8b1fe753a61f394737ea9cf51d63a3539da403b7b27e93230b1cfe5a67237a38",
+        "source_size_bytes": null,
+        "destination_size_bytes": 43134,
+        "transformation_explanation": "Round-10 directive: scripts/independent_verifier_v2.py is a standalone addition to AutoDev. The AED source commit b57fcaad does not contain an independent verifier script at any path. The verifier was introduced in AutoDev to perform the FRESH strict qualification cycle (>=180 seconds) on PR #4. The production verifier embeds every required gate, fails closed on any drift, and the optimized-Python refuse guard is the module-import __debug__ callback."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_pr4_round3_review.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "b7bcb57555c0032fb4dba17330210d49000de1a39c8672498ec6386e8cb29da9",
+        "source_size_bytes": null,
+        "destination_size_bytes": 26624,
+        "transformation_explanation": "Newly authored regression tests for PR #4 round-3 review findings: canonical-write failure injection with retry, CLI does not duplicate canonical write, verifier measured-evidence lineage, cross-process holder/contender PID identity. The PID test catches the parent-os.getpid()-interpolation defect."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_pr4_round4_review.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "7244dd7dc27335a3e84222d738d5446d05a01c56ad8fabe7912a925addf68754",
+        "source_size_bytes": null,
+        "destination_size_bytes": 33183,
+        "transformation_explanation": "Newly authored regression tests for PR #4 round-4 review findings: balanced GraphQL query builders, totalCount-required pagination, positive live PR readiness, explicit-latest CodeRabbit review via submittedAt sorting, incident-record self-authentication removed (verifier does not create sidecars), StateError post-merge COMPLETE recovery, failed-verifier canonical semantics. Loads scripts/independent_verifier_v2.py as a module and exercises _inspect_coderabbit and _verify_incident_record with mocked GraphQL responses rather than relying on source inspection alone."
+      },
+      {
+        "source_path": null,
+        "destination_path": "autocoder_orchestration/cli.py",
+        "transformation_classification": "standalone_source_addition",
+        "source_sha256": null,
+        "destination_sha256": "cb71850b6fe1f409eabaed9f21fa684b6ea5f9de8b86c4857ddc504491bde0bd",
+        "source_size_bytes": null,
+        "destination_size_bytes": 54485,
+        "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_pr4_round5_hardening.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "8d8ca0447d781cc453ae1a608e943bd0efd5dc05f4ea2f8fa1d2696c2d78c2ad",
+        "source_size_bytes": null,
+        "destination_size_bytes": 34977,
+        "transformation_explanation": "Round-8 nitpick: optimize-python negative-existence test wraps the Path composition inside the assertFalse call so the BinOp is structurally contained inside the assertFalse Call (not a separate variable). The prior line-arithmetic exemption was wrong for this case; the AST containment check now correctly exempts the BinOp."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_pr4_round6_review.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "12cbae4b971109b6718e9cf6e6bb15ca53a5a5f7d766e92da5c630205363d0dd",
+        "source_size_bytes": null,
+        "destination_size_bytes": 64136,
+        "transformation_explanation": "Round-9 directive: PRRT_kwDOTtyQLc6XXFOx (safe offenders diagnostic; no offenders[0] indexing before the length assertion; the diagnostic is safe for [], one, and many offenders), PRRT_kwDOTtyQLc6XXFO3 (test docstring correction: page 1 returns hasNextPage=True and an endCursor; production paginator forwards that cursor on its second request; second mocked network call rejects the unexpected cursor; VerificationFailure propagates through real paginator). Also replaced the line-range AST containment check with AST node-id descendant tracking (true AST containment, not line overlap). Trimmed _make_args to only fields _inspect_ci actually reads (removed aed_path, aed_expected_sha, strict_window_obs, evidence_root -- removed the per-call file hashing for aed_expected_sha). Added Round9SafeDiagnosticsTests (3 tests: empty offenders diagnostic, one offender, many offenders) and Round9PaginatorPreservationTests (re-runs the real-paginator behavioral proof). Added a Round-9 regression case for an offender that shares a line with assertFalse but is NOT its argument (line-range overlap would wrongly exempt it; AST node-id containment correctly detects it)."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_pr4_round6_d0_fixture.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "ea4d5f44be52fc1cf4eb6d8e3e2a24e2ebd540d0cb1193e32cc27aeb7e4be24e",
+        "source_size_bytes": null,
+        "destination_size_bytes": 26718,
+        "transformation_explanation": "Round-8 nitpick: shared _is_gh_pr_merge matcher requires exact argv adjacency (argv[0]=='gh', argv[1]=='pr', argv[2]=='merge') and safely handles calls without positional arguments. _count_gh_pr_merge_calls and _find_gh_pr_merge_call now delegate to the shared matcher."
+      },
+      {
+        "source_path": null,
+        "destination_path": "scripts/quiet_window_observer.py",
+        "transformation_classification": "standalone_addition",
+        "source_sha256": null,
+        "destination_sha256": "9897bd3b780fd03561b6d9f10302ced2e549cb5f3288aebadddddaa1c70f42ae",
+        "source_size_bytes": null,
+        "destination_size_bytes": 15979,
+        "transformation_explanation": "Round-10 directive: scripts/quiet_window_observer.py is a standalone addition to AutoDev. It was not extracted from AED PR #417 (the AED reference commit b57fcaad does not contain a file at scripts/local/quiet_window_observer.py). The file is required by the production verifier (default --aed-path) and was added to AutoDev's seed. The manifest audit entry remains: measured sha256 = sha256 of destination file (verified) and the audit counts this file as a standalone addition."
       }
     ]
   },
