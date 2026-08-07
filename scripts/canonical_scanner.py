@@ -206,6 +206,14 @@ def _walk_text_files(repo_root: Path):
         ".venv",
         ".pytest_cache",
         "node_modules",
+        # Round-10 directive: ruff's local cache directory
+        # contains runtime artifacts that the committed-
+        # state scanner would erroneously flag as forbidden
+        # tokens (the cache stores committed-state analysis
+        # output). The cache is git-local and excluded from
+        # the .gitignore. The scanner treats it as a local
+        # runtime artifact and skips it.
+        ".ruff_cache",
     )
     for root, dirs, files in os.walk(repo_root):
         # Compare each directory under the repo_root against the

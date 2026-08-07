@@ -59,14 +59,23 @@ VerificationFailure = VERIFIER.VerificationFailure
 
 
 def _two_page(a, b):
-    """Drive a two-page paginator. The CLI invocation always
-    passes ``-F page=N`` (or ``-F page=K`` on page 2); the
-    driver returns the corresponding page."""
+    """Drive a two-page paginator. The CLI invocation now
+    embeds ``?per_page=&page=N`` in the URL (round-10
+    directive). The driver extracts the page number from
+    either URL form or the legacy ``-F page=N`` field form,
+    so the test remains compatible with the production
+    collector's actual subprocess invocation."""
     def _run(al, *, env=None):
         for a_token in al:
-            if isinstance(a_token, str) and a_token.startswith("page="):
-                n = int(a_token.split("=", 1)[1])
-                return [a, b][n - 1]
+            if isinstance(a_token, str):
+                # URL form: .../check-runs?per_page=100&page=N
+                if "page=" in a_token:
+                    # Find the LAST page= occurrence (avoid
+                    # matching per_page=).
+                    import re
+                    m = re.search(r"[?&]page=(\d+)", a_token)
+                    if m:
+                        return [a, b][int(m.group(1)) - 1]
         raise AssertionError(f"no page= in {al!r}")
     return _run
 
@@ -144,11 +153,15 @@ class MultiPageCheckRunCollectorTests(unittest.TestCase):
         """Drive ``_collect_check_runs`` against ``pages``;
         return only the collector result (the prior unused
         ``calls`` list has been removed)."""
+        import re
         def fake_run_gh(args_list, *, env=None):
             page = 1
-            for a in args_list:
-                if isinstance(a, str) and a.startswith("page="):
-                    page = int(a.split("=", 1)[1])
+            for a_t in args_list:
+                if isinstance(a_t, str):
+                    # URL form: .../check-runs?per_page=100&page=N
+                    m = re.search(r"[?&]page=(\d+)", a_t)
+                    if m:
+                        page = int(m.group(1))
             idx = page - 1
             if idx >= len(pages):
                 return {"check_runs": [], "total_count": 0}
@@ -537,13 +550,16 @@ class InspectCiTests(unittest.TestCase):
         # Track every call into the mocked _run_gh so we can
         # prove both pages were visited by the production
         # multi-page collector.
+        import re
         calls = []
         def fake_run_gh(args_list, *, env=None):
             calls.append(args_list)
             for a_token in args_list:
-                if isinstance(a_token, str) and a_token.startswith("page="):
-                    n = int(a_token.split("=", 1)[1])
-                    return [a, b][n - 1]
+                if isinstance(a_token, str):
+                    m = re.search(r"[?&]page=(\d+)", a_token)
+                    if m:
+                        n = int(m.group(1))
+                        return [a, b][n - 1]
             raise AssertionError(f"no page= in {args_list!r}")
         args = self._make_args()
         with mock.patch.object(VERIFIER, "_run_gh",

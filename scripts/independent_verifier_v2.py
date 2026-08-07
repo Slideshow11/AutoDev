@@ -657,11 +657,14 @@ def _collect_check_runs(args, qual) -> tuple:
         # ``--paginate`` because its concatenated JSON output
         # cannot be parsed by a single ``json.loads`` call.
         try:
+            # Round-10 directive: ``-F`` on `gh api` is interpreted
+            # as a header field, NOT a URL query string. The
+            # ``?per_page=100&page=N`` parameters must be in the
+            # URL itself for the endpoint to honor pagination.
             data = _run_gh([
-                "api", f"repos/{args.repo}/commits/{qual}/check-runs",
-                "-q", ".",
-                "-F", f"per_page={_CHECK_RUN_PAGE_SIZE}",
-                "-F", f"page={page_n}",
+                "api",
+                f"repos/{args.repo}/commits/{qual}/check-runs"
+                f"?per_page={_CHECK_RUN_PAGE_SIZE}&page={page_n}",
             ])
         except json.JSONDecodeError as e:
             raise VerificationFailure(
