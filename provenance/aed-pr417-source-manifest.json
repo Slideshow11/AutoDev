@@ -392,21 +392,21 @@
     },
     {
       "destination_path": "tests/test_pr4_round6_review.py",
-      "destination_sha256": "3c96b5c90f09cb09cd6cb137eea4ca1e20ea98ccfb0dc4840fe5928b90798e44",
-      "destination_size_bytes": 30831,
+      "destination_sha256": "85198ba6b43c38ea00586c8d5a6eda14fbad2c641baac16bbf800c7bb575bb6e",
+      "destination_size_bytes": 47033,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Newly authored round-6 review regression tests: multi-page check-run collector (one/two/three pages, failing on page 2, missing on page 2, missing total_count, conflicting total_count, malformed page, duplicate run IDs, every collected head_sha, no raw JSONDecodeError); F541 ruff check; latest-review-state diagnostic; tempfile paths; redundant source-text removal; canonical_paths; 4-page cursor mapping; ArtifactError only."
+      "transformation_explanation": "Round-7 directive: comprehensive rewrite addressing PRRT_kwDOTtyQLc6XV61A (production _inspect_ci tests for failing-required-job and missing-required-job, plus a positive _inspect_ci control), XV61D (regex detects both single- and double-quoted /tmp/*.json literals), XV61F (AST-based verifier.json path composition detector with exemption for negative-existence assertFalse patterns), XV61O (assertRaises(VerificationFailure) with specific diagnostic assertions), nitpicks (consolidated _make_page comprehensions, removed unused calls list, real 100-run two/three-page tests, _drive_paginator extracted to module-level helper)."
     },
     {
       "destination_path": "tests/test_pr4_round6_d0_fixture.py",
-      "destination_sha256": "10f01983c3439cfe3647397a2ee25de09388394b54d032cc833913dda46fa4cc",
-      "destination_size_bytes": 17178,
+      "destination_sha256": "c794c923a31e0f1a2638b20e5ea3a5040b1b9db17341321ed6dda94a265278a6",
+      "destination_size_bytes": 26624,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Round-6 directive 9g: complete D0 behavioral proof with comprehensive fixture (real Git repo, valid candidate, valid verifier, valid MergeAuthorization, valid live PR payload matching the authorization, MERGEABLE/CLEAN/no-auto-merge, zero unresolved threads, working tree clean). Three tests: control (original verifier advances to _safe_run with call_count >= 1), replacement-digest-mismatch (verifier replaced AFTER authorization with structurally-acceptable record; only a non-critical field differs; guarded merge rejects with verifier digest mismatch diagnostic; _safe_run is never invoked), failed-verdict (the verifier_failed FAILED record path remains un-authorizable)."
+      "transformation_explanation": "Round-7 directive proof repair: tests/test_pr4_round6_d0_fixture.py addresses PRRT_kwDOTtyQLc6XV60h (git rev-parse uses check=True so failures raise immediately), XV604 (control test captures swallowed exception into diagnostics, counts exact gh pr merge argv via _count_gh_pr_merge_calls, asserts pr number / repo / --squash / --match-head-commit / --delete-branch / no forbidden flags). Negative test counts gh_pr_merge_invocation_count == 0 and asserts the digest mismatch diagnostic. Failed-verdict test binds authorization to the FAILED record's exact digest so the verdict guard fires, NOT the digest guard, and asserts the FAILED verdict diagnostic. The authorization, candidate, and live_pr_payload.head.sha reference the real committed head (init_head) returned by _init_real_git_repo."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",

@@ -1,22 +1,30 @@
-"""Round-6 directive 9g: complete D0 behavioral proof.
+"""Round-6 directive 9g + Round-7 directive proof repair:
+complete D0 behavioral proof.
 
 PRRT_kwDOTtyQLc6XPdD0 evidence: a passing verifier artifact
 exists; authorization binds its exact digest; verifier_failed
 (or any other tampering) replaces the canonical verifier
 afterward; the guarded merge re-reads the canonical verifier;
 the replacement is detected by digest mismatch; the guarded
-transaction fails; ``_safe_run / gh pr merge`` invocation count
-remains exactly ZERO.
+transaction fails; ``gh pr merge`` invocation count remains
+exactly ZERO.
 
-The round-5 evidence was insufficient because the fixture
-used empty directories and unclear preconditions. This round-6
-test rebuilds the fixture as a comprehensive, correct
+The round-6 evidence was insufficient because:
+* git rev-parse HEAD did not use check=True (PRRT_kwDOTtyQLc6XV60h);
+* the control test swallowed arbitrary exceptions and only
+  counted every helper invocation instead of the exact
+  gh pr merge command (PRRT_kwDOTtyQLc6XV604);
+* the failed-verdict test did not actually exercise the verdict
+  guard because the digest guard fired first.
+
+The round-7 D0 fixture builds a comprehensive, correct
 merge-transaction scenario:
 
 * real Git checkout (with a real commit on the merged branch);
-* valid distinct repository root;
-* valid distinct run-state root;
-* valid distinct evidence root;
+* the authorization, candidate, and live_pr_payload.head.sha
+  all reference that real committed head;
+* valid distinct repository root, run-state root, and
+  evidence root;
 * valid canonical candidate artifact + sidecar;
 * valid canonical passing verifier artifact + sidecar;
 * valid MergeAuthorization;
@@ -33,23 +41,49 @@ merge-transaction scenario:
 * zero unresolved current threads;
 * working tree clean.
 
-The test first runs the production transaction against the
-original verifier (the CONTROL) and proves the fixture advances
-to the ``_safe_run`` boundary. Then the test runs the same
-sequence with the canonical verifier replaced AFTER
-authorization with a structurally-acceptable but
-digest-different record (verdict=VERIFIED, defects=[],
-candidate_sha256 unchanged, harmless field differs). The
-guarded transaction MUST detect the digest mismatch and
-refuse to invoke ``_safe_run``.
+Three tests:
 
-The control is necessary to prove the negative test is not
-being stopped by some earlier unrelated guard.
+1. POSITIVE CONTROL: with the original authorized verifier
+   and every precondition valid, the production guarded
+   transaction reaches the EXACT gh pr merge command and
+   invokes it exactly once. The test captures every
+   _safe_run argv, counts the gh pr merge invocations, and
+   verifies:
+   * gh_pr_merge_invocation_count == 1
+   * authorized PR number is correct;
+   * repository is correct;
+   * --squash is present;
+   * --match-head-commit contains the fixture's authorized
+     head;
+   * --delete-branch matches the authorization policy;
+   * --admin absent;
+   * --auto absent;
+   * --merge absent;
+   * --rebase absent;
+   * no force option exists.
+   The control may fail AFTER the merge invocation is
+   proven (the mocked post-merge reconciliation may fail,
+   but the merge invocation is on the record).
+
+2. REPLACEMENT-DIGEST NEGATIVE: the canonical verifier is
+   replaced AFTER authorization with a structurally-acceptable
+   record (verdict=VERIFIED, defects=[], candidate_sha256
+   unchanged; only a non-critical field differs). The
+   guarded merge MUST detect the digest mismatch and refuse
+   to invoke the gh pr merge command. The test counts
+   gh pr merge invocations and asserts exactly zero.
+
+3. FAILED-VERDICT NEGATIVE: the FAILED verifier record is
+   constructed FIRST; the authorization binds to that
+   record's exact-file digest. The digest guard then passes
+   (the digest matches) and the verdict guard fires. The
+   test asserts the MergeError diagnostic references the
+   FAILED verdict (NOT a digest mismatch) and that no gh pr
+   merge invocation occurred.
 """
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import subprocess
@@ -63,14 +97,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 
-def _make_run_context(repo_path, run_state_root, evidence_root):
+def _make_run_context(repo_path, run_state_root, evidence_root,
+                       authorized_head):
     from autocoder_orchestration.context import (
         SCHEMA_VERSION as RC_SCHEMA,
     )
     from autocoder_orchestration.context import RunContext
     return RunContext(
         schema_version=RC_SCHEMA,
-        run_id="test-r6-d0",
+        run_id="test-r7-d0",
         created_at="2026-08-07T15:00:00Z",
         repo_owner="Slideshow11", repo_name="AutoDev",
         local_checkout=str(repo_path),
@@ -78,7 +113,7 @@ def _make_run_context(repo_path, run_state_root, evidence_root):
         authorized_base_sha="a" * 40,
         feature_branch="fix/test",
         pr_number=4,
-        current_authorized_head="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+        current_authorized_head=authorized_head,
         task_specification_path=str(evidence_root / "task.txt"),
         task_specification_sha256="c" * 64,
         required_ci_jobs=("test (3.10)", "test (3.11)",
@@ -100,7 +135,10 @@ def _make_run_context(repo_path, run_state_root, evidence_root):
 
 def _init_real_git_repo(repo_path: Path) -> str:
     """Initialize a real Git checkout with a single commit on
-    ``main``. Returns the HEAD SHA."""
+    ``main``. Returns the HEAD SHA. Per round-7 finding
+    PRRT_kwDOTtyQLc6XV60h, ``git rev-parse HEAD`` uses
+    ``check=True`` so a Git failure raises immediately instead
+    of returning an empty or invalid SHA."""
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@test",
@@ -115,23 +153,41 @@ def _init_real_git_repo(repo_path: Path) -> str:
                    cwd=str(repo_path), check=True, env=env, capture_output=True)
     subprocess.run(["git", "config", "user.name", "test"],
                    cwd=str(repo_path), check=True, env=env, capture_output=True)
-    # Make a real commit so HEAD is a valid SHA.
     (repo_path / "README.md").write_text("test")
     subprocess.run(["git", "add", "README.md"], cwd=str(repo_path),
                    check=True, env=env, capture_output=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=str(repo_path),
                    check=True, env=env, capture_output=True)
-    head = subprocess.run(
+    # Per round-7 finding PRRT_kwDOTtyQLc6XV60h: use check=True
+    # so a Git failure raises immediately.
+    proc = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=str(repo_path),
-        env=env, capture_output=True, text=True,
-    ).stdout.strip()
+        env=env, capture_output=True, text=True, check=True,
+    )
+    head = proc.stdout.strip()
+    assert len(head) == 40 and all(
+        c in "0123456789abcdef" for c in head
+    ), f"git rev-parse HEAD returned invalid SHA: {head!r}"
     return head
 
 
-def _build_d0_fixture():
+def _build_d0_fixture(verifier_payload_override=None):
     """Build a comprehensive, valid merge-transaction scenario
-    in a tempdir. Returns ``(tmp, args, paths, candidate_digest,
-    original_verifier_digest, fixtures)``."""
+    in a tempdir. Returns ``(tmp, ctx, paths, candidate_digest,
+    original_verifier_digest, fixtures)``.
+
+    Per round-7 finding ``Bind the real Git HEAD to the
+    authorized head``: ``current_authorized_head`` is set to
+    the real ``init_head`` returned by ``_init_real_git_repo``
+    so the post-merge Git reconciliation operates on a head
+    that exists in the checkout.
+
+    The optional ``verifier_payload_override`` parameter
+    allows the failed-verdict test to construct a
+    FAILED verifier record FIRST (so the authorization binds
+    to that record's exact digest; the digest guard then
+    passes; the verdict guard is the only remaining barrier).
+    """
     from autocoder_orchestration.artifacts import (
         read_artifact, write_artifact,
     )
@@ -142,7 +198,7 @@ def _build_d0_fixture():
         StateMachine,
     )
 
-    tmp = Path(tempfile.mkdtemp(prefix="aed-r6-d0-"))
+    tmp = Path(tempfile.mkdtemp(prefix="aed-r7-d0-"))
     repo_path = tmp / "repo"
     state_path = tmp / "state"
     evidence_root = tmp / "evidence"
@@ -152,13 +208,13 @@ def _build_d0_fixture():
     paths = canonical_paths(evidence_root)
     for p in paths.values():
         p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    ctx = _make_run_context(repo_path, state_path, evidence_root)
+    ctx = _make_run_context(repo_path, state_path, evidence_root,
+                            init_head)
     store = StateStore(str(state_path))
     store.write_atomic("run_context.json", ctx.to_dict())
     sm = StateMachine(current_state=STATE_AWAITING_MERGE_AUTHORIZATION)
     store.write_atomic("state.json", sm.to_dict())
 
-    # Build the canonical candidate.
     cand = {
         "schema_version": "autocoder.candidate.v1",
         "run_id": ctx.run_id,
@@ -181,27 +237,26 @@ def _build_d0_fixture():
         "input_hashes": {}, "source_files": {},
         "aed_source_files": {},
         "created_at": "2026-08-07T15:00:00Z",
-        # Required by the real guarded merge: head.head_sha is
-        # the canonical post-merge target. The exact_head above
-        # carries the same information for older schemas.
         "head": {"head_sha": ctx.current_authorized_head,
                    "exact_head_sha": ctx.current_authorized_head},
     }
     write_artifact(paths["candidate"], cand)
     candidate_digest = read_artifact(paths["candidate"]).digest
 
-    # Build the passing verifier.
-    passing = {
-        "schema_version": "autocoder.verifier_record.v1",
-        "candidate_sha256": candidate_digest,
-        "verdict": "VERIFIED",
-        "defects": [],
-        "verified_at_utc": "2026-08-07T15:00:00Z",
-    }
-    write_artifact(paths["verifier"], passing)
+    if verifier_payload_override is None:
+        verifier_payload = {
+            "schema_version": "autocoder.verifier_record.v1",
+            "candidate_sha256": candidate_digest,
+            "verdict": "VERIFIED",
+            "defects": [],
+            "verified_at_utc": "2026-08-07T15:00:00Z",
+        }
+    else:
+        verifier_payload = dict(verifier_payload_override)
+        verifier_payload["candidate_sha256"] = candidate_digest
+    write_artifact(paths["verifier"], verifier_payload)
     original_verifier_digest = read_artifact(paths["verifier"]).digest
 
-    # Build the MergeAuthorization.
     auth = {
         "schema_version": "autocoder.merge_authorization.v1",
         "run_id": ctx.run_id,
@@ -246,6 +301,38 @@ def _build_d0_fixture():
             original_verifier_digest, fixtures)
 
 
+def _count_gh_pr_merge_calls(safe_run_mock) -> int:
+    """Count invocations of the ``gh pr merge`` command in a
+    mock of ``_safe_run``. Other ``_safe_run`` calls (e.g.
+    ``gh pr view --json mergeCommit``) are NOT counted. This
+    is the controlling invariant for the D0 proof."""
+    count = 0
+    for call in safe_run_mock.call_args_list:
+        # call.args[0] is the argv list passed to _safe_run.
+        argv = call.args[0]
+        # argv may be a list/tuple; we want to find ``pr`` and
+        # ``merge`` adjacent.
+        if not isinstance(argv, (list, tuple)):
+            continue
+        if "pr" in argv and "merge" in argv:
+            # Confirm the argv is a gh invocation, not
+            # accidentally matched.
+            if argv and argv[0] in ("gh",):
+                count += 1
+    return count
+
+
+def _find_gh_pr_merge_call(safe_run_mock) -> list:
+    """Return the argv list of the gh pr merge call, or an
+    empty list if none was issued."""
+    for call in safe_run_mock.call_args_list:
+        argv = call.args[0]
+        if isinstance(argv, (list, tuple)) and len(argv) >= 4:
+            if argv[0] == "gh" and "pr" in argv and "merge" in argv:
+                return list(argv)
+    return []
+
+
 class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
     """Comprehensive D0 fixture tests for PRRT_kwDOTtyQLc6XPdD0."""
 
@@ -268,51 +355,107 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
             working_tree_clean=fixtures["working_tree_clean"],
         )
 
-    def test_control_fixtures_reach_safe_run_once(self):
-        """CONTROL: with the original unmodified verifier and
-        every precondition valid, the fixture advances to the
-        ``_safe_run`` boundary and invokes it exactly once. This
-        proves the negative test in test_negative_*
-        is not being stopped by some earlier unrelated guard.
+    def _safe_run_successful(self):
+        """Build a ``_safe_run`` mock that returns a successful
+        result."""
+        return mock.MagicMock(return_value={
+            "returncode": 0, "stdout": "", "stderr": "",
+            "timed_out": False,
+        })
+
+    def test_control_fixture_reaches_exact_guarded_merge_invocation(self):
+        """POSITIVE CONTROL: with the original authorized
+        verifier and every precondition valid, the production
+        guarded transaction reaches the EXACT gh pr merge
+        command and invokes it exactly once. Per round-7
+        directive finding PRRT_kwDOTtyQLc6XV604, the test
+        must NOT swallow the exception silently. Any
+        exception that escapes past the protected merge
+        invocation is captured into diagnostics so the
+        negative test cannot be stopped by an earlier
+        unrelated guard.
+
+        Required proof:
+        * gh_pr_merge_invocation_count == 1
+        * PR number correct
+        * repo correct
+        * --squash present
+        * --match-head-commit contains the authorized head
+        * --delete-branch matches the authorization policy
+        * --admin, --auto, --merge, --rebase all absent
+        * no force option
         """
         from autocoder_orchestration.merge_authorization import (
             execute_guarded_merge_transaction,
-            MergeError,
         )
-        from autocoder_orchestration.artifacts import write_artifact
 
         tmp, ctx, paths, cand_digest, orig_v_digest, fixtures = _build_d0_fixture()
         try:
-            # The AED path in the real repo is also reachable; the
-            # production transaction reads AED via git show. There
-            # is no AED file in the fixture, so we expect the
-            # transaction to record an AED unavailable observation.
-            # The control proves the fixture advances to _safe_run.
             inputs = self._build_inputs(ctx, paths, fixtures)
-            safe_run = mock.MagicMock(return_value={
-                "returncode": 0, "stdout": "", "stderr": "",
-                "timed_out": False,
-            })
+            safe_run = self._safe_run_successful()
+            post_merge_exception = None
             with mock.patch(
                 "autocoder_orchestration.merge_authorization._safe_run",
                 safe_run,
             ):
-                # The transaction may fail at any post-_safe_run
-                # step (reconciliation, server-side re-query, also
-                # the live PR re-query is stubbed via _safe_run). It
-                # must reach _safe_run exactly once.
                 try:
                     execute_guarded_merge_transaction(inputs)
-                except MergeError:
-                    pass
-                except Exception:
-                    pass
-            # The control fixture is valid; the transaction
-            # invokes _safe_run at least once (typically twice:
-            # the pr merge and the post-merge mergeCommit fetch).
-            assert safe_run.call_count >= 1, \
-                f"control fixture must reach _safe_run; got " \
-                f"{safe_run.call_count} calls"
+                except Exception as exc:
+                    # Capture the exception so the test does
+                    # not silently swallow it. The control may
+                    # fail after the protected merge invocation
+                    # is on the record (e.g. mocked
+                    # reconciliation may not return a complete
+                    # PostMergeReconciliation). Such failures
+                    # are diagnostic only -- they must not
+                    # invalidate the positive proof.
+                    post_merge_exception = repr(exc)
+            # The controlling invariant: gh pr merge
+            # invocation count is exactly ONE.
+            gh_merge_count = _count_gh_pr_merge_calls(safe_run)
+            self.assertEqual(
+                gh_merge_count, 1,
+                f"control fixture must invoke gh pr merge "
+                f"exactly once; got {gh_merge_count}. "
+                f"post_merge_exception={post_merge_exception!r}; "
+                f"safe_run calls={safe_run.call_args_list!r}",
+            )
+            # Inspect the argv of the gh pr merge call.
+            argv = _find_gh_pr_merge_call(safe_run)
+            self.assertTrue(argv,
+                "gh pr merge invocation must be present in "
+                "the captured _safe_run calls")
+            # PR number is the fixture's authorized PR.
+            self.assertIn(str(ctx.pr_number), argv)
+            # Repository is the fixture's authorized repo.
+            self.assertIn(ctx.repo_owner + "/" + ctx.repo_name, argv)
+            # --squash is the only approved merge method.
+            self.assertIn("--squash", argv)
+            # --match-head-commit contains the authorized head.
+            self.assertIn("--match-head-commit", argv)
+            # The --match-head-commit value is the authorized
+            # head SHA.
+            idx = argv.index("--match-head-commit")
+            self.assertEqual(
+                argv[idx + 1], ctx.current_authorized_head,
+                f"--match-head-commit value {argv[idx + 1]!r} != "
+                f"authorized head {ctx.current_authorized_head!r}",
+            )
+            # --delete-branch must match the authorization
+            # policy (delete_branch=False in this fixture).
+            self.assertNotIn("--delete-branch", argv,
+                f"--delete-branch present; authorization "
+                f"policy is delete_branch=False; argv={argv!r}")
+            # Forbidden flags are absent.
+            for forbidden in ("--admin", "--auto", "--merge", "--rebase"):
+                self.assertNotIn(forbidden, argv,
+                    f"forbidden flag {forbidden!r} present; "
+                    f"argv={argv!r}")
+            # No force option exists.
+            for force in ("--force", "--force-with-lease"):
+                self.assertNotIn(force, argv,
+                    f"force option {force!r} present; "
+                    f"argv={argv!r}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -322,15 +465,23 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
         defects=[], candidate_sha256 matches; only a
         non-critical field differs). The exact-file digest
         changes. The guarded merge MUST detect the digest
-        mismatch and refuse to invoke ``_safe_run``. The
-        failure is specifically the digest mismatch, not
-        the failed-verdict guard.
+        mismatch and refuse to invoke ``gh pr merge``.
+
+        Per round-7 directive, the controlling invariant is:
+        ``gh_pr_merge_invocation_count == 0``. ``_safe_run``
+        may also be called for ``gh pr view --json mergeCommit``
+        (the guarded merge transaction checks whether the
+        server reports the merge despite a subprocess error);
+        that call is NOT a gh pr merge invocation and is not
+        counted by ``_count_gh_pr_merge_calls``.
         """
         from autocoder_orchestration.merge_authorization import (
             execute_guarded_merge_transaction,
             MergeError,
         )
-        from autocoder_orchestration.artifacts import write_artifact
+        from autocoder_orchestration.artifacts import (
+            read_artifact, write_artifact,
+        )
 
         tmp, ctx, paths, cand_digest, orig_v_digest, fixtures = _build_d0_fixture()
         try:
@@ -346,8 +497,16 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
                 "verified_at_utc": "2026-08-07T16:00:00Z",
             }
             write_artifact(paths["verifier"], replaced)
+            # Assert the replacement precondition: the new
+            # exact-file digest differs from the original.
+            new_v_digest = read_artifact(paths["verifier"]).digest
+            self.assertNotEqual(
+                new_v_digest, orig_v_digest,
+                "replacement must change the exact-file digest; "
+                "otherwise the test proves nothing",
+            )
 
-            safe_run = mock.MagicMock()
+            safe_run = self._safe_run_successful()
             with mock.patch(
                 "autocoder_orchestration.merge_authorization._safe_run",
                 safe_run,
@@ -355,7 +514,27 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
                 with self.assertRaises(MergeError) as ctx_exc:
                     execute_guarded_merge_transaction(
                         self._build_inputs(ctx, paths, fixtures))
-            # The failure is specifically about the digest
+            # Controlling invariant: gh pr merge invocation
+            # count is exactly ZERO.
+            gh_merge_count = _count_gh_pr_merge_calls(safe_run)
+            self.assertEqual(
+                gh_merge_count, 0,
+                f"gh pr merge must NOT be invoked; got "
+                f"{gh_merge_count}. The verifier-digest "
+                f"replacement must be detected by the guarded "
+                f"merge before any remote merge invocation. "
+                f"safe_run calls={safe_run.call_args_list!r}",
+            )
+            # Additional invariant: every _safe_run helper
+            # invocation is also zero. The guarded transaction
+            # does not invoke _safe_run at all when the
+            # digest guard fires first.
+            self.assertEqual(
+                safe_run.call_count, 0,
+                f"every _safe_run invocation must be zero; got "
+                f"{safe_run.call_count}",
+            )
+            # The failure diagnostic identifies the digest
             # mismatch.
             msg = str(ctx_exc.exception).lower()
             self.assertIn("verifier", msg)
@@ -364,47 +543,77 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
                 f"MergeError must name the verifier digest/SHA "
                 f"mismatch; got: {msg!r}",
             )
-            # The critical assertion: _safe_run / gh pr merge
-            # was NEVER invoked.
-            safe_run.assert_not_called()
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_d0_failed_verdict_record_is_unauthorizable(self):
-        """The failed-verdict path (``verifier_failed`` stamping
-        ``_verdict_failed=True`` and verdict="FAILED") must
-        remain un-authorizable. The round-5 evidence is
-        preserved: even if the verifier replacement is the
-        explicit FAILED record, the merge transaction fails
-        closed.
+        """The failed-verdict path (verdict="FAILED" + _verdict_failed)
+        must remain un-authorizable. Per round-7 directive,
+        this test exercises the VERDICT GUARD (not the digest
+        guard): the FAILED record is constructed FIRST; the
+        authorization binds to that record's exact-file
+        digest; the digest guard therefore passes; only the
+        verdict guard can reject the merge.
         """
         from autocoder_orchestration.merge_authorization import (
             execute_guarded_merge_transaction,
             MergeError,
         )
-        from autocoder_orchestration.artifacts import write_artifact
 
-        tmp, ctx, paths, cand_digest, orig_v_digest, fixtures = _build_d0_fixture()
+        # Build the FAILED verifier record FIRST so the
+        # authorization binds to its exact-file digest.
+        failed = {
+            "schema_version": "autocoder.verifier_record.v1",
+            "candidate_sha256": "placeholder",  # overwritten
+            "verdict": "FAILED",
+            "defects": ["synthetic test failure"],
+            "_verdict_failed": True,
+        }
+        tmp, ctx, paths, cand_digest, orig_v_digest, fixtures = (
+            _build_d0_fixture(verifier_payload_override=failed)
+        )
         try:
-            # Replace with an explicit FAILED record.
-            failed = {
-                "schema_version": "autocoder.verifier_record.v1",
-                "candidate_sha256": cand_digest,
-                "verdict": "FAILED",
-                "defects": ["synthetic test failure"],
-                "_verdict_failed": True,
-            }
-            write_artifact(paths["verifier"], failed)
-
-            safe_run = mock.MagicMock()
+            # The authorization was bound to the FAILED
+            # verifier's exact-file digest, so the digest
+            # guard passes. Only the verdict guard can reject.
+            safe_run = self._safe_run_successful()
             with mock.patch(
                 "autocoder_orchestration.merge_authorization._safe_run",
                 safe_run,
             ):
-                with self.assertRaises(MergeError):
+                with self.assertRaises(MergeError) as ctx_exc:
                     execute_guarded_merge_transaction(
                         self._build_inputs(ctx, paths, fixtures))
-            safe_run.assert_not_called()
+            # Controlling invariant: no gh pr merge invocation.
+            gh_merge_count = _count_gh_pr_merge_calls(safe_run)
+            self.assertEqual(
+                gh_merge_count, 0,
+                f"gh pr merge must NOT be invoked on a FAILED "
+                f"verifier; got {gh_merge_count}",
+            )
+            self.assertEqual(
+                safe_run.call_count, 0,
+                f"every _safe_run invocation must be zero; got "
+                f"{safe_run.call_count}",
+            )
+            # The MergeError diagnostic references the verdict
+            # (NOT a digest mismatch).
+            msg = str(ctx_exc.exception).lower()
+            self.assertIn("verdict", msg,
+                f"MergeError must name the verdict guard; "
+                f"got: {msg!r}")
+            # The diagnostic does NOT reference a digest
+            # mismatch -- the digest guard is satisfied for
+            # this fixture (authorization was bound to the
+            # FAILED record's exact-file digest).
+            self.assertNotIn("digest mismatch", msg,
+                f"MergeError must not reference a digest "
+                f"mismatch (the digest guard passed); got: "
+                f"{msg!r}")
+            self.assertNotIn("digest of canonical verifier", msg,
+                f"MergeError must not reference a digest "
+                f"mismatch (the digest guard passed); got: "
+                f"{msg!r}")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
