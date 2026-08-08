@@ -784,6 +784,339 @@ def relay_state_for_outcome(outcome: str) -> Tuple[str, str]:
     return STATE_REPAIRING_REVIEW_FINDINGS, ACTOR_CONTROLLER
 
 
+# === Loop driver ===
+
+@dataclass(frozen=True)
+class RoundDecision:
+    """The deterministic output of one bounded round.
+
+    The decision is the single contract the relay exposes to its
+    caller. The caller (CLI / daemon) is responsible for:
+
+    - if ``action == "launch_worker"``: invoking the supervisor's
+      ``launch_worker`` with the directive's prompt;
+    - if ``action == "enter_qualifying_readiness"``: invoking the
+      controller's ``record_readiness_certificate``;
+    - if ``action == "escalate_to_human"``: invoking the
+      controller's ``block`` so the operator has a single halt
+      point.
+
+    The decision is a pure value object — no I/O, no subprocess,
+    no state mutation.
+    """
+
+    action: str  # "launch_worker" | "enter_qualifying_readiness" | "escalate_to_human" | "await_head_change"
+    round_index: int
+    head_sha: str
+    outcome: str  # "completed" | "ready" | "escalated" | "no_findings"
+    p1_count: int
+    p2_count: int
+    ci_failure_count: int
+    escalate_reasons: Tuple[str, ...]
+    directive: Optional[ReviewDirective]
+    directive_digest: Optional[str]
+
+    def to_dict(self) -> dict:
+        return {
+            "action": self.action,
+            "round_index": self.round_index,
+            "head_sha": self.head_sha,
+            "outcome": self.outcome,
+            "p1_count": self.p1_count,
+            "p2_count": self.p2_count,
+            "ci_failure_count": self.ci_failure_count,
+            "escalate_reasons": list(self.escalate_reasons),
+            "directive": self.directive.to_dict() if self.directive else None,
+            "directive_digest": self.directive_digest,
+        }
+
+
+def evaluate_round(
+    *,
+    snapshot: dict,
+    head_sha: str,
+    repo: str,
+    pr_number: int,
+    round_index: int,
+    required_check_names: Tuple[str, ...] = (),
+    coordinator_actor: str = ACTOR_CONTROLLER,
+    directive_store: Optional[DirectiveStore] = None,
+) -> RoundDecision:
+    """Run one bounded round of evidence collection and classification.
+
+    The function is the SINGLE entry point for the relay's
+    decision logic. It:
+
+    1. Validates the snapshot shape and head_sha.
+    2. Collects findings via ``collect_findings``.
+    3. If no findings: returns ``action="enter_qualifying_readiness"``
+       so the existing readiness gate can certify the head.
+    4. If findings: attempts to build a directive. On
+       ``EscalateToHuman`` returns ``action="escalate_to_human"``;
+       on success persists the directive (if a ``directive_store``
+       is supplied) and returns ``action="launch_worker"``.
+
+    The function never launches a worker, never invokes GitHub,
+    and never mutates the state machine. It is the
+    deterministic half of the relay; the imperative half is the
+    CLI / daemon that calls into the supervisor's existing
+    ``launch_worker`` and the controller's existing transitions.
+    """
+    if not isinstance(snapshot, dict):
+        raise InvalidSnapshot("snapshot must be a dict")
+    if not isinstance(head_sha, str) or (len(head_sha) != 40 and len(head_sha) != 64):
+        raise DirectiveContractError(
+            f"head_sha must be 40 or 64 lowercase hex chars: {head_sha!r}"
+        )
+    findings = collect_findings(snapshot, required_check_names=required_check_names)
+    if not findings:
+        return RoundDecision(
+            action="enter_qualifying_readiness",
+            round_index=round_index,
+            head_sha=head_sha,
+            outcome="ready",
+            p1_count=0,
+            p2_count=0,
+            ci_failure_count=0,
+            escalate_reasons=(),
+            directive=None,
+            directive_digest=None,
+        )
+    p1 = sum(1 for f in findings if f.severity == SEVERITY_P1)
+    p2 = sum(1 for f in findings if f.severity == SEVERITY_P2)
+    ci = sum(1 for f in findings if f.severity == SEVERITY_CI_FAILURE)
+    try:
+        directive = build_directive(
+            round_index=round_index,
+            head_sha=head_sha,
+            repo=repo,
+            pr_number=pr_number,
+            findings=findings,
+            coordinator_actor=coordinator_actor,
+        )
+    except EscalateToHuman as exc:
+        return RoundDecision(
+            action="escalate_to_human",
+            round_index=round_index,
+            head_sha=head_sha,
+            outcome="escalated",
+            p1_count=p1,
+            p2_count=p2,
+            ci_failure_count=ci,
+            escalate_reasons=(str(exc),),
+            directive=None,
+            directive_digest=None,
+        )
+    digest: Optional[str] = None
+    if directive_store is not None:
+        digest = directive_store.write_directive(directive)
+    return RoundDecision(
+        action="launch_worker",
+        round_index=round_index,
+        head_sha=head_sha,
+        outcome="completed",
+        p1_count=p1,
+        p2_count=p2,
+        ci_failure_count=ci,
+        escalate_reasons=(),
+        directive=directive,
+        directive_digest=digest,
+    )
+
+
+# === Worker prompt construction ===
+
+# Template for the worker prompt. The placeholder
+# ``{directive_json}`` is substituted with the canonical JSON
+# serialization of the directive. The worker (Humphry) reads the
+# prompt directly and does NOT need to re-query CodeRabbit / CI.
+WORKER_PROMPT_TEMPLATE = (
+    "[AED-AUTOCODER REPAIR DIRECTIVE — round {round_index}] "
+    "You are operating in the autonomous review/repair relay (v1) for "
+    "PR {pr_number} ({repo}).\n\n"
+    "Authoritative head: {head_sha}\n"
+    "Directive ID: {directive_id}\n"
+    "Directive SHA-256: {directive_sha256}\n\n"
+    "The relay has already collected exact-head CI and CodeRabbit evidence. Your "
+    "job is to apply every P1 finding and the required CI failures. The directive "
+    "below is the authoritative spec for this round — do not re-query the review "
+    "surface; the relay has already done so.\n\n"
+    "Directive summary: {summary}\n\n"
+    "```json\n"
+    "{directive_json}\n"
+    "```\n\n"
+    "Apply every P1 finding. Verify the repair by running the focused test suite "
+    "and the CI gate. Commit and push. Do NOT amend history. Do NOT force-push. "
+    "Do NOT merge. The relay will detect the new head automatically and run the "
+    "next round or transition to qualification.\n\n"
+    "Standing authorization is already recorded in run_state.json. Stop only when "
+    "the relay signals 'enter_qualifying_readiness' or 'escalate_to_human' via "
+    "the next round decision."
+)
+
+
+def build_worker_prompt(decision: RoundDecision) -> str:
+    """Render the canonical worker prompt for a round decision.
+
+    The prompt is deterministic for a given ``RoundDecision`` so
+    the worker can be restarted against the same directive
+    without producing a different prompt. The directive JSON is
+    pretty-printed for readability.
+    """
+    directive = decision.directive
+    if directive is None:
+        raise DirectiveContractError(
+            "build_worker_prompt requires a decision with a directive"
+        )
+    payload = json.dumps(
+        directive.to_dict(), indent=2, sort_keys=True,
+    )
+    return WORKER_PROMPT_TEMPLATE.format(
+        round_index=decision.round_index,
+        pr_number=directive.pr_number,
+        repo=directive.repo,
+        head_sha=directive.head_sha,
+        directive_id=directive.directive_id,
+        directive_sha256=directive.compute_sha256(),
+        summary=directive.summary,
+        directive_json=payload,
+    )
+
+
+# === Loop controller ===
+
+class RelayLoop:
+    """Bounded loop controller that wraps the existing state machine.
+
+    The loop is intentionally a thin shell over ``evaluate_round``
+    plus the existing ``StateStore`` / ``Controller`` / ``Lease``
+    primitives. Every state mutation is delegated to the
+    controller; the loop only owns the bounded iteration and
+    the round transcript journal.
+
+    The loop is single-shot per process invocation: the CLI
+    invokes ``loop.run_once()`` for one round. A persistent
+    daemon that loops until the head is clean is out of scope
+    for v1 (the supervisor's existing event loop is the right
+    place to call ``run_once`` periodically — that wiring is a
+    follow-up commit).
+    """
+
+    def __init__(
+        self,
+        *,
+        context: Any,
+        store: StateStore,
+        directive_store: DirectiveStore,
+        controller: Any,
+        required_check_names: Tuple[str, ...] = (),
+        max_rounds: int = DEFAULT_MAX_ROUNDS,
+        identity: Optional[ProcessIdentity] = None,
+    ) -> None:
+        self.context = context
+        self.store = store
+        self.directive_store = directive_store
+        self.controller = controller
+        self.required_check_names = tuple(required_check_names)
+        self.max_rounds = int(max_rounds)
+        self.identity = identity or current_process_identity()
+
+    def run_once(
+        self,
+        snapshot: dict,
+        head_sha: str,
+        *,
+        repo: str,
+        pr_number: int,
+    ) -> RoundDecision:
+        """Run one round.
+
+        The method appends a ``RoundTranscript`` to the journal
+        regardless of the outcome so a restart can recover the
+        last-known position. The transcript is the only durable
+        record of relay progress; the in-memory state of the
+        controller is the source of truth for the current state
+        machine position.
+        """
+        round_index = self.directive_store.last_round_index() + 1
+        if round_index >= self.max_rounds:
+            # The outer bound stops the relay. The controller's
+            # ``block`` method is the single halt point — the
+            # operator MUST see a ``BLOCKED`` state machine
+            # position and the journal must contain the
+            # ``escalated`` transcript.
+            self.controller.block(
+                reason=(
+                    f"relay exceeded max_rounds={self.max_rounds}; "
+                    "operator must inspect the round journal"
+                )
+            )
+            raise EscalateToHuman(
+                f"relay exceeded max_rounds={self.max_rounds}"
+            )
+        # The controller's state machine is the authority.
+        # If the run is not in REPAIRING_REVIEW_FINDINGS, the
+        # relay refuses to run.
+        sm = self.controller.load_state_machine()
+        if sm is not None and sm.current_state != STATE_REPAIRING_REVIEW_FINDINGS:
+            raise RelayError(
+                f"relay refused to run: controller state is "
+                f"{sm.current_state!r}; expected REPAIRING_REVIEW_FINDINGS"
+            )
+        decision = evaluate_round(
+            snapshot=snapshot,
+            head_sha=head_sha,
+            repo=repo,
+            pr_number=pr_number,
+            round_index=round_index,
+            required_check_names=self.required_check_names,
+            coordinator_actor=ACTOR_CONTROLLER,
+            directive_store=self.directive_store,
+        )
+        # Persist the round transcript. The ``head_sha_after``
+        # field stays ``None`` until the worker pushes and the
+        # next round sees the new head; that is the head-change
+        # signal the loop waits on.
+        p1 = decision.p1_count
+        p2 = decision.p2_count
+        ci = decision.ci_failure_count
+        reasons = decision.escalate_reasons
+        if decision.outcome == "completed":
+            outcome = "completed"
+        elif decision.outcome == "ready":
+            outcome = "ready"
+        else:
+            outcome = "escalated"
+        self.directive_store.append_transcript(RoundTranscript(
+            schema_version=RELAY_SCHEMA_VERSION,
+            round_index=round_index,
+            head_sha_before=head_sha,
+            head_sha_after=None,
+            directive_id=decision.directive.directive_id if decision.directive else None,
+            started_at=_now_iso(),
+            ended_at=_now_iso(),
+            outcome=outcome,
+            p1_count=p1,
+            p2_count=p2,
+            ci_failure_count=ci,
+            escalate_reasons=reasons,
+        ))
+        # If the decision is to escalate, drive the controller
+        # into BLOCKED so the operator has a single halt point.
+        if decision.action == "escalate_to_human":
+            self.controller.block(
+                reason=next(iter(reasons), "relay escalated")
+            )
+        return decision
+
+    def head_clean(self, snapshot: dict) -> bool:
+        """Return True iff the head has no actionable findings."""
+        findings = collect_findings(
+            snapshot, required_check_names=self.required_check_names,
+        )
+        return len(findings) == 0
+
+
 __all__ = [
     "RelayError",
     "EscalateToHuman",
@@ -800,8 +1133,13 @@ __all__ = [
     "ReviewDirective",
     "RoundTranscript",
     "DirectiveStore",
+    "RelayLoop",
+    "RoundDecision",
     "collect_findings",
     "build_directive",
+    "build_worker_prompt",
+    "evaluate_round",
     "heads_equal",
     "relay_state_for_outcome",
+    "WORKER_PROMPT_TEMPLATE",
 ]

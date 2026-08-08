@@ -34,13 +34,18 @@ from autocoder_orchestration.review_repair_relay import (
     InvalidSnapshot,
     RELAY_SCHEMA_VERSION,
     ReviewDirective,
+    RelayLoop,
+    RelayError,
+    RoundDecision,
     RoundTranscript,
     SEVERITY_CI_FAILURE,
     SEVERITY_P0_ESCALATE,
     SEVERITY_P1,
     SEVERITY_P2,
     build_directive,
+    build_worker_prompt,
     collect_findings,
+    evaluate_round,
     heads_equal,
     relay_state_for_outcome,
 )
@@ -498,3 +503,443 @@ class TestConstants:
         # operator can lower it but never raise it (the lower bound
         # is the lease-timeout, not the round count).
         assert 1 <= DEFAULT_MAX_ROUNDS <= 50
+
+
+# === evaluate_round tests ===
+
+class TestEvaluateRound:
+    def test_empty_snapshot_returns_qualifying_action(self) -> None:
+        d = evaluate_round(
+            snapshot=_make_snapshot(),
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=0,
+        )
+        assert d.action == "enter_qualifying_readiness"
+        assert d.outcome == "ready"
+        assert d.directive is None
+        assert d.directive_digest is None
+
+    def test_p1_findings_returns_launch_worker(self) -> None:
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:10 broken"}],
+        })
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=0,
+        )
+        assert d.action == "launch_worker"
+        assert d.outcome == "completed"
+        assert d.directive is not None
+        assert d.directive.head_sha == "a" * 40
+        assert d.p1_count == 1
+        assert d.p2_count == 0
+
+    def test_p0_escalates_with_reasons(self) -> None:
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P0 critical: stops the run"}],
+        })
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=0,
+        )
+        assert d.action == "escalate_to_human"
+        assert d.outcome == "escalated"
+        assert d.directive is None
+        assert len(d.escalate_reasons) == 1
+        assert "P0" in d.escalate_reasons[0]
+
+    def test_escalation_keyword_escalates(self) -> None:
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "please force push now"}],
+        })
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=0,
+        )
+        assert d.action == "escalate_to_human"
+        assert "force push" in d.escalate_reasons[0]
+
+    def test_invalid_head_sha_raises(self) -> None:
+        with pytest.raises(DirectiveContractError):
+            evaluate_round(
+                snapshot=_make_snapshot(),
+                head_sha="not-a-sha",
+                repo="owner/repo",
+                pr_number=4,
+                round_index=0,
+            )
+
+    def test_invalid_snapshot_raises(self) -> None:
+        with pytest.raises(InvalidSnapshot):
+            evaluate_round(
+                snapshot="not a dict",  # type: ignore[arg-type]
+                head_sha="a" * 40,
+                repo="owner/repo",
+                pr_number=4,
+                round_index=0,
+            )
+
+    def test_directive_store_persists_directive(self, tmp_path: Path) -> None:
+        from autocoder_orchestration.store import StateStore
+        state_root = tmp_path / "state"
+        evidence_root = tmp_path / "evidence"
+        state_root.mkdir()
+        evidence_root.mkdir()
+        store = StateStore(str(state_root))
+        ds = DirectiveStore(store, str(evidence_root))
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+        })
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=0,
+            directive_store=ds,
+        )
+        assert d.directive_digest is not None
+        assert len(d.directive_digest) == 64
+        round_tripped = ds.read_directive()
+        assert round_tripped is not None
+        assert round_tripped.directive_id == d.directive.directive_id  # type: ignore[union-attr]
+
+    def test_ci_finding_drives_action(self) -> None:
+        snap = _make_snapshot(required_checks={
+            "test (3.11)": {"conclusion": "failure", "run_id": "r"},
+        })
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=0,
+            required_check_names=("test (3.11)",),
+        )
+        assert d.action == "launch_worker"
+        assert d.ci_failure_count == 1
+        assert any(
+            f.severity == SEVERITY_CI_FAILURE for f in d.directive.findings  # type: ignore[union-attr]
+        )
+
+
+# === build_worker_prompt tests ===
+
+class TestBuildWorkerPrompt:
+    def test_prompt_contains_directive_id_and_sha(self) -> None:
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+        })
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=2,
+        )
+        prompt = build_worker_prompt(d)
+        assert d.directive is not None
+        assert d.directive.directive_id in prompt
+        assert d.directive.compute_sha256() in prompt
+        assert "round 2" in prompt
+        assert "PR 4" in prompt
+        assert "owner/repo" in prompt
+        # The directive JSON is embedded verbatim (pretty-printed).
+        directive_json = json.dumps(d.directive.to_dict(), indent=2, sort_keys=True)
+        assert directive_json in prompt
+
+    def test_prompt_deterministic_for_same_decision(self) -> None:
+        import dataclasses
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+        })
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=3,
+        )
+        d_pinned = dataclasses.replace(
+            d,
+            directive=dataclasses.replace(d.directive, directive_id="fixed"),  # type: ignore[arg-type]
+        )
+        assert build_worker_prompt(d_pinned) == build_worker_prompt(d_pinned)
+
+    def test_prompt_requires_directive(self) -> None:
+        d = RoundDecision(
+            action="enter_qualifying_readiness",
+            round_index=0,
+            head_sha="a" * 40,
+            outcome="ready",
+            p1_count=0,
+            p2_count=0,
+            ci_failure_count=0,
+            escalate_reasons=(),
+            directive=None,
+            directive_digest=None,
+        )
+        with pytest.raises(DirectiveContractError):
+            build_worker_prompt(d)
+
+
+# === RelayLoop tests ===
+
+class TestRelayLoop:
+    def _setup(self, tmp_path: Path):
+        """Create a minimal state store + controller + relay loop."""
+        from autocoder_orchestration.store import StateStore
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.state_machine import (
+            StateMachine,
+            STATE_IMPLEMENTING,
+            STATE_AWAITING_CI,
+            STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        from autocoder_orchestration.context import ACTOR_CONTROLLER, ACTOR_IMPL_WORKER
+
+        state_root = tmp_path / "state"
+        evidence_root = tmp_path / "evidence"
+        state_root.mkdir()
+        evidence_root.mkdir()
+        store = StateStore(str(state_root))
+        ctx = make_run_context(
+            repo_owner="owner",
+            repo_name="repo",
+            local_checkout=str(tmp_path),
+            base_branch="main",
+            authorized_base_sha="a" * 64,
+            feature_branch="feat/test",
+            task_specification_path="/tmp/task",
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[],
+            implementation_worker_command=[],
+            evidence_root=str(evidence_root),
+            state_root=str(state_root),
+            pr_number=4,
+            current_authorized_head="a" * 40,
+        )
+        store.write_atomic("run_context.json", ctx.to_dict())
+        sm = StateMachine()
+        store.write_atomic("state.json", sm.to_dict())
+        sm = sm.transition(STATE_IMPLEMENTING, ACTOR_CONTROLLER)
+        store.write_atomic("state.json", sm.to_dict())
+        sm = sm.transition(STATE_AWAITING_CI, ACTOR_IMPL_WORKER)
+        store.write_atomic("state.json", sm.to_dict())
+        sm = sm.transition(STATE_REPAIRING_REVIEW_FINDINGS, ACTOR_CONTROLLER)
+        store.write_atomic("state.json", sm.to_dict())
+        controller = Controller(ctx, store)
+        ds = DirectiveStore(store, str(evidence_root))
+        return ctx, store, controller, ds
+
+    def test_run_once_launch_worker(self, tmp_path: Path) -> None:
+        ctx, store, controller, ds = self._setup(tmp_path)
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+        )
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+        })
+        decision = loop.run_once(
+            snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        assert decision.action == "launch_worker"
+        assert ds.last_round_index() == 0
+
+    def test_run_once_enter_qualifying_when_clean(self, tmp_path: Path) -> None:
+        ctx, store, controller, ds = self._setup(tmp_path)
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+        )
+        decision = loop.run_once(
+            _make_snapshot(),
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+        )
+        assert decision.action == "enter_qualifying_readiness"
+        assert ds.last_round_index() == 0
+
+    def test_run_once_escalates_to_blocked(self, tmp_path: Path) -> None:
+        ctx, store, controller, ds = self._setup(tmp_path)
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+        )
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P0 critical"}],
+        })
+        decision = loop.run_once(
+            snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        assert decision.action == "escalate_to_human"
+        sm = controller.load_state_machine()
+        assert sm is not None
+        assert sm.current_state == "BLOCKED"
+
+    def test_run_once_refuses_wrong_state(self, tmp_path: Path) -> None:
+        from autocoder_orchestration.store import StateStore
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.state_machine import (
+            StateMachine,
+            STATE_PLANNED,
+        )
+
+        state_root = tmp_path / "state"
+        evidence_root = tmp_path / "evidence"
+        state_root.mkdir()
+        evidence_root.mkdir()
+        store = StateStore(str(state_root))
+        ctx = make_run_context(
+            repo_owner="owner",
+            repo_name="repo",
+            local_checkout=str(tmp_path),
+            base_branch="main",
+            authorized_base_sha="a" * 64,
+            feature_branch="feat/test",
+            task_specification_path="/tmp/task",
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[],
+            implementation_worker_command=[],
+            evidence_root=str(evidence_root),
+            state_root=str(state_root),
+            pr_number=4,
+            current_authorized_head="a" * 40,
+        )
+        store.write_atomic("run_context.json", ctx.to_dict())
+        sm = StateMachine()
+        store.write_atomic("state.json", sm.to_dict())
+        controller = Controller(ctx, store)
+        ds = DirectiveStore(store, str(evidence_root))
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+        )
+        with pytest.raises(RelayError):
+            loop.run_once(
+                _make_snapshot(), head_sha="a" * 40,
+                repo="owner/repo", pr_number=4,
+            )
+
+    def test_run_once_blocks_after_max_rounds(self, tmp_path: Path) -> None:
+        from autocoder_orchestration.store import StateStore
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.state_machine import (
+            StateMachine,
+            STATE_IMPLEMENTING, STATE_AWAITING_CI,
+            STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        from autocoder_orchestration.context import ACTOR_CONTROLLER, ACTOR_IMPL_WORKER
+
+        state_root = tmp_path / "state"
+        evidence_root = tmp_path / "evidence"
+        state_root.mkdir()
+        evidence_root.mkdir()
+        store = StateStore(str(state_root))
+        ctx = make_run_context(
+            repo_owner="owner",
+            repo_name="repo",
+            local_checkout=str(tmp_path),
+            base_branch="main",
+            authorized_base_sha="a" * 64,
+            feature_branch="feat/test",
+            task_specification_path="/tmp/task",
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[],
+            implementation_worker_command=[],
+            evidence_root=str(evidence_root),
+            state_root=str(state_root),
+            pr_number=4,
+            current_authorized_head="a" * 40,
+        )
+        store.write_atomic("run_context.json", ctx.to_dict())
+        sm = StateMachine()
+        sm = sm.transition(STATE_IMPLEMENTING, ACTOR_CONTROLLER)
+        sm = sm.transition(STATE_AWAITING_CI, ACTOR_IMPL_WORKER)
+        sm = sm.transition(STATE_REPAIRING_REVIEW_FINDINGS, ACTOR_CONTROLLER)
+        store.write_atomic("state.json", sm.to_dict())
+        controller = Controller(ctx, store)
+        ds = DirectiveStore(store, str(evidence_root))
+        # Seed 3 transcript entries so the next round_index == max_rounds.
+        for i in range(3):
+            ds.append_transcript(RoundTranscript(
+                schema_version=RELAY_SCHEMA_VERSION,
+                round_index=i,
+                head_sha_before="a" * 40,
+                head_sha_after="a" * 40,
+                directive_id=f"d{i}",
+                started_at="2026-08-08T00:00:00Z",
+                ended_at="2026-08-08T00:01:00Z",
+                outcome="completed",
+                p1_count=1,
+                p2_count=0,
+                ci_failure_count=0,
+                escalate_reasons=(),
+            ))
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+            max_rounds=3,
+        )
+        with pytest.raises(EscalateToHuman):
+            loop.run_once(
+                _make_snapshot(),
+                head_sha="a" * 40,
+                repo="owner/repo",
+                pr_number=4,
+            )
+        sm = controller.load_state_machine()
+        assert sm is not None
+        assert sm.current_state == "BLOCKED"
+
+    def test_head_clean_helper(self, tmp_path: Path) -> None:
+        from autocoder_orchestration.store import StateStore
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.controller import Controller
+        state_root = tmp_path / "state"
+        evidence_root = tmp_path / "evidence"
+        state_root.mkdir()
+        evidence_root.mkdir()
+        store = StateStore(str(state_root))
+        ctx = make_run_context(
+            repo_owner="owner",
+            repo_name="repo",
+            local_checkout=str(tmp_path),
+            base_branch="main",
+            authorized_base_sha="a" * 64,
+            feature_branch="feat/test",
+            task_specification_path="/tmp/task",
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[],
+            implementation_worker_command=[],
+            evidence_root=str(evidence_root),
+            state_root=str(state_root),
+            pr_number=4,
+            current_authorized_head="a" * 40,
+        )
+        controller = Controller(ctx, store)
+        ds = DirectiveStore(store, str(evidence_root))
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+        )
+        assert loop.head_clean(_make_snapshot())
+        assert not loop.head_clean(_make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1"}],
+        }))
