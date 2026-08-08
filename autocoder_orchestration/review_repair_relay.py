@@ -492,6 +492,54 @@ def _extract_suggested_test(body: str) -> Optional[str]:
     return m.group("test") if m is not None else None
 
 
+# A regex that detects the most common "this is not a
+# finding" provider comments. The supervisor's snapshot
+# captures every comment authored by a provider across the
+# PR history, including walkthrough / in-progress /
+# completion markers. These are status updates, not
+# actionable findings, and must be filtered out so the
+# relay does not repeatedly launch workers for a clean
+# head.
+_NON_FINDING_COMMENT_RE = re.compile(
+    r"(?i)\b("
+    r"walkthrough|"
+    r"in progress|"
+    r"review in progress|"
+    r"in-review|"
+    r"review complete|"
+    r"review completed|"
+    r"review approved|"
+    r"review request|"
+    r"finished review|"
+    r"commented on your changes|"
+    r"finished"
+    r")\b"
+)
+
+
+def _is_actionable_provider_comment(body: str) -> bool:
+    """Return False for walkthrough / in-progress / completion
+    comments; True for ACTUAL inline-comment findings.
+
+    The supervisor's snapshot captures every provider
+    comment across the PR history. Status markers
+    (walkthrough, in-progress, completion) are NOT
+    findings — they are reviews in progress, not review
+    findings. Filtering them out prevents the relay from
+    turning a clean head into a persistent repair loop.
+    """
+    if not body:
+        return False
+    # If the body is JUST a status marker (no other content),
+    # it is not a finding.
+    if _NON_FINDING_COMMENT_RE.search(body.strip()):
+        # An empty / single-line status marker is not a finding.
+        non_empty = body.strip()
+        if len(non_empty) < 200 and non_empty.count("\n") <= 2:
+            return False
+    return True
+
+
 def _collect_review_findings(snapshot: dict) -> List[Finding]:
     """Extract CodeRabbit-style inline-comment findings from a snapshot.
 
@@ -501,6 +549,10 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
     unfiltered ``issue_comments`` list. Provider matching is done
     by bot-login substring because the supervisor records bot
     logins under ``[bot]``-suffixed form for GitHub Apps.
+
+    Status markers (walkthrough, in-progress, completion)
+    are filtered out so the relay does not turn a clean
+    head into a persistent repair loop.
     """
     if not isinstance(snapshot, dict):
         raise InvalidSnapshot("snapshot must be a dict")
@@ -524,6 +576,8 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
                 continue
             seen_ids.add(finding_id)
             body = str(c.get("body") or "")
+            if not _is_actionable_provider_comment(body):
+                continue
             severity = _classify_severity(body)
             path, line = _extract_anchor(body)
             title = body.splitlines()[0] if body else "(no body)"
@@ -558,6 +612,8 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
                 continue
             seen_ids.add(finding_id)
             body = str(c.get("body") or "")
+            if not _is_actionable_provider_comment(body):
+                continue
             severity = _classify_severity(body)
             path, line = _extract_anchor(body)
             title = body.splitlines()[0] if body else "(no body)"

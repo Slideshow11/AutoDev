@@ -557,6 +557,52 @@ class TestConstants:
 
 # === evaluate_round tests ===
 
+class TestNonFindingCommentsAreFiltered:
+    """Status markers (walkthrough, in-progress, completion)
+    are NOT actionable findings. The relay must filter them
+    out so a clean head does not become a persistent repair
+    loop.
+    """
+
+    def test_walkthrough_marker_is_filtered(self) -> None:
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [
+                {"id": 1, "body": "🚦 Walkthrough comment."},
+            ],
+        })
+        findings = collect_findings(snap)
+        assert findings == []
+
+    def test_in_progress_marker_is_filtered(self) -> None:
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [
+                {"id": 1, "body": "Review in progress."},
+            ],
+        })
+        findings = collect_findings(snap)
+        assert findings == []
+
+    def test_completion_marker_is_filtered(self) -> None:
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [
+                {"id": 1, "body": "Review completed."},
+            ],
+        })
+        findings = collect_findings(snap)
+        assert findings == []
+
+    def test_actual_finding_is_NOT_filtered(self) -> None:
+        # A regular review finding must still be surfaced.
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [
+                {"id": 1, "body": "P1: foo.py:1 broken"},
+            ],
+        })
+        findings = collect_findings(snap)
+        assert len(findings) == 1
+        assert findings[0].severity == SEVERITY_P1
+
+
 class TestSnapshotHeadBinding:
     """The relay refuses to act on a snapshot whose head_sha
     does not match the requested head. This is the
