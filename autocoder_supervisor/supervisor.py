@@ -37,6 +37,7 @@ from typing import Any, Optional
 
 from .config import default_config_from_env
 from .contracts import SupervisorConfig
+from .directive_bridge import resolve_worker_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -935,18 +936,33 @@ def _resolve_hermes_bin() -> Optional[str]:
 
 
 def launch_worker(rs: dict, live: dict) -> Optional[dict]:
-    try:
-        prompt = build_resume_prompt(rs, live)
-    except (KeyError, ValueError) as exc:
-        # ``build_resume_prompt`` already logs and re-raises;
-        # the supervisor surfaces a regular launch failure
-        # instead of terminating the daemon.
+    # The relay (autocoder_orchestration.review_repair_relay)
+    # writes a canonical directive.json to the evidence root. When
+    # one is present, the supervisor uses the relay-built prompt
+    # instead of the operator-supplied resume_prompt_template.
+    # The bridge is a no-op when the directive is absent; the
+    # existing build_resume_prompt path is preserved byte-for-byte.
+    directive_prompt = resolve_worker_prompt()
+    if directive_prompt is not None:
+        prompt = directive_prompt
         log(
-            "error",
-            "invalid resume_prompt_template",
-            error=str(exc),
+            "info",
+            "using relay-directive prompt instead of resume_prompt_template",
+            directive_path=os.environ.get("AED_DIRECTIVE_PATH", ""),
         )
-        return None
+    else:
+        try:
+            prompt = build_resume_prompt(rs, live)
+        except (KeyError, ValueError) as exc:
+            # ``build_resume_prompt`` already logs and re-raises;
+            # the supervisor surfaces a regular launch failure
+            # instead of terminating the daemon.
+            log(
+                "error",
+                "invalid resume_prompt_template",
+                error=str(exc),
+            )
+            return None
     # Resolve the hermes binary: prefer AED_HERMES_BIN, then
     # the configured worker_command (whose first element is
     # the binary path), then `which hermes`.

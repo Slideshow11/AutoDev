@@ -843,9 +843,9 @@
   },
   "extracted_manifest_match": {
     "manifest_file": "provenance/aed-pr417-source-manifest.json",
-    "manifest_files_count": 44,
+    "manifest_files_count": 45,
     "manifest_source_files_count": 17,
-    "manifest_standalone_additions_count": 27,
+    "manifest_standalone_additions_count": 28,
     "all_manifest_source_paths_classified_as_extracted": true,
     "manifest_records": [
       {
@@ -983,9 +983,9 @@
         "destination_path": "autocoder_supervisor/supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
-        "destination_sha256": "75fd2f9ca74764dcc064b24bec9ac86cce2b32ce1c49869a78e27bda773b61ab",
+        "destination_sha256": "f934b121d0f6e5e012a2596fe7937ca7352f418be674542d7dfbe5d796e9cc03",
         "source_size_bytes": 86428,
-        "destination_size_bytes": 91496,
+        "destination_size_bytes": 92301,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
       },
       {
@@ -1287,6 +1287,16 @@
         "source_size_bytes": null,
         "destination_size_bytes": 15979,
         "transformation_explanation": "Round-10 directive: scripts/quiet_window_observer.py is a standalone addition to AutoDev. It was not extracted from AED PR #417 (the AED reference commit b57fcaad does not contain a file at scripts/local/quiet_window_observer.py). The file is required by the production verifier (default --aed-path) and was added to AutoDev's seed. The manifest audit entry remains: measured sha256 = sha256 of destination file (verified) and the audit counts this file as a standalone addition."
+      },
+      {
+        "source_path": null,
+        "destination_path": "autocoder_supervisor/directive_bridge.py",
+        "transformation_classification": "standalone_source_addition",
+        "source_sha256": null,
+        "destination_sha256": "e74b1d7fa8a82bdcd8f84c475d79f4b98f2580551ecca6673e24c95bfc7aeff7",
+        "source_size_bytes": null,
+        "destination_size_bytes": 7436,
+        "transformation_explanation": "Direct consumer of the canonical directive.json artifact written by autocoder_orchestration.review_repair_relay. Renders the matching worker prompt without importing the orchestration package (avoids cycle)."
       }
     ]
   },
@@ -7862,11 +7872,11 @@
   ],
   "metrics": {
     "extracted_manifest_match": {
-      "manifest_files_count": 44,
+      "manifest_files_count": 45,
       "manifest_source_files_count": 17,
-      "manifest_standalone_additions_count": 27
+      "manifest_standalone_additions_count": 28
     },
     "total_source_paths_in_manifest": 17,
-    "manifest_standalone_additions": 27
+    "manifest_standalone_additions": 28
   }
 }

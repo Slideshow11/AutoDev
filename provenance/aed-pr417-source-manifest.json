@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "75fd2f9ca74764dcc064b24bec9ac86cce2b32ce1c49869a78e27bda773b61ab",
-      "destination_size_bytes": 91496,
+      "destination_sha256": "f934b121d0f6e5e012a2596fe7937ca7352f418be674542d7dfbe5d796e9cc03",
+      "destination_size_bytes": 92301,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -418,6 +418,16 @@
       "source_size_bytes": null,
       "transformation_classification": "standalone_addition",
       "transformation_explanation": "Round-10 directive: scripts/quiet_window_observer.py is a standalone addition to AutoDev. It was not extracted from AED PR #417 (the AED reference commit b57fcaad does not contain a file at scripts/local/quiet_window_observer.py). The file is required by the production verifier (default --aed-path) and was added to AutoDev's seed. The manifest audit entry remains: measured sha256 = sha256 of destination file (verified) and the audit counts this file as a standalone addition."
+    },
+    {
+      "destination_path": "autocoder_supervisor/directive_bridge.py",
+      "destination_sha256": "e74b1d7fa8a82bdcd8f84c475d79f4b98f2580551ecca6673e24c95bfc7aeff7",
+      "destination_size_bytes": 7436,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "standalone_source_addition",
+      "transformation_explanation": "Direct consumer of the canonical directive.json artifact written by autocoder_orchestration.review_repair_relay. Renders the matching worker prompt without importing the orchestration package (avoids cycle)."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",
