@@ -588,21 +588,55 @@ def _collect_ci_findings(
     The collector emits one finding per failing required check. CI
     findings are tagged ``CI_FAILURE`` so the directive builder can
     group them with P1 review findings.
+
+    Additional required checks that are absent from the snapshot,
+    or whose run is still pending, also emit a finding with
+    severity ``CI_FAILURE`` and a body that names the missing
+    state. The relay's positive-observation rule requires every
+    required check to be EXPLICITLY SUCCESSFUL before the head
+    is considered clean; missing or pending evidence is not a
+    pass.
     """
     if not isinstance(snapshot, dict):
         raise InvalidSnapshot("snapshot must be a dict")
     findings: List[Finding] = []
     checks = snapshot.get("required_checks") or {}
     if not isinstance(checks, dict):
-        return findings
-    for name, info in checks.items():
+        checks = {}
+    # The required-check positive-observation rule applies
+    # ONLY when the operator has named explicit required
+    # checks. When ``required_check_names`` is empty, the
+    # existing CI-failure scan (failure / failure conclusion /
+    # etc.) still emits findings for the failures already
+    # present in the snapshot, but the relay does not
+    # require checks that the supervisor was not asked to
+    # fetch. This preserves the existing contract for
+    # callers that do not pass a required-check list.
+    for name in required_check_names:
+        info = checks.get(name)
         if not isinstance(info, dict):
-            continue
-        # Only emit a finding if the operator marked this check as
-        # required in the supervisor config. The supervisor's
-        # snapshot includes every check it fetched, not just the
-        # required ones.
-        if required_check_names and name not in required_check_names:
+            # Required check absent from the snapshot — the
+            # supervisor did not fetch it. Treat as a CI
+            # finding so the relay does not silently call the
+            # head clean.
+            findings.append(Finding(
+                finding_id=f"ci:{name}:missing",
+                source="ci",
+                severity=SEVERITY_CI_FAILURE,
+                title=f"CI required check missing: {name}",
+                body=(
+                    f"Required CI check {name!r} is absent from the "
+                    "snapshot. The supervisor must fetch the check "
+                    "before the relay can certify the head."
+                ),
+                file_path=None,
+                line=None,
+                url=None,
+                suggested_test=None,
+                review_id=None,
+                comment_id=None,
+                check_name=str(name),
+            ))
             continue
         conclusion = str(info.get("conclusion") or "").lower()
         status = str(info.get("status") or "").lower()
@@ -612,9 +646,33 @@ def _collect_ci_findings(
         # required check produced no work for the operator".
         if conclusion in ("success", "neutral", "skipped", "cancelled"):
             continue
-        # A still-running check is not a finding yet; the next
-        # supervisor iteration will see its conclusion.
+        # A still-running check is not a "failure" finding, but
+        # it MUST block the relay from calling the head clean:
+        # the existing readiness gate, not the relay, decides
+        # whether a pending check is acceptable. The cleanest
+        # encoding is a CI failure finding with a clear pending
+        # body so the directive tells the operator the check
+        # has not yet terminated.
         if conclusion == "" and status not in ("completed", "failure", "failed"):
+            findings.append(Finding(
+                finding_id=f"ci:{name}:pending",
+                source="ci",
+                severity=SEVERITY_CI_FAILURE,
+                title=f"CI required check pending: {name}",
+                body=(
+                    f"Required CI check {name!r} is still "
+                    f"in-progress (status={status!r}). The relay "
+                    "cannot certify the head until the check "
+                    "terminates with a positive conclusion."
+                ),
+                file_path=None,
+                line=None,
+                url=None,
+                suggested_test=None,
+                review_id=None,
+                comment_id=None,
+                check_name=str(name),
+            ))
             continue
         # ``conclusion`` is anything other than the accepted
         # terminal states and the run has reached a terminal
@@ -628,6 +686,37 @@ def _collect_ci_findings(
             body=(
                 f"Required CI check {name!r} failed at run {run_id or 'unknown'}. "
                 "Inspect the workflow logs to determine the failing assertion."
+            ),
+            file_path=None,
+            line=None,
+            url=None,
+            suggested_test=None,
+            review_id=None,
+            comment_id=None,
+            check_name=str(name),
+        ))
+    # Also emit findings for any non-required check seen as a
+    # failure, so the operator sees the full CI failure
+    # surface regardless of the required-list filter.
+    for name, info in checks.items():
+        if name in required_check_names:
+            continue
+        if not isinstance(info, dict):
+            continue
+        conclusion = str(info.get("conclusion") or "").lower()
+        if conclusion in ("success", "neutral", "skipped", "cancelled", ""):
+            continue
+        run_id = info.get("run_id")
+        findings.append(Finding(
+            finding_id=f"ci:{name}:{run_id or 'unknown'}:extra",
+            source="ci",
+            severity=SEVERITY_CI_FAILURE,
+            title=f"CI check failed: {name}",
+            body=(
+                f"Non-required CI check {name!r} failed at run "
+                f"{run_id or 'unknown'}. The relay surfaces this "
+                "for visibility; the existing readiness gate is "
+                "the authority on required checks."
             ),
             file_path=None,
             line=None,
@@ -892,7 +981,11 @@ def evaluate_round(
     The function is the SINGLE entry point for the relay's
     decision logic. It:
 
-    1. Validates the snapshot shape and head_sha.
+    1. Validates the snapshot shape and head_sha. The
+       snapshot's recorded ``head_sha`` and ``head_match`` are
+       verified against the requested head — stale snapshots
+       from a previous head are refused so the relay cannot
+       issue current-head directives from old review evidence.
     2. Collects findings via ``collect_findings``.
     3. If no findings: returns ``action="enter_qualifying_readiness"``
        so the existing readiness gate can certify the head.
@@ -912,6 +1005,24 @@ def evaluate_round(
     if not isinstance(head_sha, str) or not _HEX_SHA_RE.match(head_sha):
         raise DirectiveContractError(
             f"head_sha must be 40 or 64 lowercase hex chars: {head_sha!r}"
+        )
+    # The snapshot MUST be bound to the requested head. A
+    # stale snapshot from a previous head (or a snapshot whose
+    # capture did not match the live head) MUST be rejected;
+    # the relay cannot rely on review evidence that does not
+    # correspond to the exact head it is acting on.
+    snapshot_head = snapshot.get("head_sha")
+    if snapshot_head is not None and snapshot_head != head_sha:
+        raise InvalidSnapshot(
+            f"snapshot head {snapshot_head!r} != requested head {head_sha!r}; "
+            "stale snapshot rejected"
+        )
+    # When the snapshot's head_match flag is explicitly False,
+    # the capture was for a different head. Refuse.
+    if snapshot.get("head_match") is False:
+        raise InvalidSnapshot(
+            f"snapshot head_match is False for requested head {head_sha!r}; "
+            "stale snapshot rejected"
         )
     findings = collect_findings(snapshot, required_check_names=required_check_names)
     if not findings:

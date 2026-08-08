@@ -1445,13 +1445,25 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
 
 
 def cmd_review_repair_status(args: argparse.Namespace) -> int:
-    """Print the relay's progress (round index, last decision, journal)."""
+    """Print the relay's progress (round index, last decision, journal).
+
+    The evidence root is resolved from the run context when
+    available, falling back to the operator-supplied
+    ``--evidence-root``. The literal ``/var/tmp/...`` is no
+    longer the default; the status command MUST report the
+    same location the relay writes to.
+    """
     store = StateStore(args.state_root)
-    ds = DirectiveStore(store, args.evidence_root or "/var/tmp/autodev-evidence")
+    # Resolve the evidence root through the same helper used
+    # by cmd_review_repair_round so the status command and
+    # the round command agree on the canonical location.
+    evidence_root = _resolve_evidence_root(args, store)
+    ds = DirectiveStore(store, str(evidence_root))
     last = ds.last_round_index()
     directive = ds.read_directive()
     payload = {
         "run_id": args.run_id,
+        "evidence_root": str(evidence_root),
         "last_round_index": last,
         "directive_present": directive is not None,
         "transcript_count": len(ds.read_transcript()),

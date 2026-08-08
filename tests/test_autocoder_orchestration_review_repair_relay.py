@@ -58,11 +58,13 @@ def _make_snapshot(
     comments: list | None = None,
     per_provider: dict | None = None,
     required_checks: dict | None = None,
+    head_sha: str = "a" * 40,
+    head_match: bool = True,
 ) -> dict:
     return {
         "captured_at": "2026-08-08T00:00:00Z",
-        "head_sha": "abcdef1234567890" * 2,
-        "head_match": True,
+        "head_sha": head_sha,
+        "head_match": head_match,
         "mergeable": True,
         "formal_reviews": [],
         "review_threads": {},
@@ -160,19 +162,20 @@ class TestCollectFindings:
             "extra": {"conclusion": "failure", "run_id": "y"},
         })
         # When no required_check_names supplied, the collector
-        # emits findings for every failing check that the
-        # supervisor fetched (operator may inspect all).
+        # surfaces both required and non-required failures for
+        # visibility.
         findings = collect_findings(snap)
         assert {f.check_name for f in findings} == {
             "test (3.11)",
             "extra",
         }
-        # When required_check_names is supplied, only those emit
-        # findings.
+        # When required_check_names is supplied, exact failures
+        # are emitted for the required set, and non-required
+        # failures are also surfaced (extra visibility).
         findings = collect_findings(
             snap, required_check_names=("test (3.11)",),
         )
-        assert {f.check_name for f in findings} == {"test (3.11)"}
+        assert {f.check_name for f in findings} == {"test (3.11)", "extra"}
 
     def test_in_progress_ci_check_does_not_emit_finding(self) -> None:
         snap = _make_snapshot(required_checks={
@@ -217,6 +220,53 @@ class TestCollectFindings:
 
 
 # === build_directive tests ===
+
+class TestRequiredCheckMissing:
+    """If the operator names required checks, they MUST be
+    present in the snapshot and successful before the relay
+    calls the head clean. Missing or pending required checks
+    emit CI_FAILURE findings.
+    """
+
+    def test_missing_required_check_is_finding(self) -> None:
+        snap = _make_snapshot(
+            required_checks={"test (3.11)": {"conclusion": "success"}},
+        )
+        findings = collect_findings(
+            snap, required_check_names=("test (3.11)", "lint"),
+        )
+        # The lint check is missing -> finding.
+        ck_names = {f.check_name for f in findings}
+        assert "lint" in ck_names
+        # The successful test (3.11) is not a finding.
+        assert "test (3.11)" not in ck_names
+
+    def test_pending_required_check_is_finding(self) -> None:
+        snap = _make_snapshot(
+            required_checks={
+                "tests": {"conclusion": "", "status": "in_progress"},
+            },
+        )
+        findings = collect_findings(
+            snap, required_check_names=("tests",),
+        )
+        assert len(findings) == 1
+        assert findings[0].check_name == "tests"
+        assert "in-progress" in findings[0].body or "pending" in findings[0].body
+
+    def test_successful_required_check_is_passing(self) -> None:
+        snap = _make_snapshot(
+            required_checks={
+                "test (3.11)": {"conclusion": "success"},
+                "lint": {"conclusion": "success"},
+            },
+        )
+        findings = collect_findings(
+            snap, required_check_names=("test (3.11)", "lint"),
+        )
+        # All checks are present and successful -> no findings.
+        assert findings == []
+
 
 class TestBuildDirective:
     def test_builds_for_p1_findings(self) -> None:
@@ -506,6 +556,57 @@ class TestConstants:
 
 
 # === evaluate_round tests ===
+
+class TestSnapshotHeadBinding:
+    """The relay refuses to act on a snapshot whose head_sha
+    does not match the requested head. This is the
+    exact-head premise: review evidence from a previous
+    head must NEVER drive a directive for the current
+    head.
+    """
+
+    def test_snapshot_head_mismatch_raises(self) -> None:
+        snap = _make_snapshot(
+            head_sha="a" * 40, head_match=False,
+        )
+        with pytest.raises(InvalidSnapshot):
+            evaluate_round(
+                snapshot=snap,
+                head_sha="b" * 40,
+                repo="owner/repo",
+                pr_number=4,
+                round_index=0,
+            )
+
+    def test_snapshot_head_match_false_raises(self) -> None:
+        # Snapshot's head_sha matches but head_match is False;
+        # the relay must still refuse.
+        snap = _make_snapshot(
+            head_sha="a" * 40, head_match=False,
+        )
+        with pytest.raises(InvalidSnapshot):
+            evaluate_round(
+                snapshot=snap,
+                head_sha="a" * 40,
+                repo="owner/repo",
+                pr_number=4,
+                round_index=0,
+            )
+
+    def test_snapshot_head_match_true_passes(self) -> None:
+        snap = _make_snapshot(
+            head_sha="a" * 40, head_match=True,
+        )
+        # No findings -> enter_qualifying_readiness.
+        d = evaluate_round(
+            snapshot=snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            round_index=0,
+        )
+        assert d.action == "enter_qualifying_readiness"
+
 
 class TestEvaluateRound:
     def test_empty_snapshot_returns_qualifying_action(self) -> None:
