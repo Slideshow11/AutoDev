@@ -943,3 +943,157 @@ class TestRelayLoop:
         assert not loop.head_clean(_make_snapshot(per_provider={
             "coderabbit": [{"id": 1, "body": "P1: foo.py:1"}],
         }))
+
+
+
+# === Round-2 escalation-path tests ===
+
+class TestRunUntilHeadAdvances:
+    """The relay's persistent loop driver.
+
+    The supervisor's event loop calls
+    ``loop.run_until_head_advances`` to drive the relay through
+    as many rounds as the head advances. The loop halts only
+    on protected-authority escalation or when the head is
+    clean.
+    """
+
+    def _setup(self, tmp_path: Path):
+        from autocoder_orchestration.store import StateStore
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.state_machine import (
+            StateMachine,
+            STATE_IMPLEMENTING,
+            STATE_AWAITING_CI,
+            STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        from autocoder_orchestration.context import (
+            ACTOR_CONTROLLER, ACTOR_IMPL_WORKER,
+        )
+
+        state_root = tmp_path / "state"
+        evidence_root = tmp_path / "evidence"
+        state_root.mkdir()
+        evidence_root.mkdir()
+        store = StateStore(str(state_root))
+        ctx = make_run_context(
+            repo_owner="owner",
+            repo_name="repo",
+            local_checkout=str(tmp_path),
+            base_branch="main",
+            authorized_base_sha="a" * 64,
+            feature_branch="feat/test",
+            task_specification_path="/tmp/task",
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[],
+            implementation_worker_command=[],
+            evidence_root=str(evidence_root),
+            state_root=str(state_root),
+            pr_number=4,
+            current_authorized_head="a" * 40,
+        )
+        store.write_atomic("run_context.json", ctx.to_dict())
+        sm = StateMachine()
+        sm = sm.transition(STATE_IMPLEMENTING, ACTOR_CONTROLLER)
+        sm = sm.transition(STATE_AWAITING_CI, ACTOR_IMPL_WORKER)
+        sm = sm.transition(STATE_REPAIRING_REVIEW_FINDINGS, ACTOR_CONTROLLER)
+        store.write_atomic("state.json", sm.to_dict())
+        controller = Controller(ctx, store)
+        ds = DirectiveStore(store, str(evidence_root))
+        return ctx, store, controller, ds
+
+    def test_escalate_raises_escalate_to_human(self, tmp_path: Path) -> None:
+        """A P0 round must raise EscalateToHuman, not a
+        non-exception (RoundDecision is not a BaseException).
+        """
+        from autocoder_orchestration.review_repair_relay import (
+            EscalateToHuman,
+        )
+        ctx, store, controller, ds = self._setup(tmp_path)
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+        )
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P0 critical: stop the run"}],
+        })
+        # Wire the loop's _await_head_advance to mock a
+        # worker that pushes a new head.
+        calls = {"count": 0}
+        def mock_provider(head: str) -> dict:
+            calls["count"] += 1
+            return snap
+        def mock_advance(head_sha: str) -> Optional[str]:
+            # The first call returns None (no advance yet),
+            # then we return a new head to continue the loop.
+            if calls["count"] < 2:
+                return None
+            return None
+        with pytest.raises(EscalateToHuman):
+            loop.run_until_head_advances(
+                mock_provider, head_sha="a" * 40,
+                repo="owner/repo", pr_number=4,
+                on_action=lambda d: None,
+            )
+
+    def test_enter_qualifying_returns_when_head_clean(self, tmp_path: Path) -> None:
+        """A clean head returns the decision without
+        raising.
+        """
+        ctx, store, controller, ds = self._setup(tmp_path)
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+        )
+        snap = _make_snapshot()  # clean
+        decision = loop.run_until_head_advances(
+            lambda head: snap,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            on_action=lambda d: None,
+        )
+        assert decision.action == "enter_qualifying_readiness"
+
+    def test_safety_net_blocks_after_consecutive_rounds(self, tmp_path: Path) -> None:
+        """The max_rounds safety net triggers when the same
+        head produces N consecutive rounds without
+        advancement.
+        """
+        from autocoder_orchestration.review_repair_relay import (
+            EscalateToHuman,
+        )
+        ctx, store, controller, ds = self._setup(tmp_path)
+        loop = RelayLoop(
+            context=ctx, store=store,
+            directive_store=ds, controller=controller,
+            max_rounds=2,
+        )
+        # Seed 2 transcript entries with the same head and
+        # completed outcome.
+        for _ in range(2):
+            ds.append_transcript(RoundTranscript(
+                schema_version=RELAY_SCHEMA_VERSION,
+                round_index=0,
+                head_sha_before="a" * 40,
+                head_sha_after="a" * 40,
+                directive_id="d",
+                started_at="2026-08-08T00:00:00Z",
+                ended_at="2026-08-08T00:01:00Z",
+                outcome="completed",
+                p1_count=1,
+                p2_count=0,
+                ci_failure_count=0,
+                escalate_reasons=(),
+            ))
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1"}],
+        })
+        with pytest.raises(EscalateToHuman):
+            loop.run_once(
+                snap, head_sha="a" * 40,
+                repo="owner/repo", pr_number=4,
+            )
+
+

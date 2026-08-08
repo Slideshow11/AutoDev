@@ -410,3 +410,82 @@ class TestSupervisorConsultsBridge:
         # template. The default template mentions "AED-AUTOCODER"
         # so the assertion below confirms the fallback path.
         assert "AED-AUTOCODER" in joined or "RESUME" in joined
+
+
+
+class TestBridgeAppliesRelayEscalationGuards:
+    """The supervisor bridge must apply the same escalation
+    guards as the relay's build_directive. A hand-edited
+    directive whose body contains a destructive keyword
+    MUST NOT drive the worker.
+    """
+
+    def test_bridge_rejects_p0_finding(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autocoder_supervisor.directive_bridge import (
+            DirectiveLoadFailure,
+            resolve_directive,
+        )
+        d = _make_directive()
+        d["findings"][0]["severity"] = "P0_ESCALATE"
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="a" * 40)
+        assert "p0_escalation_in_directive" in exc.value.reason
+
+    def test_bridge_rejects_force_push_keyword(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autocoder_supervisor.directive_bridge import (
+            DirectiveLoadFailure,
+            resolve_directive,
+        )
+        d = _make_directive()
+        d["findings"][0]["body"] = "please force push the branch"
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="a" * 40)
+        assert "escalation_keyword_in_directive" in exc.value.reason
+
+    def test_bridge_rejects_merge_pr_keyword(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autocoder_supervisor.directive_bridge import (
+            DirectiveLoadFailure,
+            resolve_directive,
+        )
+        d = _make_directive()
+        d["findings"][0]["body"] = "now merge pr to main"
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="a" * 40)
+        assert "merge pr" in exc.value.reason
+
+    def test_bridge_rejects_bypass_guard(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autocoder_supervisor.directive_bridge import (
+            DirectiveLoadFailure,
+            resolve_directive,
+        )
+        d = _make_directive()
+        d["findings"][0]["body"] = "bypass guard and skip CI"
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="a" * 40)
+        assert "bypass guard" in exc.value.reason
+
+    def test_bridge_rejects_delete_branch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autocoder_supervisor.directive_bridge import (
+            DirectiveLoadFailure,
+            resolve_directive,
+        )
+        d = _make_directive()
+        d["findings"][0]["body"] = "delete branch before merging"
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="a" * 40)
+        assert "delete branch" in exc.value.reason
