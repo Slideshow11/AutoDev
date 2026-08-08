@@ -86,8 +86,12 @@ def merge_lock(evidence_root: Path):
     at that moment is the actual holder, not the contender.
 
     The caller MUST NOT nest ``merge_lock`` calls in the same
-    process; a second acquisition in the same process would
-    deadlock.
+    process; a second acquisition in the same process returns
+    a ``LockUnavailable`` immediately because the flock is
+    already held by the same process and ``LOCK_NB`` rejects
+    the second acquisition. This is consistent with the
+    ``LOCK_NB`` call and with the
+    ``test_lock_blocks_second_acquisition`` test.
     """
     lock_dir = Path(evidence_root)
     lock_dir.mkdir(parents=True, exist_ok=True, mode=0o700)

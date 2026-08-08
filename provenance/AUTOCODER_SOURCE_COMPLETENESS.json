@@ -1491,8 +1491,7 @@
   },
   "audit_test_paths": [
     "tests/test_extraction_provenance.py (existing; referenced for cross-check)",
-    "tests/test_autocoder_supervisor_source_completeness.py (NEW; added by this audit)",
-    "scripts/local/quiet_window_observer.py"
+    "tests/test_autocoder_supervisor_source_completeness.py (NEW; added by this audit)"
   ],
   "no_unclassified_candidates": true,
   "every_record_has_disposition": true,
