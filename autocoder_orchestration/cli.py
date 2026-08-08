@@ -78,6 +78,17 @@ from .merge_authorization import (
     execute_guarded_merge_transaction,
     fetch_live_pr_payload,
 )
+from .review_repair_relay import (
+    DEFAULT_MAX_ROUNDS,
+    DirectiveStore,
+    EscalateToHuman,
+    RelayError,
+    RelayLoop,
+    ReviewDirective,
+    RoundDecision,
+    build_worker_prompt,
+    evaluate_round,
+)
 
 
 EXIT_OK = 0
@@ -1284,6 +1295,134 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_review_repair_round(args: argparse.Namespace) -> int:
+    """Run one bounded round of the autonomous review/repair relay.
+
+    The command is the operator-facing entry point for the relay.
+    It reads the run context (and the persisted snapshot JSON
+    when ``--snapshot-file`` is supplied), runs one round via
+    ``RelayLoop.run_once``, and prints the ``RoundDecision``.
+
+    The decision tells the caller what to do:
+    - ``action == "launch_worker"``: the relay built a directive
+      and persisted it. The caller (typically the supervisor)
+      should launch the worker with the directive prompt.
+    - ``action == "enter_qualifying_readiness"``: the head is
+      clean. The caller should invoke the existing readiness gate.
+    - ``action == "escalate_to_human"``: the relay found a P0
+      finding or an escalation keyword. The run is now BLOCKED;
+      the operator must inspect and direct.
+
+    Exit codes follow the conventional mapping:
+    - 0: round ran; the action field tells the caller what to do.
+    - 2: invalid arguments.
+    - 4: state error (e.g. controller in wrong state).
+    - 5: internal error (EscalateToHuman, RelayError, ...).
+    """
+    store = StateStore(args.state_root)
+    rc = store.read_optional("run_context.json")
+    if rc is None:
+        return _emit(
+            {"error": "no run context on file"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    ctx = RunContext.from_dict(rc)
+    # Resolve the snapshot: either from --snapshot-file or stdin.
+    snapshot: Optional[dict] = None
+    if getattr(args, "snapshot_file", None):
+        try:
+            snapshot = json.loads(args.snapshot_file.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return _emit(
+                {"error": f"snapshot file unreadable: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_INVARG,
+            )
+    elif getattr(args, "snapshot_stdin", False):
+        try:
+            snapshot = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as e:
+            return _emit(
+                {"error": f"stdin is not valid JSON: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_INVARG,
+            )
+    if snapshot is None:
+        return _emit(
+            {"error": "must supply --snapshot-file or --snapshot-stdin"},
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    head_sha = args.head_sha or ctx.current_authorized_head
+    if not head_sha:
+        return _emit(
+            {"error": "no head_sha available; pass --head-sha or set context"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    evidence_root = args.evidence_root or str(ctx.evidence_root)
+    directive_store = DirectiveStore(store, evidence_root)
+    controller = Controller(ctx, store)
+    repo = f"{ctx.repo_owner}/{ctx.repo_name}"
+    # Read required_check_names from the supervisor config if
+    # present; otherwise accept the caller-supplied list.
+    required_check_names = tuple(
+        name for name in (args.required_check_names or "").split(",") if name
+    )
+    max_rounds = int(args.max_rounds) if args.max_rounds else DEFAULT_MAX_ROUNDS
+    loop = RelayLoop(
+        context=ctx,
+        store=store,
+        directive_store=directive_store,
+        controller=controller,
+        required_check_names=required_check_names,
+        max_rounds=max_rounds,
+    )
+    try:
+        decision = loop.run_once(
+            snapshot, head_sha=head_sha,
+            repo=repo, pr_number=int(ctx.pr_number or 0),
+        )
+    except (EscalateToHuman, RelayError) as e:
+        return _emit(
+            {"error": f"{type(e).__name__}: {e}"},
+            json_mode=args.json,
+            exit_code=EXIT_INTERNAL,
+        )
+    payload = decision.to_dict()
+    # When the action is "launch_worker", also render the worker
+    # prompt so the caller can pass it to whatever worker
+    # launcher they prefer. The prompt is large (it contains the
+    # full directive JSON) — printing it twice is fine for
+    # operator-facing CLI output.
+    if decision.action == "launch_worker":
+        try:
+            payload["worker_prompt"] = build_worker_prompt(decision)
+        except Exception as e:  # pragma: no cover - defensive
+            payload["worker_prompt_error"] = repr(e)
+    return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
+
+
+def cmd_review_repair_status(args: argparse.Namespace) -> int:
+    """Print the relay's progress (round index, last decision, journal)."""
+    store = StateStore(args.state_root)
+    ds = DirectiveStore(store, args.evidence_root or "/var/tmp/autodev-evidence")
+    last = ds.last_round_index()
+    directive = ds.read_directive()
+    payload = {
+        "run_id": args.run_id,
+        "last_round_index": last,
+        "directive_present": directive is not None,
+        "transcript_count": len(ds.read_transcript()),
+    }
+    if directive is not None:
+        payload["directive_head_sha"] = directive.head_sha
+        payload["directive_summary"] = directive.summary
+        payload["directive_id"] = directive.directive_id
+    return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="autocoder-orchestration")
     parser.add_argument("--json", action="store_true")
@@ -1335,6 +1474,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m = sub.add_parser("merge", parents=[common])
     m.add_argument("--evidence-root", default="")
 
+    rr = sub.add_parser("review-repair-round", parents=[common])
+    rr.add_argument("--snapshot-file", type=Path, default=None,
+                    help="Path to a JSON snapshot file (mutually exclusive with --snapshot-stdin)")
+    rr.add_argument("--snapshot-stdin", action="store_true",
+                    help="Read the snapshot JSON from stdin")
+    rr.add_argument("--head-sha", default=None,
+                    help="Override the head SHA from the run context")
+    rr.add_argument("--evidence-root", default=None,
+                    help="Override the evidence root from the run context")
+    rr.add_argument("--required-check-names", default="",
+                    help="Comma-separated CI check names that must pass for the head to be clean")
+    rr.add_argument("--max-rounds", default=str(DEFAULT_MAX_ROUNDS),
+                    help="Outer bound on relay rounds before BLOCKED")
+
+    rs = sub.add_parser("review-repair-status", parents=[common])
+    rs.add_argument("--evidence-root", default=None)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "status":
@@ -1359,6 +1515,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_merge(args)
         if args.command == "post-merge-verify":
             return cmd_post_merge_verify(args)
+        if args.command == "review-repair-round":
+            return cmd_review_repair_round(args)
+        if args.command == "review-repair-status":
+            return cmd_review_repair_status(args)
     except (ControllerError, StateStoreError, CandidateError, MergeError) as e:
         return _emit(
             {"error": f"{type(e).__name__}: {e}"},

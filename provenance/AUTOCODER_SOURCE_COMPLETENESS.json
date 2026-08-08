@@ -1243,10 +1243,10 @@
         "destination_path": "autocoder_orchestration/cli.py",
         "transformation_classification": "standalone_source_addition",
         "source_sha256": null,
-        "destination_sha256": "cb71850b6fe1f409eabaed9f21fa684b6ea5f9de8b86c4857ddc504491bde0bd",
+        "destination_sha256": "fa461f3683ea047f7516d2afbd43038dc20d72333408c9d28842e6e555a8fd9e",
         "source_size_bytes": null,
-        "destination_size_bytes": 54485,
-        "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive."
+        "destination_size_bytes": 61169,
+        "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive. v1b: added review-repair-round and review-repair-status subcommands for the autonomous review/repair relay."
       },
       {
         "source_path": null,
