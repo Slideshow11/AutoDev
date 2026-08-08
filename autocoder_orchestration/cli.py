@@ -192,7 +192,15 @@ def _fetch_coderabbit_review_state(
         "nodes { author { login } state }"
         "}}}"
     )
-    cursor = "null"
+    # ``cursor`` is None on the first request and the prior
+    # page's endCursor on subsequent requests. ``gh api
+    # graphql -F cursor=...`` sends the raw string; the
+    # GraphQL server expects a JSON null for the first
+    # page. Calling with ``-F cursor="null"`` (the four
+    # character string) makes the server reject the first
+    # request, so the path is conditioned on cursor being
+    # set.
+    cursor: Optional[str] = None
     has_next = True
     page_count = 0
     matched_state: Optional[str] = None
@@ -200,16 +208,17 @@ def _fetch_coderabbit_review_state(
         page_count += 1
         if page_count > _CODERABBIT_MAX_PAGES:
             break
+        cmd = [
+            gh_executable, "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}",
+            "-F", f"name={name}",
+            "-F", f"pr={pr_number}",
+        ]
+        if cursor is not None:
+            cmd.extend(["-F", f"cursor={cursor}"])
         proc = subprocess.run(
-            [
-                gh_executable, "api", "graphql",
-                "-f", f"query={query}",
-                "-F", f"owner={owner}",
-                "-F", f"name={name}",
-                "-F", f"pr={pr_number}",
-                "-F", f"cursor={cursor}",
-            ],
-            capture_output=True, text=True, timeout=30,
+            cmd, capture_output=True, text=True, timeout=30,
         )
         if proc.returncode != 0:
             return matched_state
@@ -231,7 +240,11 @@ def _fetch_coderabbit_review_state(
             matched_state = match
         page_info = page.get("pageInfo", {})
         has_next = bool(page_info.get("hasNextPage"))
-        cursor = page_info.get("endCursor") or "null"
+        # ``endCursor`` is None on the final page; the next
+        # iteration's cursor is None so the first-page
+        # logic above runs again (which is correct: the
+        # loop terminates via ``has_next``).
+        cursor = page_info.get("endCursor") or None
     return matched_state
 
 
@@ -964,7 +977,13 @@ def cmd_merge(args: argparse.Namespace) -> int:
     try:
         all_nodes = []
         has_next = True
-        cursor = "null"
+        # ``cursor`` is None on the first request; the
+        # ``-F cursor=...`` argument is only added when a
+        # cursor exists. ``-F cursor="null"`` (the string)
+        # would make the GraphQL server reject the first
+        # request, so the path is conditioned on cursor
+        # being set.
+        cursor: Optional[str] = None
         page_count = 0
         while has_next:
             page_count += 1
@@ -983,14 +1002,17 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "nodes { isResolved isOutdated }"
                 "}}}"
             )
+            thread_cmd = [
+                "gh", "api", "graphql",
+                "-f", f"query={q}",
+                "-F", f"owner={ctx.repo_owner}",
+                "-F", f"name={ctx.repo_name}",
+                "-F", f"pr={auth.pr_number}",
+            ]
+            if cursor is not None:
+                thread_cmd.extend(["-F", f"cursor={cursor}"])
             thread_proc = subprocess.run(
-                ["gh", "api", "graphql",
-                 "-f", f"query={q}",
-                 "-F", f"owner={ctx.repo_owner}",
-                 "-F", f"name={ctx.repo_name}",
-                 "-F", f"pr={auth.pr_number}",
-                 "-F", f"cursor={cursor}"],
-                capture_output=True, text=True, timeout=30,
+                thread_cmd, capture_output=True, text=True, timeout=30,
             )
             if thread_proc.returncode != 0:
                 raise RuntimeError(
@@ -1011,7 +1033,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
             all_nodes.extend(page.get("nodes", []))
             page_info = page.get("pageInfo", {})
             has_next = bool(page_info.get("hasNextPage"))
-            cursor = page_info.get("endCursor") or "null"
+            # ``endCursor`` is None on the final page; the
+            # loop terminates via ``has_next``. We do NOT
+            # default to the string "null" — that would
+            # re-send the broken first-page cursor.
+            cursor = page_info.get("endCursor") or None
 
         unresolved_current = sum(
             1 for n in all_nodes

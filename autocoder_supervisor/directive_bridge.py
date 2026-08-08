@@ -39,22 +39,76 @@ the relay writes to:
 The supervisor's existing ``evidence_root`` configuration is
 passed through unchanged. The bridge is a consumer, not a
 writer.
+
+Expected head
+--------------
+
+The supervisor's ``launch_worker`` passes
+``AUTHORITATIVE_HEAD`` as ``expected_head`` to
+``resolve_worker_prompt``. The bridge rejects directives whose
+``head_sha`` does not match; this is the exact-head guard from
+invariant I-08 ("review evidence is bound to the exact current
+head"). A head mismatch is logged and the bridge returns
+``None`` so the supervisor falls back to the operator-supplied
+resume prompt.
+
+Failure surface
+---------------
+
+The bridge surfaces directive failures through a structured
+``DirectiveLoadFailure`` exception so the supervisor can log
+the failure mode (missing / unreadable / malformed JSON /
+non-dict / schema-invalid / digest mismatch / head mismatch /
+wrong schema version) instead of silently retrying. The
+exception is caught at the supervisor's consultation site; the
+fallback path is preserved byte-for-byte.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from ._directive_prompt import render_directive_prompt
 
-# Direct import would create a cycle (orchestration does not
-# depend on supervisor). The bridge reads the directive via the
-# same canonical artifact writer that the relay uses, but it
-# only needs the JSON payload, so a direct read is sufficient.
-# The format contract is documented by the relay's
-# ``RELAY_SCHEMA_VERSION`` constant.
+
+# The relay's schema version. The bridge refuses any other
+# version so a stale directive from a previous harness cannot
+# drive the supervisor.
 _RELAY_SCHEMA_VERSION = "autocoder.review_repair_relay.v1"
+
+
+class DirectiveLoadFailure(Exception):
+    """Raised when a directive cannot be loaded or accepted.
+
+    The supervisor catches this exception and falls back to
+    the operator-supplied resume prompt. The ``reason`` field
+    is logged so the operator can see the structured failure
+    mode.
+    """
+
+    def __init__(self, reason: str, path: Optional[Path] = None) -> None:
+        self.reason = reason
+        self.path = path
+        super().__init__(f"{reason} ({path})" if path else reason)
+
+
+@dataclass(frozen=True)
+class ResolvedDirective:
+    """The result of a successful directive lookup.
+
+    The supervisor consults ``resolved.prompt`` for the worker
+    command and ``resolved.path`` for the log line. The
+    ``directive_sha256`` is the canonical digest the worker
+    will see in its prompt.
+    """
+
+    path: Path
+    prompt: str
+    directive_sha256: str
 
 
 def _resolve_directive_path(explicit: Optional[str] = None) -> Optional[Path]:
@@ -62,9 +116,12 @@ def _resolve_directive_path(explicit: Optional[str] = None) -> Optional[Path]:
 
     Returns ``None`` when no directive is configured; the caller
     then falls back to the operator-supplied resume prompt
-    template. The function is intentionally silent on missing
-    files — the supervisor's main loop logs the absence
-    separately so a missing directive is observable.
+    template.
+
+    Lookup order is operator-supplied explicit path, then
+    ``AED_DIRECTIVE_PATH``, then ``AED_EVIDENCE_ROOT/directive.json``.
+    Each candidate is checked for ``is_file()`` so a missing
+    file is silently treated as "no directive configured".
     """
     if explicit:
         p = Path(explicit)
@@ -82,24 +139,33 @@ def _resolve_directive_path(explicit: Optional[str] = None) -> Optional[Path]:
     return None
 
 
-def _render_directive_prompt(directive: dict) -> str:
-    """Render the canonical worker prompt from a directive dict.
+def _load_directive_payload(path: Path) -> dict:
+    """Load + validate the directive file at ``path``.
 
-    The relay renders the prompt via
-    ``autocoder_orchestration.review_repair_relay.build_worker_prompt``
-    on a ``RoundDecision`` object. The supervisor does not have
-    a ``RoundDecision`` object — it has the directive file
-    written by the relay. The bridge formats the same template
-    here so the supervisor can produce a stable prompt without
-    reverse-importing the orchestration package.
+    Raises ``DirectiveLoadFailure`` for every distinct failure
+    mode so the supervisor can log the precise reason. The
+    failure modes are:
 
-    The format MUST stay byte-identical to the relay's
-    ``build_worker_prompt`` output. The two implementations are
-    coupled by ``tests/test_directive_bridge.py`` which compares
-    them through a representative directive.
+    - ``"unreadable"`` — ``OSError`` reading the file.
+    - ``"invalid_json"`` — content is not valid JSON.
+    - ``"non_dict_payload"`` — JSON top-level is not a dict.
+    - ``"missing_field:<name>"`` — required field absent.
+    - ``"wrong_schema_version"`` — schema_version mismatch.
+    - ``"digest_mismatch"`` — recomputed digest != stored _sha256.
     """
-    # Identical template to autocoder_orchestration.review_repair_relay.
-    # Field names match the relay's ReviewDirective.to_dict() shape.
+    try:
+        text = path.read_text()
+    except OSError as e:
+        raise DirectiveLoadFailure(f"unreadable: {e!r}", path) from e
+    try:
+        directive = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise DirectiveLoadFailure(f"invalid_json: {e!r}", path) from e
+    if not isinstance(directive, dict):
+        raise DirectiveLoadFailure(
+            f"non_dict_payload: top-level is {type(directive).__name__}, not dict",
+            path,
+        )
     required = (
         "schema_version", "directive_id", "round_index",
         "head_sha", "repo", "pr_number", "summary",
@@ -107,82 +173,106 @@ def _render_directive_prompt(directive: dict) -> str:
     )
     for field_name in required:
         if field_name not in directive:
-            raise ValueError(
-                f"directive is missing required field: {field_name!r}"
+            raise DirectiveLoadFailure(
+                f"missing_field:{field_name}", path,
             )
     if directive["schema_version"] != _RELAY_SCHEMA_VERSION:
-        raise ValueError(
-            f"directive schema_version {directive['schema_version']!r} "
-            f"is not {_RELAY_SCHEMA_VERSION!r}"
+        raise DirectiveLoadFailure(
+            f"wrong_schema_version: {directive['schema_version']!r} is not "
+            f"{_RELAY_SCHEMA_VERSION!r}",
+            path,
         )
-    # Deterministic SHA-256 (matches the relay's
-    # ``ReviewDirective.compute_sha256`` which serializes the
-    # full directive payload).
-    import hashlib
+    # Verify the directive's stored _sha256 against its payload.
+    # The relay writes the directive's _sha256 sidecar value into
+    # the artifact body so the bridge can verify it without
+    # touching the sidecar file. The canonical digest is the
+    # SHA-256 of the canonical serialization of the directive
+    # fields, excluding the persisted metadata ``_sha256`` itself.
+    stored_sha = directive.get("_sha256")
+    if not stored_sha or not isinstance(stored_sha, str):
+        raise DirectiveLoadFailure(
+            "missing_or_invalid_digest: directive body has no _sha256",
+            path,
+        )
+    canonical_fields = {
+        k: v for k, v in directive.items() if k != "_sha256"
+    }
     canonical = json.dumps(
-        directive, sort_keys=True, separators=(",", ":"),
+        canonical_fields, sort_keys=True, separators=(",", ":"),
     )
-    directive_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    payload = json.dumps(directive, indent=2, sort_keys=True)
-    return (
-        f"[AED-AUTOCODER REPAIR DIRECTIVE — round {directive['round_index']}] "
-        f"You are operating in the autonomous review/repair relay (v1) for "
-        f"PR {directive['pr_number']} ({directive['repo']}).\n\n"
-        f"Authoritative head: {directive['head_sha']}\n"
-        f"Directive ID: {directive['directive_id']}\n"
-        f"Directive SHA-256: {directive_sha}\n\n"
-        "The relay has already collected exact-head CI and CodeRabbit evidence. "
-        "Your job is to apply every P1 finding and the required CI failures. "
-        "The directive below is the authoritative spec for this round — do not "
-        "re-query the review surface; the relay has already done so.\n\n"
-        f"Directive summary: {directive['summary']}\n\n"
-        "```json\n"
-        f"{payload}\n"
-        "```\n\n"
-        "Apply every P1 finding. Verify the repair by running the focused test "
-        "suite and the CI gate. Commit and push. Do NOT amend history. Do NOT "
-        "force-push. Do NOT merge. The relay will detect the new head "
-        "automatically and run the next round or transition to qualification.\n\n"
-        "Standing authorization is already recorded in run_state.json. Stop only "
-        "when the relay signals 'enter_qualifying_readiness' or 'escalate_to_human' "
-        "via the next round decision."
+    recomputed = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if stored_sha != recomputed:
+        raise DirectiveLoadFailure(
+            f"digest_mismatch: stored={stored_sha[:12]}.. "
+            f"recomputed={recomputed[:12]}..",
+            path,
+        )
+    return directive
+
+
+def resolve_directive(
+    *,
+    expected_head: Optional[str] = None,
+    directive_path: Optional[str] = None,
+) -> Optional[ResolvedDirective]:
+    """Resolve the relay-authored directive, if present and valid.
+
+    Returns ``None`` when no directive is configured. Raises
+    ``DirectiveLoadFailure`` when a directive is configured but
+    invalid so the supervisor can log the precise failure mode
+    and fall back to the operator-supplied resume prompt.
+
+    When ``expected_head`` is supplied, directives whose
+    ``head_sha`` does not match are rejected with reason
+    ``head_mismatch`` (invariant I-08: review evidence is bound
+    to the exact current head).
+    """
+    path = _resolve_directive_path(directive_path)
+    if path is None:
+        return None
+    directive = _load_directive_payload(path)
+    if expected_head is not None:
+        if directive["head_sha"] != expected_head:
+            raise DirectiveLoadFailure(
+                f"head_mismatch: directive head {directive['head_sha']!r} "
+                f"!= expected {expected_head!r}",
+                path,
+            )
+    prompt = render_directive_prompt(directive)
+    stored_sha = directive["_sha256"]
+    return ResolvedDirective(
+        path=path, prompt=prompt, directive_sha256=stored_sha,
     )
 
 
 def resolve_worker_prompt(
     *,
+    expected_head: Optional[str] = None,
     directive_path: Optional[str] = None,
 ) -> Optional[str]:
     """Return the relay's worker prompt when a directive is on disk.
 
-    Returns ``None`` when no directive is configured, when the
-    configured file is missing, or when the file is malformed.
-    The supervisor's main loop logs the configuration state so
-    the absence is observable.
+    Returns ``None`` when no directive is configured. Does NOT
+    raise on directive load failures — callers that need the
+    failure mode should use ``resolve_directive`` instead.
 
-    The function NEVER invokes the relay's
-    ``build_worker_prompt`` directly to avoid a package cycle.
-    The two prompt-rendering paths are byte-identical for
-    equivalent inputs (verified by
-    ``tests/test_directive_bridge.py``).
+    The supervisor's main loop logs the consultation site so
+    the absence is observable.
     """
-    path = _resolve_directive_path(directive_path)
-    if path is None:
-        return None
     try:
-        text = path.read_text()
-        directive = json.loads(text)
-    except (OSError, json.JSONDecodeError):
+        resolved = resolve_directive(
+            expected_head=expected_head, directive_path=directive_path,
+        )
+    except DirectiveLoadFailure:
         return None
-    if not isinstance(directive, dict):
+    if resolved is None:
         return None
-    try:
-        return _render_directive_prompt(directive)
-    except (ValueError, KeyError, TypeError):
-        return None
+    return resolved.prompt
 
 
 __all__ = [
+    "DirectiveLoadFailure",
+    "ResolvedDirective",
+    "resolve_directive",
     "resolve_worker_prompt",
-    "_render_directive_prompt",
 ]

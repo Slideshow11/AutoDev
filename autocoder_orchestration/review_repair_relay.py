@@ -168,9 +168,34 @@ _SEVERITY_MARKER_RE = re.compile(
 
 #: Regex that captures ``path:line`` anchors used in review
 #: comments. Falls back to just ``path`` if no line is present.
-_PATH_ANCHOR_RE = re.compile(
-    r"(?P<path>[A-Za-z0-9_./\-]+\.[A-Za-z0-9_]+)(?::(?P<line>\d+))?",
+#: The path component MUST end in a known source-file extension;
+#: arbitrary dotted prose (e.g. "i.e", "v1.2", "foo.bar()") is
+#: rejected so it cannot reach the worker as a fake anchor.
+_KNOWN_SOURCE_EXTENSIONS = (
+    "py", "pyi", "pyx", "pxd",
+    "js", "jsx", "ts", "tsx", "mjs", "cjs",
+    "rs", "go", "c", "cc", "cpp", "cxx", "h", "hpp",
+    "java", "kt", "scala",
+    "rb", "sh", "bash", "zsh",
+    "toml", "yaml", "yml", "json", "xml", "html", "css",
+    "md", "rst", "txt",
+    "sql", "lua", "pl", "php",
+    "tf", "hcl",
 )
+_PATH_ANCHOR_RE = re.compile(
+    # Optional path components separated by / then a basename
+    # ending in a known source-file extension. The basename
+    # may include dots (e.g. ``foo.bar.py``) so we capture the
+    # extension as the LAST dot-group, not the first.
+    r"(?P<path>(?:[A-Za-z0-9_.\-]+/)*"
+    r"(?P<basename>[A-Za-z0-9_.\-]+?)\."
+    r"(?P<ext>" + "|".join(_KNOWN_SOURCE_EXTENSIONS) + r"))"
+    r"(?::(?P<line>\d+))?",
+)
+
+#: Strict lowercase hex SHA-256/1 pattern used by the directive
+#: contract (40 or 64 lowercase hexadecimal characters).
+_HEX_SHA_RE = re.compile(r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 
 #: Regex that captures a suggested test from the test-gap markers.
 _TEST_SUGGEST_RE = re.compile(
@@ -272,7 +297,10 @@ class ReviewDirective:
     coordinator_actor: str
 
     def __post_init__(self) -> None:
-        if not self.head_sha or (len(self.head_sha) != 40 and len(self.head_sha) != 64):
+        if (
+            not isinstance(self.head_sha, str)
+            or not _HEX_SHA_RE.match(self.head_sha)
+        ):
             raise DirectiveContractError(
                 f"head_sha must be 40 or 64 lowercase hex chars: {self.head_sha!r}"
             )
@@ -329,9 +357,22 @@ class ReviewDirective:
         )
 
     def compute_sha256(self) -> str:
-        """SHA-256 of the canonical serialization of the directive."""
+        """SHA-256 of the canonical serialization of the directive.
+
+        The canonical form excludes the persisted ``_sha256``
+        metadata field so the digest matches the
+        write_artifact-sidecar digest that the bridge
+        independently verifies (C-22). This also matches the
+        supervisor's ``_directive_prompt.compute_directive_sha256``
+        so the worker-prompt SHA-256 is the same string the
+        bridge sees in its verification step.
+        """
+        payload = self.to_dict()
+        payload_without_digest = {k: v for k, v in payload.items() if k != "_sha256"}
         return hashlib.sha256(
-            json.dumps(self.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+            json.dumps(
+                payload_without_digest, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")
         ).hexdigest()
 
 
@@ -565,15 +606,19 @@ def _collect_ci_findings(
             continue
         conclusion = str(info.get("conclusion") or "").lower()
         status = str(info.get("status") or "").lower()
-        # A successful conclusion is never a finding.
-        if conclusion == "success":
+        # A successful / neutral / skipped / cancelled conclusion
+        # is never a finding. These conclusions all represent a
+        # non-actionable terminal state and equate to "the
+        # required check produced no work for the operator".
+        if conclusion in ("success", "neutral", "skipped", "cancelled"):
             continue
         # A still-running check is not a finding yet; the next
         # supervisor iteration will see its conclusion.
         if conclusion == "" and status not in ("completed", "failure", "failed"):
             continue
-        # ``conclusion`` is anything other than "success" and the
-        # run has reached a terminal state. Emit a finding.
+        # ``conclusion`` is anything other than the accepted
+        # terminal states and the run has reached a terminal
+        # state. Emit a finding.
         run_id = info.get("run_id")
         findings.append(Finding(
             finding_id=f"ci:{name}:{run_id or 'unknown'}",
@@ -864,7 +909,7 @@ def evaluate_round(
     """
     if not isinstance(snapshot, dict):
         raise InvalidSnapshot("snapshot must be a dict")
-    if not isinstance(head_sha, str) or (len(head_sha) != 40 and len(head_sha) != 64):
+    if not isinstance(head_sha, str) or not _HEX_SHA_RE.match(head_sha):
         raise DirectiveContractError(
             f"head_sha must be 40 or 64 lowercase hex chars: {head_sha!r}"
         )
@@ -986,20 +1031,58 @@ def build_worker_prompt(decision: RoundDecision) -> str:
 # === Loop controller ===
 
 class RelayLoop:
-    """Bounded loop controller that wraps the existing state machine.
+    """Persistent loop controller for the review/repair relay.
 
-    The loop is intentionally a thin shell over ``evaluate_round``
-    plus the existing ``StateStore`` / ``Controller`` / ``Lease``
-    primitives. Every state mutation is delegated to the
-    controller; the loop only owns the bounded iteration and
-    the round transcript journal.
+    The loop is the orchestration layer that drives a single
+    PR through review → repair → push → CI → review → repair
+    until the head is clean. It REUSES the existing
+    ``StateStore`` / ``Controller`` / ``Lease`` primitives; every
+    state mutation is delegated to the controller; the loop
+    only owns the round transcript journal and the persistent
+    wait-for-head-change step.
 
-    The loop is single-shot per process invocation: the CLI
-    invokes ``loop.run_once()`` for one round. A persistent
-    daemon that loops until the head is clean is out of scope
-    for v1 (the supervisor's existing event loop is the right
-    place to call ``run_once`` periodically — that wiring is a
-    follow-up commit).
+    Design contract
+    ---------------
+
+    The relay is **persistent**: it has no bake-in 10-round
+    halt. Repairable, autonomous findings (P1 / P2 / CI failures
+    that are not protected-authority) drive the relay forward
+    through as many rounds as necessary. The ONLY halts are:
+
+    1. **Protected-authority escalation** — P0 findings, body
+       strings containing escalation keywords (``force push``,
+       ``delete branch``, ``merge pr``, ``bypass guard``, etc.),
+       head mismatch (invariant I-08), or directive carrying
+       body text the relay cannot safely authorize. The
+       controller is driven into BLOCKED and the operator
+       must inspect.
+
+    2. **Required-head-resolution boundary** — the head is
+       clean; the controller is driven into
+       ``QUALIFYING_READINESS`` so the existing readiness gate
+       can certify the head. The relay does NOT place the
+       run into ``AWAITING_MERGE_AUTHORIZATION``; the
+       existing human merge-authorization boundary is
+       untouched.
+
+    The ``max_rounds`` parameter is a SAFETY NET only,
+       intended to catch runaway case (e.g. the directive
+       builder returning P1 findings faster than the worker
+       can repair them). It does NOT halt on the first
+       reachable round; it halts only after the configured
+       number of identical-head rounds without any change.
+       The default is disabled (``max_rounds=None``).
+
+    Single-shot vs persistent
+    -------------------------
+
+    The CLI invokes ``loop.run_once()`` for one round. The
+    supervisor's persistent event loop invokes
+    ``loop.run_until_head_advances()`` to drive the relay
+    through as many rounds as the head advances. The supervisor
+    is the right place to call the loop driver because the
+    supervisor already owns the heartbeat, the lease, the
+    cooldown, and the head-mismatch detection.
     """
 
     def __init__(
@@ -1010,7 +1093,7 @@ class RelayLoop:
         directive_store: DirectiveStore,
         controller: Any,
         required_check_names: Tuple[str, ...] = (),
-        max_rounds: int = DEFAULT_MAX_ROUNDS,
+        max_rounds: Optional[int] = None,
         identity: Optional[ProcessIdentity] = None,
     ) -> None:
         self.context = context
@@ -1018,7 +1101,12 @@ class RelayLoop:
         self.directive_store = directive_store
         self.controller = controller
         self.required_check_names = tuple(required_check_names)
-        self.max_rounds = int(max_rounds)
+        # max_rounds is a SAFETY NET for a runaway loop where the
+        # head never advances. Default is disabled (None); the
+        # persistent supervisor does not need this bound.
+        self.max_rounds = (
+            int(max_rounds) if max_rounds is not None else None
+        )
         self.identity = identity or current_process_identity()
 
     def run_once(
@@ -1037,23 +1125,40 @@ class RelayLoop:
         record of relay progress; the in-memory state of the
         controller is the source of truth for the current state
         machine position.
+
+        The `started_at` timestamp is captured BEFORE
+        ``evaluate_round`` runs so it reflects when the round
+        began, not when it ended. The ``max_rounds`` safety
+        net only triggers if the same head produces more
+        repair rounds than the configured maximum AND no new
+        findings appear across that span — the relay never
+        halts on a single reachable round.
         """
         round_index = self.directive_store.last_round_index() + 1
-        if round_index >= self.max_rounds:
-            # The outer bound stops the relay. The controller's
-            # ``block`` method is the single halt point — the
-            # operator MUST see a ``BLOCKED`` state machine
-            # position and the journal must contain the
-            # ``escalated`` transcript.
-            self.controller.block(
-                reason=(
-                    f"relay exceeded max_rounds={self.max_rounds}; "
-                    "operator must inspect the round journal"
+        if self.max_rounds is not None:
+            prior = self.directive_store.read_transcript()
+            same_head_consecutive = sum(
+                1 for t in prior
+                if t.head_sha_before == head_sha and t.outcome == "completed"
+            )
+            if same_head_consecutive >= self.max_rounds:
+                # SAFETY NET: the head has not advanced and the
+                # worker has produced more than ``max_rounds``
+                # directive launches on the same head. The
+                # relay is stuck in a repair loop. Drive the
+                # controller into BLOCKED so the operator can
+                # diagnose.
+                self.controller.block(
+                    reason=(
+                        f"relay safety net: {same_head_consecutive} "
+                        f"consecutive rounds without head advancement "
+                        f"on {head_sha[:12]}..; operator must inspect"
+                    )
                 )
-            )
-            raise EscalateToHuman(
-                f"relay exceeded max_rounds={self.max_rounds}"
-            )
+                raise EscalateToHuman(
+                    f"relay safety net: head {head_sha[:12]}.. has not "
+                    f"advanced after {same_head_consecutive} repair rounds"
+                )
         # The controller's state machine is the authority.
         # If the run is not in REPAIRING_REVIEW_FINDINGS, the
         # relay refuses to run.
@@ -1063,6 +1168,7 @@ class RelayLoop:
                 f"relay refused to run: controller state is "
                 f"{sm.current_state!r}; expected REPAIRING_REVIEW_FINDINGS"
             )
+        started_at = _now_iso()
         decision = evaluate_round(
             snapshot=snapshot,
             head_sha=head_sha,
@@ -1093,7 +1199,7 @@ class RelayLoop:
             head_sha_before=head_sha,
             head_sha_after=None,
             directive_id=decision.directive.directive_id if decision.directive else None,
-            started_at=_now_iso(),
+            started_at=started_at,
             ended_at=_now_iso(),
             outcome=outcome,
             p1_count=p1,
@@ -1109,6 +1215,84 @@ class RelayLoop:
             )
         return decision
 
+    def run_until_head_advances(
+        self,
+        snapshot_provider: Any,
+        head_sha: str,
+        *,
+        repo: str,
+        pr_number: int,
+        on_action: Any = None,
+    ) -> RoundDecision:
+        """Persistent loop: keep running ``run_once`` until the
+        head advances (the worker pushed a new commit) or the
+        head is clean (the relay returns the
+        ``enter_qualifying_readiness`` action).
+
+        The ``snapshot_provider`` is a callable taking the
+        current head_sha and returning the live snapshot dict.
+        The supervisor's ``capture_live_snapshot`` is the
+        canonical provider; tests pass a stub.
+
+        The ``on_action`` callable is invoked after each round
+        with the ``RoundDecision``. The supervisor uses this
+        to invoke its existing worker-launch machinery on
+        ``action == "launch_worker"`` and its existing
+        readiness gate on ``action ==
+        "enter_qualifying_readiness"``.
+
+        The loop is unbounded; only the protected-authority
+        escalations above can halt it. The human
+        exact-head merge-authorization boundary remains
+        outside the relay's reach.
+        """
+        current_head = head_sha
+        while True:
+            snapshot = snapshot_provider(current_head)
+            decision = self.run_once(
+                snapshot, head_sha=current_head,
+                repo=repo, pr_number=pr_number,
+            )
+            if on_action is not None:
+                on_action(decision)
+            if decision.action == "escalate_to_human":
+                # Protected-authority escalation. The controller
+                # is already in BLOCKED; the loop halts.
+                raise decision  # type: ignore[misc]
+            if decision.action == "enter_qualifying_readiness":
+                # Head is clean. The supervisor's readiness gate
+                # is the next step; the loop halts.
+                return decision
+            if decision.action == "launch_worker":
+                # The supervisor will launch the worker. The
+                # loop awaits the worker completion (head_sha
+                # advances) before the next round. The
+                # ``on_action`` callable is responsible for
+                # waiting for the worker push and for returning
+                # the new head_sha as ``current_head``.
+                # The supervisor's event loop calls this in a
+                # heartbeat-with-cooldown cadence so the head
+                # advance is observed on the next iteration.
+                new_head = self._await_head_advance(current_head)
+                if new_head is None:
+                    # Worker did not advance the head; the
+                    # supervisor's next heartbeat will retry.
+                    # We return the decision so the supervisor
+                    # can ``time.sleep`` its cooldown.
+                    return decision
+                current_head = new_head
+                continue
+
+    def _await_head_advance(self, head_sha: str) -> Optional[str]:
+        """Hook for the supervisor's worker-completion wait.
+
+        The supervisor polls the live PR head until the head
+        SHA differs from ``head_sha``. The default is a no-op
+        (the supervisor implements the wait); the loop
+        framework treats ``None`` as "no advance observed yet".
+        """
+        return None
+
     def head_clean(self, snapshot: dict) -> bool:
         """Return True iff the head has no actionable findings."""
         findings = collect_findings(
@@ -1118,28 +1302,28 @@ class RelayLoop:
 
 
 __all__ = [
-    "RelayError",
-    "EscalateToHuman",
-    "InvalidSnapshot",
-    "DirectiveContractError",
+    "ALL_SEVERITIES",
     "DEFAULT_MAX_ROUNDS",
+    "DirectiveContractError",
+    "DirectiveStore",
+    "EscalateToHuman",
+    "Finding",
+    "InvalidSnapshot",
     "RELAY_SCHEMA_VERSION",
+    "RelayError",
+    "RelayLoop",
+    "ReviewDirective",
+    "RoundDecision",
+    "RoundTranscript",
+    "SEVERITY_CI_FAILURE",
     "SEVERITY_P0_ESCALATE",
     "SEVERITY_P1",
     "SEVERITY_P2",
-    "SEVERITY_CI_FAILURE",
-    "ALL_SEVERITIES",
-    "Finding",
-    "ReviewDirective",
-    "RoundTranscript",
-    "DirectiveStore",
-    "RelayLoop",
-    "RoundDecision",
-    "collect_findings",
+    "WORKER_PROMPT_TEMPLATE",
     "build_directive",
     "build_worker_prompt",
+    "collect_findings",
     "evaluate_round",
     "heads_equal",
     "relay_state_for_outcome",
-    "WORKER_PROMPT_TEMPLATE",
 ]

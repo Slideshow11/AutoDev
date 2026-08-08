@@ -3,38 +3,37 @@
 The bridge is the THIN layer that lets the supervisor use a
 relay-built prompt when a directive is present. Tests cover:
 
-1. resolve_worker_prompt returns None when no directive is
+1. resolve_directive returns None when no directive is
    configured.
-2. resolve_worker_prompt renders the canonical worker prompt
-   when a directive is on disk.
-3. The bridge prompt is byte-identical to the relay's
+2. resolve_directive raises DirectiveLoadFailure on every
+   distinct failure mode.
+3. resolve_directive returns a ResolvedDirective when the
+   file is present and valid.
+4. The bridge prompt is byte-identical to the relay's
    build_worker_prompt output for the same directive.
-4. The bridge never raises on malformed or missing files.
 5. The supervisor's launch_worker consults the bridge and
-   uses the directive prompt.
+   uses the directive prompt when one is available.
 """
 from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
-# Tests must run on both the canonical evidence root and a
-# caller-supplied directive path.
+
 from autocoder_supervisor.directive_bridge import (
+    DirectiveLoadFailure,
+    ResolvedDirective,
+    resolve_directive,
     resolve_worker_prompt,
-    _render_directive_prompt,
 )
-
-
-def _write_directive(evidence_root: Path, directive: dict) -> Path:
-    evidence_root.mkdir(parents=True, exist_ok=True)
-    target = evidence_root / "directive.json"
-    target.write_text(json.dumps(directive, indent=2, sort_keys=True))
-    return target
+from autocoder_supervisor._directive_prompt import (
+    DIRECTIVE_PROMPT_TEMPLATE,
+    compute_directive_sha256,
+    render_directive_prompt,
+)
 
 
 def _make_directive() -> dict:
@@ -67,86 +66,167 @@ def _make_directive() -> dict:
     }
 
 
-class TestResolveWorkerPrompt:
-    def test_returns_none_when_no_directive(self, tmp_path: Path) -> None:
+def _write_directive_with_digest(
+    target: Path, directive: dict
+) -> dict:
+    """Write the directive with a valid _sha256 sidecar value."""
+    canonical_fields = {k: v for k, v in directive.items() if k != "_sha256"}
+    canonical = json.dumps(
+        canonical_fields, sort_keys=True, separators=(",", ":"),
+    )
+    digest = __import__("hashlib").sha256(canonical.encode("utf-8")).hexdigest()
+    payload = dict(directive)
+    payload["_sha256"] = digest
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    return payload
+
+
+class TestResolveDirective:
+    def test_returns_none_when_no_directive(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         # No AED_DIRECTIVE_PATH, no AED_EVIDENCE_ROOT, no file present.
-        os.environ.pop("AED_DIRECTIVE_PATH", None)
-        os.environ.pop("AED_EVIDENCE_ROOT", None)
-        assert resolve_worker_prompt() is None
+        monkeypatch.delenv("AED_DIRECTIVE_PATH", raising=False)
+        monkeypatch.delenv("AED_EVIDENCE_ROOT", raising=False)
+        assert resolve_directive() is None
 
-    def test_returns_none_when_file_missing(self, tmp_path: Path) -> None:
-        os.environ["AED_DIRECTIVE_PATH"] = str(tmp_path / "missing.json")
-        try:
-            assert resolve_worker_prompt() is None
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+    def test_returns_none_when_file_missing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AED_DIRECTIVE_PATH", str(tmp_path / "missing.json"),
+        )
+        assert resolve_directive() is None
 
-    def test_returns_prompt_when_directive_present(self, tmp_path: Path) -> None:
-        directive = _make_directive()
-        path = _write_directive(tmp_path, directive)
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            prompt = resolve_worker_prompt()
-            assert prompt is not None
-            assert "abc-123" in prompt
-            assert "a" * 40 in prompt
-            assert "PR 4" in prompt
-            assert "owner/repo" in prompt
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+    def test_returns_resolved_when_directive_present(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, _make_directive())
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        resolved = resolve_directive(expected_head="a" * 40)
+        assert resolved is not None
+        assert isinstance(resolved, ResolvedDirective)
+        assert resolved.path == target
+        assert "abc-123" in resolved.prompt
+        assert (resolved.directive_sha256) == compute_directive_sha256(
+            json.loads(target.read_text())
+        )
 
-    def test_returns_none_on_malformed_json(self, tmp_path: Path) -> None:
-        path = tmp_path / "directive.json"
-        path.write_text("not json")
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            assert resolve_worker_prompt() is None
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
 
-    def test_returns_none_on_non_dict_payload(self, tmp_path: Path) -> None:
-        path = tmp_path / "directive.json"
-        path.write_text(json.dumps([1, 2, 3]))
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            assert resolve_worker_prompt() is None
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+    def test_rejects_invalid_json(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "directive.json"
+        target.write_text("not json")
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive()
+        assert "invalid_json" in exc.value.reason
 
-    def test_returns_none_on_wrong_schema_version(self, tmp_path: Path) -> None:
+    def test_rejects_non_dict_payload(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "directive.json"
+        target.write_text(json.dumps([1, 2, 3]))
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive()
+        assert "non_dict_payload" in exc.value.reason
+
+    def test_rejects_wrong_schema_version(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         d = _make_directive()
         d["schema_version"] = "wrong.version"
-        path = _write_directive(tmp_path, d)
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            assert resolve_worker_prompt() is None
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive()
+        assert "wrong_schema_version" in exc.value.reason
 
-    def test_returns_none_on_missing_required_field(self, tmp_path: Path) -> None:
+    def test_rejects_missing_required_field(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         d = _make_directive()
         del d["head_sha"]
-        path = _write_directive(tmp_path, d)
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            assert resolve_worker_prompt() is None
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive()
+        assert "missing_field:head_sha" in exc.value.reason
 
-    def test_returns_none_on_non_dict_directive(self, tmp_path: Path) -> None:
-        path = tmp_path / "directive.json"
-        path.write_text("\"a string\"")
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            assert resolve_worker_prompt() is None
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+    def test_rejects_digest_mismatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        d = _make_directive()
+        target = tmp_path / "directive.json"
+        # Write the directive WITHOUT computing _sha256.
+        target.write_text(json.dumps(d, indent=2, sort_keys=True))
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive()
+        assert "missing_or_invalid_digest" in exc.value.reason
+
+    def test_rejects_when_digest_mismatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        d = _make_directive()
+        target = tmp_path / "directive.json"
+        # Write a directive with a stale _sha256.
+        bad = dict(d)
+        bad["_sha256"] = "f" * 64
+        target.write_text(json.dumps(bad, indent=2, sort_keys=True))
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive()
+        assert "digest_mismatch" in exc.value.reason
+
+    def test_rejects_head_mismatch(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, _make_directive())
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="b" * 40)
+        assert "head_mismatch" in exc.value.reason
+
+    def test_resolves_when_expected_head_matches(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, _make_directive())
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        resolved = resolve_directive(expected_head="a" * 40)
+        assert resolved is not None
+
+    def test_skips_head_check_when_expected_head_none(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, _make_directive())
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        # No expected_head means we don't enforce the head match.
+        resolved = resolve_directive(expected_head=None)
+        assert resolved is not None
+
+
+class TestResolveWorkerPrompt:
+    def test_returns_none_on_any_failure(self) -> None:
+        # resolve_worker_prompt is the silent variant: any failure
+        # returns None.
+        assert resolve_worker_prompt(
+            directive_path="/nonexistent/file.json",
+        ) is None
 
 
 class TestBridgePromptByteIdenticalToRelay:
     """The bridge prompt must match the relay prompt for the
-    same directive. The two implementations are paired via this
-    test so any drift is caught immediately.
+    same directive. The two implementations are paired via
+    this test so any drift is caught immediately.
     """
 
     def test_byte_identical_with_relay_prompt(self, tmp_path: Path) -> None:
@@ -157,9 +237,6 @@ class TestBridgePromptByteIdenticalToRelay:
             build_worker_prompt,
             RoundDecision,
         )
-        import dataclasses
-        # Build a fresh directive via the relay so the canonical
-        # serialization matches the relay's own serializer.
         finding = Finding(
             finding_id="coderabbit:1",
             source="coderabbit",
@@ -182,7 +259,6 @@ class TestBridgePromptByteIdenticalToRelay:
             findings=[finding],
             coordinator_actor="controller",
         )
-        # Build the relay prompt.
         decision = RoundDecision(
             action="launch_worker",
             round_index=2,
@@ -196,52 +272,49 @@ class TestBridgePromptByteIdenticalToRelay:
             directive_digest=None,
         )
         relay_prompt = build_worker_prompt(decision)
-        # Persist the directive and build the bridge prompt.
-        path = tmp_path / "directive.json"
-        path.write_text(json.dumps(directive.to_dict(), indent=2, sort_keys=True))
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            bridge_prompt = resolve_worker_prompt()
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+        # Persist the directive via the canonical artifact flow
+        # so _sha256 is set on the body.
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, directive.to_dict())
+        bridge_prompt = render_directive_prompt(
+            json.loads(target.read_text())
+        )
         assert bridge_prompt == relay_prompt
 
 
 class TestBridgePromptFormat:
-    def test_prompt_includes_round_and_pr(self, tmp_path: Path) -> None:
-        path = _write_directive(tmp_path, _make_directive())
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            prompt = resolve_worker_prompt()
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+    def test_prompt_includes_round_and_pr(self) -> None:
+        d = _make_directive()
+        prompt = render_directive_prompt(d)
         assert "round 2" in prompt
         assert "PR 4" in prompt
         assert "owner/repo" in prompt
 
-    def test_prompt_includes_standing_authorization(self, tmp_path: Path) -> None:
-        path = _write_directive(tmp_path, _make_directive())
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            prompt = resolve_worker_prompt()
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
+    def test_prompt_includes_standing_authorization(self) -> None:
+        d = _make_directive()
+        prompt = render_directive_prompt(d)
         assert "Standing authorization" in prompt
         assert "Do NOT amend history" in prompt
         assert "Do NOT force-push" in prompt
         assert "Do NOT merge" in prompt
 
-    def test_prompt_includes_directive_json(self, tmp_path: Path) -> None:
-        path = _write_directive(tmp_path, _make_directive())
-        os.environ["AED_DIRECTIVE_PATH"] = str(path)
-        try:
-            prompt = resolve_worker_prompt()
-        finally:
-            os.environ.pop("AED_DIRECTIVE_PATH", None)
-        # The directive JSON is embedded in a code block.
+    def test_prompt_includes_directive_json(self) -> None:
+        d = _make_directive()
+        prompt = render_directive_prompt(d)
         assert "```json" in prompt
         assert "abc-123" in prompt
         assert "owner/repo" in prompt
+
+    def test_template_is_a_single_constant(self) -> None:
+        # The template is the single source of truth; both the
+        # bridge and the relay render it.
+        assert "{round_index}" in DIRECTIVE_PROMPT_TEMPLATE
+        assert "{pr_number}" in DIRECTIVE_PROMPT_TEMPLATE
+        assert "{head_sha}" in DIRECTIVE_PROMPT_TEMPLATE
+        assert "{directive_id}" in DIRECTIVE_PROMPT_TEMPLATE
+        assert "{directive_sha256}" in DIRECTIVE_PROMPT_TEMPLATE
+        assert "{summary}" in DIRECTIVE_PROMPT_TEMPLATE
+        assert "{directive_json}" in DIRECTIVE_PROMPT_TEMPLATE
 
 
 class TestSupervisorConsultsBridge:
@@ -253,9 +326,6 @@ class TestSupervisorConsultsBridge:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from autocoder_supervisor import supervisor as sup
-        # Reset all module globals to a known-isolated state.
-        import tempfile
-        isolated = tempfile.mkdtemp(prefix="autocoder-test-")
         monkeypatch.setattr(
             sup, "WORKER_COMMAND_TEMPLATE",
             ["echo", "{prompt}", "{session_id}"],
@@ -267,10 +337,10 @@ class TestSupervisorConsultsBridge:
         monkeypatch.setattr(sup, "REPO_OWNER", "owner")
         monkeypatch.setattr(sup, "REPO_NAME", "repo")
         # Provide a directive at the canonical path.
-        directive = _make_directive()
-        evidence_root = tmp_path / "evidence"
-        _write_directive(evidence_root, directive)
-        monkeypatch.setenv("AED_EVIDENCE_ROOT", str(evidence_root))
+        target = tmp_path / "evidence" / "directive.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_directive_with_digest(target, _make_directive())
+        monkeypatch.setenv("AED_EVIDENCE_ROOT", str(tmp_path / "evidence"))
         # Intercept Popen so we can capture the cmd without
         # actually launching a worker.
         captured_cmd: list = []
@@ -279,18 +349,63 @@ class TestSupervisorConsultsBridge:
                 captured_cmd.extend(cmd)
                 self.pid = 99999
         monkeypatch.setattr(sup.subprocess, "Popen", FakePopen)
-        # Stub out file system writes the supervisor does.
         monkeypatch.setattr(sup, "write_lease", lambda lease: None)
         monkeypatch.setattr(sup, "write_cooldown", lambda: None)
-        monkeypatch.setattr(sup, "start_time_evidence", lambda pid: {"pid": pid})
-        # Run.
+        monkeypatch.setattr(
+            sup, "start_time_evidence", lambda pid: {"pid": pid},
+        )
         lease = sup.launch_worker(
             {"current_head": "a" * 40}, {"snapshot": {}},
         )
         assert lease is not None
-        # The directive prompt contains the directive_id and
-        # the directive JSON; the resume template does not.
         joined = " ".join(captured_cmd)
         assert "abc-123" in joined
         assert "owner/repo" in joined
         assert "REPAIR DIRECTIVE" in joined
+
+    def test_launch_worker_falls_back_on_directive_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A malformed directive logs the failure and falls back
+        to the operator-supplied resume_prompt_template.
+        """
+        from autocoder_supervisor import supervisor as sup
+        monkeypatch.setattr(
+            sup, "WORKER_COMMAND_TEMPLATE",
+            ["echo", "{prompt}", "{session_id}"],
+        )
+        monkeypatch.setattr(sup, "SESSION_ID", "test-session")
+        monkeypatch.setattr(sup, "INSTANCE_ID", "test-instance")
+        monkeypatch.setattr(sup, "AUTHORITATIVE_HEAD", "a" * 40)
+        monkeypatch.setattr(sup, "PR_NUMBER", 4)
+        monkeypatch.setattr(sup, "REPO_OWNER", "owner")
+        monkeypatch.setattr(sup, "REPO_NAME", "repo")
+        # Provide a malformed directive.
+        target = tmp_path / "evidence" / "directive.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("not json")
+        monkeypatch.setenv("AED_EVIDENCE_ROOT", str(tmp_path / "evidence"))
+        captured_cmd: list = []
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured_cmd.extend(cmd)
+                self.pid = 99999
+        monkeypatch.setattr(sup.subprocess, "Popen", FakePopen)
+        monkeypatch.setattr(sup, "write_lease", lambda lease: None)
+        monkeypatch.setattr(sup, "write_cooldown", lambda: None)
+        monkeypatch.setattr(
+            sup, "start_time_evidence", lambda pid: {"pid": pid},
+        )
+        lease = sup.launch_worker(
+            {"current_head": "a" * 40}, {"snapshot": {}},
+        )
+        assert lease is not None
+        # The fallback path was used; the directive content is not
+        # in the command.
+        joined = " ".join(captured_cmd)
+        assert "abc-123" not in joined
+        assert "REPAIR DIRECTIVE" not in joined
+        # The fallback is the operator-supplied resume prompt
+        # template. The default template mentions "AED-AUTOCODER"
+        # so the assertion below confirms the fallback path.
+        assert "AED-AUTOCODER" in joined or "RESUME" in joined

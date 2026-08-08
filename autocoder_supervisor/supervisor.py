@@ -37,7 +37,11 @@ from typing import Any, Optional
 
 from .config import default_config_from_env
 from .contracts import SupervisorConfig
-from .directive_bridge import resolve_worker_prompt
+from .directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the public back-compat surface
+    DirectiveLoadFailure,
+    resolve_directive,
+    resolve_worker_prompt,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -942,14 +946,34 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # instead of the operator-supplied resume_prompt_template.
     # The bridge is a no-op when the directive is absent; the
     # existing build_resume_prompt path is preserved byte-for-byte.
-    directive_prompt = resolve_worker_prompt()
-    if directive_prompt is not None:
-        prompt = directive_prompt
+    directive_prompt: Optional[str] = None
+    resolved_directive = None
+    expected_head = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+    try:
+        resolved_directive = resolve_directive(expected_head=expected_head)
+    except DirectiveLoadFailure as exc:
+        # The directive is malformed (digest mismatch,
+        # head_mismatch, schema-invalid, etc.). Log the
+        # structured failure mode and fall back to the
+        # operator-supplied resume prompt. The supervisor
+        # NEVER crashes on a bad directive; the operator can
+        # inspect the supervisor log.
+        log(
+            "warning",
+            "directive_bridge rejected directive; falling back to resume_prompt_template",
+            reason=exc.reason,
+            path=str(exc.path) if exc.path else "",
+        )
+    if resolved_directive is not None:
+        directive_prompt = resolved_directive.prompt
         log(
             "info",
             "using relay-directive prompt instead of resume_prompt_template",
-            directive_path=os.environ.get("AED_DIRECTIVE_PATH", ""),
+            directive_path=str(resolved_directive.path),
+            directive_sha256=resolved_directive.directive_sha256,
         )
+    if directive_prompt is not None:
+        prompt = directive_prompt
     else:
         try:
             prompt = build_resume_prompt(rs, live)
@@ -2320,6 +2344,91 @@ def active_repair_quiet_window(
         )
 
 
+def _invoke_relay_for_events(
+    new_events: list,
+) -> bool:
+    """Invoke the relay's review-repair-round CLI for the
+    current live snapshot.
+
+    Returns True when the relay was invoked (the directive
+    is on disk, or a halt was requested). Returns False
+    when the relay was not invoked (no actionable findings,
+    CLI missing, wiring failure). The supervisor's main
+    loop falls back to the existing launch_worker path on
+    ``False``.
+    """
+    from .relay_wiring import (
+        RelayWiringError,
+        delete_directive_if_present,
+        invoke_relay_round,
+        should_invoke_relay,
+    )
+    token = get_github_token()
+    snapshot = capture_live_snapshot(
+        {"current_head": AUTHORITATIVE_HEAD},  # type: ignore[name-defined]
+        token or "",
+    )
+    if not should_invoke_relay(snapshot):
+        return False
+    state_root = str(STATE_DIR)  # type: ignore[name-defined]
+    evidence_root = os.environ.get(
+        "AED_EVIDENCE_ROOT", state_root + "/evidence",
+    )
+    run_id = os.environ.get(
+        "AED_RUN_ID", f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
+    )
+    try:
+        decision = invoke_relay_round(
+            snapshot=snapshot,
+            head_sha=str(AUTHORITATIVE_HEAD),  # type: ignore[name-defined]
+            state_root=state_root,
+            run_id=run_id,
+            pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+            evidence_root=evidence_root,
+            required_check_names=tuple(
+                (POLICY or {}).get(  # type: ignore[name-defined]
+                    "required_check_names", [],
+                )
+            ),
+        )
+    except RelayWiringError as exc:
+        log(
+            "warning",
+            "relay_wiring failed; supervisor falls back to launch_worker",
+            reason=exc.reason,
+            rc=exc.returncode,
+        )
+        return False
+    action = decision.get("action")
+    if action == "enter_qualifying_readiness":
+        delete_directive_if_present(evidence_root)
+        log(
+            "info",
+            "relay_signaled_enter_qualifying_readiness",
+            round_index=decision.get("round_index"),
+            head_sha=decision.get("head_sha"),
+        )
+        return True
+    if action == "escalate_to_human":
+        log(
+            "warning",
+            "relay_signaled_escalate_to_human",
+            round_index=decision.get("round_index"),
+            head_sha=decision.get("head_sha"),
+            reasons=decision.get("escalate_reasons", []),
+        )
+        return True
+    if action == "launch_worker":
+        log(
+            "info",
+            "relay_signaled_launch_worker",
+            round_index=decision.get("round_index"),
+            directive_digest=decision.get("directive_digest"),
+        )
+        return True
+    return False
+
+
 def handle_new_events(
     rs: dict,
     new_events: list,
@@ -2330,24 +2439,12 @@ def handle_new_events(
     launch a single worker, and mark events only after a
     successful launch.
 
-    This function is the testable extraction of the
-    event-to-launch path that lives in the supervisor's
-    main loop. The behaviour:
-
-    1. Subtract the durable ``launched_event_ids()`` set
-       from the new events. The result is the set of event
-       IDs that have NOT yet been launched for the current
-       head.
-    2. If the durable lease is alive (``lease_alive`` returns
-       non-None), skip launching: the existing worker is
-       still responsible for the events.
-    3. Otherwise call ``launch_worker`` (revoking readiness
-       first), and mark each fresh event ID only after the
-       worker has been launched successfully.
-
-    A failed launch is intentionally NOT marked: the next
-    heartbeat's fresh-IDs filter must see the events again
-    so the next attempt can succeed.
+    The relay is invoked BEFORE the worker launch. The
+    relay writes a structured directive to the canonical
+    evidence root; the existing launch_worker picks it
+    up via the directive bridge. The relay is the
+    persistent wiring that eliminates the human
+    copy/paste review-repair loop.
     """
     already = launched_event_ids()
     fresh_ids = [
@@ -2365,15 +2462,38 @@ def handle_new_events(
         reason="new_actionable_event",
         head_sha=iteration.get("head_sha"),
     )
-    log(
-        "info",
-        "revoking readiness (new actionable "
-        "event); launching single worker",
-        events=[
-            e.get("kind") for e in new_events
-            if e.get("id") in fresh_ids
-        ],
-    )
+    # Persistent relay wiring. The relay replaces the
+    # "copy-paste a giant prompt" loop with a structured
+    # directive persisted to the canonical evidence root.
+    try:
+        invoked = _invoke_relay_for_events(new_events)
+    except Exception as exc:  # noqa: BLE001 — defensive
+        log(
+            "error",
+            "relay_wiring blew up; falling back",
+            error=str(exc),
+        )
+        invoked = False
+    if invoked:
+        log(
+            "info",
+            "revoking readiness (new actionable "
+            "event); relay-driven round",
+            events=[
+                e.get("kind") for e in new_events
+                if e.get("id") in fresh_ids
+            ],
+        )
+    else:
+        log(
+            "info",
+            "revoking readiness (new actionable "
+            "event); launching single worker (no relay directive)",
+            events=[
+                e.get("kind") for e in new_events
+                if e.get("id") in fresh_ids
+            ],
+        )
     live = (
         inspect_live_state(token) if token else {}
     )

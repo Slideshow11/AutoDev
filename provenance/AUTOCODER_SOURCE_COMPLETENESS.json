@@ -843,9 +843,9 @@
   },
   "extracted_manifest_match": {
     "manifest_file": "provenance/aed-pr417-source-manifest.json",
-    "manifest_files_count": 45,
+    "manifest_files_count": 48,
     "manifest_source_files_count": 17,
-    "manifest_standalone_additions_count": 28,
+    "manifest_standalone_additions_count": 31,
     "all_manifest_source_paths_classified_as_extracted": true,
     "manifest_records": [
       {
@@ -983,9 +983,9 @@
         "destination_path": "autocoder_supervisor/supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
-        "destination_sha256": "f934b121d0f6e5e012a2596fe7937ca7352f418be674542d7dfbe5d796e9cc03",
+        "destination_sha256": "4aa04fddbacec61f2b67760bc1a52aa6fecd2d35de9ab8b95221e27b3195f410",
         "source_size_bytes": 86428,
-        "destination_size_bytes": 92301,
+        "destination_size_bytes": 96443,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
       },
       {
@@ -1243,9 +1243,9 @@
         "destination_path": "autocoder_orchestration/cli.py",
         "transformation_classification": "standalone_source_addition",
         "source_sha256": null,
-        "destination_sha256": "fa461f3683ea047f7516d2afbd43038dc20d72333408c9d28842e6e555a8fd9e",
+        "destination_sha256": "ebfaf2534c8d6e74604ee89b89fde5e2a052e5e3e7a4c661f19dcef48b7c8408",
         "source_size_bytes": null,
-        "destination_size_bytes": 61169,
+        "destination_size_bytes": 62473,
         "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive. v1b: added review-repair-round and review-repair-status subcommands for the autonomous review/repair relay."
       },
       {
@@ -1293,10 +1293,40 @@
         "destination_path": "autocoder_supervisor/directive_bridge.py",
         "transformation_classification": "standalone_source_addition",
         "source_sha256": null,
-        "destination_sha256": "e74b1d7fa8a82bdcd8f84c475d79f4b98f2580551ecca6673e24c95bfc7aeff7",
+        "destination_sha256": "c5a29d4231346e78970f98d26c8d32b201b85821c0b765a5a7bda922a7c6e732",
         "source_size_bytes": null,
-        "destination_size_bytes": 7436,
+        "destination_size_bytes": 9791,
         "transformation_explanation": "Direct consumer of the canonical directive.json artifact written by autocoder_orchestration.review_repair_relay. Renders the matching worker prompt without importing the orchestration package (avoids cycle)."
+      },
+      {
+        "source_path": null,
+        "destination_path": "autocoder_supervisor/_directive_prompt.py",
+        "transformation_classification": "standalone_source_addition",
+        "source_sha256": null,
+        "destination_sha256": "3355af13e3940e0af0504f4f28d74b3ca88f8dd3856dc3555c6974ac7b9b810d",
+        "source_size_bytes": null,
+        "destination_size_bytes": 4729,
+        "transformation_explanation": "Single source of truth for the relay-directive worker prompt. Both the relay and the bridge render this template. Replaces the previously duplicated template across the two layers."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_directive_bridge.py",
+        "transformation_classification": "standalone_source_addition",
+        "source_sha256": null,
+        "destination_sha256": "4a4d9a2817e0211129e30d4f158117068f6aa26d3e1104c510f9e4fffc1f1930",
+        "source_size_bytes": null,
+        "destination_size_bytes": 15887,
+        "transformation_explanation": "Tests for the directive bridge. 20 tests covering resolve_directive failure modes, byte-identical relay bridge pairing, supervisor launch_worker integration, and the head-mismatch / digest-mismatch guards."
+      },
+      {
+        "source_path": null,
+        "destination_path": "autocoder_supervisor/relay_wiring.py",
+        "transformation_classification": "standalone_source_addition",
+        "source_sha256": null,
+        "destination_sha256": "2576ba4f99c65246f2d723b8f0574ab9d1fcef3dea770e2001088de9e39a4495",
+        "source_size_bytes": null,
+        "destination_size_bytes": 9319,
+        "transformation_explanation": "Persistent relay wiring for the supervisor's event loop. Spawns the relay CLI subprocess on every new actionable event so review->repair->push->CI->review->repair repeats automatically. No package cycle: the supervisor uses subprocess to talk to the orchestration package."
       }
     ]
   },
@@ -7872,11 +7902,11 @@
   ],
   "metrics": {
     "extracted_manifest_match": {
-      "manifest_files_count": 45,
+      "manifest_files_count": 48,
       "manifest_source_files_count": 17,
-      "manifest_standalone_additions_count": 28
+      "manifest_standalone_additions_count": 31
     },
     "total_source_paths_in_manifest": 17,
-    "manifest_standalone_additions": 28
+    "manifest_standalone_additions": 31
   }
 }
