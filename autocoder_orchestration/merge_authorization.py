@@ -1097,11 +1097,20 @@ def _execute_guarded_merge_transaction_locked(
 
     # Validate the live PR payload shape before any binding check. A
     # missing or malformed key is a MergeError, not a KeyError, so
-    # the CLI's exception handlers keep working. Empty payloads are
-    # tolerated (tests that exercise path-only checks legitimately pass
-    # empty live payloads); the production CLI always populates them.
+    # the CLI's exception handlers keep working. Empty payloads
+    # are tolerated (tests that exercise path-only checks legitimately
+    # pass empty live payloads); the production CLI always populates
+    # them. The guard is "if pr:" so a None or empty dict is accepted
+    # and the downstream code uses ``pr.get("repo")`` which returns
+    # None on the empty path. The cross-binding check at the
+    # ``auth.repo != live_repo`` line is conditional on
+    # ``live_repo`` so the empty path is a no-op.
     pr = inputs.live_pr_payload
     if pr:
+        if not isinstance(pr, dict):
+            raise MergeError(
+                f"live_pr_payload must be a dict, got {type(pr).__name__}"
+            )
         for key in ("state", "merged", "head", "baseRefName", "mergeable"):
             if key not in pr:
                 raise MergeError(f"live_pr_payload is missing required key {key!r}")
@@ -1124,8 +1133,13 @@ def _execute_guarded_merge_transaction_locked(
     #    is mandatory: an absent field is a hard failure, not a
     #    silent skip.
     candidate_payload, candidate_digest = _read_candidate(inputs.candidate_artifact_path)
+    # The candidate record's top-level ``exact_head`` is the
+    # canonical head (see Candidate.to_dict in
+    # autocoder_orchestration/candidate.py). Fall back to the
+    # nested ``head.head_sha`` shape for legacy payloads only.
     candidate_head_sha = (
-        candidate_payload.get("head", {}).get("head_sha")
+        candidate_payload.get("exact_head")
+        or candidate_payload.get("head", {}).get("head_sha")
         or candidate_payload.get("head", {}).get("exact_head_sha")
         or ""
     )
@@ -1191,6 +1205,13 @@ def _execute_guarded_merge_transaction_locked(
                 f"merge subprocess failed AND live re-query failed: {e!r}; "
                 "refusing to proceed (fail closed)"
             )
+    # NOTE: a zero exit + non-merged state is reachable when the
+    # PR is queued (merge queue) rather than merged. The
+    # subsequent ``_fetch_pr_merge_commit_oid`` block requires
+    # an explicit mergeCommit OID; the merge-commit OID is
+    # None for a queued PR, so the OID-fetch step fails closed
+    # naturally. The post-merge record is therefore NEVER
+    # written for a queued PR.
 
     # Fetch the explicit mergeCommit OID. Per the explicit identity
     # contract, the PR's merge commit is observed server-side; we do
