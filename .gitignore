@@ -22,3 +22,9 @@ autocoder_supervisor/logs/
 autocoder_supervisor/lock
 autocoder_supervisor/heartbeat
 autocoder_supervisor/supervisor.log
+
+# Round-10 directive: ruff's local cache directory
+# contains runtime artifacts that the committed-state
+# scanner would erroneously flag as forbidden tokens. The
+# cache is git-local and must never be committed.
+.ruff_cache/

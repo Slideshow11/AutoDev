@@ -366,6 +366,23 @@ def test_all_migrated_records_have_matching_destination_bytes(audit, manifest):
 
 
 def test_manifest_match_count(audit, manifest):
+    """The audit's extracted_manifest_match counts must match
+    the actual manifest contents. The audit also has
+    duplicate copies of these counts in metrics; both
+    sections must agree (round-10 directive consistency
+    check).
+
+    Round-11 directive: every duplicated manifest metric
+    key (not just standalone_additions_count) must agree
+    across both sections, AND the standalone count must
+    satisfy the arithmetic contract::
+
+        manifest_standalone_additions_count
+        == manifest_files_count - manifest_source_files_count.
+
+    The same invariant is enforced at regeneration time
+    by scripts/provenance_audit.py:_validate_audit_consistency.
+    """
     mm = audit["extracted_manifest_match"]
     assert mm["manifest_files_count"] == len(manifest["files"])
     assert mm["manifest_source_files_count"] == sum(
@@ -374,6 +391,96 @@ def test_manifest_match_count(audit, manifest):
     assert mm["manifest_standalone_additions_count"] == sum(
         1 for f in manifest["files"] if not f.get("source_path")
     )
+    # Arithmetic contract (round-11 directive).
+    expected_standalone = (
+        mm["manifest_files_count"] - mm["manifest_source_files_count"]
+    )
+    assert mm["manifest_standalone_additions_count"] == expected_standalone, (
+        f"standalone count violates arithmetic contract: "
+        f"{mm['manifest_standalone_additions_count']} != "
+        f"{mm['manifest_files_count']} - {mm['manifest_source_files_count']} "
+        f"= {expected_standalone}"
+    )
+    # Pre-publish consistency: the audit's metrics block
+    # contains duplicate counts that must equal the
+    # extracted_manifest_match counts. Check every
+    # duplicated key, not just standalone_additions_count.
+    for key in ("manifest_files_count",
+                "manifest_source_files_count",
+                "manifest_standalone_additions_count"):
+        assert mm[key] == audit["metrics"]["extracted_manifest_match"][key], (
+            f"audit keys diverge: extracted_manifest_match.{key}={mm[key]} ≠ "
+            f"metrics.extracted_manifest_match.{key}="
+            f"{audit['metrics']['extracted_manifest_match'][key]}"
+        )
+
+def test_provenance_audit_module_consistency_check():
+    """Round-11 directive: behavioral regression that
+    exercises the public scripts/provenance_audit.py
+    module's check subcommand. The invocation uses
+    ``sys.executable`` so the test works under any
+    Python interpreter name. This proves the published
+    artifact is impossible to produce in an internally
+    contradictory state through the normal generation
+    path."""
+    import subprocess
+    import sys as _sys
+    r = subprocess.run(
+        [_sys.executable, "-m", "scripts.provenance_audit", "check"],
+        capture_output=True, text=True, cwd=str(AUTODEV_REPO),
+    )
+    assert r.returncode == 0, (
+        f"check failed: rc={r.returncode} stdout={r.stdout!r} "
+        f"stderr={r.stderr!r}"
+    )
+    assert "audit consistency check passed" in r.stdout
+
+def test_provenance_audit_regenerate_round_trip(tmp_path):
+    """Round-11 directive: regenerate the audit from the
+    live manifest, then verify the audit remains
+    consistent with the manifest. The test copies the
+    audit and manifest into tmp_path so the round trip
+    never writes to repository artifacts. The atomic
+    write leaves the on-disk file format indistinguishable
+    from a hand-edited artifact (consistency is the
+    invariant, not the byte-for-byte format)."""
+    import shutil as _shutil
+    import subprocess
+    import sys as _sys
+    audit_src = AUTODEV_REPO / "provenance" / "AUTOCODER_SOURCE_COMPLETENESS.json"
+    manifest_src = AUTODEV_REPO / "provenance" / "aed-pr417-source-manifest.json"
+    audit_copy = tmp_path / "audit.json"
+    manifest_copy = tmp_path / "manifest.json"
+    _shutil.copy(audit_src, audit_copy)
+    _shutil.copy(manifest_src, manifest_copy)
+    r = subprocess.run(
+        [_sys.executable, "-m", "scripts.provenance_audit", "regenerate",
+         "--audit", str(audit_copy),
+         "--manifest", str(manifest_copy)],
+        capture_output=True, text=True, cwd=str(AUTODEV_REPO),
+    )
+    assert r.returncode == 0, (
+        f"regenerate failed: rc={r.returncode} stdout={r.stdout!r} "
+        f"stderr={r.stderr!r}"
+    )
+    # Re-check after regeneration.
+    r = subprocess.run(
+        [_sys.executable, "-m", "scripts.provenance_audit", "check",
+         "--audit", str(audit_copy),
+         "--manifest", str(manifest_copy)],
+        capture_output=True, text=True, cwd=str(AUTODEV_REPO),
+    )
+    assert r.returncode == 0, (
+        f"post-regenerate check failed: rc={r.returncode} "
+        f"stdout={r.stdout!r} stderr={r.stderr!r}"
+    )
+    # Verify the regenerated audit matches the manifest.
+    with audit_copy.open() as f:
+        regen_audit = json.load(f)
+    with manifest_copy.open() as f:
+        regen_manifest = json.load(f)
+    assert regen_audit["extracted_manifest_match"]["manifest_files_count"
+        ] == len(regen_manifest["files"])
 
 
 # --- Test 5: supervisor-v1 runtime inventory is concrete ---

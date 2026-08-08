@@ -200,3 +200,81 @@ not start a wave unless:
 - `/var/tmp/autodev-evidence/AED_AUTODEV_FIRST_PR_SPEC.md`
 - `INVARIANTS.md` (existing supervisor invariants; the new package
   adds control-plane invariants)
+
+## ADR-001 — Post-merge hardening (post-PR #3)
+
+After PR #3 was merged, six defects were observed during the merge
+itself. They are repaired by the
+`fix/control-plane-merge-integrity-v1` branch. None of them changed
+the user-facing contract; they repaired the implementation.
+
+### Defects and repairs
+
+**DEFECT A: MIXED DIGEST DEFINITIONS.** The pipeline used at least
+three different digest conventions interchangeably: SHA-256 of
+canonical JSON body bytes, SHA-256 of the full file including a
+footer, and a `_sha256` field stored inside a parsed artifact. The
+candidate's authorized SHA was the JSON-body SHA, while the full-file
+hash produced another value. This caused a false pre-merge mismatch.
+
+Repair: a single canonical artifact format lives in
+`autocoder_orchestration/artifacts.py`. The artifact is valid UTF-8
+JSON only, no comment or footer text is appended, the digest is
+SHA-256 of the exact complete file bytes, and the digest lives in
+a separate atomic sidecar.
+
+**DEFECT B: OPTIONAL CANDIDATE INTEGRITY CHECK.** The previous
+executor treated a missing `candidate._sha256` field as optional
+and skipped the comparison. A missing digest must never weaken merge
+authorization.
+
+Repair: `read_artifact` is mandatory; a missing sidecar, malformed
+sidecar, malformed JSON, symlink, insecure mode or digest mismatch
+raises and blocks the caller. The production merge path never
+treats a missing digest as optional.
+
+**DEFECT C: TEMPORARY MANUAL STAGING.** The previous executor
+expected `candidate.json` and `verifier-record.json` under a path
+used as `auto_repo_root`. The operator workflow had to create a
+temporary run directory and copy artifacts.
+
+Repair: `MergeTransactionInputs` carries explicit
+`authorization_artifact_path`, `candidate_artifact_path`,
+`verifier_artifact_path`, `merge_record_artifact_path`,
+`repository_checkout`, `run_state_root`, `evidence_root`. The
+production merge path refuses if any two named roots resolve to
+the same directory.
+
+**DEFECT D: SPLIT MERGE EXECUTION.** The previous workflow called
+the guarded merge command first and then a separate code path
+constructed the post-merge record. The intended atomic workflow is
+one operation that does both.
+
+Repair: `execute_guarded_merge_transaction` is the single
+production merge path. It loads and verifies every artifact,
+fetches all live GitHub evidence, repeats every exact-head and
+integrity guard, invokes the guarded command once with a finite
+timeout, reconciles timeout or ambiguity against the live PR
+state, reconciles post-merge Git (branch-independent), writes the
+merge record through the canonical artifact writer, and transitions
+the state machine to `COMPLETE`.
+
+**DEFECT E: CURRENT-BRANCH ASSUMPTION.** The first local fast-forward
+attempt occurred while the checkout was on the feature branch.
+
+Repair: `reconcile_after_merge` reads the current branch from
+`HEAD`, refuses on a dirty working tree, switches to the authorized
+base branch when needed, fast-forwards with `--ff-only`, verifies
+local base equals origin/base, verifies the squash commit and its
+tree, and only deletes the local feature branch when it matches the
+authorized head.
+
+**DEFECT F: RECORD HASH CONFUSION.** Authorization and merge records
+also used body hashes, footer hashes and sidecars in ways that
+required manual interpretation.
+
+Repair: every accepted control-plane artifact uses the same digest
+contract (C-21, C-22). All five artifacts — readiness certificate,
+candidate, verifier record, merge authorization, merge record —
+are written and read through one module.
+

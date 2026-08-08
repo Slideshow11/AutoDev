@@ -20,13 +20,16 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
 from .context import RunContext, make_run_context, generate_run_id
+from .canonical_paths import canonical_paths as _canonical_artifact_paths
 from .state_machine import (
     StateMachine,
+    StateError,
     STATE_PLANNED,
     STATE_IMPLEMENTING,
     STATE_AWAITING_CI,
@@ -48,6 +51,7 @@ from .store import StateStore, StateStoreError, ProcessIdentity, current_process
 from .controller import Controller, ControllerError
 from .readiness import ReadinessEngine, ReadinessDecision, ReadinessCertificate
 from .observer import ObservationLog, Observation
+from .artifacts import ArtifactError, write_artifact, read_artifact
 from .candidate import (
     Candidate,
     CandidateBuilder,
@@ -65,6 +69,14 @@ from .merge_authorization import (
     MergeExecutor,
     MergeRecord,
     MergeError,
+    MergeTransactionInputs,
+    MergeAuthorizationMissing,
+    MergeAuthorizationMalformed,
+    MergeInputsCollide,
+    MergeSubprocessFailed,
+    MergeAmbiguousOutcome,
+    execute_guarded_merge_transaction,
+    fetch_live_pr_payload,
 )
 
 
@@ -73,6 +85,200 @@ EXIT_INVARG = 2
 EXIT_GUARD = 3
 EXIT_STATE = 4
 EXIT_INTERNAL = 5
+
+# Author login used by CodeRabbit on this repository. The CLI filters
+# latestReviews by this identity so a human review cannot satisfy the
+# CodeRabbit guard. GitHub App bot logins are conventionally suffixed
+# with "[bot]" in some APIs and not in others; the comparison
+# normalizes by stripping one terminal "[bot]" suffix from both sides
+# before equality, so the gate works for both forms.
+CODERABBIT_AUTHOR_LOGIN = "coderabbitai"
+
+
+def _normalize_coderabbit_login(login: object) -> str:
+    """Strip one terminal ``[bot]`` suffix and lower-case the result.
+
+    The GitHub GraphQL ``latestReviews.author.login`` field can return
+    either ``coderabbitai`` (for bot accounts) or ``coderabbitai[bot]``
+    (for GitHub Apps) depending on the installation. Stripping the
+    suffix lets the same constant match both forms while a plain
+    substring or ``startswith`` comparison would over-match
+    similarly-named accounts.
+    """
+    if not isinstance(login, str):
+        return ""
+    s = login.lower().strip()
+    if s.endswith("[bot]"):
+        s = s[:-5].rstrip()
+    return s
+
+
+def _filter_coderabbit_review_state(reviews_data: dict) -> Optional[str]:
+    """Extract the latest CodeRabbit review state from a GraphQL payload.
+
+    Returns the latest review whose author matches
+    :data:`CODERABBIT_AUTHOR_LOGIN` (with ``[bot]`` suffix tolerated),
+    or ``None`` if no matching review exists. The state is left
+    unavailable when the payload is empty or no CodeRabbit review is
+    found, so the guarded transaction fails closed (C-25).
+
+    GitHub returns ``"author": null`` for reviews whose reviewer
+    account has been deleted. The filter MUST treat a null author
+    as "no matching identity" without raising -- it returns
+    ``None`` for that node, which propagates as "no matching
+    CodeRabbit review" through the rest of the CLI.
+    """
+    target = _normalize_coderabbit_login(CODERABBIT_AUTHOR_LOGIN)
+    nodes = (
+        reviews_data.get("data", {})
+        .get("repository", {})
+        .get("pullRequest", {})
+        .get("latestReviews", {})
+        .get("nodes", [])
+    )
+    for node in nodes:
+        # Normalize a null author to an empty mapping before reading
+        # ``login``. GitHub returns ``"author": null`` for deleted
+        # accounts; an ``AttributeError`` here would escape the
+        # CLI as an uncaught traceback, defeating the fail-closed
+        # contract.
+        author_obj = node.get("author") or {}
+        author_login = author_obj.get("login") or ""
+        if _normalize_coderabbit_login(author_login) == target:
+            return node.get("state")
+    return None
+
+
+# Maximum number of pages to walk through the CodeRabbit review
+# inventory. 10 pages × 100 = 1000 reviews is well above any realistic
+# PR's review count, and bounds total latency.
+_CODERABBIT_MAX_PAGES = 10
+
+
+def _fetch_coderabbit_review_state(
+    gh_executable: str,
+    *,
+    owner: str,
+    name: str,
+    pr_number: int,
+) -> Optional[str]:
+    """Fetch the latest CodeRabbit review state with pagination.
+
+    Uses GraphQL variables for the owner, name, and PR number so the
+    query is well-formed regardless of how the CLI was invoked. Walks
+    every page of ``latestReviews`` via ``pageInfo.hasNextPage`` until
+    a CodeRabbit review is found or the inventory is exhausted, so
+    even an early review at position N is reachable. Returns the
+    state of the matching review, or ``None`` if no CodeRabbit review
+    exists in the inventory (fail-closed C-25).
+    """
+    query = (
+        "query($owner:String!,$name:String!,$pr:Int!,$cursor:String){"
+        "repository(owner:$owner,name:$name){"
+        "pullRequest(number:$pr){"
+        "latestReviews(first:100, after:$cursor){"
+        "pageInfo { hasNextPage endCursor }"
+        "nodes { author { login } state }"
+        "}}}"
+    )
+    cursor = "null"
+    has_next = True
+    page_count = 0
+    matched_state: Optional[str] = None
+    while has_next:
+        page_count += 1
+        if page_count > _CODERABBIT_MAX_PAGES:
+            break
+        proc = subprocess.run(
+            [
+                gh_executable, "api", "graphql",
+                "-f", f"query={query}",
+                "-F", f"owner={owner}",
+                "-F", f"name={name}",
+                "-F", f"pr={pr_number}",
+                "-F", f"cursor={cursor}",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            return matched_state
+        try:
+            doc = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return matched_state
+        page = (
+            doc.get("data", {})
+            .get("repository", {})
+            .get("pullRequest", {})
+            .get("latestReviews", {})
+        )
+        if not page:
+            return matched_state
+        # Filter for CodeRabbit matches on this page.
+        match = _filter_coderabbit_review_state(doc)
+        if match is not None and matched_state is None:
+            matched_state = match
+        page_info = page.get("pageInfo", {})
+        has_next = bool(page_info.get("hasNextPage"))
+        cursor = page_info.get("endCursor") or "null"
+    return matched_state
+
+
+def _resolve_evidence_root(args: argparse.Namespace, store) -> Path:
+    """Resolve the canonical evidence root for this CLI invocation.
+
+    Per C-24 the three named roots must be independent. The persisted
+    ``RunContext.evidence_root`` is the canonical source — the CLI
+    reads it from the run-state store when available. The operator
+    may pass ``--evidence-root`` to override the persisted path;
+    conflicting overrides are rejected so a non-canonical evidence
+    root can never be silently used.
+
+    Fail-closed behavior (per PR #4 round-2 review):
+
+    * If the run context exists but cannot be read (I/O failure),
+      parsed (malformed JSON), or trusted (``StateStoreError``),
+      the call MUST NOT silently substitute a fallback evidence
+      root. Falling back to ``state_root.parent / "evidence"`` on
+      a transient read failure would route ``cmd_merge`` to a
+      different evidence root than the one ``cmd_merge_authorize``
+      bound into the authorization, defeating the digest contract.
+      Instead, the failure is propagated as ``StateStoreError`` so
+      the CLI's existing error handler returns a controlled state
+      failure with exit code EXIT_STATE.
+
+    * The fallback derivation is permitted only when the run
+      context is genuinely absent (``read_optional`` returns
+      ``None``). A missing run context is the documented "first
+      invocation" path: there is no persisted evidence root to
+      diverge from.
+    """
+    # Distinguish "absent" from "unreadable". ``read_optional``
+    # returns None only when the file is missing. Any other failure
+    # (parse error, I/O error, StateStore validation failure) must
+    # propagate so the CLI fails closed.
+    rc = store.read_optional("run_context.json")
+    persisted: Optional[str] = None
+    if rc is not None:
+        persisted = rc.get("evidence_root") if isinstance(rc, dict) else None
+
+    override = getattr(args, "evidence_root", None)
+    if override and persisted and Path(str(override)).resolve() != Path(str(persisted)).resolve():
+        raise MergeInputsCollide(
+            f"--evidence-root {override!r} conflicts with persisted "
+            f"RunContext.evidence_root {persisted!r}"
+        )
+
+    if override:
+        return Path(str(override))
+    if persisted:
+        return Path(str(persisted))
+    # Genuinely absent run context: the documented first-invocation
+    # fallback is permitted because no persisted evidence root can
+    # diverge from the requested root. State this explicitly so the
+    # audit log records the derivation.
+    state_root_path = Path(str(store.state_root))
+    return state_root_path.parent / "evidence"
 
 
 def _emit(payload: Dict[str, Any], *, json_mode: bool, exit_code: int) -> int:
@@ -262,16 +468,58 @@ def cmd_build_candidate(args: argparse.Namespace) -> int:
         candidate = builder.build(cert, args.local_checkout)
     except CandidateError as e:
         return _emit(
-            {"error": f"candidate build failed: {e}"},
+            {"error": f"candidate build failed: {e!r}"},
             json_mode=args.json,
             exit_code=EXIT_GUARD,
         )
-    store.write_atomic("candidate.json", candidate.to_dict())
-    store.write_atomic("candidate.sha256", {"sha256": candidate.compute_sha256()})
+    # Single canonical producer. ``Controller.build_candidate``
+    # writes the canonical evidence-root ``candidate.json`` (with
+    # the ``_sha256``-enriched payload the merge transaction
+    # expects) and the state-root ``candidate.json`` audit copy.
+    # It also performs the ``READY_FOR_CANDIDATE -> CANDIDATE_FROZEN``
+    # state transition through the established safe order. Routing
+    # through the Controller guarantees identical canonical bytes
+    # for identical candidate data, regardless of which public
+    # surface produced them. The duplicate canonical write that
+    # used to follow is removed.
+    controller = Controller(ctx, store)
+    try:
+        controller.build_candidate(
+            candidate, head_observed=str(ctx.current_authorized_head or ""),
+        )
+    except (ControllerError, StateStoreError, StateError,
+            ArtifactError) as e:
+        # Pre-merge failures return controlled state / guard
+        # exits. A canonical-write failure (``ArtifactError``) is
+        # a state failure: the run has not transitioned and a
+        # retry can resume cleanly.
+        if isinstance(e, ArtifactError):
+            return _emit(
+                {"error": f"canonical candidate write failed: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_STATE,
+            )
+        return _emit(
+            {"error": f"candidate transition rejected: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    # Capture the canonical artifact digest for the response
+    # payload from the canonical evidence root that the merge
+    # transaction will re-read. This is a single read; no
+    # ``write_artifact`` call is duplicated.
+    from .artifacts import read_artifact as _read_canonical
+    from .canonical_paths import canonical_paths as _cp
+    canonical_candidate_path = _cp(Path(ctx.evidence_root))["candidate"]
+    canonical_candidate_digest = _read_canonical(
+        canonical_candidate_path,
+    ).digest
     return _emit(
         {
             "run_id": args.run_id,
             "candidate_sha256": candidate.compute_sha256(),
+            "canonical_candidate_path": str(canonical_candidate_path),
+            "canonical_candidate_sha256": canonical_candidate_digest,
         },
         json_mode=args.json,
         exit_code=EXIT_OK,
@@ -279,7 +527,24 @@ def cmd_build_candidate(args: argparse.Namespace) -> int:
 
 
 def cmd_handoff_verifier(args: argparse.Namespace) -> int:
-    """Write a verifier handoff record for the current run."""
+    """Write a verifier handoff record for the current run.
+
+    The verifier handoff is COORDINATION metadata. It records
+    which external verifier worker was asked to run, against
+    which exact candidate digest, and from which trusted
+    verifier package version. The verifier worker reads this
+    handoff, runs its independent verification, and writes a
+    separate canonical evidence-root ``verifier.json`` (the
+    authoritative merge input).
+
+    The handoff is NEVER read by ``cmd_merge_authorize`` or
+    ``cmd_merge``. ``cmd_merge_authorize`` binds the digest of
+    the canonical evidence-root ``verifier.json``; the
+    merge transaction re-verifies that digest. The handoff
+    therefore cannot influence merge authorization under any
+    sequence of writes. This is the architectural separation
+    that makes the handoff safe to remain in state-root.
+    """
     store = StateStore(args.state_root)
     cert_payload = store.read_optional("readiness.json")
     if cert_payload is None:
@@ -374,7 +639,38 @@ def cmd_apply_verifier_result(args: argparse.Namespace) -> int:
 
 
 def cmd_merge_authorize(args: argparse.Namespace) -> int:
-    """Record a human merge authorization."""
+    """Record a human merge authorization.
+
+    The candidate and verifier artifacts that bound this
+    authorization MUST be the canonical evidence-root artifacts
+    that ``cmd_merge`` later consumes. The state-root copies
+    (``<state_root>/candidate.json`` and ``<state_root>/verifier-record.json``)
+    exist solely as secondary audit observables and are NOT merge
+    authorization inputs; this command MUST NOT read them when
+    building the authorization. Reading the canonical artifacts
+    via ``read_artifact`` validates the exact-file digest and the
+    sidecar; that digest is the value bound into the
+    authorization. Authorization therefore binds the same digests
+    that the merge transaction will re-read.
+
+    Safe ordering (per PR #4 round-2 review):
+
+    1. Validate the authorization preconditions (state machine is
+       in AWAITING_MERGE_AUTHORIZATION, authorized head matches
+       ``ctx.current_authorized_head``, candidate + verifier carry
+       ``verdict == VERIFIED`` and a qualifying verdict binding).
+    2. Build ``MergeAuthorization`` only after every precondition
+       passes.
+    3. Persist the canonical authorization artifact via
+       ``Controller.authorize_merge(auth)`` — which itself
+       validates the transition BEFORE writing.
+    4. Persist the canonical evidence-root ``authorization.json``
+       only after the controller call returns successfully.
+
+    A rejected authorization leaves NO canonical
+    ``authorization.json`` on disk. ``cmd_merge`` cannot consume
+    rejected authorization evidence.
+    """
     store = StateStore(args.state_root)
     rc = store.read_optional("run_context.json")
     if rc is None:
@@ -384,38 +680,142 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
             exit_code=EXIT_STATE,
         )
     ctx = RunContext.from_dict(rc)
-    cand_payload = store.read_optional("candidate.json")
-    if cand_payload is None:
+
+    # Resolve the canonical evidence root BEFORE reading any
+    # candidate/verifier evidence. Per C-24 the evidence root is
+    # independent of the state root, so this resolution MUST happen
+    # before any read. All four control-plane artifacts live here.
+    evidence_root = _resolve_evidence_root(args, store)
+    paths = _canonical_artifact_paths(evidence_root)
+
+    # Read the candidate from the canonical evidence root through
+    # the canonical artifact reader. ``read_artifact`` verifies
+    # the sidecar digest and raises on any failure.
+    from .artifacts import (
+        ArtifactError,
+        read_artifact as _read_canonical_artifact,
+    )
+    try:
+        candidate_result = _read_canonical_artifact(paths["candidate"])
+    except FileNotFoundError:
         return _emit(
-            {"error": "no candidate on file"},
+            {
+                "error": (
+                    f"no canonical candidate at {paths['candidate']}; "
+                    "authorization cannot bind a non-canonical artifact"
+                ),
+            },
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    cand = Candidate.from_dict(cand_payload)
+    except ArtifactError as e:
+        return _emit(
+            {"error": f"canonical candidate unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    cand_payload = candidate_result.payload
+    try:
+        cand = Candidate.from_dict(cand_payload)
+    except (ValueError, TypeError, KeyError) as e:
+        # The canonical artifact bytes have been validated against
+        # the sidecar by ``read_artifact``, but the payload schema
+        # may still be malformed (wrong schema_version, missing
+        # fields, mistyped values). Convert this to a controlled
+        # state failure with EXIT_STATE; a correctly signed
+        # malformed candidate MUST NEVER cause an uncaught
+        # traceback.
+        return _emit(
+            {"error": f"canonical candidate schema invalid: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     if cand.exact_head != ctx.current_authorized_head:
         return _emit(
             {"error": "candidate head does not match current authorized head"},
             json_mode=args.json,
             exit_code=EXIT_GUARD,
         )
-    vr = store.read_optional("verifier-record.json")
-    if vr is None:
+
+    # Read the verifier record from the canonical evidence root.
+    try:
+        verifier_result = _read_canonical_artifact(paths["verifier"])
+    except FileNotFoundError:
         return _emit(
-            {"error": "no verifier record on file"},
+            {
+                "error": (
+                    f"no canonical verifier at {paths['verifier']}; "
+                    "authorization cannot bind a non-canonical artifact"
+                ),
+            },
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    vr_sha = hashlib.sha256(
-        json.dumps(vr, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    except ArtifactError as e:
+        return _emit(
+            {"error": f"canonical verifier unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+
+    # Semantic verdict gate (per PR #4 round-2 review).
+    #
+    # ``canonical verifier.json`` may be the LAST WRITTEN record,
+    # irrespective of verdict. ``verifier_failed`` writes the same
+    # canonical path; a failing attempt can therefore overwrite a
+    # passing one if a verifier process retries. ``cmd_merge_authorize``
+    # must independently inspect the record's verdict and reject any
+    # artifact whose ``verdict`` is not exactly ``VERIFIED``.
+    #
+    # The two acceptable shapes for a passing record are:
+    #   ``{"verdict": "VERIFIED", ...}`` (top-level), or
+    #   ``{"verdict": "VERIFIED", "defects": [], ...}``.
+    # Any other verdict value (including missing, "FAILED",
+    # "ERROR", "INCONCLUSIVE", or the ``_verdict_failed`` flag set
+    # by ``Controller.verifier_failed``) is rejected.
+    verdict = verifier_result.payload.get("verdict")
+    if verdict != "VERIFIED":
+        return _emit(
+            {
+                "error": (
+                    f"canonical verifier at {paths['verifier']} has "
+                    f"verdict {verdict!r}; authorization requires "
+                    "exactly verdict == 'VERIFIED'; a failed or "
+                    "absent verification MUST NOT become merge "
+                    "evidence"
+                ),
+                "verifier_verdict": verdict,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_GUARD,
+        )
+    if verifier_result.payload.get("_verdict_failed") is True:
+        return _emit(
+            {
+                "error": (
+                    f"canonical verifier at {paths['verifier']} is "
+                    "tagged as a failed attempt; authorization "
+                    "MUST NOT bind its digest"
+                ),
+            },
+            json_mode=args.json,
+            exit_code=EXIT_GUARD,
+        )
+
+    # Bind the EXACT-FILE DIGESTS returned by ``read_artifact``
+    # (already validated against the on-disk sidecar). These are
+    # the same digests the merge transaction will re-read; the
+    # state-root copies are intentionally ignored.
+    candidate_digest = candidate_result.digest
+    verifier_digest = verifier_result.digest
     auth = MergeAuthorization(
         schema_version="autocoder.merge_authorization.v1",
         run_id=args.run_id,
         repo=f"{ctx.repo_owner}/{ctx.repo_name}",
         pr_number=args.pr_number,
         authorized_head=args.authorized_head,
-        candidate_sha256=cand.compute_sha256(),
-        verifier_record_sha256=vr_sha,
+        candidate_sha256=candidate_digest,
+        verifier_record_sha256=verifier_digest,
         merge_method=args.method,
         delete_branch=not args.keep_branch,
         require_match_head_commit=True,
@@ -426,34 +826,72 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
     )
     auth_payload = auth.to_dict()
     auth_payload["_sha256"] = auth.compute_sha256()
-    store.write_atomic("merge-authorization.json", auth_payload)
+    # The Controller owns the complete safe transaction:
+    # validate inputs -> validate state -> validate head ->
+    # canonical write -> state-root write -> state transition.
+    # A failure at ANY step leaves the run at
+    # AWAITING_MERGE_AUTHORIZATION so a retry can succeed
+    # without re-entering an already-committed transition.
     controller = Controller(ctx, store)
-    sm = controller.authorize_merge(auth)
+    try:
+        sm = controller.authorize_merge(auth)
+    except (ControllerError, StateStoreError, StateError,
+            ArtifactError) as e:
+        # Catch every precondition / write failure. The
+        # canonical authorization.json MUST NOT appear when
+        # authorization is rejected, so a follow-up retry
+        # can re-authorize cleanly.
+        if isinstance(e, ArtifactError):
+            return _emit(
+                {"error": f"authorization canonical write failed: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_STATE,
+            )
+        return _emit(
+            {"error": f"authorization transition rejected: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    # Controller wrote both canonical authorization.json and
+    # the state-root merge-authorization.json, then committed
+    # MERGE_AUTHORIZED. No duplicate canonical write here.
     return _emit(
-        {"run_id": args.run_id, "state": sm.current_state},
+        {
+            "run_id": args.run_id,
+            "state": sm.current_state,
+            "candidate_digest_source": "canonical_evidence_root",
+            "verifier_digest_source": "canonical_evidence_root",
+            "candidate_digest": candidate_digest,
+            "verifier_digest": verifier_digest,
+        },
         json_mode=args.json,
         exit_code=EXIT_OK,
     )
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    """Execute the guarded merge.
+    """Execute the guarded merge via the production transaction.
 
-    Fetches every required live value via the gh CLI, builds the
-    live state dict from the actual API responses, and only then
-    calls the executor. The executor re-binds the candidate and
-    verifier record hashes from the local store and validates the
-    authorization against them.
+    This command delegates to ``execute_guarded_merge_transaction``,
+    which is the single checked-in path that loads and verifies the
+    authorization / candidate / verifier artifacts, fetches live
+    GitHub evidence, repeats every exact-head and integrity guard,
+    invokes the guarded ``gh pr merge`` command once with a finite
+    timeout, reconciles post-merge state, and writes the merge
+    record through the canonical artifact writer.
+
+    After the transaction returns, ``cmd_merge`` itself persists
+    the COMPLETE state transition by calling
+    ``Controller.report_complete()``. The transaction does NOT
+    transition to COMPLETE; the durable state change is this
+    command's responsibility. If ``report_complete`` raises, the
+    merge record remains durable for retry and ``cmd_merge``
+    returns EXIT_STATE.
+
+    Production flows MUST NOT bypass this function. No production code
+    may call ``MergeExecutor().compute_command`` and ``_run`` directly.
     """
     store = StateStore(args.state_root)
-    auth_payload = store.read_optional("merge-authorization.json")
-    if auth_payload is None:
-        return _emit(
-            {"error": "no merge authorization on file"},
-            json_mode=args.json,
-            exit_code=EXIT_STATE,
-        )
-    auth = MergeAuthorization.from_dict(auth_payload)
     rc = store.read_optional("run_context.json")
     if rc is None:
         return _emit(
@@ -462,118 +900,290 @@ def cmd_merge(args: argparse.Namespace) -> int:
             exit_code=EXIT_STATE,
         )
     ctx = RunContext.from_dict(rc)
-    # Fetch live PR identity via gh.
+    # Resolve the canonical evidence root once per invocation. All four
+    # control-plane artifacts share this root (per C-24).
+    evidence_root = _resolve_evidence_root(args, store)
+    paths = _canonical_artifact_paths(evidence_root)
+
+    # Read the canonical authorization artifact from the evidence root.
+    from .artifacts import read_artifact
     try:
-        pr_proc = subprocess.run(
-            ["gh", "pr", "view", str(auth.pr_number), "--repo", auth.repo,
-             "--json", "state,merged,headRefOid"],
-            capture_output=True, text=True, timeout=30,
+        auth_result = read_artifact(paths["authorization"])
+    except FileNotFoundError:
+        return _emit(
+            {"error": f"no merge authorization at {paths['authorization']}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
         )
-        if pr_proc.returncode != 0:
-            return _emit(
-                {"error": f"gh pr view failed: {pr_proc.stderr}"},
-                json_mode=args.json,
-                exit_code=EXIT_STATE,
-            )
-        live_pr = json.loads(pr_proc.stdout)
-    except (subprocess.CalledProcessError, json.JSONDecodeError) as e:
+    except Exception as e:
+        return _emit(
+            {"error": f"merge authorization unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    try:
+        auth = MergeAuthorization.from_dict(auth_result.payload)
+    except (ValueError, TypeError, MergeAuthorizationMalformed) as e:
+        return _emit(
+            {"error": f"merge authorization malformed: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    authorization_path = paths["authorization"]
+    candidate_path = paths["candidate"]
+    verifier_path = paths["verifier"]
+    merge_record_path = paths["merge_record"]
+
+    # Fetch live PR identity via gh using the production helper.
+    try:
+        live_pr_payload = fetch_live_pr_payload("gh", auth.repo, auth.pr_number)
+    except Exception as e:
         return _emit(
             {"error": f"failed to fetch live PR state: {e!r}"},
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    live_pr_payload = {
-        "state": live_pr.get("state"),
-        "merged": live_pr.get("merged", False),
-        "number": auth.pr_number,
-        "head": {"sha": live_pr.get("headRefOid")},
-    }
-    # Fetch live thread inventory
-    try:
-        thread_proc = subprocess.run(
-            ["gh", "api", "graphql", "-f",
-             f"query={{repository(owner:{{owner}},name:{{repo}}){{pullRequest(number:{{pr}}){{reviewThreads(first:100){{nodes{{isResolved isOutdated}}}}}}}}}}}}".format(
-                 owner=ctx.repo_owner, repo=ctx.repo_name, pr=auth.pr_number,
-             )],
-            capture_output=True, text=True, timeout=30,
-        )
-        if thread_proc.returncode == 0:
-            td = json.loads(thread_proc.stdout)
-            nodes = td.get("data", {}).get("repository", {}).get("pullRequest", {}).get("reviewThreads", {}).get("nodes", [])
-            unresolved_current = sum(1 for n in nodes if not n.get("isResolved") and not n.get("isOutdated"))
-            unresolved_outdated = sum(1 for n in nodes if not n.get("isResolved") and n.get("isOutdated"))
-            live_thread_inventory = {
-                "unresolved_current": unresolved_current,
-                "unresolved_outdated": unresolved_outdated,
-            }
-        else:
-            live_thread_inventory = {"unresolved_current": 0, "unresolved_outdated": 0}
-    except (subprocess.CalledProcessError, json.JSONDecodeError):
-        live_thread_inventory = {"unresolved_current": 0, "unresolved_outdated": 0}
 
-    # Fetch CI inventory (best-effort)
+    # Fetch live thread inventory via gh graphql with pagination.
+    # An incomplete inventory is treated as a guard failure (C-22):
+    # missing data must never weaken merge authorization. We follow
+    # reviewThreads.pageInfo.hasNextPage and fail closed if another
+    # page exists or if the query fails.
+    live_thread_inventory = None
+    try:
+        all_nodes = []
+        has_next = True
+        cursor = "null"
+        page_count = 0
+        while has_next:
+            page_count += 1
+            if page_count > 10:
+                # Defensive: refuse if more than 10 pages of review
+                # threads exist (well above realistic limits).
+                raise RuntimeError(
+                    f"reviewThreads pagination exceeded {page_count} pages"
+                )
+            q = (
+                "query($owner:String!,$name:String!,$pr:Int!,$cursor:String){"
+                "repository(owner:$owner,name:$name){"
+                "pullRequest(number:$pr){"
+                "reviewThreads(first:100, after:$cursor){"
+                "pageInfo { hasNextPage endCursor }"
+                "nodes { isResolved isOutdated }"
+                "}}}"
+            )
+            thread_proc = subprocess.run(
+                ["gh", "api", "graphql",
+                 "-f", f"query={q}",
+                 "-F", f"owner={ctx.repo_owner}",
+                 "-F", f"name={ctx.repo_name}",
+                 "-F", f"pr={auth.pr_number}",
+                 "-F", f"cursor={cursor}"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if thread_proc.returncode != 0:
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"failed: rc={thread_proc.returncode} "
+                    f"stderr={thread_proc.stderr.strip()}"
+                )
+            td = json.loads(thread_proc.stdout)
+            page = (
+                td.get("data", {}).get("repository", {})
+                  .get("pullRequest", {}).get("reviewThreads", {})
+            )
+            if not page:
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"returned no data: {thread_proc.stdout[:200]!r}"
+                )
+            all_nodes.extend(page.get("nodes", []))
+            page_info = page.get("pageInfo", {})
+            has_next = bool(page_info.get("hasNextPage"))
+            cursor = page_info.get("endCursor") or "null"
+
+        unresolved_current = sum(
+            1 for n in all_nodes
+            if not n.get("isResolved") and not n.get("isOutdated")
+        )
+        unresolved_outdated = sum(
+            1 for n in all_nodes
+            if not n.get("isResolved") and n.get("isOutdated")
+        )
+        live_thread_inventory = {
+            "unresolved_current": unresolved_current,
+            "unresolved_outdated": unresolved_outdated,
+        }
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError, RuntimeError) as exc:
+        # Timeout, network error, or malformed JSON: incomplete thread
+        # evidence cannot represent zero unresolved threads. Fail closed.
+        return _emit(
+            {"error": f"failed to fetch complete thread inventory: {exc!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+
+    # Fetch live CI inventory.
+    live_ci_state = {"all_required_passing": False, "coderabbit_passing": False,
+                     "checks": []}
     try:
         ci_proc = subprocess.run(
-            ["gh", "pr", "checks", str(auth.pr_number), "--repo", auth.repo],
+            ["gh", "pr", "checks", str(auth.pr_number), "--repo", auth.repo, "--json", "name,state"],
             capture_output=True, text=True, timeout=30,
         )
-        live_ci_inventory = []
         if ci_proc.returncode == 0:
-            for line in ci_proc.stdout.splitlines():
-                parts = line.split("\t")
-                if len(parts) >= 2:
-                    live_ci_inventory.append({"name": parts[0], "state": parts[1]})
-    except (subprocess.CalledProcessError, OSError):
-        live_ci_inventory = []
+            checks = json.loads(ci_proc.stdout)
+            live_ci_state["checks"] = checks
+            required = {"test (3.10)", "test (3.11)", "test (3.12)",
+                        "package-smoke", "provenance", "committed-state-scan"}
+            passing = {
+                name for c in checks
+                if c.get("state") == "SUCCESS"
+                # A check object without a ``name`` key cannot
+                # contribute to the passing set; skip it so a
+                # KeyError does not escape this handler.
+                for name in [c.get("name")]
+                if name
+            }
+            live_ci_state["all_required_passing"] = required.issubset(passing)
+            live_ci_state["coderabbit_passing"] = "CodeRabbit" in passing
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        # Timeout or transient failure: retain the failing CI state
+        # (all_required_passing stays False). Fail closed downstream.
+        pass
 
-    # Compute the LIVE candidate and verifier record SHA from the store.
-    # The executor will compare auth.candidate_sha256 to this.
-    cand_payload = store.read_optional("candidate.json")
-    if cand_payload is None:
-        return _emit(
-            {"error": "candidate.json not found in run directory"},
-            json_mode=args.json,
-            exit_code=EXIT_STATE,
+    # Fetch the latest CodeRabbit review state. Filter reviews by the
+    # configured CodeRabbit author login so a human review cannot
+    # satisfy the CodeRabbit guard. Leave the field unavailable when
+    # no matching review exists. The filter normalizes "coderabbitai"
+    # and "coderabbitai[bot]" to the same identity.
+    live_review_state: Dict[str, Optional[str]] = {"latest_coderabbit_state": None}
+    try:
+        match_state = _fetch_coderabbit_review_state(
+            "gh",
+            owner=ctx.repo_owner,
+            name=ctx.repo_name,
+            pr_number=auth.pr_number,
         )
-    candidate_sha256_actual = cand_payload.get("_sha256")
-    if candidate_sha256_actual is None:
-        return _emit(
-            {"error": "candidate.json missing _sha256 sidecar"},
-            json_mode=args.json,
-            exit_code=EXIT_STATE,
-        )
-    vr_payload = store.read_optional("verifier-record.json")
-    if vr_payload is None:
-        return _emit(
-            {"error": "verifier-record.json not found in run directory"},
-            json_mode=args.json,
-            exit_code=EXIT_STATE,
-        )
-    import hashlib
-    verifier_record_sha256_actual = hashlib.sha256(
-        json.dumps(vr_payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+        if match_state is not None:
+            live_review_state["latest_coderabbit_state"] = match_state
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        # Timeout or transient failure: keep latest_coderabbit_state None
+        # so the CodeRabbit guard fails closed.
+        pass
 
-    executor = MergeExecutor()
-    record = executor.merge(
-        auth,
+    # Working tree clean? Measured BEFORE execute_guarded_merge_transaction
+    # runs -- the measurement is a pre-flight guard, not a post-merge
+    # reconciliation check. A post-merge dirty tree is detected by the
+    # reconciliation inside execute_guarded_merge_transaction itself,
+    # and surfaced via the merge record's working_tree_clean field.
+    working_tree_clean = False
+    try:
+        wt_clean_proc = subprocess.run(
+            ["git", "-C", str(ctx.local_checkout), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10,
+        )
+        working_tree_clean = (
+            wt_clean_proc.returncode == 0 and wt_clean_proc.stdout.strip() == ""
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        # Timeout or transient failure: dirty is the safe default.
+        working_tree_clean = False
+
+    # Resolve canonical artifact paths for the production transaction.
+    # All four named roots are independent (C-24); the canonical evidence
+    # root was resolved once at the top of this function.
+    authorization_path = paths["authorization"]
+    candidate_path = paths["candidate"]
+    verifier_path = paths["verifier"]
+    merge_record_path = paths["merge_record"]
+
+    inputs = MergeTransactionInputs(
+        authorization_artifact_path=authorization_path,
+        candidate_artifact_path=candidate_path,
+        verifier_artifact_path=verifier_path,
+        merge_record_artifact_path=merge_record_path,
+        repository_checkout=Path(str(ctx.local_checkout)),
+        run_state_root=Path(str(store.state_root)),
+        evidence_root=Path(str(evidence_root)),
         live_pr_payload=live_pr_payload,
-        live_ci_state={"jobs": live_ci_inventory},
+        live_ci_state=live_ci_state,
+        live_review_state=live_review_state,
         live_thread_inventory=live_thread_inventory,
-        live_review_state={},
-        candidate_sha256_actual=candidate_sha256_actual,
-        verifier_record_sha256_actual=verifier_record_sha256_actual,
-        auto_repo_root=ctx.local_checkout,
+        working_tree_clean=working_tree_clean,
     )
-    store.write_atomic("merge-record.json", record.to_dict())
-    controller = Controller(ctx, store)
-    sm = controller.report_merged(record)
+
+    try:
+        record, rec_digest = execute_guarded_merge_transaction(inputs)
+    except (MergeAuthorizationMissing, MergeAuthorizationMalformed, MergeInputsCollide,
+            MergeError, MergeSubprocessFailed, MergeAmbiguousOutcome) as e:
+        return _emit(
+            {"error": f"merge transaction failed: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_GUARD,
+        )
+
+    # Persist the COMPLETE state transition on the run-state side, so a
+    # subsequent restart sees the controller in COMPLETE even if the
+    # CLI process exits before a separate post-merge verify invocation.
+    #
+    # Per the explicit fail-closed COMPLETE contract:
+    # * The merge record was already durably written above.
+    # * If ``report_complete()`` raises (ControllerError / StateStoreError /
+    #   any persistence failure), the CLI returns a NONZERO exit code.
+    # * The merge record remains durable so a subsequent retry can
+    #   recover by re-applying report_complete() idempotently.
+    # * The CLI does NOT report success in this case.
+    final_state = record.final_state
+    complete_state_warning: Optional[str] = None
+    try:
+        controller = Controller(ctx, store)
+        sm = controller.report_complete()
+        final_state = sm.current_state
+    except (ControllerError, StateStoreError, StateError, OSError) as e:
+        # The merge record is durable on disk; the durable COMPLETE
+        # transition failed. This is NOT a successful completion —
+        # return a controlled nonzero result so the caller can retry.
+        # The durable merge record preserves the recovery information
+        # so a follow-up ``report_complete()`` retry can persist the
+        # COMPLETE transition idempotently.
+        complete_state_warning = (
+            f"durable COMPLETE transition failed: {e!r}; merge record "
+            f"at {merge_record_path} is durable; "
+            f"merge_record_digest={rec_digest}; "
+            "retry report_complete() to persist COMPLETE idempotently."
+        )
+
+    if complete_state_warning is not None:
+        return _emit(
+            {
+                "error": complete_state_warning,
+                "run_id": auth.run_id,
+                "squash_merge_commit": record.squash_merge_commit,
+                "merge_record_path": str(merge_record_path),
+                "merge_record_digest": rec_digest,
+                "recovery_required": True,
+                "recovery_action": (
+                    "merge_record is durable on disk; "
+                    "COMPLETE transition must be re-applied "
+                    "(e.g. retry cmd_post_merge_verify) before "
+                    "downstream automation can treat the run as "
+                    "completed"
+                ),
+                "complete_state_persisted": False,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+
+    payload = {
+        "run_id": auth.run_id,
+        "state": final_state,
+        "squash_merge_commit": record.squash_merge_commit,
+        "merge_record_digest": rec_digest,
+    }
     return _emit(
-        {
-            "run_id": args.run_id,
-            "state": sm.current_state,
-            "squash_merge_commit": record.squash_merge_commit,
-        },
+        payload,
         json_mode=args.json,
         exit_code=EXIT_OK,
     )
@@ -582,21 +1192,49 @@ def cmd_merge(args: argparse.Namespace) -> int:
 def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     """Verify the post-merge state."""
     store = StateStore(args.state_root)
-    record_payload = store.read_optional("merge-record.json")
-    if record_payload is None:
+    rc = store.read_optional("run_context.json")
+    if rc is None:
         return _emit(
-            {"error": "no merge record on file"},
+            {"error": "no run context on file"},
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
-    record = MergeRecord.from_dict(record_payload)
+    ctx = RunContext.from_dict(rc)
+    # Read the canonical merge-record artifact from the canonical evidence
+    # root. Per C-24, the post-merge verify command must use the same
+    # path as the merge transaction.
+    evidence_root = _resolve_evidence_root(args, store)
+    paths = _canonical_artifact_paths(evidence_root)
+    from .artifacts import read_artifact
+    try:
+        record_result = read_artifact(paths["merge_record"])
+    except FileNotFoundError:
+        return _emit(
+            {"error": f"no merge record at {paths['merge_record']}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    except Exception as e:
+        return _emit(
+            {"error": f"merge record unreadable: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    try:
+        record = MergeRecord.from_dict(record_result.payload)
+    except (ValueError, TypeError, MergeAuthorizationMalformed) as e:
+        return _emit(
+            {"error": f"merge record malformed: {e!r}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     if not record.local_main_equals_origin_main:
         return _emit(
             {"error": "local main does not match origin/main"},
             json_mode=args.json,
             exit_code=EXIT_GUARD,
         )
-    if not record.autodev_clean_post_merge:
+    if not record.aed_clean_post_merge:
         return _emit(
             {"error": "autodev working tree not clean"},
             json_mode=args.json,
@@ -611,7 +1249,34 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
         )
     ctx = RunContext.from_dict(rc)
     controller = Controller(ctx, store)
-    sm = controller.report_complete()
+    try:
+        sm = controller.report_complete()
+    except (ControllerError, StateStoreError, StateError, OSError) as e:
+        # The merge record is durable on disk; the durable
+        # COMPLETE transition failed. The recovery payload
+        # identifies both the merge-record PATH and the verified
+        # exact-file DIGEST (returned by ``read_artifact``, which
+        # compares the body against its sidecar) so a follow-up
+        # retry can locate the durable evidence without
+        # inspecting the state store directly. Round-5 finding
+        # PRRT_kwDOTtyQLc6XSGfP.
+        return _emit(
+            {
+                "error": f"durable COMPLETE transition failed: {e!r}",
+                "merge_record_path": str(paths["merge_record"]),
+                "merge_record_sha256": record_result.digest,
+                "recovery_required": True,
+                "recovery_action": (
+                    "merge_record is durable on disk; "
+                    "COMPLETE transition must be re-applied "
+                    "(e.g. retry cmd_post_merge_verify) before "
+                    "downstream automation can treat the run as "
+                    "completed"
+                ),
+            },
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
     return _emit(
         {"run_id": args.run_id, "state": sm.current_state},
         json_mode=args.json,
@@ -667,7 +1332,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ma.add_argument("--keep-branch", action="store_true")
     ma.add_argument("--notes", default="")
 
-    sub.add_parser("merge", parents=[common])
+    m = sub.add_parser("merge", parents=[common])
+    m.add_argument("--evidence-root", default="")
 
     args = parser.parse_args(argv)
     try:

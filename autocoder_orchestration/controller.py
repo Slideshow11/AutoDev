@@ -97,6 +97,8 @@ from .merge_authorization import (
     MergeRecord,
     MergeError,
 )
+from .artifacts import write_artifact as _write_artifact
+from .canonical_paths import canonical_paths as _canonical_paths
 
 
 class ControllerError(Exception):
@@ -213,6 +215,10 @@ class Controller:
         )
         cand_payload = candidate.to_dict()
         cand_payload["_sha256"] = candidate.compute_sha256()
+        # Canonical evidence-root copy (authoritative merge input).
+        # The merge transaction reads only the canonical path; the
+        # state-root copy is a secondary observable for audit only.
+        self._write_canonical("candidate", cand_payload)
         self.store.write_atomic("candidate.json", cand_payload)
         self.store.write_atomic("candidate.sha256", {"sha256": cand_payload["_sha256"]})
         self.save_state_machine(next_sm)
@@ -377,8 +383,32 @@ class Controller:
         self.save_state_machine(next_sm)
         return next_sm
 
+    def _write_canonical(self, kind: str, payload: dict) -> str:
+        """Write ``payload`` to the canonical evidence-root artifact path.
+
+        The state-root copy is kept as a secondary observable for
+        audit; the canonical evidence-root copy is authoritative.
+        The guarded merge transaction reads only the canonical
+        path; the state-root copy must never become a second input.
+        """
+        paths = _canonical_paths(Path(self.context.evidence_root))
+        target = paths[kind]
+        target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        result = _write_artifact(target, payload)
+        return result.digest
+
     def verifier_failed(self, *, head_observed: str, verifier_record: Dict[str, Any]) -> StateMachine:
-        """VERIFYING -> VERIFICATION_FAILED."""
+        """VERIFYING -> VERIFICATION_FAILED.
+
+        Failed verification MUST NOT overwrite a previously
+        written passing verifier artifact at the canonical
+        evidence-root path. The merged-verdict model is:
+        ``canonical verifier.json`` is the LAST WRITTEN verifier
+        record, irrespective of verdict, but every authorization
+        consumer MUST independently check ``verdict == VERIFIED``
+        before binding its digest into a MergeAuthorization.
+        ``cmd_merge_authorize`` enforces this gate.
+        """
         sm = self._require_state_for_event()
         next_sm = sm.transition(
             STATE_VERIFICATION_FAILED,
@@ -386,6 +416,14 @@ class Controller:
             head_observed=head_observed,
             head_required=self.context.current_authorized_head,
         )
+        # Tag the failed record so consumers can distinguish a
+        # failure-only artifact from a passing one even after
+        # ``verifier_passed`` subsequently overwrites it.
+        verifier_record = dict(verifier_record)
+        verifier_record["_verdict_failed"] = True
+        # Canonical evidence-root copy (authoritative merge input).
+        self._write_canonical("verifier", verifier_record)
+        # State-root copy is a secondary observable for audit only.
         self.store.write_atomic("verifier-record.json", verifier_record)
         self.save_state_machine(next_sm)
         return next_sm
@@ -399,6 +437,9 @@ class Controller:
             head_observed=head_observed,
             head_required=self.context.current_authorized_head,
         )
+        # Canonical evidence-root copy (authoritative merge input).
+        self._write_canonical("verifier", verifier_record)
+        # State-root copy is a secondary observable for audit only.
         self.store.write_atomic("verifier-record.json", verifier_record)
         self.save_state_machine(next_sm)
         return next_sm
@@ -406,13 +447,30 @@ class Controller:
     def authorize_merge(self, auth: MergeAuthorization) -> StateMachine:
         """AWAITING_MERGE_AUTHORIZATION -> MERGE_AUTHORIZED.
 
-        Validates the transition before writing the artifact.
-        Caller-supplied merge authorization is validated by the
-        caller; the controller stores the authorization and applies
-        the transition.
+        Complete safe transaction owned by the Controller:
+
+        1. Validate inputs.
+        2. Validate current state supports the transition.
+        3. Validate the authorized head matches the persisted
+           current authorized head.
+        4. Write the canonical evidence-root ``authorization.json``
+           AND its sidecar (this is the authoritative merge input
+           that ``cmd_merge`` consumes).
+        5. Write the state-root ``merge-authorization.json``
+           coordination copy.
+        6. Commit the state-machine transition only after every
+           write has succeeded.
+
+        A canonical-write failure leaves the run at
+        ``AWAITING_MERGE_AUTHORIZATION`` so a retry can succeed
+        without re-entering an already-committed transition. A
+        rejected transition leaves no accepted artifact anywhere.
         """
         if not isinstance(auth, MergeAuthorization):
             raise ControllerError("auth must be a MergeAuthorization")
+        # Validate the transition will succeed BEFORE writing the
+        # artifact. ``_require_state_for_event`` raises on the
+        # wrong state; ``sm.transition`` raises on the wrong head.
         sm = self._require_state_for_event()
         next_sm = sm.transition(
             STATE_MERGE_AUTHORIZED,
@@ -420,11 +478,23 @@ class Controller:
             head_observed=auth.authorized_head,
             head_required=self.context.current_authorized_head,
         )
+        # Build the artifact payload ONCE; both writes consume it.
         auth_payload = auth.to_dict()
         auth_payload["_sha256"] = auth.compute_sha256()
+        # Step 4: write the canonical evidence-root artifact
+        # FIRST. This is the authoritative merge input; the
+        # state-root coordination copy below must not commit
+        # without it. ``_write_canonical`` raises ArtifactError on
+        # any write failure; the state-machine transition below
+        # is therefore unreachable.
+        self._write_canonical("authorization", auth_payload)
+        # Step 5: state-root coordination copy for audit only.
+        # Failures here raise StateStoreError; same recovery
+        # semantics as above -- the run stays at
+        # AWAITING_MERGE_AUTHORIZATION until both writes succeed.
         self.store.write_atomic("merge-authorization.json", auth_payload)
-        self.save_state_machine(next_sm)
-        return next_sm
+        # Step 6: commit the transition.
+        return self.save_state_machine(next_sm) and next_sm or next_sm
 
     def report_merged(self, record: MergeRecord) -> StateMachine:
         """MERGE_AUTHORIZED -> POST_MERGE_VERIFYING."""
