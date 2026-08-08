@@ -446,7 +446,7 @@
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,
-      "transformation_classification": "standalone_source_addition",
+      "transformation_classification": "standalone_test_addition",
       "transformation_explanation": "Tests for the directive bridge. 20 tests covering resolve_directive failure modes, byte-identical relay bridge pairing, supervisor launch_worker integration, and the head-mismatch / digest-mismatch guards."
     },
     {
