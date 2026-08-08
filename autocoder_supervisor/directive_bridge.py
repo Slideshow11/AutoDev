@@ -81,6 +81,26 @@ from ._directive_prompt import render_directive_prompt
 _RELAY_SCHEMA_VERSION = "autocoder.review_repair_relay.v1"
 
 
+# Same escalation keywords as the relay's build_directive.
+# The bridge rejects any directive whose body contains
+# these so a hand-edited directive cannot bypass the
+# human-only authority via the directive feed. The
+# operator MUST direct the relay through the
+# review-repair-round CLI; the bridge is a consumer of
+# validated directives only.
+_ESCALATION_KEYWORDS = frozenset({
+    "force push",
+    "rewrite history",
+    "delete branch",
+    "disable tests",
+    "skip ci",
+    "merge pr",
+    "close pr",
+    "bypass guard",
+    "ignore gate",
+})
+
+
 class DirectiveLoadFailure(Exception):
     """Raised when a directive cannot be loaded or accepted.
 
@@ -182,6 +202,35 @@ def _load_directive_payload(path: Path) -> dict:
             f"{_RELAY_SCHEMA_VERSION!r}",
             path,
         )
+    # Apply the relay's escalation guards. A directive whose
+    # findings list contains P0_ESCALATE or whose body
+    # strings contain a destructive keyword MUST NOT drive
+    # the supervisor. The relay's build_directive refuses
+    # these at write time; the bridge refuses them at read
+    # time so a hand-edited directive cannot bypass the
+    # human-only authority via the directive feed.
+    findings = directive.get("findings") or []
+    if not isinstance(findings, list):
+        raise DirectiveLoadFailure(
+            f"findings_field_invalid: type={type(findings).__name__}",
+            path,
+        )
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        severity = str(finding.get("severity") or "")
+        if severity == "P0_ESCALATE":
+            raise DirectiveLoadFailure(
+                f"p0_escalation_in_directive: title={finding.get('title', '')[:80]!r}",
+                path,
+            )
+        body = str(finding.get("body") or "").lower()
+        for kw in _ESCALATION_KEYWORDS:
+            if kw in body:
+                raise DirectiveLoadFailure(
+                    f"escalation_keyword_in_directive: keyword={kw!r} finding={finding.get('finding_id', '')!r}",
+                    path,
+                )
     # Verify the directive's stored _sha256 against its payload.
     # The relay writes the directive's _sha256 sidecar value into
     # the artifact body so the bridge can verify it without

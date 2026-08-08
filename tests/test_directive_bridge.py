@@ -16,6 +16,7 @@ relay-built prompt when a directive is present. Tests cover:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -74,7 +75,7 @@ def _write_directive_with_digest(
     canonical = json.dumps(
         canonical_fields, sort_keys=True, separators=(",", ":"),
     )
-    digest = __import__("hashlib").sha256(canonical.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     payload = dict(directive)
     payload["_sha256"] = digest
     target.write_text(json.dumps(payload, indent=2, sort_keys=True))

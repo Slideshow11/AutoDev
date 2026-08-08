@@ -170,7 +170,7 @@ def invoke_relay_round(
         ) from exc
     if proc.returncode != 0:
         raise RelayWiringError(
-            f"non_zero_exit", returncode=proc.returncode,
+            "non_zero_exit", returncode=proc.returncode,
             stdout=proc.stdout, stderr=proc.stderr,
         )
     try:

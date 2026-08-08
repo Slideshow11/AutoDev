@@ -2346,16 +2346,23 @@ def active_repair_quiet_window(
 
 def _invoke_relay_for_events(
     new_events: list,
-) -> bool:
+) -> str:
     """Invoke the relay's review-repair-round CLI for the
     current live snapshot.
 
-    Returns True when the relay was invoked (the directive
-    is on disk, or a halt was requested). Returns False
-    when the relay was not invoked (no actionable findings,
-    CLI missing, wiring failure). The supervisor's main
-    loop falls back to the existing launch_worker path on
-    ``False``.
+    Returns the relay's action string:
+    - ``"launch_worker"``: the directive is on disk; the
+      supervisor launches via the existing machinery.
+    - ``"enter_qualifying_readiness"``: the head is clean.
+      The supervisor removes the directive and lets the
+      existing readiness machinery evaluate the head.
+    - ``"escalate_to_human"``: the relay drove the controller
+      into ``BLOCKED``. The supervisor DOES NOT launch a
+      worker; the operator must inspect.
+    - ``"no_action"``: the relay was not invoked (no
+      actionable findings, CLI missing, wiring failure).
+      The supervisor falls back to the existing
+      ``launch_worker`` path.
     """
     from .relay_wiring import (
         RelayWiringError,
@@ -2369,7 +2376,7 @@ def _invoke_relay_for_events(
         token or "",
     )
     if not should_invoke_relay(snapshot):
-        return False
+        return "no_action"
     state_root = str(STATE_DIR)  # type: ignore[name-defined]
     evidence_root = os.environ.get(
         "AED_EVIDENCE_ROOT", state_root + "/evidence",
@@ -2398,7 +2405,7 @@ def _invoke_relay_for_events(
             reason=exc.reason,
             rc=exc.returncode,
         )
-        return False
+        return "no_action"
     action = decision.get("action")
     if action == "enter_qualifying_readiness":
         delete_directive_if_present(evidence_root)
@@ -2408,7 +2415,7 @@ def _invoke_relay_for_events(
             round_index=decision.get("round_index"),
             head_sha=decision.get("head_sha"),
         )
-        return True
+        return "enter_qualifying_readiness"
     if action == "escalate_to_human":
         log(
             "warning",
@@ -2417,7 +2424,7 @@ def _invoke_relay_for_events(
             head_sha=decision.get("head_sha"),
             reasons=decision.get("escalate_reasons", []),
         )
-        return True
+        return "escalate_to_human"
     if action == "launch_worker":
         log(
             "info",
@@ -2425,8 +2432,8 @@ def _invoke_relay_for_events(
             round_index=decision.get("round_index"),
             directive_digest=decision.get("directive_digest"),
         )
-        return True
-    return False
+        return "launch_worker"
+    return "no_action"
 
 
 def handle_new_events(
@@ -2445,6 +2452,12 @@ def handle_new_events(
     up via the directive bridge. The relay is the
     persistent wiring that eliminates the human
     copy/paste review-repair loop.
+
+    Escalation policy: when the relay returns
+    ``escalate_to_human`` or ``enter_qualifying_readiness``,
+    the supervisor DOES NOT launch a worker. The
+    operator must inspect the BLOCKED state or the
+    existing readiness gate must certify the head.
     """
     already = launched_event_ids()
     fresh_ids = [
@@ -2466,15 +2479,49 @@ def handle_new_events(
     # "copy-paste a giant prompt" loop with a structured
     # directive persisted to the canonical evidence root.
     try:
-        invoked = _invoke_relay_for_events(new_events)
+        relay_action = _invoke_relay_for_events(new_events)
     except Exception as exc:  # noqa: BLE001 — defensive
         log(
             "error",
             "relay_wiring blew up; falling back",
             error=str(exc),
         )
-        invoked = False
-    if invoked:
+        relay_action = "no_action"
+    if relay_action == "escalate_to_human":
+        # Protected-authority escalation. The relay drove
+        # the controller into BLOCKED. The supervisor
+        # stops launching workers; the operator's halt
+        # point is the only path forward.
+        log(
+            "warning",
+            "supervisor halted: relay escalated to human",
+            events=[
+                e.get("kind") for e in new_events
+                if e.get("id") in fresh_ids
+            ],
+        )
+        # Mark the events so the next heartbeat does not
+        # re-launch a worker. The relay has driven the
+        # controller into BLOCKED.
+        for eid in fresh_ids:
+            mark_event_launched(eid)
+        return
+    if relay_action == "enter_qualifying_readiness":
+        # The head is clean. The supervisor does NOT
+        # launch a worker; the existing readiness gate
+        # evaluates the head on the next heartbeat.
+        log(
+            "info",
+            "supervisor halted: relay indicated qualifying readiness",
+            events=[
+                e.get("kind") for e in new_events
+                if e.get("id") in fresh_ids
+            ],
+        )
+        for eid in fresh_ids:
+            mark_event_launched(eid)
+        return
+    if relay_action == "launch_worker":
         log(
             "info",
             "revoking readiness (new actionable "

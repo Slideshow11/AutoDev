@@ -1257,8 +1257,13 @@ class RelayLoop:
                 on_action(decision)
             if decision.action == "escalate_to_human":
                 # Protected-authority escalation. The controller
-                # is already in BLOCKED; the loop halts.
-                raise decision  # type: ignore[misc]
+                # is already in BLOCKED; the loop halts. Raise
+                # the typed exception so the caller can catch the
+                # protected-authority signal.
+                raise EscalateToHuman(
+                    "; ".join(decision.escalate_reasons)
+                    or "relay escalated to human"
+                )
             if decision.action == "enter_qualifying_readiness":
                 # Head is clean. The supervisor's readiness gate
                 # is the next step; the loop halts.
@@ -1290,6 +1295,9 @@ class RelayLoop:
         SHA differs from ``head_sha``. The default is a no-op
         (the supervisor implements the wait); the loop
         framework treats ``None`` as "no advance observed yet".
+        The supervisor MAY override this hook to provide
+        its own wait semantics; the relay's ``run_until_head_advances``
+        loop is the persistent harness the supervisor drives.
         """
         return None
 

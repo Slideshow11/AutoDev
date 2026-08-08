@@ -200,6 +200,13 @@ def _fetch_coderabbit_review_state(
     # character string) makes the server reject the first
     # request, so the path is conditioned on cursor being
     # set.
+    #
+    # The path fails CLOSED on every incomplete-inventory
+    # signal (subprocess error, JSON error, missing page,
+    # page-limit, or hasNextPage without endCursor). A
+    # partial inventory that already shows an APPROVED
+    # state from an earlier round must NOT satisfy the
+    # merge guard when a later page cannot be confirmed.
     cursor: Optional[str] = None
     has_next = True
     page_count = 0
@@ -207,7 +214,10 @@ def _fetch_coderabbit_review_state(
     while has_next:
         page_count += 1
         if page_count > _CODERABBIT_MAX_PAGES:
-            break
+            # Defensive: refuse if more than 10 pages of
+            # reviews exist. An incomplete inventory is a
+            # guard failure.
+            return None
         cmd = [
             gh_executable, "api", "graphql",
             "-f", f"query={query}",
@@ -221,11 +231,11 @@ def _fetch_coderabbit_review_state(
             cmd, capture_output=True, text=True, timeout=30,
         )
         if proc.returncode != 0:
-            return matched_state
+            return None
         try:
             doc = json.loads(proc.stdout)
         except json.JSONDecodeError:
-            return matched_state
+            return None
         page = (
             doc.get("data", {})
             .get("repository", {})
@@ -233,13 +243,17 @@ def _fetch_coderabbit_review_state(
             .get("latestReviews", {})
         )
         if not page:
-            return matched_state
+            return None
         # Filter for CodeRabbit matches on this page.
         match = _filter_coderabbit_review_state(doc)
         if match is not None and matched_state is None:
             matched_state = match
         page_info = page.get("pageInfo", {})
         has_next = bool(page_info.get("hasNextPage"))
+        # If hasNextPage is set but endCursor is missing,
+        # the inventory is incomplete: fail closed.
+        if has_next and not page_info.get("endCursor"):
+            return None
         # ``endCursor`` is None on the final page; the next
         # iteration's cursor is None so the first-page
         # logic above runs again (which is correct: the
