@@ -209,15 +209,19 @@ def _load_directive_payload(path: Path) -> dict:
     # these at write time; the bridge refuses them at read
     # time so a hand-edited directive cannot bypass the
     # human-only authority via the directive feed.
-    findings = directive.get("findings") or []
+    findings = directive.get("findings")
     if not isinstance(findings, list):
         raise DirectiveLoadFailure(
             f"findings_field_invalid: type={type(findings).__name__}",
             path,
         )
-    for finding in findings:
+    for index, finding in enumerate(findings):
         if not isinstance(finding, dict):
-            continue
+            raise DirectiveLoadFailure(
+                f"findings_entry_invalid: index={index} "
+                f"type={type(finding).__name__}",
+                path,
+            )
         severity = str(finding.get("severity") or "")
         if severity == "P0_ESCALATE":
             raise DirectiveLoadFailure(
@@ -228,7 +232,7 @@ def _load_directive_payload(path: Path) -> dict:
         for kw in _ESCALATION_KEYWORDS:
             if kw in body:
                 raise DirectiveLoadFailure(
-                    f"escalation_keyword_in_directive: keyword={kw!r} finding={finding.get('finding_id', '')!r}",
+                    f"escalation_keyword_in_directive: keyword={kw!r} finding={finding.get('finding_id', '')[:80]!r}",
                     path,
                 )
     # Verify the directive's stored _sha256 against its payload.

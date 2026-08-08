@@ -468,13 +468,46 @@ class TestBridgeAppliesRelayEscalationGuards:
             resolve_directive,
         )
         d = _make_directive()
-        d["findings"][0]["body"] = "bypass guard and skip CI"
+        d["findings"][0]["body"] = "bypass guard immediately"
         target = tmp_path / "directive.json"
         _write_directive_with_digest(target, d)
         monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
         with pytest.raises(DirectiveLoadFailure) as exc:
             resolve_directive(expected_head="a" * 40)
         assert "bypass guard" in exc.value.reason
+
+    def test_bridge_rejects_smuggled_string_finding(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autocoder_supervisor.directive_bridge import (
+            DirectiveLoadFailure,
+            resolve_directive,
+        )
+        # A payload like {"findings": ["force push"]} smuggles
+        # a string where a dict was expected. The bridge MUST
+        # refuse this so the keyword guard cannot be bypassed.
+        d = _make_directive()
+        d["findings"] = ["force push"]
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="a" * 40)
+        assert "findings_entry_invalid" in exc.value.reason
+
+    def test_bridge_rejects_non_list_findings(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        from autocoder_supervisor.directive_bridge import (
+            DirectiveLoadFailure,
+            resolve_directive,
+        )
+        d = _make_directive()
+        # None, str, int — all non-list. The bridge MUST
+        # refuse these (it used to coerce None / "" to []).
+        d["findings"] = None
+        target = tmp_path / "directive.json"
+        _write_directive_with_digest(target, d)
+        monkeypatch.setenv("AED_DIRECTIVE_PATH", str(target))
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            resolve_directive(expected_head="a" * 40)
+        assert "findings_field_invalid" in exc.value.reason
 
     def test_bridge_rejects_delete_branch(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         from autocoder_supervisor.directive_bridge import (

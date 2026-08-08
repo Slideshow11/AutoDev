@@ -421,8 +421,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/directive_bridge.py",
-      "destination_sha256": "12126aeef07b18ae871e438cf47f3471df6020af17a61b7ae35efa3b444ea25e",
-      "destination_size_bytes": 11638,
+      "destination_sha256": "d7de46ebddb3ed76d631e809edfe84af1facf4b03124f93b3a60ccaf1b122c4c",
+      "destination_size_bytes": 11818,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,
@@ -441,8 +441,8 @@
     },
     {
       "destination_path": "tests/test_directive_bridge.py",
-      "destination_sha256": "1535a5a370fb32daf621370172dd76a59594b855031bb9d0809446cf6d93ffc2",
-      "destination_size_bytes": 19428,
+      "destination_sha256": "f7e9f3cdc0a95eef89a3ed88a2d2720223c93e712f74dd13e907a652650d1ec4",
+      "destination_size_bytes": 21013,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,
