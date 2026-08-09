@@ -2687,6 +2687,42 @@ def capture_and_store_snapshot(
     return snap
 
 
+def _sync_readiness_state_with_controller() -> None:
+    """Sync the supervisor's readiness_state with the
+    orchestration controller's state.
+
+    The relay drives the controller through the required
+    state transitions (REPAIRING_REVIEW_FINDINGS ->
+    AWAITING_CI -> QUALIFYING_READINESS, or into BLOCKED on
+    escalation). The supervisor's readiness_state is a
+    SEPARATE state machine for the quiet-window /
+    PROVISIONAL_READY / AWAITING_MERGE_AUTHORIZATION
+    transitions.
+
+    When the controller is in BLOCKED, the supervisor's
+    readiness state is also recorded as BLOCKED so the
+    quiet-window logic halts the transition. This is the
+    HALT signal: the supervisor stops launching workers
+    AND stops promoting readiness until the operator
+    inspects.
+    """
+    try:
+        state_path = Path(STATE_DIR) / "state.json"  # type: ignore[name-defined]
+        if not state_path.is_file():
+            return
+        controller_state = json.loads(
+            state_path.read_text(),
+        ).get("current_state")
+    except (OSError, json.JSONDecodeError):
+        return
+    if controller_state == "BLOCKED":
+        write_readiness_state({"state": "BLOCKED"})
+        log(
+            "warning",
+            "supervisor readiness synced: controller is in BLOCKED; "
+            "operator must inspect",
+        )
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -2883,6 +2919,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     return 0
                 time.sleep(heartbeat_seconds)
                 continue
+            # Sync the supervisor's readiness state with the
+            # orchestration controller's state. When the
+            # relay escalates to human, the controller is in
+            # BLOCKED. The supervisor's readiness state must
+            # reflect this so the quiet-window logic does not
+            # promote readiness in subsequent heartbeats.
+            _sync_readiness_state_with_controller()
             if new_events and not cooldown_active():
                 handle_new_events(rs, new_events, token, iteration)
 
