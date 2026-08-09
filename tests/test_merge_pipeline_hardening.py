@@ -564,7 +564,16 @@ class DistinctRootsTests(unittest.TestCase):
             repository_checkout=repo,
             run_state_root=state,
             evidence_root=evidence,
-            live_pr_payload={},
+            # Minimal valid live_pr_payload: the production CLI
+            # always populates this; empty/None is a MergeError.
+            live_pr_payload={
+                "state": "open",
+                "merged": False,
+                "head": {"sha": "0" * 40},
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "repo": "owner/repo",
+            },
             live_ci_state={},
             live_review_state={},
             live_thread_inventory={},

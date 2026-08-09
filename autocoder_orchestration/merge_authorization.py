@@ -814,7 +814,20 @@ def reconcile_after_merge(
     #     produce a false-negative clean flag.
     aed_clean = False
     aed_checked = False
-    if expected_aed_sha256 is not None:
+    # The AED probe only attests the post-merge AED file when
+    # the squash_merge_commit identity is verified against the
+    # server-reported mergeCommit OID. A probe against a fallback
+    # commit would produce a false-positive clean flag because the
+    # fallback is local_main_sha, not the actual PR merge.
+    if (
+        expected_aed_sha256 is not None
+        and not squash_merge_commit_reliable
+    ):
+        unavailable.append(
+            "AED probe skipped: squash_merge_commit identity is a fallback, "
+            "not the server-reported mergeCommit OID"
+        )
+    elif expected_aed_sha256 is not None:
         try:
             proc = subprocess.run(
                 ["git", "show", f"{squash_merge_commit}:{aed_path}"],
@@ -1100,25 +1113,19 @@ def _execute_guarded_merge_transaction_locked(
 
     # Validate the live PR payload shape before any binding check. A
     # missing or malformed key is a MergeError, not a KeyError, so
-    # the CLI's exception handlers keep working. Empty payloads
-    # are tolerated (tests that exercise path-only checks legitimately
-    # pass empty live payloads); the production CLI always populates
-    # them. The guard is "if pr:" so a None or empty dict is accepted
-    # and the downstream code uses ``pr.get("repo")`` which returns
-    # None on the empty path. The cross-binding check at the
-    # ``auth.repo != live_repo`` line is conditional on
-    # ``live_repo`` so the empty path is a no-op.
+    # the CLI's exception handlers keep working. The production CLI
+    # always populates ``live_pr_payload`` via ``fetch_live_pr_payload``.
+    # A None or empty dict is a MergeError: the downstream code reads
+    # ``pr.get("repo")`` unconditionally, and an AttributeError would
+    # escape the declared error hierarchy.
     pr = inputs.live_pr_payload
-    if pr:
-        if not isinstance(pr, dict):
-            raise MergeError(
-                f"live_pr_payload must be a dict, got {type(pr).__name__}"
-            )
-        for key in ("state", "merged", "head", "baseRefName", "mergeable"):
-            if key not in pr:
-                raise MergeError(f"live_pr_payload is missing required key {key!r}")
-        if not isinstance(pr["head"], dict) or "sha" not in pr["head"]:
-            raise MergeError("live_pr_payload['head'] must contain 'sha'")
+    if not isinstance(pr, dict) or not pr:
+        raise MergeError("live_pr_payload is empty; live evidence is mandatory")
+    for key in ("state", "merged", "head", "baseRefName", "mergeable"):
+        if key not in pr:
+            raise MergeError(f"live_pr_payload is missing required key {key!r}")
+    if not isinstance(pr["head"], dict) or "sha" not in pr["head"]:
+        raise MergeError("live_pr_payload['head'] must contain 'sha'")
 
     # 1. Read authorization artifact (mandatory, sidecar-verified).
     auth, auth_digest = _read_authorization(inputs.authorization_artifact_path)
@@ -1415,7 +1422,23 @@ def _execute_guarded_merge_transaction_locked(
     record.aed_clean_post_merge = bool(recon.aed_checked and recon.aed_clean)
 
     # 8. Write the merge record through the canonical artifact writer.
-    write_result = write_artifact(inputs.merge_record_artifact_path, record.to_dict())
+    # The remote merge has already completed by this point, so an
+    # ArtifactError from the durable record write is a controlled
+    # MergeAmbiguousOutcome (C-28): the irreversible merge is
+    # complete but the durable record is absent. The CLI maps this
+    # to a nonzero exit code with the operator's recovery point
+    # encoded in the exception message.
+    try:
+        write_result = write_artifact(
+            inputs.merge_record_artifact_path, record.to_dict()
+        )
+    except (ArtifactError, OSError) as exc:
+        raise MergeAmbiguousOutcome(
+            "the remote merge completed but the durable merge record "
+            f"could not be written to "
+            f"{inputs.merge_record_artifact_path}: {exc!r}; "
+            f"squash_merge_commit={record.squash_merge_commit!r}"
+        ) from exc
     record.merge_record_exact_file_digest = write_result.digest
 
     # 9. If reconciliation failed, raise AFTER the record is durable
