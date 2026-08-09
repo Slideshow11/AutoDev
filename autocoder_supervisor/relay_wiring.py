@@ -52,6 +52,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -140,20 +141,28 @@ def invoke_relay_round(
         os.chmod(snapshot_path, 0o600)
     except OSError:
         pass
-    cmd = [
-        cli, DEFAULT_RELAY_SUBCOMMAND,
-        "--state-root", state_root,
-        "--run-id", run_id,
-        "--snapshot-file", str(snapshot_path),
-        "--head-sha", head_sha,
-        "--evidence-root", evidence_root,
-        "--required-check-names", ",".join(required_check_names),
-        "--json",
-    ]
-    # Translate shell-style CLI invocations into argv for
-    # subprocess.
-    if " " in cli:
-        cmd = cli.split() + cmd[1:]
+    # ``_resolve_cli_executable`` may return a shell-style
+    # executable (e.g. ``python3 -m autocoder_orchestration.cli``).
+    # Split it into argv; the binary path is the first token.
+    cli_argv = shlex.split(cli)
+    # ``autocoder_orchestration.cli`` declares `--json` on the
+    # TOP-LEVEL parser before subcommands. The CLI rejects
+    # `--json` after the subcommand; the production
+    # invocation must be the top-level form. The build is:
+    #   [cli_argv..., --json, <subcommand>, ...args]
+    # so argparse sees `--json` before the subcommand.
+    cmd = (
+        cli_argv
+        + ["--json", DEFAULT_RELAY_SUBCOMMAND]
+        + [
+            "--state-root", state_root,
+            "--run-id", run_id,
+            "--snapshot-file", str(snapshot_path),
+            "--head-sha", head_sha,
+            "--evidence-root", evidence_root,
+            "--required-check-names", ",".join(required_check_names),
+        ]
+    )
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True,
