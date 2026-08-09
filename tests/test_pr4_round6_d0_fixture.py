@@ -289,6 +289,7 @@ def _build_d0_fixture(verifier_payload_override=None):
             "mergeStateStatus": "CLEAN",
             "autoMergeRequest": None,
             "isDraft": False,
+            "reviewDecision": "APPROVED",
         },
         "live_ci_state": {"all_required_passing": True,
                             "coderabbit_passing": True},

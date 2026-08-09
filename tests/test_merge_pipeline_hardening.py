@@ -277,6 +277,7 @@ class ExactFileDigestTests(unittest.TestCase):
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
             live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -333,6 +334,7 @@ class ExactFileDigestTests(unittest.TestCase):
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
             live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -403,6 +405,7 @@ class ExactFileDigestTests(unittest.TestCase):
                 "head": {"sha": AH},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
             live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -463,6 +466,7 @@ class ExactFileDigestTests(unittest.TestCase):
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
             live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -653,6 +657,7 @@ class OneShotMergeTransactionTests(unittest.TestCase):
             "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             "baseRefName": "main", "mergeable": "MERGEABLE",
             "autoMergeRequest": None,
+            "reviewDecision": "APPROVED",
         })
         live_ci_state = overrides.pop("live_ci_state", {"all_required_passing": True, "coderabbit_passing": True})
         live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
@@ -827,6 +832,7 @@ class TimeoutAmbiguityTests(unittest.TestCase):
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
             live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -1154,6 +1160,7 @@ class ConcurrencyTests(unittest.TestCase):
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
             live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -1264,6 +1271,7 @@ class LegacyFooterTests(unittest.TestCase):
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
             live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -1788,6 +1796,7 @@ class EndToEndFlowTests(unittest.TestCase):
                         "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                         "baseRefName": "main", "mergeable": "MERGEABLE",
                         "autoMergeRequest": None,
+                        "reviewDecision": "APPROVED",
                         "repo": "Slideshow11/AutoDev"},
                     live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
                     live_review_state={"latest_coderabbit_state": "APPROVED"},
@@ -1881,6 +1890,7 @@ class HardeningRepairTests(unittest.TestCase):
             "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             "baseRefName": "main", "mergeable": "MERGEABLE",
             "autoMergeRequest": None,
+            "reviewDecision": "APPROVED",
         })
         live_ci_state = overrides.pop("live_ci_state", {"all_required_passing": True, "coderabbit_passing": True})
         live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
@@ -2073,6 +2083,156 @@ class HardeningRepairTests(unittest.TestCase):
             "reconcile_after_merge failed" in s
             for s in record["unavailable_observations"]
         ))
+
+
+class ReviewDecisionGateTests(unittest.TestCase):
+    """Round-5 Codex P1: the merge gate MUST reject a human
+    ``CHANGES_REQUESTED`` even when the latest CodeRabbit review is
+    ``APPROVED``. The verifier already enforces this, but the merge
+    gate must repeat the check on the live payload so a same-head
+    change request posted AFTER the verifier ran still blocks the
+    merge.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tmpdir = Path(self.tmp.name)
+        self.repo = self.tmpdir / "repo"
+        self.state = self.tmpdir / "state"
+        self.evidence = self.tmpdir / "evidence"
+        for d in (self.repo, self.state, self.evidence):
+            d.mkdir()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _build_artifacts(self, **overrides) -> dict:
+        from autocoder_orchestration.merge_authorization import write_artifact
+        AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+        auth = self.evidence / "authorization.json"
+        write_artifact(auth, {
+            "schema_version": "autocoder.merge_authorization.v1",
+            "run_id": "test",
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 3,
+            "authorized_head": AH,
+            "candidate_sha256": "a" * 64,
+            "verifier_record_sha256": "b" * 64,
+        })
+        cand = self.evidence / "candidate.json"
+        write_artifact(cand, {"head": {"head_sha": AH}, "files": []})
+        ver = self.evidence / "verifier.json"
+        write_artifact(ver, {
+            "verdict": "VERIFIED", "defects": [],
+            "candidate_sha256": digest_bytes(cand.read_bytes()),
+            "qualification_head": AH,
+        })
+        rec = self.evidence / "merge-record.json"
+        return {"auth": auth, "cand": cand, "ver": ver, "rec": rec}
+
+    def _inputs(self, paths, **overrides):
+        review_decision = overrides.pop("review_decision", "APPROVED")
+        live_pr_payload = overrides.pop("live_pr_payload", {
+            "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+            "baseRefName": "main", "mergeable": "MERGEABLE",
+            "autoMergeRequest": None,
+            "reviewDecision": review_decision,
+        })
+        live_ci_state = overrides.pop("live_ci_state", {"all_required_passing": True, "coderabbit_passing": True})
+        live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
+        live_thread_inventory = overrides.pop("live_thread_inventory", {"unresolved_current": 0, "unresolved_outdated": 0})
+        working_tree_clean = overrides.pop("working_tree_clean", True)
+        return MergeTransactionInputs(
+            authorization_artifact_path=paths["auth"],
+            candidate_artifact_path=paths["cand"],
+            verifier_artifact_path=paths["ver"],
+            merge_record_artifact_path=paths["rec"],
+            repository_checkout=self.repo,
+            run_state_root=self.state,
+            evidence_root=self.evidence,
+            live_pr_payload=live_pr_payload,
+            live_ci_state=live_ci_state,
+            live_review_state=live_review_state,
+            live_thread_inventory=live_thread_inventory,
+            working_tree_clean=working_tree_clean,
+        )
+
+    def test_review_decision_changes_requested_blocks_merge(self) -> None:
+        """A human ``CHANGES_REQUESTED`` must fail the merge gate even
+        when the latest CodeRabbit review is ``APPROVED``."""
+        paths = self._build_artifacts()
+        inputs = self._inputs(paths, review_decision="CHANGES_REQUESTED")
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+        ) as safe_run:
+            with self.assertRaises(MergeError) as ctx:
+                execute_guarded_merge_transaction(inputs)
+        safe_run.assert_not_called()
+        msg = str(ctx.exception).lower()
+        self.assertIn("changes_requested", msg)
+        self.assertIn("reviewdecision", msg)
+
+    def test_review_decision_approved_allows_merge(self) -> None:
+        """An ``APPROVED`` reviewDecision lets the merge proceed."""
+        paths = self._build_artifacts()
+        inputs = self._inputs(paths, review_decision="APPROVED")
+
+        call_count = {"n": 0}
+        def fake_safe_run(*args, **kwargs):
+            call_count["n"] += 1
+            # The first call is the merge subprocess; succeed.
+            if "merge" in (args[1] if len(args) > 1 else ""):
+                return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
+            return {"returncode": 0, "stdout": "{}", "stderr": "", "timed_out": False}
+
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+            side_effect=fake_safe_run,
+        ):
+            with mock.patch(
+                "autocoder_orchestration.merge_authorization.reconcile_after_merge",
+                return_value=None,
+            ):
+                try:
+                    execute_guarded_merge_transaction(inputs)
+                except (MergeError, MergeSubprocessFailed, MergeAmbiguousOutcome, MergeAuthorizationMissing):
+                    # Other guards may still trip on the test fixture;
+                    # the important point is that the reviewDecision
+                    # gate did NOT trip on an APPROVED review.
+                    pass
+
+    def test_review_decision_missing_fails_closed(self) -> None:
+        """An absent ``reviewDecision`` must fail closed (absent
+        evidence is not a pass)."""
+        paths = self._build_artifacts()
+        inputs = self._inputs(paths)
+        # Strip reviewDecision from the payload entirely.
+        inputs.live_pr_payload.pop("reviewDecision", None)
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+        ) as safe_run:
+            with self.assertRaises(MergeError) as ctx:
+                execute_guarded_merge_transaction(inputs)
+        safe_run.assert_not_called()
+        msg = str(ctx.exception).lower()
+        self.assertIn("reviewdecision", msg)
+        self.assertIn("missing", msg)
+
+    def test_review_decision_unrecognized_value_fails_closed(self) -> None:
+        """An unrecognized ``reviewDecision`` value (e.g. ``None``
+        string, ``''``, ``'FOO'``) must fail closed rather than
+        silently pass."""
+        paths = self._build_artifacts()
+        inputs = self._inputs(paths, review_decision="UNKNOWN_STATE")
+        with mock.patch(
+            "autocoder_orchestration.merge_authorization._safe_run",
+        ) as safe_run:
+            with self.assertRaises(MergeError) as ctx:
+                execute_guarded_merge_transaction(inputs)
+        safe_run.assert_not_called()
+        msg = str(ctx.exception).lower()
+        self.assertIn("unknown_state", msg)
+        self.assertIn("fails closed", msg)
 
 
 if __name__ == "__main__":

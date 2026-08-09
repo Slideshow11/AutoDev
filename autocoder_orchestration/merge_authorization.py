@@ -514,13 +514,18 @@ def fetch_live_pr_payload(
     """Fetch the live PR state via ``gh pr view``.
 
     Returns a dict with ``state``, ``merged``, ``head``, ``baseRefName``,
-    ``mergeable`` and ``autoMergeRequest``. Raises on subprocess failure
-    or ambiguous output.
+    ``mergeable``, ``autoMergeRequest`` and ``reviewDecision``. Raises on
+    subprocess failure or ambiguous output.
+
+    ``reviewDecision`` is included so the production merge gate can
+    reject a human ``CHANGES_REQUESTED`` even when the latest CodeRabbit
+    review remains ``APPROVED`` (the verifier already enforces this, but
+    the merge gate must not rely on a stale snapshot).
     """
     _runner = runner or (lambda *a, **kw: _safe_run(list(a), **kw))
     res = _runner(gh_executable, "pr", "view", str(pr_number),
                   "--repo", repo,
-                  "--json", "state,isDraft,mergeable,mergeStateStatus,mergedAt,headRefOid,baseRefName,autoMergeRequest,number")
+                  "--json", "state,isDraft,mergeable,mergeStateStatus,mergedAt,headRefOid,baseRefName,autoMergeRequest,number,reviewDecision")
     if res["returncode"] != 0:
         raise GitHubLiveFetchError(
             f"gh pr view failed (rc={res['returncode']}): "
@@ -543,6 +548,10 @@ def fetch_live_pr_payload(
         "mergeable": str(doc.get("mergeable", "")),
         "mergeStateStatus": str(doc.get("mergeStateStatus", "")),
         "autoMergeRequest": doc.get("autoMergeRequest"),
+        # PR-level reviewDecision (e.g. "APPROVED" | "CHANGES_REQUESTED" |
+        # "REVIEW_REQUIRED"). ``None`` means GitHub did not return the
+        # field; the merge gate treats that as a fail-closed signal.
+        "reviewDecision": doc.get("reviewDecision"),
         # Include the repository identity so the cross-binding guard
         # in execute_guarded_merge_transaction can compare it against
         # auth.repo (per C-25: every integrity guard is mandatory).
@@ -1149,6 +1158,32 @@ def _repeat_exact_head_guards(
         raise MergeError(
             f"latest CodeRabbit review state is {rs.get('latest_coderabbit_state')!r}, "
             "expected 'APPROVED'"
+        )
+
+    # 3b. PR-level reviewDecision (human review gate). The verifier
+    # already enforces this, but the merge gate must repeat the check
+    # on the live payload so a same-head ``CHANGES_REQUESTED`` posted
+    # AFTER the verifier ran still blocks the merge. A missing or
+    # ``None`` value fails closed: absent evidence is not a pass.
+    review_decision = pr.get("reviewDecision")
+    if review_decision is None:
+        raise MergeError(
+            "live_pr_payload['reviewDecision'] is missing; "
+            "the production merge gate requires a live PR-level review decision"
+        )
+    if review_decision == "CHANGES_REQUESTED":
+        raise MergeError(
+            f"live PR-level reviewDecision is 'CHANGES_REQUESTED'; "
+            "the merge gate must reject human change requests even when "
+            "the latest CodeRabbit review is APPROVED"
+        )
+    if review_decision not in ("APPROVED", "REVIEW_REQUIRED"):
+        # Anything else (e.g. an unexpected enum value, an empty string)
+        # is treated as fail-closed rather than silently approved.
+        raise MergeError(
+            f"live PR-level reviewDecision is {review_decision!r}; "
+            "expected one of 'APPROVED' | 'REVIEW_REQUIRED' | 'CHANGES_REQUESTED' "
+            "(the production merge gate fails closed on unrecognized values)"
         )
 
     # 4. Thread inventory.

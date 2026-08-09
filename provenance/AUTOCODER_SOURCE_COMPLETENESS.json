@@ -1273,9 +1273,9 @@
         "destination_path": "tests/test_pr4_round6_d0_fixture.py",
         "transformation_classification": "standalone_test_addition",
         "source_sha256": null,
-        "destination_sha256": "ea4d5f44be52fc1cf4eb6d8e3e2a24e2ebd540d0cb1193e32cc27aeb7e4be24e",
+        "destination_sha256": "e6d912761b98d6523bfb3bdf2e5c01e096e61acd7075858402f80a1e1cf2681f",
         "source_size_bytes": null,
-        "destination_size_bytes": 26718,
+        "destination_size_bytes": 26760,
         "transformation_explanation": "Round-8 nitpick: shared _is_gh_pr_merge matcher requires exact argv adjacency (argv[0]=='gh', argv[1]=='pr', argv[2]=='merge') and safely handles calls without positional arguments. _count_gh_pr_merge_calls and _find_gh_pr_merge_call now delegate to the shared matcher."
       },
       {
@@ -1343,9 +1343,9 @@
         "destination_path": "tests/test_merge_queued_pr_fails_closed.py",
         "transformation_classification": "standalone_test_addition",
         "source_sha256": null,
-        "destination_sha256": "a3053a02b696ebb4fab04f24b0825a49fde75ef09d7275c76b0835fdcb8bd496",
+        "destination_sha256": "7d4fe3bede68b77235bb631c1e1b4ea5a407474afd699eda6127f15d0fea5ee6",
         "source_size_bytes": null,
-        "destination_size_bytes": 30534,
+        "destination_size_bytes": 30760,
         "transformation_explanation": "Production-path behavioral tests for the merge-queue failure mode. Proves the production logic fails closed: a queued PR (no explicit mergeCommit OID) cannot produce a merge record. This is the production-path behavioral test for the merge-queue P1."
       },
       {
