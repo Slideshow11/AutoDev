@@ -1485,6 +1485,7 @@ def _execute_guarded_merge_transaction_locked(
                     "unavailable; reconciliation against local_main_sha "
                     "is forbidden (C-28)."
                 ),
+                pr_merge_commit_oid=pr_merge_commit_oid,
             )
             raise MergeAmbiguousOutcome(
                 "merge was server-confirmed (subprocess or live "
@@ -1696,6 +1697,7 @@ def _persist_partial_merge_record(
     auth: "MergeAuthorization",
     *,
     unavailable_reason: str,
+    pr_merge_commit_oid: Optional[str] = None,
 ) -> None:
     """Persist a PARTIAL recovery merge record before raising.
 
@@ -1742,14 +1744,33 @@ def _persist_partial_merge_record(
             merge_record_exact_file_digest="",
             merge_timestamp=_utc_now(),
             unavailable_observations=[unavailable_reason],
+            # The unauthorized_actions_taken map MUST keep the
+            # canonical thirteen-key shape so downstream auditors
+            # can scan a single schema. Use the standard keys, all
+            # False, and record the merge confirmation in ``notes``.
             unauthorized_actions_taken={
-                "verify_failed": False,
-                "reconciled": False,
-                "merged": True,  # server reported merged
-                "blocked": False,
+                "merge_other_sha": False,
+                "additional_commit_after_authorization": False,
+                "rebase": False,
+                "force_push": False,
+                "auto_merge": False,
+                "admin_bypass": False,
+                "merge_commit_or_rebase_merge": False,
+                "modify_pr_body": False,
+                "weaken_branch_protection": False,
+                "dismiss_reviews": False,
+                "next_wave": False,
+                "modify_aed": False,
+                "create_release_or_tag": False,
             },
+            notes=(
+                f"PARTIAL recovery: server reported merged=true but no "
+                f"mergeCommit OID was observed; merge_commit_oid={pr_merge_commit_oid!r}; "
+                "the partial recovery record is durable evidence for an "
+                "operator to inspect and finalize the merge identity."
+            ),
             final_state="PARTIAL",
-        )
+            )
         write_artifact(
             inputs.merge_record_artifact_path,
             record.to_dict(),

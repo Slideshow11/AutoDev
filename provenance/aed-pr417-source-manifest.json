@@ -471,8 +471,8 @@
     },
     {
       "destination_path": "tests/test_merge_queued_pr_fails_closed.py",
-      "destination_sha256": "7d4fe3bede68b77235bb631c1e1b4ea5a407474afd699eda6127f15d0fea5ee6",
-      "destination_size_bytes": 30760,
+      "destination_sha256": "35bbf85de5ef9a6f162318866dd66beaa339f0dc2e0d5efc251d0c3bcafce764",
+      "destination_size_bytes": 32509,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,

@@ -596,6 +596,46 @@ class TestServerConfirmedMergeRequiresValidOID:
         # The squash_merge_commit is empty (no reconciliation
         # happened).
         assert record["squash_merge_commit"] == ""
+        # The ``unauthorized_actions_taken`` map MUST use the
+        # canonical thirteen-key shape (CodeRabbit round-19
+        # finding). A non-canonical key like ``"merged"`` would
+        # make the partial record indistinguishable from a
+        # forbidden-action report.
+        ua = record.get("unauthorized_actions_taken", {})
+        canonical_keys = {
+            "merge_other_sha",
+            "additional_commit_after_authorization",
+            "rebase",
+            "force_push",
+            "auto_merge",
+            "admin_bypass",
+            "merge_commit_or_rebase_merge",
+            "modify_pr_body",
+            "weaken_branch_protection",
+            "dismiss_reviews",
+            "next_wave",
+            "modify_aed",
+            "create_release_or_tag",
+        }
+        assert set(ua.keys()) == canonical_keys, (
+            f"PARTIAL record's unauthorized_actions_taken must use the "
+            f"canonical 13-key shape; got keys {set(ua.keys())}"
+        )
+        # Every value MUST be False — the PARTIAL record is not
+        # reporting any forbidden action. The merge confirmation
+        # is recorded in ``notes`` instead.
+        for key, value in ua.items():
+            assert value is False, (
+                f"PARTIAL record's unauthorized_actions_taken[{key!r}] "
+                f"must be False; got {value!r}"
+            )
+        # The merge confirmation must be recorded in notes (not
+        # in the unauthorized_actions_taken map).
+        assert "PARTIAL" in record.get("notes", "") or \
+               "merged=true" in record.get("notes", ""), (
+            f"PARTIAL record's notes must mention the partial merge "
+            f"confirmation; got {record.get('notes', '')!r}"
+        )
 
 
 class TestMergeQueueQueuedPRFailsClosed:
