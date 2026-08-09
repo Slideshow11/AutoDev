@@ -2278,41 +2278,78 @@ def active_repair_quiet_window(
 ) -> None:
     """Run the ACTIVE_REPAIR quiet-window transition.
 
-    Captures snapshot A, sleeps for the quiet window, captures
-    snapshot B, and decides what to do:
+    Strict quiet-window: the supervisor polls continuously
+    for the full ``quiet_window`` seconds. Any non-qualifying
+    observation (new event, snapshot drift, or BLOCKED
+    controller) during the window RESETS the interval; the
+    run only advances to PROVISIONAL_READY when one
+    uninterrupted >= ``quiet_window`` second qualifying
+    interval has elapsed.
 
-    - If snapshots differ or new events were emitted during
-      the quiet window, stay in ACTIVE_REPAIR.
-    - If snapshots are stable AND no new events emerged,
-      clear the pre-existing unconsumed events (they are
-      effectively resolved by the system stabilising) and
-      advance to PROVISIONAL_READY if the readiness gate
-      passes.
-
-    The function reads ``readiness_state``, ``snapshot_a``,
-    ``snapshot_b``, and ``unconsumed_events``; the caller
-    is responsible for the surrounding ``while True:`` loop
-    and the heartbeat / lock bookkeeping.
+    Polling cadence is the supervisor's heartbeat (default
+    2 seconds). A qualifying observation is a snapshot A
+    and snapshot B captured ``quiet_window`` seconds apart
+    that match, with no new events emerging and the
+    controller not in BLOCKED.
     """
+    import time as _time
     snap_a = capture_and_store_snapshot("A", rs, token)
-    time.sleep(quiet_window)
-    snap_b = capture_live_snapshot(rs, token or "")
-    new_events_during_window = [
-        e
-        for e in detect_new_actionable_events(snap_a, snap_b)
-        if e.get("id") not in pre_unconsumed_ids
-    ]
-    reasons = snapshot_differs(
-        snap_a, snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
-    )
-    if reasons or new_events_during_window:
-        log(
-            "info",
-            "snapshot differs; staying ACTIVE_REPAIR",
-            reasons=reasons,
-            new_events=len(new_events_during_window),
+    qualifying_started_at = _time.monotonic()
+    last_blocked_check_at = 0.0
+    while True:
+        _time.sleep(min(2, quiet_window))
+        # Controller BLOCKED check at every heartbeat so
+        # an escalation mid-window halts the transition.
+        if _time.monotonic() - last_blocked_check_at > 1.0:
+            last_blocked_check_at = _time.monotonic()
+            try:
+                state_path = Path(STATE_DIR) / "state.json"  # type: ignore[name-defined]
+                if state_path.is_file():
+                    controller_state = json.loads(
+                        state_path.read_text(),
+                    ).get("current_state")
+                    if controller_state == "BLOCKED":
+                        log(
+                            "warning",
+                            "quiet-window halted: controller is in BLOCKED "
+                            "(relay escalated to human); operator must inspect",
+                            head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                        )
+                        return
+            except (OSError, json.JSONDecodeError):
+                pass
+        snap_b = capture_live_snapshot(rs, token or "")
+        new_events_during_window = [
+            e
+            for e in detect_new_actionable_events(snap_a, snap_b)
+            if e.get("id") not in pre_unconsumed_ids
+        ]
+        reasons = snapshot_differs(
+            snap_a, snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
         )
-        return
+        elapsed = _time.monotonic() - qualifying_started_at
+        if reasons or new_events_during_window:
+            log(
+                "info",
+                "quiet-window: non-qualifying observation; "
+                "resetting interval",
+                reasons=reasons,
+                new_events=len(new_events_during_window),
+                elapsed=round(elapsed, 1),
+            )
+            # Reset the interval. Re-capture snapshot A
+            # so the next interval starts from the
+            # current state.
+            snap_a = capture_and_store_snapshot("A", rs, token)
+            qualifying_started_at = _time.monotonic()
+            pre_unconsumed_ids = {
+                e.get("id") for e in list_unconsumed_events()
+            }
+            continue
+        if elapsed >= quiet_window:
+            # One uninterrupted >=quiet_window second
+            # qualifying interval has elapsed.
+            break
     # Snapshot is stable AND no new events emerged during the
     # quiet window. Clear pre-existing unconsumed events
     # BEFORE evaluating readiness so the readiness gate can
