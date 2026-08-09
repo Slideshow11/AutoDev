@@ -500,7 +500,9 @@
     "byte_identical_files": 1,
     "files_from_source": 17,
     "newly_added_files": 34,
-    "transformed_files": 16
+    "transformed_files": 16,
+    "test_count": 747,
+    "last_audit_timestamp": "2026-08-09T04:50:00Z"
   },
   "terminal_evidence": {
     "authorized_head_sha": "18ba0df49d2a19779e350d6df5a102b254cbeed7",

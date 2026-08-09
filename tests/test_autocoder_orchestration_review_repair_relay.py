@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -52,6 +53,12 @@ from autocoder_orchestration.review_repair_relay import (
 
 
 # === Helpers ===
+
+def _tmp_task_spec_path() -> str:
+    p = tempfile.NamedTemporaryFile(prefix="task_spec_", suffix=".md", dir="/tmp", delete=False)
+    p.close()
+    return p.name
+
 
 def _make_snapshot(
     *,
@@ -940,7 +947,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path="/tmp/task",
+            task_specification_path=_tmp_task_spec_path(),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1030,7 +1037,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path="/tmp/task",
+            task_specification_path=_tmp_task_spec_path(),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1077,7 +1084,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path="/tmp/task",
+            task_specification_path=_tmp_task_spec_path(),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1142,7 +1149,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path="/tmp/task",
+            task_specification_path=_tmp_task_spec_path(),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1202,7 +1209,7 @@ class TestRunUntilHeadAdvances:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path="/tmp/task",
+            task_specification_path=_tmp_task_spec_path(),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1455,7 +1462,7 @@ class TestLaunchWorkerDoesNotTransition:
             "base_branch": "main",
             "authorized_base_sha": "a" * 64,
             "feature_branch": "feat/test",
-            "task_specification_path": "/tmp/task",
+            "task_specification_path": _tmp_task_spec_path(),
             "task_specification_sha256": "b" * 64,
             "required_ci_jobs": [],
             "implementation_worker_command": [],
