@@ -127,6 +127,18 @@ DEFAULT_MAX_ROUNDS = 10
 #: whenever the durable shape changes.
 RELAY_SCHEMA_VERSION = "autocoder.review_repair_relay.v1"
 
+#: Schema version for the finding ledger. The ledger is a per-head
+#: record of which provider findings have been observed and on
+#: which head. The collector skips findings whose last observed
+#: signature matches the live signature at the current head —
+#: i.e. a comment that has not changed since the last round on
+#: this head is considered "addressed" and is not re-emitted into
+#: a new directive. The ledger is the durable proof of the
+#: invariant the user spelled out: "finding on A -> repaired in B
+#: -> old A finding does not re-enter B directive unless fresh
+#: evidence explicitly reopens it".
+FINDING_LEDGER_SCHEMA_VERSION = "autocoder.finding_ledger.v1"
+
 #: Severity ranking. P1 must be addressed in the current round; P2
 #: is preferred but not blocking. The classifier treats any
 #: finding whose body contains a SECRETS / DESTRUCTIVE keyword as
@@ -201,6 +213,177 @@ _HEX_SHA_RE = re.compile(r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 _TEST_SUGGEST_RE = re.compile(
     r"(?P<test>test_[A-Za-z0-9_]+|Test[A-Za-z0-9_]+|[A-Za-z0-9_]+Test)\b",
 )
+
+
+# === Finding signature ===
+
+def _finding_signature(finding: "Finding") -> str:
+    """Return a stable signature for the finding's content.
+
+    Two findings with the same ``finding_id`` are considered the
+    SAME piece of evidence iff their signatures match. A body
+    edit (CodeRabbit re-review, new suggestion text) produces a
+    different signature and re-emits the finding; a pure
+    timestamp change produces the same signature and is skipped.
+
+    The signature deliberately ignores transient metadata that
+    GitHub mutates between identical comments (e.g.
+    ``updated_at`` timestamps) and focuses on the parts of the
+    content that represent the actual review finding.
+    """
+    if not isinstance(finding, Finding):
+        raise DirectiveContractError(
+            f"finding_signature requires a Finding, got {type(finding).__name__}"
+        )
+    body_norm = (finding.body or "").strip()
+    title_norm = (finding.title or "").strip()
+    parts = (
+        finding.finding_id,
+        finding.source,
+        finding.severity,
+        title_norm,
+        body_norm,
+        finding.file_path or "",
+        str(finding.line) if finding.line is not None else "",
+        finding.check_name or "",
+    )
+    raw = "\u0001".join(parts).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+# === Finding ledger ===
+
+class FindingLedger:
+    """Durable per-head record of which provider findings were observed.
+
+    The relay's collector uses the ledger to filter stale findings
+    out of each new round's directive. A finding whose last
+    signature was observed at the CURRENT head is considered
+    "addressed" (the worker has already seen it on this head) and
+    is suppressed from the directive. A finding whose signature
+    has changed, or whose last observation was on a DIFFERENT
+    head, is "fresh evidence" and is emitted.
+
+    Invariant enforced by ``is_fresh``:
+        finding on A -> repaired in B -> old A finding does not
+        re-enter B directive unless fresh evidence explicitly
+        reopens it.
+
+    The ledger is persisted as JSONL under the state root so the
+    record survives supervisor restarts.
+    """
+
+    def __init__(
+        self,
+        store: "StateStore",
+        *,
+        head_sha: str,
+    ) -> None:
+        self.store = store
+        self.head_sha = head_sha
+
+    def _rel_path(self) -> str:
+        return "finding_ledger.jsonl"
+
+    def load(self) -> dict:
+        """Return ``{finding_id: {signature, head_sha, ...}}`` for
+        the last observed entry per finding id.
+
+        Missing entries yield an empty dict. Malformed lines are
+        skipped silently — the ledger is an audit aid, not a
+        source of truth for the durable state machine.
+        """
+        out: dict = {}
+        try:
+            for entry in self.store.read_journal(self._rel_path()):
+                if not isinstance(entry, dict):
+                    continue
+                fid = entry.get("finding_id")
+                if not isinstance(fid, str):
+                    continue
+                # The last write wins per finding_id.
+                out[fid] = entry
+        except (OSError, KeyError, AttributeError):
+            return {}
+        return out
+
+    def is_fresh(self, finding: "Finding") -> bool:
+        """Return True iff the finding should be emitted into the
+        next directive.
+
+        The rule is:
+
+        - ``head_sha`` differs from the persisted record's last
+          ``head_sha`` -> fresh (the head advanced).
+        - ``signature`` differs from the persisted record's
+          ``signature`` -> fresh (the content changed).
+        - both match -> NOT fresh; the worker already saw this
+          finding on this head and either addressed it or chose
+          not to.
+        - no prior record -> fresh (first sighting).
+        """
+        if not isinstance(finding, Finding):
+            raise DirectiveContractError(
+                f"is_fresh requires a Finding, got {type(finding).__name__}"
+            )
+        sig = _finding_signature(finding)
+        prior = self.load().get(finding.finding_id)
+        if prior is None:
+            return True
+        prior_sig = prior.get("signature")
+        prior_head = prior.get("head_sha")
+        if prior_sig != sig:
+            return True  # body/title/severity changed — fresh
+        if prior_head != self.head_sha:
+            return True  # head advanced — re-emit on new head
+        return False
+
+    def record(self, finding: "Finding") -> None:
+        """Persist a single observation. The append-only ledger is
+        the durable record of what was emitted on which head.
+        """
+        sig = _finding_signature(finding)
+        entry = {
+            "schema_version": FINDING_LEDGER_SCHEMA_VERSION,
+            "finding_id": finding.finding_id,
+            "source": finding.source,
+            "severity": finding.severity,
+            "head_sha": self.head_sha,
+            "signature": sig,
+            "recorded_at": _now_iso(),
+        }
+        try:
+            self.store.append_journal(self._rel_path(), entry)
+        except (OSError, AttributeError):
+            # The ledger is advisory; never let a write failure
+            # block a round.
+            pass
+
+
+def filter_findings_to_current_head(
+    findings: List["Finding"],
+    ledger: FindingLedger,
+) -> List["Finding"]:
+    """Drop findings already observed on the current head.
+
+    The relay's ``collect_findings`` still emits ALL findings
+    from the live snapshot; this filter applies the ledger's
+    current-head rule. Findings are not mutated, only removed.
+
+    CI findings (``check_name``) are filtered using the same
+    ledger path: a CI check that was failing on head A and is
+    still failing on head B is considered fresh for head B
+    (the head advanced, so the worker must re-attempt); a CI
+    check that is green on B is no longer a finding at all and
+    is removed upstream by ``_collect_ci_findings``.
+    """
+    out: List["Finding"] = []
+    for f in findings:
+        if not isinstance(f, Finding):
+            continue
+        if ledger.is_fresh(f):
+            out.append(f)
+    return out
 
 
 # === Finding ===
@@ -831,6 +1014,7 @@ def collect_findings(
     snapshot: dict,
     *,
     required_check_names: Tuple[str, ...] = (),
+    ledger: Optional["FindingLedger"] = None,
 ) -> List[Finding]:
     """Collect all actionable findings from a snapshot.
 
@@ -844,10 +1028,20 @@ def collect_findings(
     The collector never raises on empty snapshots — empty input
     produces an empty list. Invalid snapshot shape raises
     ``InvalidSnapshot`` so the caller can ``BLOCK`` the run.
+
+    If ``ledger`` is supplied, the result is filtered through the
+    current-head rule: a finding already observed on the current
+    head with the same content is suppressed. The pre-filter
+    count is unchanged from the caller's perspective because
+    the filter is internal; callers who need the full set can
+    pass ``ledger=None`` and filter separately via
+    ``filter_findings_to_current_head``.
     """
     review_findings = _collect_review_findings(snapshot)
     ci_findings = _collect_ci_findings(snapshot, required_check_names)
     findings: List[Finding] = list(review_findings) + list(ci_findings)
+    if ledger is not None:
+        findings = filter_findings_to_current_head(findings, ledger)
     order = {
         SEVERITY_P0_ESCALATE: 0,
         SEVERITY_P1: 1,
@@ -1073,6 +1267,7 @@ def evaluate_round(
     required_check_names: Tuple[str, ...] = (),
     coordinator_actor: str = ACTOR_CONTROLLER,
     directive_store: Optional[DirectiveStore] = None,
+    finding_ledger: Optional[FindingLedger] = None,
 ) -> RoundDecision:
     """Run one bounded round of evidence collection and classification.
 
@@ -1131,7 +1326,11 @@ def evaluate_round(
             f"snapshot head_match is False for requested head {head_sha!r}; "
             "stale snapshot rejected"
         )
-    findings = collect_findings(snapshot, required_check_names=required_check_names)
+    findings = collect_findings(
+        snapshot,
+        required_check_names=required_check_names,
+        ledger=finding_ledger,
+    )
     if not findings:
         return RoundDecision(
             action="enter_qualifying_readiness",
@@ -1391,6 +1590,10 @@ class RelayLoop:
                 f"{sm.current_state!r}; expected REPAIRING_REVIEW_FINDINGS"
             )
         started_at = _now_iso()
+        # The current-head finding ledger is constructed per
+        # round from the live head. ``store`` is the durable
+        # StateStore; ``head_sha`` is the snapshot's exact head.
+        finding_ledger = FindingLedger(self.store, head_sha=head_sha)
         decision = evaluate_round(
             snapshot=snapshot,
             head_sha=head_sha,
@@ -1400,7 +1603,17 @@ class RelayLoop:
             required_check_names=self.required_check_names,
             coordinator_actor=ACTOR_CONTROLLER,
             directive_store=self.directive_store,
+            finding_ledger=finding_ledger,
         )
+        # Record the findings we actually emitted into this
+        # round's directive. The ledger is the durable proof
+        # that a finding was observed on this head; the next
+        # round's filter consults it. CI findings are recorded
+        # too so a check that is failing on head A but
+        # unrelated to the directive is still tracked.
+        if decision.directive is not None:
+            for f in decision.directive.findings:
+                finding_ledger.record(f)
         # Persist the round transcript. The ``head_sha_after``
         # field stays ``None`` until the worker pushes and the
         # next round sees the new head; that is the head-change
@@ -1641,6 +1854,7 @@ __all__ = [
     "DirectiveStore",
     "EscalateToHuman",
     "Finding",
+    "FindingLedger",
     "InvalidSnapshot",
     "RELAY_SCHEMA_VERSION",
     "RelayError",
@@ -1657,6 +1871,7 @@ __all__ = [
     "build_worker_prompt",
     "collect_findings",
     "evaluate_round",
+    "filter_findings_to_current_head",
     "heads_equal",
     "relay_state_for_outcome",
 ]

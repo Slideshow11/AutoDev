@@ -1563,12 +1563,28 @@ class TestLaunchWorkerDoesNotTransition:
         self, tmp_path
     ) -> None:
         """A launch failure leaves the state machine in
-        REPAIRING_REVIEW_FINDINGS. The next round can
-        retry the same repair or issue a fresh one. The
-        run is recoverable.
+        REPAIRING_REVIEW_FINDINGS. The run is recoverable. The
+        next round is allowed to run again, but the
+        current-head ledger prevents the SAME finding from
+        re-entering the directive until fresh evidence
+        reopens it (a body edit, a new comment, or a head
+        advance).
+
+        Before the ledger (round-26 P1#2) the second round on
+        the same head produced another ``launch_worker``
+        decision with the same finding, which looped the
+        worker forever. The new contract is: the second
+        round returns ``enter_qualifying_readiness`` because
+        the same finding has already been emitted on this
+        head. The relay records that the head is clean of
+        FRESH findings and advances the state machine to
+        ``QUALIFYING_READINESS`` via the canonical
+        ``evaluate_round`` path. The operator can then
+        decide whether the readiness certificate can be
+        issued.
         """
         from autocoder_orchestration.state_machine import (
-            STATE_REPAIRING_REVIEW_FINDINGS,
+            STATE_QUALIFYING_READINESS, STATE_REPAIRING_REVIEW_FINDINGS,
         )
         loop, controller = self._setup_loop(tmp_path)
         # The relay decides launch_worker.
@@ -1585,20 +1601,483 @@ class TestLaunchWorkerDoesNotTransition:
         # REPAIRING_REVIEW_FINDINGS.
         sm_after = controller.load_state_machine()
         assert sm_after.current_state == STATE_REPAIRING_REVIEW_FINDINGS
-        # The next round can retry with the same head.
+        # The next round on the same head returns
+        # enter_qualifying_readiness because the same
+        # finding is already on the ledger for this head.
         decision2 = loop.run_once(
             snapshot,
             head_sha="a" * 40,
             repo="owner/repo",
             pr_number=4,
         )
-        assert decision2.action == "launch_worker"
-        # The state machine is still in REPAIRING_REVIEW_FINDINGS
-        # (a recoverable state).
-        sm_after2 = controller.load_state_machine()
-        assert sm_after2.current_state == STATE_REPAIRING_REVIEW_FINDINGS, (
-            f"after a launch failure, the state MUST remain "
-            f"recoverable in REPAIRING_REVIEW_FINDINGS; "
-            f"got {sm_after2.current_state!r}"
+        assert decision2.action == "enter_qualifying_readiness", (
+            f"second round on the same head must return "
+            f"enter_qualifying_readiness (ledger suppresses "
+            f"the already-emitted finding); got {decision2.action!r}"
         )
+        # The state machine has advanced to QUALIFYING_READINESS
+        # — the relay signals "head is clean of fresh findings"
+        # and the operator can issue a readiness certificate.
+        sm_after2 = controller.load_state_machine()
+        assert sm_after2.current_state == STATE_QUALIFYING_READINESS, (
+            f"after the second round, the state MUST advance to "
+            f"QUALIFYING_READINESS; got {sm_after2.current_state!r}"
+        )
+
+
+class TestMarkHeadAdvancedRebindsContext:
+    """Round-26 P1: ``mark_head_advanced`` must persist the rebound
+    RunContext so subsequent rounds see the new head.
+
+    Proof requirement (user's invariant):
+    Head A -> worker pushes Head B -> persisted
+    RunContext.current_authorized_head == B ->
+    report_repair_pushed succeeds -> controller enters AWAITING_CI.
+
+    No ``InvalidTransition`` is acceptable on the success path,
+    and no fallback to a stale context is permitted.
+    """
+
+    def _setup_loop(self, tmp_path) -> tuple:
+        """Build a fresh controller in REPAIRING_REVIEW_FINDINGS.
+
+        Uses an initial ``current_authorized_head`` of ``a*40`` so
+        the rebind path is exercised with a 40-char SHA (matching
+        the GitHub SHA-1 form) rather than the 64-char placeholder
+        the schema also accepts.
+        """
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.review_repair_relay import DirectiveStore, RelayLoop
+        from autocoder_orchestration.state_machine import StateMachine, STATE_REPAIRING_REVIEW_FINDINGS
+        from autocoder_orchestration.store import StateStore
+
+        store = StateStore(str(tmp_path / "state"))
+        run_id = "test-rebind"
+        ctx = make_run_context(
+            run_id=run_id,
+            repo_owner="owner",
+            repo_name="repo",
+            local_checkout=str(tmp_path),
+            base_branch="main",
+            authorized_base_sha="a" * 64,
+            feature_branch="feat/test",
+            pr_number=4,
+            current_authorized_head="a" * 40,
+            task_specification_path=_tmp_task_spec_path(tmp_path),
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[],
+            implementation_worker_command=[],
+            evidence_root=str(tmp_path / "evidence"),
+            state_root=str(tmp_path / "state"),
+        )
+        store.write_atomic("run_context.json", ctx.to_dict())
+        sm = StateMachine(current_state=STATE_REPAIRING_REVIEW_FINDINGS)
+        store.write_atomic("state.json", sm.to_dict())
+        controller = Controller(context=ctx, store=store)
+        directive_store = DirectiveStore(
+            store=store, evidence_root=str(tmp_path / "evidence"),
+        )
+        loop = RelayLoop(
+            context=ctx, store=store, directive_store=directive_store,
+            controller=controller, required_check_names=(),
+        )
+        return loop, controller, store, run_id
+
+    def test_persisted_context_rebinds_to_new_head(self, tmp_path) -> None:
+        """After ``mark_head_advanced`` the on-disk
+        ``run_context.json`` MUST reflect the new head SHA.
+        Without this rebind, the next round's exact-head guard
+        rejects the new head because the persisted authorized
+        head is still A.
+        """
+        from autocoder_orchestration.context import RunContext
+        from autocoder_orchestration.state_machine import STATE_AWAITING_CI
+        loop, controller, store, _run_id = self._setup_loop(tmp_path)
+        new_head = "b" * 40
+        loop.mark_head_advanced("a" * 40, new_head)
+        # Persisted context's current_authorized_head MUST be B.
+        ctx_payload = store.read_optional("run_context.json")
+        assert ctx_payload is not None, "run_context.json MUST persist"
+        assert ctx_payload["current_authorized_head"] == new_head, (
+            f"persisted context head {ctx_payload['current_authorized_head']!r} "
+            f"must equal new head {new_head!r}"
+        )
+        ctx = RunContext.from_dict(ctx_payload)
+        assert ctx.current_authorized_head == new_head
+        # Controller transitions to AWAITING_CI without InvalidTransition.
+        sm_after = controller.load_state_machine()
+        assert sm_after.current_state == STATE_AWAITING_CI, (
+            f"after rebind+push, state MUST be AWAITING_CI; got {sm_after.current_state!r}"
+        )
+
+    def test_rebind_uses_64_char_head_too(self, tmp_path) -> None:
+        """The rebind path MUST accept both 40- and 64-char SHAs.
+
+        The schema allows both; production SHAs from GitHub can be
+        either. A rebind that only accepts one form is a partial
+        fix.
+        """
+        from autocoder_orchestration.context import RunContext
+        from autocoder_orchestration.state_machine import STATE_AWAITING_CI
+        loop, controller, store, _run_id = self._setup_loop(tmp_path)
+        # 64-char new head, original head is 40-char.
+        new_head_64 = "c" * 64
+        loop.mark_head_advanced("a" * 40, new_head_64)
+        ctx_payload = store.read_optional("run_context.json")
+        assert ctx_payload["current_authorized_head"] == new_head_64
+        ctx = RunContext.from_dict(ctx_payload)
+        assert ctx.current_authorized_head == new_head_64
+        sm_after = controller.load_state_machine()
+        assert sm_after.current_state == STATE_AWAITING_CI
+
+    def test_controller_context_attribute_is_updated(self, tmp_path) -> None:
+        """The controller's in-memory ``context.current_authorized_head``
+        MUST also be updated so the next transition uses the
+        rebound head (not just the on-disk copy).
+        """
+        loop, controller, _store, _run_id = self._setup_loop(tmp_path)
+        loop.mark_head_advanced("a" * 40, "b" * 40)
+        assert controller.context.current_authorized_head == "b" * 40, (
+            "controller.context.current_authorized_head MUST be rebound "
+            "after mark_head_advanced; got "
+            f"{controller.context.current_authorized_head!r}"
+        )
+
+    def test_invalid_head_shape_is_rejected(self, tmp_path) -> None:
+        """A non-hex / wrong-length head_observed MUST be rejected
+        before any state is mutated. The rebind path cannot accept
+        malformed inputs.
+        """
+        from autocoder_orchestration.controller import ControllerError
+        from autocoder_orchestration.context import RunContext
+        loop, controller, store, _run_id = self._setup_loop(tmp_path)
+        with pytest.raises(ControllerError):
+            loop.mark_head_advanced("a" * 40, "not-a-sha")
+        # Persisted context MUST still point at A.
+        ctx_payload = store.read_optional("run_context.json")
+        assert ctx_payload["current_authorized_head"] == "a" * 40
+        # And reloading produces a context that still has A.
+        ctx = RunContext.from_dict(ctx_payload)
+        assert ctx.current_authorized_head == "a" * 40
+
+
+class TestFindingLedger:
+    """Round-26 P1#2: ``FindingLedger`` enforces the user's
+    invariant on the current review head.
+
+    Invariant:
+      finding on A -> repaired in B -> old A finding does not
+      re-enter B directive unless fresh evidence explicitly
+      reopens it.
+
+    The ledger is the durable JSONL record of every finding
+    that was emitted into a directive, bound to the exact
+    ``head_sha`` it was emitted on. ``is_fresh`` decides
+    whether a finding should re-enter the directive on the
+    next round:
+
+    - same head, same signature -> NOT fresh (already emitted)
+    - different head, same signature -> fresh (head advanced)
+    - same head, different signature -> fresh (body edited)
+    - no prior record -> fresh (first sighting)
+    """
+
+    def _setup(self, tmp_path):
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        return FindingLedger(store, head_sha="a" * 40), store
+
+    def _finding(self, **overrides) -> "Finding":
+        from autocoder_orchestration.review_repair_relay import Finding
+        # mypy/pyright: explicitly typed dict so the helper
+        # passes the Finding dataclass type check.
+        base: dict = {
+            "finding_id": "coderabbit:42",
+            "source": "coderabbit",
+            "severity": "P1",
+            "title": "Title",
+            "body": "Body",
+            "file_path": "src/x.py",
+            "line": 10,
+            "url": None,
+            "suggested_test": None,
+            "review_id": None,
+            "comment_id": 42,
+            "check_name": None,
+        }
+        base.update(overrides)
+        return Finding(**base)
+
+    def test_first_sighting_is_fresh(self, tmp_path) -> None:
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding()
+        assert ledger.is_fresh(f) is True
+
+    def test_same_head_same_signature_is_suppressed(self, tmp_path) -> None:
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding()
+        ledger.record(f)
+        # Same head, same body -> not fresh.
+        assert ledger.is_fresh(self._finding()) is False
+
+    def test_head_advance_re_emits_same_finding(self, tmp_path) -> None:
+        """The worker pushed a new commit (head A -> head B). The
+        same comment body re-appears in the snapshot for B. The
+        ledger MUST consider this fresh so the directive on B
+        addresses it (the worker did the work, but the relay
+        should still re-offer the finding for visibility).
+        """
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        ledger_a = FindingLedger(store, head_sha="a" * 40)
+        f = self._finding()
+        ledger_a.record(f)
+        # New head B; same ledger file (same store) -> fresh.
+        ledger_b = FindingLedger(store, head_sha="b" * 40)
+        assert ledger_b.is_fresh(self._finding()) is True
+
+    def test_body_edit_reopens_finding(self, tmp_path) -> None:
+        """A CodeRabbit edit to the same comment MUST reopen
+        the finding (different signature).
+        """
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding()
+        ledger.record(f)
+        edited = self._finding(body="Edited body")
+        assert ledger.is_fresh(edited) is True
+
+    def test_severity_change_reopens_finding(self, tmp_path) -> None:
+        """A CodeRabbit severity change MUST reopen the finding.
+        """
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding(severity="P2")
+        ledger.record(f)
+        promoted = self._finding(severity="P1")
+        assert ledger.is_fresh(promoted) is True
+
+    def test_ledger_survives_reload(self, tmp_path) -> None:
+        """A new ledger constructed from the same store MUST
+        see prior observations (durable across restarts).
+        """
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        ledger1 = FindingLedger(store, head_sha="a" * 40)
+        f = self._finding()
+        ledger1.record(f)
+        # Simulate restart: fresh ledger, same store.
+        ledger2 = FindingLedger(store, head_sha="a" * 40)
+        assert ledger2.is_fresh(self._finding()) is False
+
+    def test_filter_drops_already_emitted(self, tmp_path) -> None:
+        """``filter_findings_to_current_head`` removes findings
+        the ledger has already observed at the current head.
+        """
+        from autocoder_orchestration.review_repair_relay import (
+            filter_findings_to_current_head,
+        )
+        ledger, _store = self._setup(tmp_path)
+        a = self._finding(finding_id="coderabbit:1", comment_id=1)
+        b = self._finding(finding_id="coderabbit:2", comment_id=2)
+        ledger.record(a)
+        out = filter_findings_to_current_head([a, b], ledger)
+        # ``a`` is on the ledger (same head, same sig) so
+        # it is dropped; ``b`` is a first sighting so kept.
+        ids = {f.finding_id for f in out}
+        assert ids == {"coderabbit:2"}
+
+    def test_collect_findings_accepts_ledger(self, tmp_path) -> None:
+        """``collect_findings`` with a ``ledger`` kwarg MUST
+        apply the filter internally.
+        """
+        from autocoder_orchestration.review_repair_relay import collect_findings
+        ledger, _store = self._setup(tmp_path)
+        a = self._finding(finding_id="coderabbit:1", comment_id=1)
+        b = self._finding(finding_id="coderabbit:2", comment_id=2)
+        ledger.record(a)
+        snap = {
+            "head_sha": "a" * 40,
+            "head_match": True,
+            "review_comments": [],
+            "issue_comments": [],
+            "_provider_issue_comments": {
+                "coderabbit": [
+                    {"id": 1, "body": "Body", "html_url": "u1"},
+                    {"id": 2, "body": "Body", "html_url": "u2"},
+                ],
+            },
+            "required_checks": {},
+        }
+        out = collect_findings(snap, ledger=ledger)
+        ids = {f.finding_id for f in out}
+        # Only the unrecorded finding is emitted.
+        assert "coderabbit:2" in ids
+        # And the recorded one is suppressed (same head + body).
+        # We check via filter directly because the provider
+        # collector may classify severity differently.
+        from autocoder_orchestration.review_repair_relay import filter_findings_to_current_head
+        out2 = filter_findings_to_current_head([a, b], ledger)
+        assert {f.finding_id for f in out2} == {"coderabbit:2"}
+
+    def test_invalid_input_raises(self, tmp_path) -> None:
+        """``is_fresh`` MUST reject non-Finding input rather
+        than silently returning False (which would mask
+        bugs in callers).
+        """
+        from autocoder_orchestration.review_repair_relay import (
+            DirectiveContractError,
+        )
+        ledger, _store = self._setup(tmp_path)
+        # A non-Finding dict MUST raise. The guard runs BEFORE
+        # the ledger load so even an empty ledger raises.
+        with pytest.raises(DirectiveContractError):
+            ledger.is_fresh({"not": "a finding"})
+        # Same for a string, list, None, or a non-Finding
+        # object instance.
+        for bad in ("a string", [1, 2, 3], None, 42, object()):
+            with pytest.raises(DirectiveContractError):
+                ledger.is_fresh(bad)
+
+
+class TestFindingLedgerPersistsAcrossRounds:
+    """End-to-end: ``RelayLoop.run_once`` writes the ledger;
+    the next round on the same head suppresses the same finding.
+    """
+
+    def _setup_loop(self, tmp_path):
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.review_repair_relay import DirectiveStore, RelayLoop
+        from autocoder_orchestration.state_machine import StateMachine, STATE_REPAIRING_REVIEW_FINDINGS
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        ctx = make_run_context(
+            run_id="ledger-test",
+            repo_owner="owner", repo_name="repo",
+            local_checkout=str(tmp_path), base_branch="main",
+            authorized_base_sha="a" * 64, feature_branch="feat/test",
+            pr_number=4, current_authorized_head="a" * 40,
+            task_specification_path=_tmp_task_spec_path(tmp_path),
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[], implementation_worker_command=[],
+            evidence_root=str(tmp_path / "evidence"),
+            state_root=str(tmp_path / "state"),
+        )
+        store.write_atomic("run_context.json", ctx.to_dict())
+        sm = StateMachine(current_state=STATE_REPAIRING_REVIEW_FINDINGS)
+        store.write_atomic("state.json", sm.to_dict())
+        controller = Controller(context=ctx, store=store)
+        directive_store = DirectiveStore(
+            store=store, evidence_root=str(tmp_path / "evidence"),
+        )
+        loop = RelayLoop(
+            context=ctx, store=store, directive_store=directive_store,
+            controller=controller, required_check_names=(),
+        )
+        return loop, store
+
+    def test_ledger_persists_between_rounds(self, tmp_path) -> None:
+        loop, store = self._setup_loop(tmp_path)
+        snap = {
+            "head_sha": "a" * 40, "head_match": True,
+            "review_comments": [], "issue_comments": [],
+            "_provider_issue_comments": {
+                "coderabbit": [
+                    {"id": 99, "body": "P1 finding", "html_url": "u99"},
+                ],
+            },
+            "required_checks": {},
+        }
+        d1 = loop.run_once(
+            snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        assert d1.action == "launch_worker"
+        # The ledger was written.
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        ledger = FindingLedger(store, head_sha="a" * 40)
+        entries = ledger.load()
+        assert "coderabbit:99" in entries
+        # Second round on the same head: same body, no edit.
+        d2 = loop.run_once(
+            snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        # The ledger suppresses the same finding on the same
+        # head — the directive's findings count is zero and the
+        # action flips to enter_qualifying_readiness.
+        assert d2.action == "enter_qualifying_readiness", (
+            f"same head + same body must be suppressed by the ledger; "
+            f"got action={d2.action!r}"
+        )
+
+    def test_body_edit_on_same_head_reopens(self, tmp_path) -> None:
+        """A body edit on the same head MUST reopen the finding.
+        """
+        loop, _store = self._setup_loop(tmp_path)
+        snap_v1 = {
+            "head_sha": "a" * 40, "head_match": True,
+            "review_comments": [], "issue_comments": [],
+            "_provider_issue_comments": {
+                "coderabbit": [{"id": 99, "body": "v1 body", "html_url": "u"}],
+            },
+            "required_checks": {},
+        }
+        d1 = loop.run_once(
+            snap_v1, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        assert d1.action == "launch_worker"
+        # CodeRabbit edits the same comment — different body.
+        snap_v2 = {
+            "head_sha": "a" * 40, "head_match": True,
+            "review_comments": [], "issue_comments": [],
+            "_provider_issue_comments": {
+                "coderabbit": [{"id": 99, "body": "v2 body", "html_url": "u"}],
+            },
+            "required_checks": {},
+        }
+        d2 = loop.run_once(
+            snap_v2, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        # Different body = fresh evidence = launch_worker.
+        assert d2.action == "launch_worker", (
+            f"body edit on same head must reopen the finding; "
+            f"got action={d2.action!r}"
+        )
+
+    def test_new_comment_id_is_always_fresh(self, tmp_path) -> None:
+        """A new comment with a new id on the same head MUST be
+        emitted regardless of the ledger (different finding_id).
+        """
+        loop, _store = self._setup_loop(tmp_path)
+        snap_v1 = {
+            "head_sha": "a" * 40, "head_match": True,
+            "review_comments": [], "issue_comments": [],
+            "_provider_issue_comments": {
+                "coderabbit": [{"id": 1, "body": "x", "html_url": "u"}],
+            },
+            "required_checks": {},
+        }
+        d1 = loop.run_once(
+            snap_v1, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        assert d1.action == "launch_worker"
+        # A second, distinct comment arrives on the same head.
+        snap_v2 = {
+            "head_sha": "a" * 40, "head_match": True,
+            "review_comments": [], "issue_comments": [],
+            "_provider_issue_comments": {
+                "coderabbit": [
+                    {"id": 1, "body": "x", "html_url": "u"},
+                    {"id": 2, "body": "y", "html_url": "u2"},
+                ],
+            },
+            "required_checks": {},
+        }
+        d2 = loop.run_once(
+            snap_v2, head_sha="a" * 40, repo="owner/repo", pr_number=4,
+        )
+        # The new comment must be emitted (different finding_id).
+        assert d2.action == "launch_worker"
 

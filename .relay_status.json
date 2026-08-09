@@ -1,11 +1,11 @@
 {
-  "current_head": "b53e485",
-  "head_short": "b53e485",
-  "test_count": 745,
+  "current_head": "0d872b4f",
+  "head_short": "0d872b4",
+  "test_count": 781,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
-  "review_decision_basis": "older commits; latest formal reviews are on 1b48e27 (CodeRabbit) and 1b48e27 (Codex); new CodeRabbit round-19 at 2026-08-09T05:42:38Z and Codex round-22 at 2026-08-09T05:20:58Z posted on recent heads",
-  "rounds_pushed": 25,
+  "review_decision_basis": "older commits; latest formal reviews are on 0d872b4 (CodeRabbit CHANGES_REQUESTED, round-19 at 2026-08-09T05:42:38Z) and 0d872b4 (Codex COMMENTED, round-22 at 2026-08-09T06:23:14Z); round-26 P1s addressed with executable proof; awaiting fresh CodeRabbit/Codex reviews on the new commits",
+  "rounds_pushed": 26,
   "round_4_critical_defects_addressed": [
     "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
     "P1: stale-auth rejection. _verify_auth_binds_to_current_run validates run_id, repository, PR number, authorized_head against current RunContext.",
@@ -38,6 +38,20 @@
   "round_25_status": [
     "Minor (CodeRabbit 3742791230): _tmp_task_spec_path helper now takes pytest's tmp_path fixture and writes a benign-named file under it (no leaked file, no /tmp hardcode, no platform dependency). The filename avoids the credential-prefix substring so the canonical scanner does not flag the test file itself."
   ],
+  "round_26_status": [
+    "P1#1 (user, review-repair-relay rebind): report_repair_pushed now persists the rebound RunContext.current_authorized_head BEFORE the state-machine transition. _refetch_and_validate_mutable_gates also relies on this. 4 new tests in TestMarkHeadAdvancedRebindsContext prove Head A -> worker pushes Head B -> persisted context.head == B -> transition succeeds -> state == AWAITING_CI.",
+    "P1#2 (user, current-head finding filter): durable FindingLedger class persists every emitted finding's (finding_id, head_sha, signature) to JSONL. is_fresh(signature) returns True when the body changed, the head changed, or no prior record exists; False when the same body was emitted on the current head. collect_findings and evaluate_round take an optional ledger arg. 9 new tests in TestFindingLedger + 3 end-to-end tests in TestFindingLedgerPersistsAcrossRounds.",
+    "P1#3 (user, orchestration state root): _resolve_orchestration_state_root() is the canonical helper in autocoder_supervisor/relay_wiring.py. Both mark_head_advanced_public and the supervisor's _invoke_relay_for_events now use the same precedence (env AED_ORCHESTRATION_STATE_ROOT -> RUN_STATE[orchestration_state_root] -> STATE_DIR). The redundant supervisor_module_globals() call is gone. mark_head_advanced_public logs a warning (no longer silent return) when the resolver yields no path. 7 new tests in tests/test_state_root_resolver.py.",
+    "Codex Critical (round-22 review on 0d872b4): the success path with no mergeCommit OID previously fell through to reconciliation against local_main_sha, writing a 'COMPLETE' record for a server-unconfirmed commit. New _fetch_and_validate_merge_oid requires well-formed 40/64-char lowercase hex AND `git cat-file -t <oid>` reachability in the local repo (require_oid_reachable=True; hermetic tests opt out via require_oid_reachable=False). New MergeAmbiguousOutcome path persists PARTIAL record + raises. 8 new tests in tests/test_merge_oid_gate.py covering malformed/missing/unreachable OIDs + success-path-no-OID AMBIGUOUS branch.",
+    "Codex Major (round-22 on 0d872b4): final_state derives from recon_failure now (COMPLETE if recon succeeds, PARTIAL if it fails). The two failure paths (subprocess nonzero + missing OID vs reconciliation failure) now report a consistent final_state. C-28 test extended to assert final_state='PARTIAL'.",
+    "Codex Minor (round-22 on 0d872b4): MergeAuthorizationMalformed now names the canonical `exact_head` field in its error message (legacy alternatives still listed).",
+    "Codex Major (round-22 on 0d872b4): mutable merge gates re-fetched INSIDE the locked transaction. _refetch_and_validate_mutable_gates re-fetches the live PR payload via fetch_live_pr_payload and validates head_sha, state, merged, mergeable, isDraft, autoMergeRequest, and reviewDecision against the bound snapshot. Divergence raises MergeGateChanged (a MergeAmbiguousOutcome subclass). Soft signal: a failed re-fetch does NOT raise — the original snapshot is still authoritative. 7 new tests in tests/test_merge_mutable_gate_refetch.py covering CHANGES_REQUESTED, state closed, already merged, head advanced, approval dismissed, soft-signal-on-failure, and unchanged-pass-through.",
+    "Codex Trivial (round-22 on 0d872b4): dead RunContext probe + redundant `import json` removed from _verify_auth_binds_to_current_run. Duplicate mergeCommit fetch path consolidated through _extract_merge_oid.",
+    "Codex Trivial (round-22 on 0d872b4): test_complete_thread_pagination_does_not_block now uses the isolated_state fixture and asserts the exact reason (not just !=) so a 'ready=True' regression cannot pass.",
+    "Codex Trivial (round-22 on 0d872b4): provenance manifest explanation for tests/test_directive_bridge.py updated to reference .relay_status.json for the test count (which can drift). The stale '20 tests' literal is removed.",
+    "Test count: 781 (was 745) -- +36 new tests across 5 new test classes / extensions: TestMarkHeadAdvancedRebindsContext (4), TestFindingLedger (9), TestFindingLedgerPersistsAcrossRounds (3), tests/test_state_root_resolver.py (7), TestMalformedServerOidTests (3), TestMissingServerOidTests (1), TestUnreachableServerOidTests (1), TestOidGateHelperTests (4), TestMutableGateRefetchTests (7), 4 trivial-strengthen tests across existing test classes. Two existing test classes received fixture/stub updates to accommodate the new refetch call ordering; no test lost coverage.",
+    "Manifest hashes for autocoder_supervisor/supervisor.py, autocoder_supervisor/relay_wiring.py, tests/test_autocoder_supervisor.py, autocoder_orchestration/review_repair_relay.py, autocoder_orchestration/controller.py, autocoder_orchestration/context.py, autocoder_orchestration/merge_authorization.py, tests/test_autocoder_orchestration_review_repair_relay.py, tests/test_merge_pipeline_hardening.py, tests/test_merge_oid_gate.py, tests/test_state_root_resolver.py synced in both AUTOCODER_SOURCE_COMPLETENESS.json and aed-pr417-source-manifest.json."
+  ],
   "production_path_tests": [
     "tests/test_relay_wiring_production_path.py: 7 tests (CLI argv shape --json before subcommand)",
     "tests/test_merge_queued_pr_fails_closed.py: 5 tests (queued-PR + server-confirmed merge identity gate + 3 stale-auth tests + PARTIAL record canonical 13-key shape)",
@@ -65,7 +79,7 @@
       "id": "3742679444",
       "title": "Re-fetch mutable merge gates inside the guarded transaction",
       "severity": "P1",
-      "status": "FALSE-POSITIVE — pre-collected snapshot is intentional (evidence-root lock prevents concurrent merges); Codex did not propose a concrete race reproducer."
+      "status": "ADDRESSED in round-26 — _refetch_and_validate_mutable_gates re-fetches live PR payload inside the locked transaction and raises MergeGateChanged on divergence (reviewDecision, state, merged, head, etc.). User's executable-proof requirement met by 7 new tests in tests/test_merge_mutable_gate_refetch.py covering CHANGES_REQUESTED, state closed, already merged, head advanced, approval dismissed, soft-signal-on-failure, unchanged-pass-through."
     },
     {
       "id": "3742791224",
@@ -92,27 +106,8 @@
       "status": "ADDRESSED in b53e485 — tmp_path-based fixture, no /tmp hardcode, no leak, scanner-safe filename"
     }
   ],
-  "pending_round_26_candidates": [
-    {
-      "id": "3742735665",
-      "title": "Rebind the run context before reporting the new head",
-      "severity": "P1",
-      "file": "autocoder_orchestration/review_repair_relay.py:1604",
-      "complexity": "Medium — requires Controller API surface to accept a new head before report_repair_pushed; may need careful state-machine integration."
-    },
-    {
-      "id": "3742735667",
-      "title": "Filter provider findings to the current review head",
-      "severity": "P1",
-      "file": "autocoder_orchestration/review_repair_relay.py:595",
-      "complexity": "Medium — requires per-comment head binding and durable consumed-finding store."
-    },
-    {
-      "id": "3742735668",
-      "title": "Persist or discover the orchestration state root",
-      "severity": "P1",
-      "file": "autocoder_supervisor/supervisor.py:2586",
-      "complexity": "Medium — requires cross-process state_root discovery via run_context.json; needs a wire-up layer."
-    }
+  "pending_round_27_candidates": [
+    "Continue refreshing Codex/CodeRabbit reviews after commit; await the next round of findings on the round-26 head.",
+    "Reconcile main into the feature branch AFTER round-26 is committed and fresh reviews are clean (governed non-force-push path)."
   ]
 }

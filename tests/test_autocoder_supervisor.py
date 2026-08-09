@@ -1763,9 +1763,18 @@ def test_thread_pagination_failure_blocks_readiness():
     assert result["reason"] == "thread_pagination_failed"
 
 
-def test_complete_thread_pagination_does_not_block():
+def test_complete_thread_pagination_does_not_block(isolated_state) -> None:
     """A complete pagination does NOT block readiness on
     the pagination flag alone.
+
+    Strengthened on round-26 (Codex Trivial):
+    - takes ``isolated_state`` so the result depends only on
+      the snapshot, not on host supervisor state;
+    - asserts the exact reason (NOT "thread_pagination_failed")
+      regardless of whether other gates are open. The previous
+      conditional assertion only ran when ``ready is False``,
+      so a "ready=True" output would have passed even if the
+      pagination guard had been deleted.
     """
     from autocoder_supervisor import supervisor as sup
     snap = {
@@ -1775,8 +1784,11 @@ def test_complete_thread_pagination_does_not_block():
         "review_threads_pagination_complete": True,
     }
     result = sup.evaluate_readiness(snap, head="a" * 40)
-    if result["ready"] is False:
-        # The pagination flag is not the blocker; other
-        # gates (checks, unconsumed_events, etc.) may
-        # still be open.
-        assert result["reason"] != "thread_pagination_failed"
+    # The pagination flag MUST NOT be the blocker. Other gates
+    # (checks, unconsumed_events) may still be open, but the
+    # reason MUST never be "thread_pagination_failed" for a
+    # complete-pagination snapshot.
+    assert result["reason"] != "thread_pagination_failed", (
+        f"complete pagination MUST NOT block on the pagination "
+        f"flag; got reason={result['reason']!r}, ready={result.get('ready')!r}"
+    )

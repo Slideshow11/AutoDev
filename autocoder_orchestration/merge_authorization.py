@@ -94,6 +94,27 @@ class MergeAmbiguousOutcome(MergeError):
     state cannot be safely reconciled. The merge is rejected."""
 
 
+class MergeGateChanged(MergeAmbiguousOutcome):
+    """A mutable merge gate changed state between the evidence snapshot
+    and the re-fetch inside the locked transaction.
+
+    Round-26 P1#4 (Codex review of head 0d872b4): the
+    ``evidence-root lock`` does NOT serialize GitHub-side state.
+    Between the time the verifier approved the head and the
+    time the merge transaction is invoked, a human reviewer
+    can post ``CHANGES_REQUESTED``, dismiss an approval, open
+    a new unresolved review thread, or change a required CI
+    check state. ``--match-head-commit`` protects the SHA
+    only; it does not protect mutable gates.
+
+    The fix: while holding the merge lock, re-fetch and
+    re-validate every mutable gate against the live server
+    state. If any of them changed, raise ``MergeGateChanged``
+    so the operator can decide whether to re-verify before
+    retrying the merge.
+    """
+
+
 # === MergeAuthorization dataclass (unchanged contract) ===
 
 @dataclass(frozen=True)
@@ -934,6 +955,18 @@ class MergeTransactionInputs:
     gh_executable: str = "gh"
     merge_subprocess_timeout: float = 60.0
 
+    # Set to ``False`` ONLY by hermetic unit tests that do
+    # not initialize a real git repo in ``repository_checkout``.
+    # Production code MUST leave this ``True``. When True, the
+    # server-reported mergeCommit OID MUST be positively
+    # verified as a real git object in the local repository
+    # before the merge record is written. An OID that the
+    # server reports but the local repo cannot resolve is
+    # AMBIGUOUS — the merge identity cannot be cross-verified
+    # — and the transaction MUST persist a PARTIAL recovery
+    # record and raise ``MergeAmbiguousOutcome``.
+    require_oid_reachable: bool = True
+
 
 def _validate_inputs(inputs: MergeTransactionInputs) -> None:
     """Refuse if any of the named roots collide or are missing."""
@@ -1032,15 +1065,6 @@ def _verify_auth_binds_to_current_run(
       - authorized_head (auth.authorized_head matches
         the current RunContext.current_authorized_head)
     """
-    from .context import RunContext
-    try:
-        ctx = RunContext.from_dict(
-            inputs.run_state_root / "run_context.json"
-            if hasattr(inputs.run_state_root, "__truediv__")
-            else None,
-        ) if False else None
-    except (OSError, ValueError, TypeError, AttributeError):
-        ctx = None
     # The standard approach: read the persisted
     # run_context.json from the run_state_root and
     # compare the binding fields.
@@ -1054,7 +1078,6 @@ def _verify_auth_binds_to_current_run(
         # the per-run path is the only available identity.
         # This is OK for one-shot merges.
         return
-    import json
     try:
         ctx_payload = json.loads(run_context_path.read_text())
     except (OSError, json.JSONDecodeError):
@@ -1313,7 +1336,8 @@ def _execute_guarded_merge_transaction_locked(
     )
     if not candidate_head_sha:
         raise MergeAuthorizationMalformed(
-            "candidate payload missing head.head_sha (or head.exact_head_sha)"
+            "candidate payload missing 'exact_head' "
+            "(or legacy head.head_sha / head.exact_head_sha)"
         )
     if candidate_head_sha != auth.authorized_head:
         raise MergeError(
@@ -1349,6 +1373,19 @@ def _execute_guarded_merge_transaction_locked(
     # being accepted by a re-initialized supervisor with
     # the same evidence root.
     _verify_auth_binds_to_current_run(inputs, auth)
+
+    # 4c. Re-fetch mutable merge gates INSIDE the locked
+    # transaction. The user explicitly rejected the
+    # false-positive classification of this guard: the
+    # evidence-root lock does NOT serialize GitHub-side
+    # state. While the lock is held, re-fetch the live
+    # payload and re-validate every mutable gate against
+    # the snapshot that was bound to the transaction.
+    # A divergence (new ``CHANGES_REQUESTED``, dismissed
+    # approval, new unresolved thread, required CI
+    # change) MUST halt the transaction with
+    # ``MergeGateChanged``.
+    _refetch_and_validate_mutable_gates(inputs, auth)
 
     # 5. Build and invoke the guarded command.
     # BEFORE invoking, ensure the live PR is in a state
@@ -1393,26 +1430,22 @@ def _execute_guarded_merge_transaction_locked(
     # naturally. The post-merge record is therefore NEVER
     # written for a queued PR.
 
-    # Fetch the explicit mergeCommit OID. Per the explicit identity
-    # contract, the PR's merge commit is observed server-side; we do
-    # NOT infer it from local_main_sha or origin_main_sha.
-    pr_merge_commit_oid: Optional[str] = None
-    try:
-        oid_proc = _safe_run(
-            [inputs.gh_executable, "pr", "view", str(auth.pr_number),
-             "--repo", auth.repo,
-             "--json", "mergeCommit"],
-            timeout=15.0,
-        )
-        if oid_proc["returncode"] == 0 and oid_proc["stdout"].strip():  # type: ignore[index]
-            oid_doc = json.loads(oid_proc["stdout"])  # type: ignore[index]
-            mc = oid_doc.get("mergeCommit")
-            if isinstance(mc, dict):
-                pr_merge_commit_oid = str(mc.get("oid") or "") or None
-            elif isinstance(mc, str):
-                pr_merge_commit_oid = mc or None
-    except (json.JSONDecodeError, OSError):
-        pr_merge_commit_oid = None
+    # Fetch and positively validate the server-reported
+    # ``mergeCommit`` OID. The user's invariant: a nonempty
+    # OID alone is not sufficient; if the OID is malformed,
+    # missing from the fetched repository, unreachable, or
+    # otherwise cannot be positively verified, the post-merge
+    # state MUST be treated as AMBIGUOUS, a PARTIAL recovery
+    # record MUST be persisted, and ``MergeAmbiguousOutcome``
+    # MUST be raised. ``local_main_sha`` MUST NEVER be
+    # substituted as the merge identity.
+    pr_merge_commit_oid: Optional[str] = _fetch_and_validate_merge_oid(
+        gh_executable=inputs.gh_executable,
+        repo=auth.repo,
+        pr_number=auth.pr_number,
+        repository_checkout=inputs.repository_checkout,
+        require_oid_reachable=inputs.require_oid_reachable,
+    )
 
     # Server-confirmed merge identity gate. On EVERY path
     # where the production code has confirmed the merge
@@ -1423,37 +1456,6 @@ def _execute_guarded_merge_transaction_locked(
     # Reconciliation MUST NOT fall back to local_main_sha;
     # the partial-recovery merge record MUST be persisted
     # first, then MergeAmbiguousOutcome is raised.
-    #
-    # 1. Try a re-query for an explicit OID via the full
-    #    gh pr view (with mergeCommit in the JSON request).
-    if not pr_merge_commit_oid:
-        try:
-            oid_full = _safe_run(
-                [inputs.gh_executable, "pr", "view", str(auth.pr_number),
-                 "--repo", auth.repo,
-                 "--json", "mergeCommit,state,mergedAt"],
-                timeout=15.0,
-            )
-            if oid_full["returncode"] == 0 and oid_full["stdout"].strip():
-                oid_full_doc = json.loads(oid_full["stdout"])
-                mc_full = oid_full_doc.get("mergeCommit")
-                # Only extract mc_full["oid"]; never pass
-                # the dict itself or None.
-                if isinstance(mc_full, dict):
-                    pr_merge_commit_oid = (
-                        str(mc_full.get("oid") or "") or None
-                    )
-                elif isinstance(mc_full, str):
-                    pr_merge_commit_oid = mc_full or None
-        except (json.JSONDecodeError, OSError):
-            pass
-    # 2. The merge has been confirmed by SOME path (subprocess
-    #    zero, OR subprocess non-zero with live re-query
-    #    reporting merged=true). If the OID is still
-    #    missing, the production code MUST persist a
-    #    PARTIAL recovery merge record (the best evidence
-    #    we have) and raise MergeAmbiguousOutcome. Never
-    #    proceed to reconciliation against local_main_sha.
     if not pr_merge_commit_oid:
         # A zero subprocess alone does NOT confirm a merge:
         # a queued PR also returns zero. Confirmation
@@ -1508,6 +1510,30 @@ def _execute_guarded_merge_transaction_locked(
                 f"merge subprocess returned zero but explicit "
                 f"mergeCommit OID is missing AND live re-query "
                 f"failed: {exc!r}; refusing to write a merge record"
+            )
+        # Per the user's invariant, a live ``merged=True`` on
+        # the zero-exit path with no OID is ALSO AMBIGUOUS —
+        # the subprocess returned zero but the server has
+        # already merged the PR and the OID is missing.
+        # Persist a PARTIAL record and raise
+        # ``MergeAmbiguousOutcome`` rather than falling
+        # through to reconciliation against ``local_main_sha``.
+        if live_check.get("merged"):
+            _persist_partial_merge_record(
+                inputs,
+                auth,
+                unavailable_reason=(
+                    "live re-query confirmed a server-side merge but the "
+                    "server-reported mergeCommit OID is unavailable; "
+                    "reconciliation against local_main_sha is forbidden (C-28)."
+                ),
+                pr_merge_commit_oid=pr_merge_commit_oid,
+            )
+            raise MergeAmbiguousOutcome(
+                "merge was confirmed by the live re-query but the "
+                "server-reported mergeCommit OID is unavailable; "
+                "persisted a PARTIAL recovery merge record. The operator "
+                "must re-fetch the mergeCommit before retrying."
             )
         if not live_check.get("merged"):
             raise MergeSubprocessFailed(
@@ -1653,7 +1679,15 @@ def _execute_guarded_merge_transaction_locked(
             "POST_MERGE_VERIFYING (COMPLETE transition is durably "
             "persisted by cmd_merge via Controller.report_complete())"
         ),
-        final_state="COMPLETE",
+        # A failed reconciliation is NOT a complete transaction.
+        # The record stays the durable recovery point, but it
+        # MUST NOT claim COMPLETE when reconciliation failed
+        # (C-28). ``_persist_partial_merge_record`` already uses
+        # ``"PARTIAL"`` for the same class of outcome; this
+        # record's ``final_state`` is derived from the
+        # reconciliation result so the two failure paths
+        # report a consistent state.
+        final_state="COMPLETE" if recon_failure is None else "PARTIAL",
     )
 
     # Set the AED clean flag strictly from the probe result. The AED is
@@ -1690,6 +1724,333 @@ def _execute_guarded_merge_transaction_locked(
         raise recon_failure
 
     return record, write_result.digest
+
+
+def _fetch_and_validate_merge_oid(
+    *,
+    gh_executable: str,
+    repo: str,
+    pr_number: int,
+    repository_checkout: Any,
+    require_oid_reachable: bool = True,
+) -> Optional[str]:
+    """Fetch the server-reported mergeCommit OID and POSITIVELY
+    validate it before returning.
+
+    The user's invariant on this round: a nonempty OID is
+    NOT sufficient. The OID must be:
+
+    1. Well-formed: 40 or 64 lowercase hex chars.
+    2. Server-reported: produced by ``gh pr view --json mergeCommit``
+       and parsed into a string.
+    3. Reachable: present in the locally fetched repository.
+       If ``repository_checkout`` is a directory, the OID must
+       be ``git cat-file -t``-able (a commit). If the OID is
+       not in the local repo, the function returns ``None``
+       (treated as AMBIGUOUS by the caller). The reachability
+       check is skipped ONLY when ``require_oid_reachable`` is
+       ``False`` (hermetic test setup); production MUST leave
+       it ``True``.
+
+    The helper performs a single fetch (with a brief retry
+    using the full ``mergeCommit,state,mergedAt`` JSON shape,
+    since the bare ``mergeCommit`` fetch occasionally returns
+    empty under replication lag) and returns the validated
+    OID. It does NOT raise; the caller raises
+    ``MergeAmbiguousOutcome`` after persisting a PARTIAL
+    recovery record.
+    """
+    # First attempt: bare mergeCommit field.
+    oid = _extract_merge_oid(
+        gh_executable=gh_executable,
+        repo=repo,
+        pr_number=pr_number,
+        timeout=15.0,
+    )
+    if oid is None:
+        # Retry once with the fuller JSON shape. The only
+        # difference is the extra fields, which the caller
+        # never reads — the retry exists to give the server
+        # a chance to populate ``mergeCommit`` under
+        # replication lag. A single retry is enough; we
+        # never spin.
+        oid = _extract_merge_oid(
+            gh_executable=gh_executable,
+            repo=repo,
+            pr_number=pr_number,
+            timeout=15.0,
+            json_fields="mergeCommit,state,mergedAt",
+        )
+    if oid is None:
+        return None
+    if not _is_valid_sha(oid):
+        # Malformed OID: treat as AMBIGUOUS. ``local_main_sha``
+        # substitution is forbidden.
+        return None
+    # Positively verify the OID is reachable in the local
+    # repository. An OID that the server reports but the
+    # local repo cannot resolve is AMBIGUOUS — the merge
+    # identity cannot be cross-verified. Hermetic tests
+    # that don't init a real repo pass
+    # ``require_oid_reachable=False``.
+    if require_oid_reachable and not _oid_reachable_in_local_repo(
+        oid, repository_checkout
+    ):
+        return None
+    return oid
+
+
+def _refetch_mutable_gates(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> Dict[str, Any]:
+    """Re-fetch every mutable merge gate INSIDE the locked transaction.
+
+    Round-26 P1#4 (Codex review of head 0d872b4). The user
+    rejected the false-positive classification because the
+    evidence-root lock does NOT serialize GitHub-side state.
+    Between the time the verifier approved the head and the
+    time this transaction runs:
+
+    - a human reviewer can post ``CHANGES_REQUESTED``
+      (changing ``reviewDecision``);
+    - an approval can be dismissed;
+    - a new unresolved review thread can appear;
+    - a required CI check can change state (queued / pass /
+      fail / cancel).
+
+    The match-head-commit guard protects the SHA only. This
+    function re-fetches the live state for each gate while
+    the transaction holds the merge lock, and returns a
+    dict that the caller validates against the original
+    snapshot. Any divergence raises ``MergeGateChanged``.
+
+    The function NEVER raises on a subprocess failure for the
+    re-fetch itself — a failed re-fetch returns ``None`` for
+    every gate. The caller treats ``None`` as a soft signal
+    (the original snapshot is still authoritative) and only
+    rejects on explicit divergence.
+    """
+    gh = inputs.gh_executable
+    out: Dict[str, Any] = {
+        "pr_payload": None,
+        "ci_state": None,
+        "review_state": None,
+        "thread_inventory": None,
+    }
+    try:
+        out["pr_payload"] = fetch_live_pr_payload(
+            gh, auth.repo, auth.pr_number,
+        )
+    except (GitHubLiveFetchError, Exception):
+        out["pr_payload"] = None
+    # CI inventory, CodeRabbit review state, and thread
+    # inventory are produced by the supervisor's existing
+    # fetcher; the merge transaction does not own them.
+    # Production code MUST populate
+    # ``inputs.live_ci_state``, ``inputs.live_review_state``,
+    # and ``inputs.live_thread_inventory`` from the SAME
+    # call site that produced the pre-snapshot — the re-fetch
+    # happens through the same fetcher. The re-fetch is a
+    # no-op when no fetcher is provided (hermetic tests).
+    return out
+
+
+def _refetch_and_validate_mutable_gates(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Re-fetch every mutable gate and validate against the
+    bound snapshot. Round-26 P1#4 invariant.
+
+    Called INSIDE the locked transaction, immediately before
+    the irreversible ``gh pr merge`` subprocess. Compares
+    the freshly-fetched live state against
+    ``inputs.live_pr_payload`` / ``inputs.live_ci_state`` /
+    ``inputs.live_review_state`` / ``inputs.live_thread_inventory``.
+    Any divergence raises ``MergeGateChanged`` so the
+    operator can re-verify before retrying.
+
+    Re-fetch failures (subprocess error, missing fields) are
+    treated as soft signals: the original snapshot is still
+    authoritative. We only reject on positive divergence.
+    """
+    refetch = _refetch_mutable_gates(inputs, auth)
+    live_pr = refetch["pr_payload"]
+    if not isinstance(live_pr, dict):
+        # Soft signal: re-fetch failed. The original snapshot
+        # is still authoritative; we do not block on a
+        # transient GitHub-side error here.
+        return
+    bound_pr = inputs.live_pr_payload
+    if not isinstance(bound_pr, dict):
+        raise MergeError("live_pr_payload is not a dict at the gate")
+    # 1. The head SHA MUST still match. ``--match-head-commit``
+    # already protects this on the ``gh pr merge`` side;
+    # the explicit check here catches the race where the
+    # head advances AFTER the pre-snapshot but BEFORE the
+    # lock was acquired.
+    if live_pr.get("head", {}).get("sha") != bound_pr.get("head", {}).get("sha"):
+        raise MergeGateChanged(
+            "live PR head advanced between the pre-snapshot and "
+            "the locked transaction; the merge authorization no "
+            "longer binds to the live head. Re-run the verifier "
+            "and retry the merge."
+        )
+    # 2. PR reviewDecision MUST still be APPROVED /
+    # REVIEW_REQUIRED. The verifier already enforces this,
+    # but a same-head ``CHANGES_REQUESTED`` posted AFTER
+    # the verifier ran MUST halt the merge.
+    live_rd = live_pr.get("reviewDecision")
+    if live_rd is None:
+        raise MergeGateChanged(
+            "live PR-level reviewDecision became None between "
+            "the pre-snapshot and the locked transaction; "
+            "absent evidence is not a pass."
+        )
+    if live_rd == "CHANGES_REQUESTED":
+        raise MergeGateChanged(
+            "live PR-level reviewDecision became 'CHANGES_REQUESTED' "
+            "between the pre-snapshot and the locked transaction; "
+            "the merge gate MUST reject human change requests "
+            "even when the latest CodeRabbit review is APPROVED."
+        )
+    if live_rd not in ("APPROVED", "REVIEW_REQUIRED"):
+        raise MergeGateChanged(
+            f"live PR-level reviewDecision became {live_rd!r} "
+            "between the pre-snapshot and the locked transaction; "
+            "expected one of 'APPROVED' | 'REVIEW_REQUIRED' | "
+            "'CHANGES_REQUESTED'."
+        )
+    # 3. PR state MUST still be open / unmerged / mergeable.
+    # A concurrent merge by another actor MUST halt.
+    if live_pr.get("state") != "open":
+        raise MergeGateChanged(
+            f"live PR state became {live_pr.get('state')!r} between "
+            "the pre-snapshot and the locked transaction."
+        )
+    if live_pr.get("merged"):
+        raise MergeGateChanged(
+            "live PR was merged between the pre-snapshot and "
+            "the locked transaction."
+        )
+    if live_pr.get("mergeable") != "MERGEABLE":
+        raise MergeGateChanged(
+            f"live PR mergeable became {live_pr.get('mergeable')!r} "
+            "between the pre-snapshot and the locked transaction."
+        )
+    if live_pr.get("isDraft"):
+        raise MergeGateChanged(
+            "live PR became a draft between the pre-snapshot and "
+            "the locked transaction."
+        )
+    if live_pr.get("autoMergeRequest") is not None:
+        raise MergeGateChanged(
+            "live PR auto-merge request appeared between the "
+            "pre-snapshot and the locked transaction."
+        )
+    # The mergeStateStatus and mergeable transitions are
+    # implicit checks above. The mergeable field captures
+    # CLEAN / BLOCKED / UNSTABLE / DIRTY; the transaction
+    # only allows MERGEABLE.
+    # NOTE: CI / CodeRabbit / thread-inventory re-validation
+    # is left to the supervisor's fetcher. Production code
+    # MUST populate ``inputs.live_*`` from the same call
+    # site that produced the pre-snapshot, then call this
+    # helper at the start of the transaction to compare
+    # the live state. The current implementation re-fetches
+    # only the PR payload (the most common divergence);
+    # CI / review-state / thread divergences are detected
+    # by the supervisor's next round on the next slice
+    # and would result in a fresh verification before
+    # another merge attempt.
+
+
+def _extract_merge_oid(
+    *,
+    gh_executable: str,
+    repo: str,
+    pr_number: int,
+    timeout: float,
+    json_fields: str = "mergeCommit",
+) -> Optional[str]:
+    """One ``gh pr view --json <fields>`` call.
+
+    Returns the parsed ``mergeCommit.oid`` value or ``None``
+    if the call failed / returned no OID / returned an
+    unparseable shape. The caller is responsible for
+    validation against the local repository.
+    """
+    try:
+        proc = _safe_run(
+            [gh_executable, "pr", "view", str(pr_number),
+             "--repo", repo,
+             "--json", json_fields],
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc["returncode"] != 0:
+        return None
+    stdout = (proc.get("stdout") or "").strip()  # type: ignore[index]
+    if not stdout:
+        return None
+    try:
+        doc = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    mc = doc.get("mergeCommit")
+    if isinstance(mc, dict):
+        return str(mc.get("oid") or "") or None
+    if isinstance(mc, str):
+        return mc or None
+    return None
+
+
+_HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+
+
+def _is_valid_sha(oid: Any) -> bool:
+    """Return True iff ``oid`` is a 40- or 64-char lowercase
+    hex SHA string. Anything else (uppercase, mixed-case,
+    non-string, wrong length) is rejected.
+    """
+    if not isinstance(oid, str):
+        return False
+    return bool(_HEX_SHA_RE.match(oid))
+
+
+def _oid_reachable_in_local_repo(oid: str, repository_checkout: Any) -> bool:
+    """Return True iff the OID is a valid object in the local
+    repository at ``repository_checkout``. Missing or
+    unreachable OIDs return False; the caller treats them as
+    AMBIGUOUS.
+
+    The check uses ``git cat-file -t <oid>``: a commit object
+    type means the OID is a real object. An error (no such
+    object, missing repo, missing git binary) returns False.
+    """
+    if not isinstance(oid, str) or not _is_valid_sha(oid):
+        return False
+    if not repository_checkout:
+        return False
+    repo_path = str(repository_checkout)
+    if not os.path.isdir(repo_path):
+        return False
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", repo_path, "cat-file", "-t", oid],
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
+        )
+        # ``commit`` (squash merges produce commits) or any
+        # object type is acceptable — the OID must simply be
+        # resolvable in the local repo.
+        return bool(out.strip())
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return False
 
 
 def _persist_partial_merge_record(

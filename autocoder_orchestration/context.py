@@ -226,9 +226,16 @@ class RunContext:
         Used only when the controller explicitly observes a new head
         (e.g. after a repair push). The candidate, verifier record,
         and merge authorization must be invalidated separately.
+
+        Accepts both 40- and 64-character lowercase hex to match the
+        ``__post_init__`` invariant for ``current_authorized_head``.
         """
-        if not isinstance(new_head, str) or len(new_head) != 64:
-            raise ValueError("new_head must be 64 lowercase hex chars")
+        if (
+            not isinstance(new_head, str)
+            or (len(new_head) != 40 and len(new_head) != 64)
+            or not all(c in "0123456789abcdef" for c in new_head)
+        ):
+            raise ValueError("new_head must be 40 or 64 lowercase hex chars")
         return dataclasses.replace(self, current_authorized_head=new_head)
 
     def to_dict(self) -> dict:

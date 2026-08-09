@@ -239,6 +239,79 @@ def should_invoke_relay(snapshot: dict) -> bool:
     return False
 
 
+def _resolve_orchestration_state_root() -> Optional[str]:
+    """Return the orchestration's state_root using the canonical precedence.
+
+    The relay, the supervisor's relay invocation, and the head-advance
+    binding MUST all read the same ``run_context.json``. Three callers
+    previously diverged:
+
+    - ``invoke_relay_round`` was passed an explicit ``state_root``.
+    - ``mark_head_advanced_public`` resolved ``AED_ORCHESTRATION_STATE_ROOT``
+      then ``RUN_STATE['orchestration_state_root']`` then silently
+      returned.
+    - ``_invoke_relay_for_events`` resolved the same env var and
+      ``RUN_STATE`` then fell back to ``str(STATE_DIR)``.
+
+    The unified precedence is:
+
+    1. ``AED_ORCHESTRATION_STATE_ROOT`` environment variable.
+    2. ``orchestration_state_root`` field of the supervisor's
+       ``RUN_STATE`` JSON (recorded when the supervisor hands off
+       to the relay).
+    3. ``str(STATE_DIR)`` — the supervisor's own state directory,
+       used only when neither of the above is configured.
+
+    The function NEVER invents a path. Returns ``None`` only when
+    the helper cannot resolve a path AND ``STATE_DIR`` is not
+    importable (a hard misconfiguration). Callers must log a
+    warning when they receive ``None``.
+
+    Returns ``None`` when ``STATE_DIR`` itself is unimportable;
+    callers should treat ``None`` as fail-closed.
+    """
+    state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    if state_root:
+        return state_root
+    try:
+        from .supervisor import RUN_STATE
+        run_state = json.loads(RUN_STATE.read_text())
+        state_root = run_state.get("orchestration_state_root")
+        if state_root:
+            return state_root
+    except (OSError, json.JSONDecodeError):
+        pass
+    # Last resort: the supervisor's own STATE_DIR. This is the
+    # SAME fallback the supervisor's relay invocation uses, so
+    # both code paths now read the same run_context.json.
+    try:
+        from .supervisor import STATE_DIR
+        return str(STATE_DIR)
+    except ImportError:
+        return None
+
+
+def _resolve_orchestration_evidence_root(state_root: Optional[str]) -> str:
+    """Return the orchestration's evidence_root, paired with the
+    state-root resolver above. Falls back to ``<state_root>/evidence``
+    when no explicit ``orchestration_evidence_root`` is recorded.
+    """
+    explicit = os.environ.get("AED_EVIDENCE_ROOT")
+    if explicit:
+        return explicit
+    if state_root:
+        try:
+            from .supervisor import RUN_STATE
+            run_state = json.loads(RUN_STATE.read_text())
+            recorded = run_state.get("orchestration_evidence_root")
+            if recorded:
+                return recorded
+        except (OSError, json.JSONDecodeError):
+            pass
+        return os.path.join(state_root, "evidence")
+    return ""
+
+
 def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
     """Bind the worker push to the orchestration state machine.
 
@@ -257,29 +330,23 @@ def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
     from autocoder_orchestration.controller import Controller
     from autocoder_orchestration.review_repair_relay import RelayLoop
     from autocoder_orchestration.store import StateStore
-    state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    state_root = _resolve_orchestration_state_root()
     if not state_root:
-        # Do NOT default to a shared /tmp path. The shared
-        # path is unsafe (cross-tenant collisions). The
-        # operator MUST configure AED_ORCHESTRATION_STATE_ROOT
-        # explicitly, or the supervisor MUST wire the
-        # orchestration state_root into the supervisor's
-        # run_state.json (orchestration_state_root field).
+        # Fail closed with a visible warning. The supervisor's
+        # heartbeat will retry on the next tick.
         try:
-            from .supervisor import RUN_STATE, supervisor_module_globals
-            supervisor_module_globals()
-            run_state = json.loads(RUN_STATE.read_text())
-            state_root = run_state.get("orchestration_state_root")
-        except (OSError, json.JSONDecodeError, KeyError):
-            state_root = None
-        if not state_root:
-            # No explicit configuration. Mark head_advanced
-            # as a no-op. The operator must configure the
-            # orchestration state root.
-            return
-    evidence_root = os.environ.get("AED_EVIDENCE_ROOT")
-    if not evidence_root:
-        evidence_root = os.path.join(state_root, "evidence")
+            from .supervisor import log
+            log(
+                "warning",
+                "no orchestration state_root resolvable; "
+                "mark_head_advanced is a no-op",
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return
+    evidence_root = _resolve_orchestration_evidence_root(state_root)
     store = StateStore(state_root)
     if not store.read_optional("state.json"):
         # Controller state not initialized yet; nothing

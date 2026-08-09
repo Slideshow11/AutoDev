@@ -2557,49 +2557,30 @@ def _invoke_relay_for_events(
     )
     if not should_invoke_relay(snapshot):
         return "no_action"
-    # Resolve the canonical state and evidence roots. The
-    # supervisor's STATE_DIR is the supervisor's private
-    # state; the orchestration's run context may use a
-    # different state_root. The supervisor must pass the
-    # orchestration's state_root (NOT the supervisor's
-    # STATE_DIR) so the relay CLI's StateStore reads the
-    # same run_context.json the controller wrote. The
-    # lookup order: explicit env var, then
-    # ``<STATE_DIR>/run_state.json`` (the supervisor's
-    # own run-state record), then a derived default.
-    state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    # Resolve the canonical state and evidence roots via the
+    # shared helper in ``relay_wiring``. The helper enforces a
+    # single precedence (env, then RUN_STATE, then STATE_DIR) so
+    # every supervisor/relay boundary reads the same
+    # ``run_context.json``. The previous hand-rolled resolution
+    # here diverged from ``mark_head_advanced_public`` and left
+    # the relay wiring pointing at ``STATE_DIR`` while the head
+    # advance was a silent no-op.
+    from .relay_wiring import (
+        _resolve_orchestration_state_root,
+        _resolve_orchestration_evidence_root,
+    )
+    state_root = _resolve_orchestration_state_root()
     if not state_root:
-        # The supervisor stores its own run_state.json;
-        # the orchestration's state_root is recorded there
-        # when the supervisor hands off. Fall back to the
-        # supervisor's STATE_DIR only as a last resort.
-        try:
-            supervisor_run_state = json.loads(
-                RUN_STATE.read_text()  # type: ignore[name-defined]
-            )
-            state_root = supervisor_run_state.get(
-                "orchestration_state_root"
-            )
-        except (OSError, json.JSONDecodeError):
-            pass
-    if not state_root:
-        state_root = str(STATE_DIR)  # type: ignore[name-defined]
-    evidence_root = os.environ.get("AED_EVIDENCE_ROOT")
-    if not evidence_root:
-        # Use the orchestration's evidence_root if the
-        # supervisor's run_state has it; otherwise derive
-        # from the state_root.
-        try:
-            supervisor_run_state = json.loads(
-                RUN_STATE.read_text()  # type: ignore[name-defined]
-            )
-            evidence_root = supervisor_run_state.get(
-                "orchestration_evidence_root"
-            )
-        except (OSError, json.JSONDecodeError):
-            pass
-    if not evidence_root:
-        evidence_root = str(Path(state_root) / "evidence")
+        # Hard misconfiguration: the helper itself returned
+        # ``None``, which only happens when STATE_DIR cannot be
+        # imported either. Surface the failure to the operator
+        # rather than silently falling back to a stray default.
+        log(
+            "error",
+            "relay_invocation_failed: no orchestration state_root resolvable",
+        )
+        return "no_action"
+    evidence_root = _resolve_orchestration_evidence_root(state_root)
     run_id = os.environ.get(
         "AED_RUN_ID", f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
     )

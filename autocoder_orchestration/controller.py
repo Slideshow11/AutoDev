@@ -164,8 +164,50 @@ class Controller:
         return self._apply(sm, STATE_QUALIFYING_READINESS, ACTOR_CONTROLLER, head_observed=head_observed)
 
     def report_repair_pushed(self, *, head_observed: str) -> StateMachine:
-        """REPAIRING_REVIEW_FINDINGS -> AWAITING_CI."""
+        """REPAIRING_REVIEW_FINDINGS -> AWAITING_CI.
+
+        Safe sequence for head advance:
+
+        1. Validate the head shape and current state.
+        2. Rebind ``context.current_authorized_head`` to the new
+           head via ``with_new_head`` and PERSIST the new context
+           BEFORE the transition. The state-machine's head guard
+           compares the observed head against the persisted
+           authorized head; if the persisted head is stale (still
+           pointing at the pre-push head) the transition will
+           fail with ``InvalidTransition``.
+        3. Apply the transition only after the new context is on
+           disk.
+
+        A failed rebind leaves the run in
+        ``REPAIRING_REVIEW_FINDINGS`` with the original
+        authorized head so the worker can retry. A failed
+        transition leaves the rebind in place; the relay's next
+        round will observe the new head and re-issue the push.
+        """
+        if not isinstance(head_observed, str) or (
+            len(head_observed) != 40 and len(head_observed) != 64
+        ) or not all(c in "0123456789abcdef" for c in head_observed):
+            raise ControllerError(
+                f"head_observed must be 40 or 64 lowercase hex chars: {head_observed!r}"
+            )
         sm = self._require_state_for_event()
+        # Step 2: rebind and persist the new authorized head.
+        # ``with_new_head`` validates the shape and returns a new
+        # RunContext (RunContext is frozen). Reassign
+        # ``self.context`` so the post-transition state machine
+        # is bound to the new head on the next call. Persist the
+        # rebound context BEFORE the transition so the
+        # state-machine's head guard sees a consistent
+        # current_authorized_head.
+        new_context = self.context.with_new_head(head_observed)
+        self.context = new_context
+        self.save_run_context()
+        # Step 3: apply the transition. ``_apply`` uses
+        # ``self.context.current_authorized_head`` as the
+        # required head, so the transition succeeds for the
+        # new head and the persisted context is already
+        # consistent.
         return self._apply(sm, STATE_AWAITING_CI, ACTOR_IMPL_WORKER, head_observed=head_observed)
 
     def record_readiness_certificate(self, cert: ReadinessCertificate, *, head_observed: str) -> StateMachine:

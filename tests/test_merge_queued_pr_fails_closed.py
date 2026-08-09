@@ -545,20 +545,43 @@ class TestServerConfirmedMergeRequiresValidOID:
                     r.stdout = b'{"mergeCommit": null}'
                     r.stderr = b""
                 elif "view" in cmd_str:
-                    # gh pr view (full re-query)
-                    r.returncode = 0
-                    r.stdout = (
-                        b'{"mergedAt": "2026-08-08T00:00:00Z", '
-                        b'"mergeCommit": null, '
-                        b'"state": "merged", '
-                        b'"isDraft": false, '
-                        b'"mergeable": "MERGEABLE", '
-                        b'"mergeStateStatus": "CLEAN", '
-                        b'"headRefOid": "' + main_sha.encode() + b'", '
-                        b'"baseRefName": "main", '
-                        b'"autoMergeRequest": null, '
-                        b'"number": 4}'
-                    )
+                    # gh pr view (full re-query). The
+                    # round-26 P1#4 refetch is the FIRST
+                    # ``pr view`` call (before the merge);
+                    # return the OPEN/CLEAN snapshot so the
+                    # gate passes. The POST-subprocess re-query
+                    # is the SECOND ``pr view`` call (after
+                    # the merge failure); return merged=true so
+                    # the OID-missing path triggers.
+                    if getattr(fake_run, "_view_count", 0) == 0:
+                        fake_run._view_count = 1
+                        r.returncode = 0
+                        r.stdout = (
+                            b'{"mergedAt": null, '
+                            b'"state": "OPEN", '
+                            b'"isDraft": false, '
+                            b'"mergeable": "MERGEABLE", '
+                            b'"mergeStateStatus": "CLEAN", '
+                            b'"headRefOid": "' + main_sha.encode() + b'", '
+                            b'"baseRefName": "main", '
+                            b'"autoMergeRequest": null, '
+                            b'"reviewDecision": "APPROVED", '
+                            b'"number": 4}'
+                        )
+                    else:
+                        r.returncode = 0
+                        r.stdout = (
+                            b'{"mergedAt": "2026-08-08T00:00:00Z", '
+                            b'"mergeCommit": null, '
+                            b'"state": "merged", '
+                            b'"isDraft": false, '
+                            b'"mergeable": "MERGEABLE", '
+                            b'"mergeStateStatus": "CLEAN", '
+                            b'"headRefOid": "' + main_sha.encode() + b'", '
+                            b'"baseRefName": "main", '
+                            b'"autoMergeRequest": null, '
+                            b'"number": 4}'
+                        )
                     r.stderr = b""
                 else:
                     r.returncode = 0
