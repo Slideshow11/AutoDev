@@ -137,7 +137,50 @@ RELAY_SCHEMA_VERSION = "autocoder.review_repair_relay.v1"
 #: invariant the user spelled out: "finding on A -> repaired in B
 #: -> old A finding does not re-enter B directive unless fresh
 #: evidence explicitly reopens it".
-FINDING_LEDGER_SCHEMA_VERSION = "autocoder.finding_ledger.v1"
+FINDING_LEDGER_SCHEMA_VERSION = "autocoder.finding_ledger.v2"
+
+# === Finding lifecycle (round-27) ===
+# A finding's lifecycle is OBSERVED -> DISPATCHED -> ACTIVE -> {SUPERSEDED, REPAIRED}.
+# Round-26 conflated "DISPATCHED" with "addressed": any finding placed in a
+# directive was marked as consumed, so a failed/no-op worker launch (which
+# NEVER addresses the finding) caused the next round to skip it. Round-27
+# explicitly separates the states:
+#
+#   OBSERVED     - finding collected from a live snapshot but no directive yet
+#   DISPATCHED   - finding placed in a directive; worker has not yet responded
+#   ACTIVE       - finding emitted on the SAME head and NOT yet addressed
+#   SUPERSEDED   - head advanced to a new SHA (the relay saw B != A)
+#   REPAIRED     - a fresh evaluation proves the finding no longer applies
+#                  (e.g. comment was resolved upstream, code now satisfies
+#                  the requirement)
+#
+# ``is_fresh`` returns True when the finding should be emitted. The contract:
+#
+#   - No ledger entry for (finding_id, current_head) -> fresh (first sighting)
+#   - Entry's state in {ACTIVE} for current_head -> fresh (still unresolved)
+#   - Entry's state in {SUPERSEDED, REPAIRED} on current_head -> NOT fresh
+#   - Entry's head_sha differs from current_head -> NOT fresh (the head
+#     advanced; the relay must call ``mark_superseded_by_head`` explicitly,
+#     so a state of OBSERVED/DISPATCHED on a stale head is treated as
+#     NOT-fresh ONLY when the caller has advanced the head)
+#
+# A failed worker launch, worker crash, worker timeout, no-op worker, or
+# worker that exits without pushing MUST leave a same-head finding in
+# ACTIVE so the next round re-emits it. The relay must NOT promote
+# DISPATCHED -> REPAIRED on its own; only positive evidence (head advance,
+# explicit resolution, semantic re-evaluation) transitions.
+FINDING_STATE_OBSERVED = "OBSERVED"
+FINDING_STATE_DISPATCHED = "DISPATCHED"
+FINDING_STATE_ACTIVE = "ACTIVE"
+FINDING_STATE_SUPERSEDED = "SUPERSEDED"
+FINDING_STATE_REPAIRED = "REPAIRED"
+ALL_FINDING_STATES = frozenset({
+    FINDING_STATE_OBSERVED,
+    FINDING_STATE_DISPATCHED,
+    FINDING_STATE_ACTIVE,
+    FINDING_STATE_SUPERSEDED,
+    FINDING_STATE_REPAIRED,
+})
 
 #: Severity ranking. P1 must be addressed in the current round; P2
 #: is preferred but not blocking. The classifier treats any
@@ -254,20 +297,33 @@ def _finding_signature(finding: "Finding") -> str:
 # === Finding ledger ===
 
 class FindingLedger:
-    """Durable per-head record of which provider findings were observed.
+    """Durable per-head record of which provider findings have been
+    observed, dispatched, and resolved.
 
-    The relay's collector uses the ledger to filter stale findings
-    out of each new round's directive. A finding whose last
-    signature was observed at the CURRENT head is considered
-    "addressed" (the worker has already seen it on this head) and
-    is suppressed from the directive. A finding whose signature
-    has changed, or whose last observation was on a DIFFERENT
-    head, is "fresh evidence" and is emitted.
+    Round-27 lifecycle (vs round-26's brittle ``is_fresh`` filter):
 
-    Invariant enforced by ``is_fresh``:
-        finding on A -> repaired in B -> old A finding does not
-        re-enter B directive unless fresh evidence explicitly
-        reopens it.
+      OBSERVED    -> DISPATCHED -> ACTIVE -> SUPERSEDED  (head advance)
+                                   \\-> REPAIRED    (semantic re-eval)
+
+    ``is_fresh(finding)`` returns True iff the finding MUST be emitted
+    into the next directive. The rule:
+
+      - No prior entry on the current head -> fresh (first sighting)
+      - Prior entry state == ACTIVE on the current head -> fresh
+      - Prior entry state == SUPERSEDED on the current head -> NOT fresh
+      - Prior entry state == REPAIRED on the current head -> NOT fresh
+      - Prior entry state in {OBSERVED, DISPATCHED} on the current head
+        -> fresh (the worker has not yet responded; the round
+        must re-emit so the failure is visible)
+      - Prior entry is on a DIFFERENT head -> fresh (the head advanced;
+        the relay must first call ``mark_superseded_by_head`` to move
+        stale entries out of ACTIVE before this gate sees them)
+
+    A failed worker launch, worker crash, worker timeout, no-op
+    worker, or worker that exits without pushing MUST leave the
+    same-head finding ACTIVE so the next round re-emits it. The
+    round-26 ledger marked DISPATCHED as consumed and skipped the
+    next round; round-27 explicitly forbids that.
 
     The ledger is persisted as JSONL under the state root so the
     record survives supervisor restarts.
@@ -279,6 +335,11 @@ class FindingLedger:
         *,
         head_sha: str,
     ) -> None:
+        if not isinstance(head_sha, str) or not _HEX_SHA_RE.match(head_sha):
+            raise DirectiveContractError(
+                f"FindingLedger requires a 40/64-char lowercase hex head_sha, "
+                f"got {head_sha!r}"
+            )
         self.store = store
         self.head_sha = head_sha
 
@@ -286,7 +347,7 @@ class FindingLedger:
         return "finding_ledger.jsonl"
 
     def load(self) -> dict:
-        """Return ``{finding_id: {signature, head_sha, ...}}`` for
+        """Return ``{finding_id: {state, signature, head_sha, ...}}`` for
         the last observed entry per finding id.
 
         Missing entries yield an empty dict. Malformed lines are
@@ -301,48 +362,27 @@ class FindingLedger:
                 fid = entry.get("finding_id")
                 if not isinstance(fid, str):
                     continue
+                # Validate the entry shape; skip invalid rows.
+                state = entry.get("state")
+                if state not in ALL_FINDING_STATES:
+                    continue
                 # The last write wins per finding_id.
                 out[fid] = entry
         except (OSError, KeyError, AttributeError):
             return {}
         return out
 
-    def is_fresh(self, finding: "Finding") -> bool:
-        """Return True iff the finding should be emitted into the
-        next directive.
-
-        The rule is:
-
-        - ``head_sha`` differs from the persisted record's last
-          ``head_sha`` -> fresh (the head advanced).
-        - ``signature`` differs from the persisted record's
-          ``signature`` -> fresh (the content changed).
-        - both match -> NOT fresh; the worker already saw this
-          finding on this head and either addressed it or chose
-          not to.
-        - no prior record -> fresh (first sighting).
-        """
+    def _validate_finding(self, finding: Any) -> None:
         if not isinstance(finding, Finding):
             raise DirectiveContractError(
-                f"is_fresh requires a Finding, got {type(finding).__name__}"
+                f"finding must be a Finding, got {type(finding).__name__}"
             )
-        sig = _finding_signature(finding)
-        prior = self.load().get(finding.finding_id)
-        if prior is None:
-            return True
-        prior_sig = prior.get("signature")
-        prior_head = prior.get("head_sha")
-        if prior_sig != sig:
-            return True  # body/title/severity changed — fresh
-        if prior_head != self.head_sha:
-            return True  # head advanced — re-emit on new head
-        return False
 
-    def record(self, finding: "Finding") -> None:
-        """Persist a single observation. The append-only ledger is
-        the durable record of what was emitted on which head.
-        """
-        sig = _finding_signature(finding)
+    def _signature(self, finding: "Finding") -> str:
+        return _finding_signature(finding)
+
+    def _append(self, finding: "Finding", state: str) -> None:
+        sig = self._signature(finding)
         entry = {
             "schema_version": FINDING_LEDGER_SCHEMA_VERSION,
             "finding_id": finding.finding_id,
@@ -350,6 +390,7 @@ class FindingLedger:
             "severity": finding.severity,
             "head_sha": self.head_sha,
             "signature": sig,
+            "state": state,
             "recorded_at": _now_iso(),
         }
         try:
@@ -359,23 +400,300 @@ class FindingLedger:
             # block a round.
             pass
 
+    def is_fresh(self, finding: Any) -> bool:
+        """Return True iff the finding should be emitted into the
+        next directive.
+
+        The rule (round-27):
+
+          - No prior entry on any head with the same signature
+            -> fresh (first sighting).
+          - Prior entry state in {ACTIVE, DISPATCHED,
+            OBSERVED} on the SAME head -> fresh (the worker
+            has not yet responded; the next round must re-emit
+            so the failure is visible).
+          - Prior entry state in {SUPERSEDED, REPAIRED} ANYWHERE
+            with the SAME signature -> NOT fresh. SUPERSEDED
+            is a terminal state across heads (the finding on
+            the old head was promoted because the head
+            advanced; re-emission on the new head requires a
+            different signature, i.e. fresh evidence).
+          - Prior entry state in {SUPERSEDED, REPAIRED} with a
+            DIFFERENT signature -> the old terminal entry
+            does not silence the new finding.
+
+        ``state_of`` returns the canonical entry for the
+        finding on the current head. For the SUPERSEDED-on-
+        old-head case, ``is_fresh`` consults
+        ``latest_terminal_state`` which walks the journal for
+        the strongest terminal state with the same
+        signature (regardless of head).
+        """
+        self._validate_finding(finding)
+        sig = self._signature(finding)
+        prior = self.state_of(finding.finding_id)
+        if prior is not None:
+            prior_sig = prior.get("signature")
+            if prior_sig != sig:
+                # The body/title/severity changed at the same head.
+                # Re-emit as a fresh observation; the prior entry
+                # is no longer authoritative for the same content.
+                return True
+            prior_state = prior.get("state")
+            if prior_state in (FINDING_STATE_SUPERSEDED, FINDING_STATE_REPAIRED):
+                return False
+            # OBSERVED, DISPATCHED, or ACTIVE on the same head with the
+            # same signature -> the finding is still unresolved; emit.
+            return True
+        # No entry on the current head. Check whether a
+        # SUPERSEDED / REPAIRED entry exists for the same
+        # signature on any prior head. If so, the finding was
+        # already resolved on the prior head and the new head
+        # sees the same content as a continuation; the
+        # terminal state shadows across heads.
+        terminal = self.latest_terminal_state(finding.finding_id, sig)
+        if terminal is not None:
+            return False
+        return True
+
+    def latest_terminal_state(
+        self,
+        finding_id: str,
+        signature: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Walk the journal in reverse for the strongest
+        terminal state (SUPERSEDED or REPAIRED) for
+        ``finding_id`` with the matching ``signature``.
+
+        ``is_fresh`` consults this when no entry exists on the
+        current head. A terminal entry on a PRIOR head means
+        the finding has already been resolved at the prior
+        head; the new head should NOT re-emit unless fresh
+        evidence (different signature) is available.
+        """
+        try:
+            rows = list(self.store.read_journal(self._rel_path()))
+        except (OSError, AttributeError):
+            return None
+        for entry in reversed(rows):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("finding_id") != finding_id:
+                continue
+            if entry.get("signature") != signature:
+                continue
+            state = entry.get("state")
+            if state in (FINDING_STATE_SUPERSEDED, FINDING_STATE_REPAIRED):
+                return entry
+        return None
+
+    def record_observed(self, finding: "Finding") -> None:
+        """Mark a finding as OBSERVED on the current head.
+
+        Called when the relay's collector sees the finding in the
+        live snapshot. The finding is NOT yet in a directive.
+        """
+        self._validate_finding(finding)
+        self._append(finding, FINDING_STATE_OBSERVED)
+
+    def record_dispatched(self, finding: "Finding") -> None:
+        """Mark a finding as DISPATCHED on the current head.
+
+        Called when the relay places the finding into a directive.
+        The worker has not yet responded; the next round on the
+        same head MUST still emit the finding (this is the
+        round-26 bug fixed: DISPATCHED is NOT 'consumed').
+        """
+        self._validate_finding(finding)
+        self._append(finding, FINDING_STATE_DISPATCHED)
+
+    def mark_active(self, finding: "Finding") -> None:
+        """Mark a DISPATCHED finding ACTIVE.
+
+        Called when the relay has placed the finding in a directive
+        AND the worker has acknowledged receipt (the worker
+        process is alive and the directive SHA matches). The
+        finding remains ACTIVE until one of:
+
+          - The head advances and ``mark_superseded_by_head``
+            promotes it to SUPERSEDED.
+          - A subsequent evaluation proves the finding no longer
+            applies (resolved upstream) and ``mark_repaired``
+            promotes it to REPAIRED.
+
+        A worker that crashes, times out, or exits without
+        pushing leaves the finding in DISPATCHED -> ACTIVE on
+        the SAME head; the next round re-emits it.
+        """
+        self._validate_finding(finding)
+        self._append(finding, FINDING_STATE_ACTIVE)
+
+    def mark_repaired(
+        self, finding: "Finding", *,
+        resolution_evidence: Optional[str] = None,
+    ) -> None:
+        """Mark a finding as REPAIRED on the current head.
+
+        Called when positive evidence proves the finding no
+        longer applies (e.g. CodeRabbit marked the thread
+        resolved, the CI failure cleared with the same
+        signature, or the file under review was rewritten to
+        satisfy the requirement). The ``resolution_evidence``
+        argument is recorded in the journal for audit.
+
+        REPAIRED is a terminal state for the SAME HEAD. A
+        re-introduction of the SAME finding (same signature) at
+        the same head does not happen by design — if the body
+        changed the signature differs and ``is_fresh`` returns
+        True. A re-introduction at a DIFFERENT head is a new
+        finding on a new head and starts at OBSERVED.
+        """
+        self._validate_finding(finding)
+        sig = self._signature(finding)
+        entry = {
+            "schema_version": FINDING_LEDGER_SCHEMA_VERSION,
+            "finding_id": finding.finding_id,
+            "source": finding.source,
+            "severity": finding.severity,
+            "head_sha": self.head_sha,
+            "signature": sig,
+            "state": FINDING_STATE_REPAIRED,
+            "resolution_evidence": resolution_evidence or "",
+            "recorded_at": _now_iso(),
+        }
+        try:
+            self.store.append_journal(self._rel_path(), entry)
+        except (OSError, AttributeError):
+            pass
+
+    def mark_superseded_by_head(self, old_head_sha: str) -> int:
+        """Mark every ACTIVE finding on ``old_head_sha`` as
+        SUPERSEDED.
+
+        Called when the supervisor observes the worker push and
+        the head advances from ``old_head_sha`` to a new SHA.
+        The ledger rewrites every ACTIVE / DISPATCHED / OBSERVED
+        entry for ``old_head_sha`` to SUPERSEDED. SUPERSEDED is
+        a terminal state on that head.
+
+        Returns the number of entries that were promoted.
+
+        The function NEVER deletes entries; it APPENDS the new
+        SUPERSEDED rows to the append-only JSONL journal. The
+        ``load`` helper keeps the LAST write per finding_id, so
+        the SUPERSEDED row shadows the prior entry. The journal
+        remains a valid JSONL for ``read_journal``.
+        """
+        if not isinstance(old_head_sha, str) or not _HEX_SHA_RE.match(old_head_sha):
+            raise DirectiveContractError(
+                f"mark_superseded_by_head requires a hex head_sha, "
+                f"got {old_head_sha!r}"
+            )
+        try:
+            rows = list(self.store.read_journal(self._rel_path()))
+        except (OSError, AttributeError):
+            return 0
+        if not rows:
+            return 0
+        # Walk the journal in order; for each finding_id on the
+        # old head, append a SUPERSEDED row that shadows the
+        # prior entry. ``load`` returns the last write per
+        # finding_id, so the shadow takes effect immediately.
+        # We compute the per-finding latest entry first to
+        # avoid stacking multiple SUPERSEDED rows for the same
+        # finding (idempotent promotion).
+        latest_per_id: Dict[str, Dict[str, Any]] = {}
+        for entry in rows:
+            if not isinstance(entry, dict):
+                continue
+            fid = entry.get("finding_id")
+            if not isinstance(fid, str):
+                continue
+            latest_per_id[fid] = entry
+        promoted = 0
+        for fid, entry in latest_per_id.items():
+            if entry.get("head_sha") != old_head_sha:
+                continue
+            if entry.get("state") not in (
+                FINDING_STATE_ACTIVE,
+                FINDING_STATE_DISPATCHED,
+                FINDING_STATE_OBSERVED,
+            ):
+                continue
+            superseded = dict(entry)
+            superseded["state"] = FINDING_STATE_SUPERSEDED
+            superseded["superseded_at"] = _now_iso()
+            try:
+                self.store.append_journal(self._rel_path(), superseded)
+                promoted += 1
+            except (OSError, AttributeError):
+                # Ledger writes are advisory; do not block the
+                # controller on a journal write failure.
+                pass
+        return promoted
+
+    def state_of(self, finding_id: str) -> Optional[Dict[str, Any]]:
+        """Return the canonical ledger entry for ``finding_id`` on
+        the current head, or ``None`` if the finding has no entry.
+
+        Round-27: prefers the latest NON-OBSERVED entry. OBSERVED
+        is the weakest state (the relay has seen the finding in
+        a snapshot but no directive yet); if a stronger state
+        (DISPATCHED, ACTIVE, REPAIRED, SUPERSEDED) exists for
+        the same finding on the same head, that stronger state is
+        the canonical one and ``is_fresh`` / ``filter_findings_to_current_head``
+        MUST consult it.
+        """
+        prior = self.load().get(finding_id)
+        if prior is None:
+            return None
+        if prior.get("head_sha") != self.head_sha:
+            return None
+        # ``load`` returns the last write per finding_id; if the
+        # last write is OBSERVED but an earlier write is a
+        # stronger state, ``load`` does not surface it. Walk the
+        # journal in reverse to find the canonical entry.
+        if prior.get("state") != FINDING_STATE_OBSERVED:
+            return prior
+        try:
+            rows = list(self.store.read_journal(self._rel_path()))
+        except (OSError, AttributeError):
+            return prior
+        for entry in reversed(rows):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("finding_id") != finding_id:
+                continue
+            if entry.get("head_sha") != self.head_sha:
+                continue
+            state = entry.get("state")
+            if state not in ALL_FINDING_STATES:
+                continue
+            if state != FINDING_STATE_OBSERVED:
+                return entry
+        return prior
+
 
 def filter_findings_to_current_head(
     findings: List["Finding"],
     ledger: FindingLedger,
 ) -> List["Finding"]:
-    """Drop findings already observed on the current head.
+    """Apply the round-27 lifecycle filter.
 
     The relay's ``collect_findings`` still emits ALL findings
     from the live snapshot; this filter applies the ledger's
-    current-head rule. Findings are not mutated, only removed.
+    current-head rule (see ``FindingLedger.is_fresh`` for the
+    full lifecycle). Findings whose prior entry on the current
+    head is ``SUPERSEDED`` or ``REPAIRED`` are dropped; findings
+    whose prior entry is ``OBSERVED``, ``DISPATCHED``, or
+    ``ACTIVE`` are kept (the worker has not yet responded or
+    the finding is still open).
 
-    CI findings (``check_name``) are filtered using the same
-    ledger path: a CI check that was failing on head A and is
-    still failing on head B is considered fresh for head B
-    (the head advanced, so the worker must re-attempt); a CI
-    check that is green on B is no longer a finding at all and
-    is removed upstream by ``_collect_ci_findings``.
+    Side effects: every surviving finding is recorded as
+    ``OBSERVED`` on the current head so the next round's
+    lifecycle has a fresh entry to compare against. ``ACTIVE``
+    and ``DISPATCHED`` transitions are written explicitly by
+    ``run_once`` when the directive is built.
     """
     out: List["Finding"] = []
     for f in findings:
@@ -383,6 +701,7 @@ def filter_findings_to_current_head(
             continue
         if ledger.is_fresh(f):
             out.append(f)
+            ledger.record_observed(f)
     return out
 
 
@@ -1605,15 +1924,18 @@ class RelayLoop:
             directive_store=self.directive_store,
             finding_ledger=finding_ledger,
         )
-        # Record the findings we actually emitted into this
-        # round's directive. The ledger is the durable proof
-        # that a finding was observed on this head; the next
-        # round's filter consults it. CI findings are recorded
-        # too so a check that is failing on head A but
-        # unrelated to the directive is still tracked.
+        # Record the findings we just placed into a directive as
+        # ``DISPATCHED`` on the current head. The ledger is the
+        # durable proof that the directive was issued; the next
+        # round on the same head will re-emit (round-27 invariant:
+        # DISPATCHED is NOT consumed). CI findings are recorded
+        # too so a check that is failing on head A but unrelated
+        # to the directive is still tracked. ``filter_findings_to_current_head``
+        # already wrote OBSERVED for every surviving finding; the
+        # DISPATCHED row is the next state transition.
         if decision.directive is not None:
             for f in decision.directive.findings:
-                finding_ledger.record(f)
+                finding_ledger.record_dispatched(f)
         # Persist the round transcript. The ``head_sha_after``
         # field stays ``None`` until the worker pushes and the
         # next round sees the new head; that is the head-change
@@ -1804,6 +2126,17 @@ class RelayLoop:
         REPAIRING_REVIEW_FINDINGS round and the new
         AWAITING_CI observation.
 
+        Round-27: the finding ledger is advanced too.
+        Every ACTIVE / DISPATCHED / OBSERVED entry for the
+        old head is rewritten to SUPERSEDED on the new head.
+        SUPERSEDED is a terminal state for that head; the
+        next round on the new head evaluates each finding
+        from scratch (a finding with the same signature is
+        NOT re-emitted at the new head because the ledger
+        marks it SUPERSEDED; a finding with a different
+        signature — body edit, new code under review — is
+        emitted because the signature differs).
+
         The transition is conditional: if the controller
         is not in REPAIRING_REVIEW_FINDINGS, the
         transition is a no-op (the controller may have
@@ -1813,10 +2146,22 @@ class RelayLoop:
         """
         if new_head_sha == old_head_sha:
             return
+        # Round-27: advance the finding ledger so the prior
+        # head's findings are not re-emitted on the new head
+        # unless fresh evidence explicitly reopens them.
+        old_ledger = FindingLedger(self.store, head_sha=old_head_sha)
+        promoted = old_ledger.mark_superseded_by_head(old_head_sha)
+        log_attr = getattr(self.controller, "log", None)
+        if log_attr is not None and promoted:
+            log_attr(
+                "info",
+                "relay promoted findings to SUPERSEDED on head advance",
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                promoted_count=promoted,
+            )
         result = self.controller.report_repair_pushed(
             head_observed=new_head_sha,
         )
-        log_attr = getattr(self.controller, "log", None)
         if log_attr is not None:
             log_attr(
                 "info",
@@ -1848,11 +2193,18 @@ class RelayLoop:
 
 
 __all__ = [
+    "ALL_FINDING_STATES",
     "ALL_SEVERITIES",
     "DEFAULT_MAX_ROUNDS",
     "DirectiveContractError",
     "DirectiveStore",
     "EscalateToHuman",
+    "FINDING_LEDGER_SCHEMA_VERSION",
+    "FINDING_STATE_ACTIVE",
+    "FINDING_STATE_DISPATCHED",
+    "FINDING_STATE_OBSERVED",
+    "FINDING_STATE_REPAIRED",
+    "FINDING_STATE_SUPERSEDED",
     "Finding",
     "FindingLedger",
     "InvalidSnapshot",

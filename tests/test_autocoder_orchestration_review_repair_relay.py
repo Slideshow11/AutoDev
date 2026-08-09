@@ -1564,27 +1564,16 @@ class TestLaunchWorkerDoesNotTransition:
     ) -> None:
         """A launch failure leaves the state machine in
         REPAIRING_REVIEW_FINDINGS. The run is recoverable. The
-        next round is allowed to run again, but the
-        current-head ledger prevents the SAME finding from
-        re-entering the directive until fresh evidence
-        reopens it (a body edit, a new comment, or a head
-        advance).
+        next round is allowed to run again.
 
-        Before the ledger (round-26 P1#2) the second round on
-        the same head produced another ``launch_worker``
-        decision with the same finding, which looped the
-        worker forever. The new contract is: the second
-        round returns ``enter_qualifying_readiness`` because
-        the same finding has already been emitted on this
-        head. The relay records that the head is clean of
-        FRESH findings and advances the state machine to
-        ``QUALIFYING_READINESS`` via the canonical
-        ``evaluate_round`` path. The operator can then
-        decide whether the readiness certificate can be
-        issued.
+        Round-27 contract: the SAME finding remains ACTIVE in
+        the ledger and is re-emitted into a new directive on
+        every round the worker has not responded with positive
+        resolution. qualification is impossible while ACTIVE
+        findings exist on the same head.
         """
         from autocoder_orchestration.state_machine import (
-            STATE_QUALIFYING_READINESS, STATE_REPAIRING_REVIEW_FINDINGS,
+            STATE_REPAIRING_REVIEW_FINDINGS,
         )
         loop, controller = self._setup_loop(tmp_path)
         # The relay decides launch_worker.
@@ -1601,27 +1590,27 @@ class TestLaunchWorkerDoesNotTransition:
         # REPAIRING_REVIEW_FINDINGS.
         sm_after = controller.load_state_machine()
         assert sm_after.current_state == STATE_REPAIRING_REVIEW_FINDINGS
-        # The next round on the same head returns
-        # enter_qualifying_readiness because the same
-        # finding is already on the ledger for this head.
+        # The next round on the same head MUST re-emit the
+        # finding because DISPATCHED is not consumed. The
+        # action is launch_worker (NOT enter_qualifying_readiness —
+        # that was the round-26 bug).
         decision2 = loop.run_once(
             snapshot,
             head_sha="a" * 40,
             repo="owner/repo",
             pr_number=4,
         )
-        assert decision2.action == "enter_qualifying_readiness", (
-            f"second round on the same head must return "
-            f"enter_qualifying_readiness (ledger suppresses "
-            f"the already-emitted finding); got {decision2.action!r}"
+        assert decision2.action == "launch_worker", (
+            f"round-27: ACTIVE finding on same head MUST be "
+            f"re-emitted; got {decision2.action!r}"
         )
-        # The state machine has advanced to QUALIFYING_READINESS
-        # — the relay signals "head is clean of fresh findings"
-        # and the operator can issue a readiness certificate.
+        # The state machine is still REPAIRING_REVIEW_FINDINGS
+        # — the controller waits for a positive head advance or
+        # operator intervention.
         sm_after2 = controller.load_state_machine()
-        assert sm_after2.current_state == STATE_QUALIFYING_READINESS, (
-            f"after the second round, the state MUST advance to "
-            f"QUALIFYING_READINESS; got {sm_after2.current_state!r}"
+        assert sm_after2.current_state == STATE_REPAIRING_REVIEW_FINDINGS, (
+            f"while ACTIVE findings exist, the state must remain "
+            f"in REPAIRING_REVIEW_FINDINGS; got {sm_after2.current_state!r}"
         )
 
 
@@ -1761,26 +1750,105 @@ class TestMarkHeadAdvancedRebindsContext:
         ctx = RunContext.from_dict(ctx_payload)
         assert ctx.current_authorized_head == "a" * 40
 
+    def test_persistence_failure_leaves_disk_and_memory_on_old_head(
+        self, tmp_path
+    ) -> None:
+        """Round-27 P1#5 atomicity: a failed rebind persistence
+        MUST leave the run in a consistent state on disk AND in
+        memory. ``self.context.current_authorized_head`` MUST
+        remain on the OLD head; the on-disk ``run_context.json``
+        MUST also remain on the OLD head; no state-machine
+        transition may fire.
+
+        The injection point is ``save_run_context`` (the hook
+        called BEFORE ``self.context`` is mutated). We mock it
+        to raise ``OSError`` and assert the post-state.
+        """
+        from autocoder_orchestration.context import RunContext
+        from autocoder_orchestration.state_machine import (
+            STATE_AWAITING_CI,
+            STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        loop, controller, store, _run_id = self._setup_loop(tmp_path)
+        # Capture the pre-state.
+        original_disk = store.read_optional("run_context.json")
+        original_in_memory = controller.context.current_authorized_head
+        original_sm = controller.load_state_machine()
+        assert original_disk is not None
+        assert original_disk["current_authorized_head"] == original_in_memory
+        # Inject a save_run_context_for failure. The rebind
+        # sequence MUST catch the OSError and leave ``self.context``
+        # untouched; in-memory and disk MUST both still be on
+        # the OLD head.
+        original_save = controller.save_run_context_for
+        def failing_save(_context):
+            raise OSError("disk full — persistence failed")
+        # Replace the method on the instance (round-27 hook).
+        controller.save_run_context_for = failing_save  # type: ignore[assignment]
+        try:
+            with pytest.raises(OSError):
+                loop.mark_head_advanced("a" * 40, "b" * 40)
+        finally:
+            controller.save_run_context_for = original_save  # type: ignore[assignment]
+        # In-memory context: still bound to OLD head (a*40).
+        assert controller.context.current_authorized_head == "a" * 40, (
+            f"on persistence failure, self.context MUST remain "
+            f"on the OLD head; got "
+            f"{controller.context.current_authorized_head!r}"
+        )
+        # On-disk context: still bound to OLD head (a*40).
+        disk_after = store.read_optional("run_context.json")
+        assert disk_after is not None
+        assert disk_after["current_authorized_head"] == "a" * 40, (
+            f"on persistence failure, disk MUST remain on the OLD "
+            f"head; got {disk_after['current_authorized_head']!r}"
+        )
+        # State machine: still REPAIRING_REVIEW_FINDINGS — the
+        # transition did NOT fire because the persistence
+        # failed BEFORE ``self.context`` was mutated.
+        sm_after = controller.load_state_machine()
+        assert sm_after.current_state == STATE_REPAIRING_REVIEW_FINDINGS, (
+            f"on persistence failure, state MUST remain in "
+            f"REPAIRING_REVIEW_FINDINGS; got {sm_after.current_state!r}"
+        )
+        # The original (pre-failure) disk content is byte-equal.
+        assert disk_after == original_disk, (
+            "on persistence failure, disk MUST be byte-equal to "
+            "the pre-call content"
+        )
+
 
 class TestFindingLedger:
-    """Round-26 P1#2: ``FindingLedger`` enforces the user's
-    invariant on the current review head.
+    """Round-27 P1#1: ``FindingLedger`` enforces the lifecycle
+    contract.
 
     Invariant:
-      finding on A -> repaired in B -> old A finding does not
-      re-enter B directive unless fresh evidence explicitly
-      reopens it.
+      OBSERVED    -> DISPATCHED -> ACTIVE -> SUPERSEDED  (head advance)
+                                   \\-> REPAIRED    (semantic re-eval)
 
-    The ledger is the durable JSONL record of every finding
-    that was emitted into a directive, bound to the exact
-    ``head_sha`` it was emitted on. ``is_fresh`` decides
-    whether a finding should re-enter the directive on the
-    next round:
+    ``is_fresh(finding)`` returns True iff the finding MUST be
+    emitted into the next directive. The rule:
 
-    - same head, same signature -> NOT fresh (already emitted)
-    - different head, same signature -> fresh (head advanced)
-    - same head, different signature -> fresh (body edited)
-    - no prior record -> fresh (first sighting)
+      - No prior entry on the current head -> fresh (first sighting)
+      - Prior entry state in {OBSERVED, DISPATCHED, ACTIVE}
+        on the current head -> fresh (still unresolved; the
+        worker has not yet responded, or the directive was
+        emitted but no positive evidence exists that the
+        finding is resolved)
+      - Prior entry state in {SUPERSEDED, REPAIRED} on the
+        current head -> NOT fresh (terminal states)
+      - Prior entry is on a DIFFERENT head -> fresh (the head
+        advanced; the relay must call
+        ``mark_superseded_by_head`` to promote the prior entry
+        explicitly, otherwise the prior remains authoritative
+        only for its own head)
+
+    Round-27 invariant: a failed worker launch, worker crash,
+    worker timeout, no-op worker, or worker that exits without
+    pushing MUST leave the same-head finding in DISPATCHED /
+    ACTIVE so the next round re-emits it. Round-26 conflated
+    DISPATCHED with "consumed"; that contract is now
+    explicitly forbidden.
     """
 
     def _setup(self, tmp_path):
@@ -1815,37 +1883,135 @@ class TestFindingLedger:
         f = self._finding()
         assert ledger.is_fresh(f) is True
 
-    def test_same_head_same_signature_is_suppressed(self, tmp_path) -> None:
+    def test_observed_then_dispatched_then_active_keeps_fresh(self, tmp_path) -> None:
+        """Round-27: a finding placed in a directive and
+        acknowledged by the worker is still ACTIVE on the same
+        head. ``is_fresh`` returns True so the next round on
+        the same head re-emits it (round-26 bug fix).
+        """
         ledger, _store = self._setup(tmp_path)
         f = self._finding()
-        ledger.record(f)
-        # Same head, same body -> not fresh.
+        ledger.record_observed(f)
+        ledger.record_dispatched(f)
+        ledger.mark_active(f)
+        # Same head, same body -> STILL fresh (active, not resolved).
+        assert ledger.is_fresh(self._finding()) is True, (
+            "DISPATCHED/ACTIVE MUST NOT suppress the next-round emit; "
+            "the worker has not yet responded with positive resolution"
+        )
+
+    def test_dispatched_alone_keeps_fresh(self, tmp_path) -> None:
+        """Even without ACTIVE promotion, the round-27 ledger
+        keeps DISPATCHED fresh so a worker that never even
+        acknowledged the directive is re-emitted on the next
+        round.
+        """
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding()
+        ledger.record_observed(f)
+        ledger.record_dispatched(f)
+        assert ledger.is_fresh(self._finding()) is True
+
+    def test_observed_alone_keeps_fresh(self, tmp_path) -> None:
+        """An OBSERVED entry on the same head is still fresh —
+        the directive has not even been built yet.
+        """
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding()
+        ledger.record_observed(f)
+        assert ledger.is_fresh(self._finding()) is True
+
+    def test_superseded_is_not_fresh(self, tmp_path) -> None:
+        """A finding SUPERSEDED on the current head is NOT fresh.
+        The head advanced and the relay rewrote the entry to
+        SUPERSEDED.
+        """
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding()
+        ledger.record_observed(f)
+        ledger.record_dispatched(f)
+        ledger.mark_active(f)
+        promoted = ledger.mark_superseded_by_head("a" * 40)
+        assert promoted >= 1
+        # Same head + SUPERSEDED -> NOT fresh.
+        assert ledger.is_fresh(self._finding()) is False
+
+    def test_repaired_is_not_fresh(self, tmp_path) -> None:
+        """A finding REPAIRED on the current head is NOT fresh.
+        The repair evidence proves the finding no longer applies.
+        """
+        ledger, _store = self._setup(tmp_path)
+        f = self._finding()
+        ledger.record_observed(f)
+        ledger.record_dispatched(f)
+        ledger.mark_active(f)
+        ledger.mark_repaired(f, resolution_evidence="upstream resolved")
         assert ledger.is_fresh(self._finding()) is False
 
     def test_head_advance_re_emits_same_finding(self, tmp_path) -> None:
-        """The worker pushed a new commit (head A -> head B). The
-        same comment body re-appears in the snapshot for B. The
-        ledger MUST consider this fresh so the directive on B
-        addresses it (the worker did the work, but the relay
-        should still re-offer the finding for visibility).
+        """The worker pushed a new commit (head A -> head B).
+        Round-27 contract: the OLD head's findings are NOT
+        automatically re-emitted on the new head; the relay
+        must first call ``mark_superseded_by_head`` to promote
+        them. Before that call, the prior entry is on the
+        OLD head and ``is_fresh`` returns True on the NEW
+        head (different head_sha).
         """
         from autocoder_orchestration.review_repair_relay import FindingLedger
         from autocoder_orchestration.store import StateStore
         store = StateStore(str(tmp_path / "state"))
         ledger_a = FindingLedger(store, head_sha="a" * 40)
         f = self._finding()
-        ledger_a.record(f)
-        # New head B; same ledger file (same store) -> fresh.
+        ledger_a.record_observed(f)
+        ledger_a.record_dispatched(f)
+        # New head B; same ledger file -> fresh (different head).
         ledger_b = FindingLedger(store, head_sha="b" * 40)
         assert ledger_b.is_fresh(self._finding()) is True
 
+    def test_head_advance_with_supersede_is_not_fresh(self, tmp_path) -> None:
+        """Once ``mark_superseded_by_head`` has promoted the
+        prior head's entries to SUPERSEDED, the new head
+        evaluates each finding from scratch. A finding whose
+        signature matches the SUPERSEDED row on the prior
+        head is NOT fresh (terminal). A finding whose
+        signature differs IS fresh (new evidence at the new
+        head).
+        """
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        # The finding was ACTIVE on the OLD head (the worker
+        # had acknowledged it but had not yet resolved it
+        # when the head advanced). ``mark_superseded_by_head``
+        # is called with the OLD head, not the new head.
+        old_head = "a" * 40
+        new_head = "b" * 40
+        ledger_a = FindingLedger(store, head_sha=old_head)
+        f = self._finding()
+        ledger_a.record_observed(f)
+        ledger_a.record_dispatched(f)
+        ledger_a.mark_active(f)
+        promoted = ledger_a.mark_superseded_by_head(old_head)
+        assert promoted == 1
+        # On the new head, same signature -> NOT fresh (the
+        # SUPERSEDED row on the prior head shadows it).
+        ledger_b = FindingLedger(store, head_sha=new_head)
+        assert ledger_b.is_fresh(self._finding()) is False
+        # On the new head, different signature -> fresh (new
+        # evidence at the new head).
+        assert ledger_b.is_fresh(self._finding(body="new body")) is True
+
     def test_body_edit_reopens_finding(self, tmp_path) -> None:
         """A CodeRabbit edit to the same comment MUST reopen
-        the finding (different signature).
+        the finding (different signature) on the same head.
+        Round-27: a body edit while SUPERSEDED does not
+        reopen; a body edit while ACTIVE does.
         """
         ledger, _store = self._setup(tmp_path)
         f = self._finding()
-        ledger.record(f)
+        ledger.record_observed(f)
+        ledger.record_dispatched(f)
+        ledger.mark_active(f)
         edited = self._finding(body="Edited body")
         assert ledger.is_fresh(edited) is True
 
@@ -1854,7 +2020,9 @@ class TestFindingLedger:
         """
         ledger, _store = self._setup(tmp_path)
         f = self._finding(severity="P2")
-        ledger.record(f)
+        ledger.record_observed(f)
+        ledger.record_dispatched(f)
+        ledger.mark_active(f)
         promoted = self._finding(severity="P1")
         assert ledger.is_fresh(promoted) is True
 
@@ -1867,37 +2035,95 @@ class TestFindingLedger:
         store = StateStore(str(tmp_path / "state"))
         ledger1 = FindingLedger(store, head_sha="a" * 40)
         f = self._finding()
-        ledger1.record(f)
+        ledger1.record_observed(f)
+        ledger1.record_dispatched(f)
+        ledger1.mark_active(f)
         # Simulate restart: fresh ledger, same store.
         ledger2 = FindingLedger(store, head_sha="a" * 40)
-        assert ledger2.is_fresh(self._finding()) is False
+        # Round-27: ACTIVE on the same head IS fresh (the worker
+        # has not yet responded). The next round re-emits.
+        assert ledger2.is_fresh(self._finding()) is True
 
-    def test_filter_drops_already_emitted(self, tmp_path) -> None:
+    def test_filter_drops_superseded_and_repaired_keeps_active(self, tmp_path) -> None:
         """``filter_findings_to_current_head`` removes findings
-        the ledger has already observed at the current head.
+        the ledger has marked SUPERSEDED or REPAIRED on the
+        CURRENT head, but keeps ACTIVE findings so the next
+        round re-emits them.
+
+        ``mark_superseded_by_head`` is called with an OLD
+        head to simulate head advance; ``filter_findings_to_current_head``
+        is then called with the NEW head as the current head.
         """
         from autocoder_orchestration.review_repair_relay import (
             filter_findings_to_current_head,
         )
-        ledger, _store = self._setup(tmp_path)
+        # Use the round-27 lifecycle: build the ledger on the
+        # OLD head, mark supersede, then evaluate against the
+        # NEW head.
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        old_head = "a" * 40
+        new_head = "b" * 40
+        ledger_a = FindingLedger(store, head_sha=old_head)
         a = self._finding(finding_id="coderabbit:1", comment_id=1)
         b = self._finding(finding_id="coderabbit:2", comment_id=2)
-        ledger.record(a)
-        out = filter_findings_to_current_head([a, b], ledger)
-        # ``a`` is on the ledger (same head, same sig) so
-        # it is dropped; ``b`` is a first sighting so kept.
+        c = self._finding(finding_id="coderabbit:3", comment_id=3)
+        # ``a`` is ACTIVE on the OLD head (worker not done).
+        # It is NOT yet terminal. After head advance it stays
+        # ACTIVE on the new head (the same finding is still
+        # open at the new head until REPAIRED or SUPERSEDED).
+        ledger_a.record_observed(a)
+        ledger_a.record_dispatched(a)
+        ledger_a.mark_active(a)
+        # ``b`` is REPAIRED on the OLD head -> terminal.
+        ledger_a.record_observed(b)
+        ledger_a.record_dispatched(b)
+        ledger_a.mark_active(b)
+        ledger_a.mark_repaired(b, resolution_evidence="upstream resolved")
+        # ``c`` is SUPERSEDED on the OLD head -> terminal.
+        ledger_a.record_observed(c)
+        ledger_a.record_dispatched(c)
+        ledger_a.mark_active(c)
+        promoted = ledger_a.mark_superseded_by_head(old_head)
+        assert promoted == 2, (
+            f"mark_superseded_by_head MUST promote ACTIVE + DISPATCHED "
+            f"entries for the OLD head; got promoted={promoted}"
+        )
+        # Now construct a ledger at the NEW head and run the
+        # filter. ``a`` was promoted by the supersede call —
+        # so ``a`` is now SUPERSEDED too. To test that ACTIVE
+        # findings survive, we add a NEW ACTIVE finding on
+        # the new head.
+        ledger_b = FindingLedger(store, head_sha=new_head)
+        d = self._finding(finding_id="coderabbit:4", comment_id=4, body="active on new head")
+        ledger_b.record_observed(d)
+        ledger_b.record_dispatched(d)
+        ledger_b.mark_active(d)
+        out = filter_findings_to_current_head([a, b, c, d], ledger_b)
         ids = {f.finding_id for f in out}
-        assert ids == {"coderabbit:2"}
+        # Only ``d`` (ACTIVE on the new head) is re-emitted.
+        assert ids == {"coderabbit:4"}, (
+            f"only ACTIVE findings on the current head should be "
+            f"re-emitted; got {ids}"
+        )
 
     def test_collect_findings_accepts_ledger(self, tmp_path) -> None:
         """``collect_findings`` with a ``ledger`` kwarg MUST
-        apply the filter internally.
+        apply the filter internally. Round-27: a fresh
+        finding is still emitted; an ACTIVE finding on the
+        head is re-emitted (the worker has not responded).
         """
-        from autocoder_orchestration.review_repair_relay import collect_findings
+        from autocoder_orchestration.review_repair_relay import (
+            collect_findings, filter_findings_to_current_head,
+        )
         ledger, _store = self._setup(tmp_path)
         a = self._finding(finding_id="coderabbit:1", comment_id=1)
         b = self._finding(finding_id="coderabbit:2", comment_id=2)
-        ledger.record(a)
+        # ``a`` recorded as ACTIVE -> kept (re-emit on the next round).
+        ledger.record_observed(a)
+        ledger.record_dispatched(a)
+        ledger.mark_active(a)
         snap = {
             "head_sha": "a" * 40,
             "head_match": True,
@@ -1913,14 +2139,14 @@ class TestFindingLedger:
         }
         out = collect_findings(snap, ledger=ledger)
         ids = {f.finding_id for f in out}
-        # Only the unrecorded finding is emitted.
-        assert "coderabbit:2" in ids
-        # And the recorded one is suppressed (same head + body).
-        # We check via filter directly because the provider
-        # collector may classify severity differently.
-        from autocoder_orchestration.review_repair_relay import filter_findings_to_current_head
+        # ``a`` was ACTIVE -> emitted; ``b`` is first sighting -> emitted.
+        assert "coderabbit:1" in ids and "coderabbit:2" in ids, (
+            f"both ACTIVE and fresh findings must be emitted; got {ids}"
+        )
+        # And filter_findings_to_current_head returns both for
+        # the same input set.
         out2 = filter_findings_to_current_head([a, b], ledger)
-        assert {f.finding_id for f in out2} == {"coderabbit:2"}
+        assert {f.finding_id for f in out2} == {"coderabbit:1", "coderabbit:2"}
 
     def test_invalid_input_raises(self, tmp_path) -> None:
         """``is_fresh`` MUST reject non-Finding input rather
@@ -1941,10 +2167,275 @@ class TestFindingLedger:
             with pytest.raises(DirectiveContractError):
                 ledger.is_fresh(bad)
 
+    def test_mark_superseded_is_idempotent(self, tmp_path) -> None:
+        """Calling ``mark_superseded_by_head`` twice for the
+        same head MUST NOT stack duplicate SUPERSEDED rows.
+        The second call is a no-op.
+        """
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        ledger = FindingLedger(store, head_sha="a" * 40)
+        f = self._finding()
+        ledger.record_observed(f)
+        ledger.record_dispatched(f)
+        ledger.mark_active(f)
+        first = ledger.mark_superseded_by_head("a" * 40)
+        second = ledger.mark_superseded_by_head("a" * 40)
+        assert first == 1 and second == 0, (
+            f"supersede must be idempotent; got first={first}, second={second}"
+        )
+
+    def test_invalid_head_sha_raises(self, tmp_path) -> None:
+        """``FindingLedger`` rejects non-hex head_sha at
+        construction time so a wrong head never silently
+        persists a finding on the wrong ledger.
+        """
+        from autocoder_orchestration.review_repair_relay import (
+            DirectiveContractError, FindingLedger,
+        )
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        for bad in (None, "", "not-hex", "A" * 40, 1234):
+            with pytest.raises((DirectiveContractError, TypeError)):
+                FindingLedger(store, head_sha=bad)
+
+
+class TestFindingLedgerLifecycleInvariant:
+    """Round-27 P1#1 user-specified tests: the lifecycle
+    contract is enforced at the directive level, not the
+    ledger level alone. The relay MUST NOT mark a finding
+    consumed merely because a directive was emitted.
+
+    Three scenarios from the user's spec:
+
+      1. Head A has F -> directive created -> worker launch
+         fails -> next round on A STILL contains F ->
+         qualification is impossible.
+      2. Head A has F -> worker launches but pushes nothing
+         -> next round on A STILL contains F.
+      3. Head A has F -> worker pushes B -> A/F may now be
+         treated as superseded subject to fresh B evidence.
+    """
+
+    def _setup_loop(self, tmp_path):
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.context import make_run_context
+        from autocoder_orchestration.review_repair_relay import (
+            DirectiveStore, FindingLedger, RelayLoop,
+        )
+        from autocoder_orchestration.state_machine import (
+            StateMachine, STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        ctx = make_run_context(
+            run_id="lifecycle-test",
+            repo_owner="owner", repo_name="repo",
+            local_checkout=str(tmp_path), base_branch="main",
+            authorized_base_sha="a" * 64, feature_branch="feat/test",
+            pr_number=4, current_authorized_head="a" * 40,
+            task_specification_path=_tmp_task_spec_path(tmp_path),
+            task_specification_sha256="b" * 64,
+            required_ci_jobs=[], implementation_worker_command=[],
+            evidence_root=str(tmp_path / "evidence"),
+            state_root=str(tmp_path / "state"),
+        )
+        store.write_atomic("run_context.json", ctx.to_dict())
+        sm = StateMachine(current_state=STATE_REPAIRING_REVIEW_FINDINGS)
+        store.write_atomic("state.json", sm.to_dict())
+        controller = Controller(context=ctx, store=store)
+        directive_store = DirectiveStore(
+            store=store, evidence_root=str(tmp_path / "evidence"),
+        )
+        loop = RelayLoop(
+            context=ctx, store=store, directive_store=directive_store,
+            controller=controller, required_check_names=(),
+        )
+        return loop, store
+
+    def _snap_with_finding(self, head_sha, finding_id, body):
+        return {
+            "head_sha": head_sha, "head_match": True,
+            "review_comments": [], "issue_comments": [],
+            "_provider_issue_comments": {
+                "coderabbit": [
+                    {"id": finding_id, "body": body, "html_url": "u"},
+                ],
+            },
+            "required_checks": {},
+        }
+
+    def test_worker_launch_failure_keeps_finding_active(self, tmp_path) -> None:
+        """Scenario 1: Head A has F -> directive created ->
+        worker launch fails -> next round on A STILL contains
+        F. The relay MUST NOT mark F consumed because a
+        directive was emitted.
+        """
+        loop, store = self._setup_loop(tmp_path)
+        snap_a = self._snap_with_finding("a" * 40, 99, "P1 finding")
+        d1 = loop.run_once(
+            snap_a, head_sha="a" * 40,
+            repo="owner/repo", pr_number=4,
+        )
+        # First round: launch_worker (directive issued).
+        assert d1.action == "launch_worker", (
+            f"first round must emit directive; got {d1.action!r}"
+        )
+        # Worker launch "fails" — the controller stays in
+        # REPAIRING_REVIEW_FINDINGS; the directive stays on
+        # disk; the next round runs on the same head.
+        sm = loop.controller.load_state_machine()
+        assert sm.current_state == "REPAIRING_REVIEW_FINDINGS"
+        # Second round: same head, same body -> the relay MUST
+        # still emit F. Round-27 invariant: DISPATCHED does
+        # not consume.
+        d2 = loop.run_once(
+            snap_a, head_sha="a" * 40,
+            repo="owner/repo", pr_number=4,
+        )
+        assert d2.action == "launch_worker", (
+            f"worker launch failure MUST leave F in the next "
+            f"directive; got {d2.action!r}"
+        )
+        # And the finding on the same head is ACTIVE/DISPATCHED
+        # in the ledger, never SUPERSEDED.
+        from autocoder_orchestration.review_repair_relay import FindingLedger
+        ledger = FindingLedger(store, head_sha="a" * 40)
+        entry = ledger.state_of("coderabbit:99")
+        assert entry is not None, (
+            "ledger MUST retain the entry; missing entries are "
+            "evidence the round-26 'consumed on dispatch' bug"
+        )
+        assert entry["state"] in ("OBSERVED", "DISPATCHED", "ACTIVE"), (
+            f"finding state MUST NOT be SUPERSEDED on a launch "
+            f"failure; got {entry['state']!r}"
+        )
+
+    def test_worker_noop_keeps_finding_active(self, tmp_path) -> None:
+        """Scenario 2: Head A has F -> worker launches but
+        pushes nothing (no head advance) -> next round on A
+        STILL contains F.
+        """
+        loop, store = self._setup_loop(tmp_path)
+        snap_a = self._snap_with_finding("a" * 40, 99, "P1 finding")
+        loop.run_once(
+            snap_a, head_sha="a" * 40,
+            repo="owner/repo", pr_number=4,
+        )
+        # "Worker launches but pushes nothing" — the head
+        # stays at A; the controller stays in
+        # REPAIRING_REVIEW_FINDINGS; the relay's next round
+        # sees the same head.
+        snap_again = self._snap_with_finding("a" * 40, 99, "P1 finding")
+        d2 = loop.run_once(
+            snap_again, head_sha="a" * 40,
+            repo="owner/repo", pr_number=4,
+        )
+        assert d2.action == "launch_worker", (
+            f"worker that pushes nothing MUST leave F in the "
+            f"next directive; got {d2.action!r}"
+        )
+
+    def test_head_advance_supersedes_finding(self, tmp_path) -> None:
+        """Scenario 3: Head A has F -> worker pushes B ->
+        A/F may now be treated as superseded subject to
+        fresh B evidence. The relay calls
+        ``mark_head_advanced`` which promotes the prior
+        entries to SUPERSEDED.
+
+        The relay's ``run_once`` on head B requires the
+        controller to be in REPAIRING_REVIEW_FINDINGS, but
+        ``mark_head_advanced`` advances it to AWAITING_CI
+        (canonical post-head-advance transition). We
+        therefore exercise the ledger promotion and
+        ``is_fresh`` semantics directly, which is the
+        underlying invariant the relay depends on.
+        """
+        loop, store = self._setup_loop(tmp_path)
+        snap_a = self._snap_with_finding("a" * 40, 99, "P1 finding")
+        loop.run_once(
+            snap_a, head_sha="a" * 40,
+            repo="owner/repo", pr_number=4,
+        )
+        # Worker pushes head B. The supervisor calls
+        # ``mark_head_advanced`` which (a) promotes prior
+        # ACTIVE / DISPATCHED entries to SUPERSEDED and (b)
+        # binds the controller to AWAITING_CI.
+        loop.mark_head_advanced("a" * 40, "b" * 40)
+        from autocoder_orchestration.review_repair_relay import (
+            FindingLedger, FINDING_STATE_SUPERSEDED,
+        )
+        # The ledger promoted the prior entry to SUPERSEDED.
+        ledger_a = FindingLedger(store, head_sha="a" * 40)
+        entries = ledger_a.load()
+        assert entries["coderabbit:99"]["state"] == FINDING_STATE_SUPERSEDED, (
+            f"mark_head_advanced MUST promote prior ACTIVE/DISPATCHED "
+            f"entries to SUPERSEDED; got {entries['coderabbit:99']['state']!r}"
+        )
+        # On head B with the same signature, the SUPERSEDED row
+        # makes the finding NOT fresh. The relay's
+        # ``evaluate_round`` would return
+        # ``enter_qualifying_readiness`` IF it could run on
+        # head B; the controller's transition to AWAITING_CI
+        # prevents that. The ledger's ``is_fresh`` is the
+        # correct invariant: NOT fresh.
+        ledger_b = FindingLedger(store, head_sha="b" * 40)
+        # The signature includes the title (the first line of
+        # the body, per ``_collect_review_findings``), so the
+        # rebuild must match the relay's construction.
+        from autocoder_orchestration.review_repair_relay import Finding
+        f_b = Finding(
+            finding_id="coderabbit:99",
+            source="coderabbit",
+            severity="P1",
+            title="P1 finding",
+            body="P1 finding",
+            file_path=None, line=None, url=None,
+            suggested_test=None, review_id=None,
+            comment_id=99, check_name=None,
+        )
+        assert ledger_b.is_fresh(f_b) is False, (
+            "on head B with the same body, the SUPERSEDED row MUST "
+            "make the finding NOT fresh (the prior is terminal)"
+        )
+
+    def test_fresh_evidence_at_new_head_reopens(self, tmp_path) -> None:
+        """At the new head B, fresh evidence (different
+        signature) IS emitted — the SUPERSEDED row at A does
+        not silence the new evidence at B.
+        """
+        loop, store = self._setup_loop(tmp_path)
+        snap_a = self._snap_with_finding("a" * 40, 99, "v1 body")
+        loop.run_once(
+            snap_a, head_sha="a" * 40,
+            repo="owner/repo", pr_number=4,
+        )
+        loop.mark_head_advanced("a" * 40, "b" * 40)
+        from autocoder_orchestration.review_repair_relay import Finding, FindingLedger
+        ledger_b = FindingLedger(store, head_sha="b" * 40)
+        f_b = Finding(
+            finding_id="coderabbit:99",
+            source="coderabbit",
+            severity="P1",
+            title="",
+            body="v2 body",
+            file_path=None, line=None, url=None,
+            suggested_test=None, review_id=None,
+            comment_id=99, check_name=None,
+        )
+        assert ledger_b.is_fresh(f_b) is True, (
+            "different signature at the new head IS fresh; "
+            "the SUPERSEDED row only shadows the original signature"
+        )
+
 
 class TestFindingLedgerPersistsAcrossRounds:
     """End-to-end: ``RelayLoop.run_once`` writes the ledger;
-    the next round on the same head suppresses the same finding.
+    the next round on the same head sees the finding still
+    ACTIVE (round-27 invariant). The directive is issued
+    every round the finding remains ACTIVE; only
+    SUPERSEDED / REPAIRED transition is terminal.
     """
 
     def _setup_loop(self, tmp_path):
@@ -1979,7 +2470,13 @@ class TestFindingLedgerPersistsAcrossRounds:
         )
         return loop, store
 
-    def test_ledger_persists_between_rounds(self, tmp_path) -> None:
+    def test_active_finding_stays_in_directive_each_round(self, tmp_path) -> None:
+        """Round-27 invariant: ACTIVE findings remain in the
+        directive every round on the same head. The relay
+        does NOT mark them consumed merely because a
+        directive was emitted. qualification is impossible
+        while ACTIVE findings exist.
+        """
         loop, store = self._setup_loop(tmp_path)
         snap = {
             "head_sha": "a" * 40, "head_match": True,
@@ -1995,22 +2492,17 @@ class TestFindingLedgerPersistsAcrossRounds:
             snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
         )
         assert d1.action == "launch_worker"
-        # The ledger was written.
-        from autocoder_orchestration.review_repair_relay import FindingLedger
-        ledger = FindingLedger(store, head_sha="a" * 40)
-        entries = ledger.load()
-        assert "coderabbit:99" in entries
-        # Second round on the same head: same body, no edit.
         d2 = loop.run_once(
             snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
         )
-        # The ledger suppresses the same finding on the same
-        # head — the directive's findings count is zero and the
-        # action flips to enter_qualifying_readiness.
-        assert d2.action == "enter_qualifying_readiness", (
-            f"same head + same body must be suppressed by the ledger; "
-            f"got action={d2.action!r}"
+        assert d2.action == "launch_worker", (
+            f"round-27 invariant: ACTIVE finding on same head "
+            f"MUST be re-emitted; got {d2.action!r}"
         )
+        # Round-26 test was: action == "enter_qualifying_readiness".
+        # That was the round-26 bug: the ledger marked the
+        # finding consumed on dispatch. Round-27 explicitly
+        # forbids that.
 
     def test_body_edit_on_same_head_reopens(self, tmp_path) -> None:
         """A body edit on the same head MUST reopen the finding.

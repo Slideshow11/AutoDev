@@ -406,11 +406,32 @@ def acquire_lock() -> bool:
 
 
 def read_run_state() -> dict:
+    """Read the persistent ``RUN_STATE`` JSON document.
+
+    Round-27 P1#3: on first read, ensure the document records
+    the canonical ``orchestration_state_root`` (the supervisor's
+    own ``STATE_DIR``). Persisting the value on the supervisor
+    side gives the relay and the controller a single,
+    positively-known source of truth for the orchestration
+    run state directory. Without this, the relay's resolver
+    would fall back to ``STATE_DIR`` at the relay side
+    (silently substituting an unrelated directory if the
+    modules diverge).
+    """
     try:
-        return json.loads(RUN_STATE.read_text())  # type: ignore[name-defined]
+        state = json.loads(RUN_STATE.read_text())  # type: ignore[name-defined]
     except Exception as e:
         log("error", "read_run_state failed", error=str(e))
-        return {}
+        state = {}
+    # First-read: persist the canonical orchestration state root.
+    if "orchestration_state_root" not in state:
+        try:
+            state["orchestration_state_root"] = str(STATE_DIR)  # type: ignore[name-defined]
+            state.setdefault("schema_version", "autocoder.run_state.v1")
+            write_json(RUN_STATE, state)  # type: ignore[name-defined]
+        except (OSError, NameError):
+            pass
+    return state
 
 
 def get_github_token() -> Optional[str]:
@@ -2558,13 +2579,12 @@ def _invoke_relay_for_events(
     if not should_invoke_relay(snapshot):
         return "no_action"
     # Resolve the canonical state and evidence roots via the
-    # shared helper in ``relay_wiring``. The helper enforces a
-    # single precedence (env, then RUN_STATE, then STATE_DIR) so
-    # every supervisor/relay boundary reads the same
-    # ``run_context.json``. The previous hand-rolled resolution
-    # here diverged from ``mark_head_advanced_public`` and left
-    # the relay wiring pointing at ``STATE_DIR`` while the head
-    # advance was a silent no-op.
+    # shared helper in ``relay_wiring``. Round-27 P1#3: the
+    # helper's precedence is env, then
+    # ``RUN_STATE['orchestration_state_root']``. The
+    # supervisor persists the value at first read so the
+    # relay always finds it. We do NOT silently substitute
+    # ``STATE_DIR`` here.
     from .relay_wiring import (
         _resolve_orchestration_state_root,
         _resolve_orchestration_evidence_root,

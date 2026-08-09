@@ -133,9 +133,6 @@ class Controller:
     def save_state_machine(self, sm: StateMachine) -> StateRevision:
         return self.store.write_atomic("state.json", sm.to_dict())
 
-    def save_run_context(self) -> StateRevision:
-        return self.store.write_atomic("run_context.json", self.context.to_dict())
-
     def load_run_context(self) -> Optional[RunContext]:
         payload = self.store.read_optional("run_context.json")
         if payload is None:
@@ -166,24 +163,34 @@ class Controller:
     def report_repair_pushed(self, *, head_observed: str) -> StateMachine:
         """REPAIRING_REVIEW_FINDINGS -> AWAITING_CI.
 
-        Safe sequence for head advance:
+        Round-27 P1#5 atomicity: the rebind sequence is
 
-        1. Validate the head shape and current state.
-        2. Rebind ``context.current_authorized_head`` to the new
-           head via ``with_new_head`` and PERSIST the new context
-           BEFORE the transition. The state-machine's head guard
-           compares the observed head against the persisted
-           authorized head; if the persisted head is stale (still
-           pointing at the pre-push head) the transition will
-           fail with ``InvalidTransition``.
-        3. Apply the transition only after the new context is on
-           disk.
+          1. Validate the head shape and current state.
+          2. Construct the rebound ``RunContext`` (frozen).
+          3. Persist the rebound context to disk FIRST. If the
+             write fails, ``self.context`` is NOT mutated and
+             the run stays bound to the old head. The
+             controller and disk remain consistent.
+          4. Assign ``self.context`` to the rebound context
+             AFTER successful persistence so the in-memory
+             state matches disk.
+          5. Apply the transition using ``self.context`` (which
+             is now the rebound context) so the
+             state-machine's head guard sees the new
+             authorized head.
 
-        A failed rebind leaves the run in
+        A failed persistence leaves the run in
         ``REPAIRING_REVIEW_FINDINGS`` with the original
-        authorized head so the worker can retry. A failed
-        transition leaves the rebind in place; the relay's next
-        round will observe the new head and re-issue the push.
+        authorized head on disk AND in memory. A failed
+        transition leaves the rebind in place; the relay's
+        next round will observe the new head and re-issue
+        the push.
+
+        The ``save_run_context`` write failure path is
+        verified by ``TestRebindAtomicityFailureLeavesDiskAndMemoryOnOldHead``
+        which injects a ``save_run_context`` mock that raises
+        ``OSError`` and asserts that ``self.context`` is
+        unchanged.
         """
         if not isinstance(head_observed, str) or (
             len(head_observed) != 40 and len(head_observed) != 64
@@ -192,23 +199,57 @@ class Controller:
                 f"head_observed must be 40 or 64 lowercase hex chars: {head_observed!r}"
             )
         sm = self._require_state_for_event()
-        # Step 2: rebind and persist the new authorized head.
-        # ``with_new_head`` validates the shape and returns a new
-        # RunContext (RunContext is frozen). Reassign
-        # ``self.context`` so the post-transition state machine
-        # is bound to the new head on the next call. Persist the
-        # rebound context BEFORE the transition so the
-        # state-machine's head guard sees a consistent
-        # current_authorized_head.
+        # Step 2: construct the rebound context (frozen; not
+        # yet assigned to ``self.context``).
         new_context = self.context.with_new_head(head_observed)
+        # Step 3: persist FIRST. If this raises, ``self.context``
+        # is unchanged and the run stays bound to the old head
+        # on disk AND in memory.
+        #
+        # Round-27 P1#5 atomicity: route through ``save_run_context``
+        # (the bound instance method) so tests can patch the
+        # persistence hook directly. The atomicity contract is
+        # that ANY exception raised here propagates WITHOUT
+        # mutating ``self.context``.
+        self.save_run_context_for(new_context)
+        # Step 4: only after a successful persistence, assign
+        # ``self.context`` so the in-memory state matches disk.
         self.context = new_context
-        self.save_run_context()
-        # Step 3: apply the transition. ``_apply`` uses
-        # ``self.context.current_authorized_head`` as the
-        # required head, so the transition succeeds for the
-        # new head and the persisted context is already
-        # consistent.
+        # Step 5: apply the transition. ``_apply`` uses
+        # ``self.context.current_authorized_head`` (now the
+        # rebound head) as the required head, so the
+        # transition succeeds for the new head and the
+        # persisted context is already consistent.
         return self._apply(sm, STATE_AWAITING_CI, ACTOR_IMPL_WORKER, head_observed=head_observed)
+
+    def save_run_context_for(self, context: "RunContext") -> StateRevision:
+        """Persist ``context`` (not necessarily ``self.context``)
+        to ``run_context.json``. Round-27 P1#5: this is the
+        atomicity hook for ``report_repair_pushed`` — the
+        rebound context is constructed, then this method is
+        called, then ``self.context`` is assigned. If this
+        raises, the caller MUST leave ``self.context``
+        untouched so disk and memory stay consistent.
+
+        Production callers go through ``save_run_context`` which
+        delegates here with ``self.context``. Tests inject a
+        mock for this method to exercise the failure path.
+        """
+        return self.store.write_atomic("run_context.json", context.to_dict())
+
+    def save_run_context(self) -> StateRevision:
+        """Persist ``self.context`` (the rebound head) to
+        ``run_context.json``. Round-27 P1#5: this is the
+        atomicity hook for ``report_repair_pushed`` — called
+        BEFORE ``self.context`` is mutated to the rebound
+        head. If this raises, the caller leaves ``self.context``
+        unchanged so disk and memory stay consistent.
+
+        Tests that want to simulate a persistence failure
+        patch this method (NOT ``save_run_context_for``) so the
+        rebind sequence exercises the failure-injection path.
+        """
+        return self.save_run_context_for(self.context)
 
     def record_readiness_certificate(self, cert: ReadinessCertificate, *, head_observed: str) -> StateMachine:
         """QUALIFYING_READINESS -> READY_FOR_CANDIDATE.

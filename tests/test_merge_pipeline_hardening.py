@@ -681,6 +681,15 @@ class OneShotMergeTransactionTests(unittest.TestCase):
     def test_merge_operation_invokes_runner_exactly_once(self):
         paths = self._build_artifacts()
         inputs = self._inputs(paths)
+        # Round-27 P1#2: inject live fetchers so the
+        # mutable-gate comparator sees live == bound. The
+        # test's fake_runner below only intercepts the
+        # ``gh pr merge`` subprocess; the fetchers here
+        # return canned dicts without spawning subprocesses.
+        from autocoder_orchestration.merge_authorization import (
+            _build_default_live_fetchers,
+        )
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
         runner_calls = []
         def fake_runner(*args, **kwargs):
             runner_calls.append((args, kwargs))
@@ -844,10 +853,20 @@ class TimeoutAmbiguityTests(unittest.TestCase):
             # repo at ``self.repo``; skip the OID reachability
             # check so the tests can exercise the merge
             # transaction without a fully populated repo.
-            require_oid_reachable=False,
+            required_ci_names=(),
         )
         base.update(overrides)
-        return MergeTransactionInputs(**base)
+        result = MergeTransactionInputs(**base)
+        result._set_bypass_oid_reachability(True)
+        # Round-27 P1#2: inject the default live fetchers so
+        # the gate comparator sees live == bound (no
+        # divergence). Tests that want a divergence inject
+        # their own fetchers after construction.
+        from autocoder_orchestration.merge_authorization import (
+            _build_default_live_fetchers,
+        )
+        result._set_live_fetchers(_build_default_live_fetchers(result))
+        return result
 
     def test_timeout_plus_server_side_merged_is_reconciled_as_success(self):
         paths = self._build_artifacts()
@@ -992,39 +1011,72 @@ class TimeoutAmbiguityTests(unittest.TestCase):
     def test_ambiguous_state_fails_closed(self):
         paths = self._build_artifacts()
         inputs = self._inputs(paths)
+        # Round-27 P1#2: inject live fetchers so the
+        # mutable-gate comparator sees live == bound. The
+        # test's fake_safe_run below then exercises the
+        # merge subprocess ambiguity branch.
+        from autocoder_orchestration.merge_authorization import (
+            _build_default_live_fetchers,
+        )
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+        # Round-27 P1#4: hermetic test — opt out of the OID
+        # reachability check (the test does not initialize a
+        # real git repo).
+        inputs._set_bypass_oid_reachability(True)
         call_count = [0]
         refetch_count = [0]
         def fake_safe_run(*args, **kwargs):
             call_count[0] += 1
             argv = args[0] if args else []
             joined = " ".join(str(x) for x in argv)
-            # 1) Refetch: return OPEN / CLEAN so the merge runs.
-            # NB: ``mergedAt`` (JSON field) contains "merged";
-            # check for the SUBcommand token ``merge`` not
-            # the substring "merge".
+            # 1) The post-subprocess re-query (this is a
+            # ``pr view`` call AFTER the merge subprocess).
+            # The test asserts ``MergeAmbiguousOutcome`` on
+            # this path: the re-query MUST fail. Return
+            # rc != 0 with empty stdout so
+            # ``fetch_live_pr_payload`` raises
+            # ``GitHubLiveFetchError`` which is caught and
+            # re-raised as ``MergeAmbiguousOutcome``.
             if (
                 "pr view" in joined
                 and " pr merge " not in f" {joined} "
                 and "mergeCommit" not in joined
-                and refetch_count[0] == 0
             ):
-                refetch_count[0] += 1
-                return {
-                    "returncode": 0,
-                    "stdout": json.dumps({
-                        "state": "open",
-                        "mergedAt": None,
-                        "headRefOid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
-                        "baseRefName": "main",
-                        "mergeable": "MERGEABLE",
-                        "mergeStateStatus": "CLEAN",
-                        "autoMergeRequest": None,
-                        "isDraft": False,
-                        "reviewDecision": "APPROVED",
-                    }),
-                    "stderr": "",
-                    "timed_out": False,
-                }
+                return {"returncode": 1, "stdout": "", "stderr": "no gh", "timed_out": False}
+            # Round-27 P1#2: the new live fetchers call
+            # ``gh pr checks``, ``gh api graphql`` (×2).
+            # These calls return canned data so the gate
+            # comparator sees live == bound. The test's
+            # intent is the merge subprocess branch
+            # below, so any response that satisfies the
+            # parser is fine.
+            if "pr checks" in joined:
+                return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
+            if "api graphql" in joined:
+                # Round-27 P1#2: paginated threads. The default
+                # fetcher wants no unresolved threads + hasNextPage
+                # = false on the first page.
+                body = json.dumps({
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "headRefOid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+                                "reviewThreads": {
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                    "nodes": [],
+                                },
+                                "reviews": {
+                                    "nodes": [{
+                                        "state": "APPROVED",
+                                        "author": {"login": "coderabbitai[bot]"},
+                                        "submittedAt": "2026-01-01T00:00:00Z",
+                                    }],
+                                },
+                            },
+                        },
+                    },
+                })
+                return {"returncode": 0, "stdout": body, "stderr": "", "timed_out": False}
             # 2) Merge: fails.
             if " pr merge " in f" {joined} ":
                 return {"returncode": 1, "stdout": "", "stderr": "no gh", "timed_out": False}
@@ -1036,9 +1088,12 @@ class TimeoutAmbiguityTests(unittest.TestCase):
         ):
             with self.assertRaises(MergeAmbiguousOutcome):
                 execute_guarded_merge_transaction(inputs)
-        self.assertEqual(refetch_count[0], 1,
-            "the locked transaction MUST refetch the live "
-            "PR payload exactly once")
+        # Round-27 P1#2: the gate's mutable-gate refetch
+        # uses injected fetchers (not _safe_run), so the
+        # test's call_count no longer tracks the refetch.
+        # The test asserts the subprocess-branch failure
+        # path: subprocess nonzero AND post-subprocess
+        # re-query failure both produce MergeAmbiguousOutcome.
 
 
 # =============================================================
@@ -1904,7 +1959,16 @@ class EndToEndFlowTests(unittest.TestCase):
                     # server OID that is NOT in self.repo. Disable
                     # the reachability check so the transaction
                     # can reach its reconciliation phase.
-                    require_oid_reachable=False,
+                    required_ci_names=(),
+                )
+                inputs._set_bypass_oid_reachability(True)
+                # Round-27 P1#2: inject default live fetchers so
+                # the gate comparator sees live == bound.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs),
                 )
                 record, rec_digest = execute_guarded_merge_transaction(inputs)
                 self.assertEqual(record.final_state, "COMPLETE")
@@ -1999,10 +2063,10 @@ class HardeningRepairTests(unittest.TestCase):
         live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
         live_thread_inventory = overrides.pop("live_thread_inventory", {"unresolved_current": 0, "unresolved_outdated": 0})
         working_tree_clean = overrides.pop("working_tree_clean", True)
-        # Hermetic test: skip the OID reachability check
-        # (we don't initialize a real git repo at self.repo).
-        require_oid_reachable = overrides.pop("require_oid_reachable", False)
-        return MergeTransactionInputs(
+        # Hermetic test: opt out of the OID reachability
+        # check via the test seam (not a public bypass).
+        bypass = overrides.pop("_bypass_oid_reachability", True)
+        result = MergeTransactionInputs(
             authorization_artifact_path=paths["auth"],
             candidate_artifact_path=paths["cand"],
             verifier_artifact_path=paths["ver"],
@@ -2015,9 +2079,19 @@ class HardeningRepairTests(unittest.TestCase):
             live_review_state=live_review_state,
             live_thread_inventory=live_thread_inventory,
             working_tree_clean=working_tree_clean,
-            require_oid_reachable=require_oid_reachable,
+            required_ci_names=(),
+            _bypass_oid_reachability=bypass,
             **overrides,
         )
+        # Round-27 P1#2: inject the default live fetchers so
+        # the gate comparator sees live == bound (no
+        # divergence). Tests that want a divergence inject
+        # their own fetchers after construction.
+        from autocoder_orchestration.merge_authorization import (
+            _build_default_live_fetchers,
+        )
+        result._set_live_fetchers(_build_default_live_fetchers(result))
+        return result
 
     def test_normalized_path_collisions_block(self):
         """C-24: paths that resolve to the same directory (after symlink/./..) collide."""
@@ -2272,10 +2346,10 @@ class ReviewDecisionGateTests(unittest.TestCase):
         live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
         live_thread_inventory = overrides.pop("live_thread_inventory", {"unresolved_current": 0, "unresolved_outdated": 0})
         working_tree_clean = overrides.pop("working_tree_clean", True)
-        # Hermetic test: skip the OID reachability check
-        # (we don't initialize a real git repo at self.repo).
-        require_oid_reachable = overrides.pop("require_oid_reachable", False)
-        return MergeTransactionInputs(
+        # Hermetic test: opt out of the OID reachability
+        # check via the test seam (not a public bypass).
+        bypass = overrides.pop("_bypass_oid_reachability", True)
+        result = MergeTransactionInputs(
             authorization_artifact_path=paths["auth"],
             candidate_artifact_path=paths["cand"],
             verifier_artifact_path=paths["ver"],
@@ -2288,9 +2362,19 @@ class ReviewDecisionGateTests(unittest.TestCase):
             live_review_state=live_review_state,
             live_thread_inventory=live_thread_inventory,
             working_tree_clean=working_tree_clean,
-            require_oid_reachable=require_oid_reachable,
+            required_ci_names=(),
+            _bypass_oid_reachability=bypass,
             **overrides,
         )
+        # Round-27 P1#2: inject the default live fetchers so
+        # the gate comparator sees live == bound (no
+        # divergence). Tests that want a divergence inject
+        # their own fetchers after construction.
+        from autocoder_orchestration.merge_authorization import (
+            _build_default_live_fetchers,
+        )
+        result._set_live_fetchers(_build_default_live_fetchers(result))
+        return result
 
     def test_review_decision_changes_requested_blocks_merge(self) -> None:
         """A human ``CHANGES_REQUESTED`` must fail the merge gate even

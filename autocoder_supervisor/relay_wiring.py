@@ -242,33 +242,23 @@ def should_invoke_relay(snapshot: dict) -> bool:
 def _resolve_orchestration_state_root() -> Optional[str]:
     """Return the orchestration's state_root using the canonical precedence.
 
-    The relay, the supervisor's relay invocation, and the head-advance
-    binding MUST all read the same ``run_context.json``. Three callers
-    previously diverged:
+    Round-27 P1#3: production code MUST NOT silently substitute
+    the supervisor's ``STATE_DIR`` for the orchestration run
+    state root. The supervisor persists the canonical value to
+    ``RUN_STATE['orchestration_state_root']`` at first read
+    (see ``read_run_state``); the relay reads it from there.
+    The resolver fails closed when neither the env var nor
+    ``RUN_STATE`` provides a value.
 
-    - ``invoke_relay_round`` was passed an explicit ``state_root``.
-    - ``mark_head_advanced_public`` resolved ``AED_ORCHESTRATION_STATE_ROOT``
-      then ``RUN_STATE['orchestration_state_root']`` then silently
-      returned.
-    - ``_invoke_relay_for_events`` resolved the same env var and
-      ``RUN_STATE`` then fell back to ``str(STATE_DIR)``.
+    Precedence:
 
-    The unified precedence is:
+      1. ``AED_ORCHESTRATION_STATE_ROOT`` environment variable.
+      2. ``orchestration_state_root`` field of the supervisor's
+         ``RUN_STATE`` JSON (recorded when the supervisor hands
+         off to the relay).
 
-    1. ``AED_ORCHESTRATION_STATE_ROOT`` environment variable.
-    2. ``orchestration_state_root`` field of the supervisor's
-       ``RUN_STATE`` JSON (recorded when the supervisor hands off
-       to the relay).
-    3. ``str(STATE_DIR)`` — the supervisor's own state directory,
-       used only when neither of the above is configured.
-
-    The function NEVER invents a path. Returns ``None`` only when
-    the helper cannot resolve a path AND ``STATE_DIR`` is not
-    importable (a hard misconfiguration). Callers must log a
-    warning when they receive ``None``.
-
-    Returns ``None`` when ``STATE_DIR`` itself is unimportable;
-    callers should treat ``None`` as fail-closed.
+    Returns ``None`` only when no positively-known state root
+    is configured. Callers MUST treat ``None`` as fail-closed.
     """
     state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
     if state_root:
@@ -281,14 +271,7 @@ def _resolve_orchestration_state_root() -> Optional[str]:
             return state_root
     except (OSError, json.JSONDecodeError):
         pass
-    # Last resort: the supervisor's own STATE_DIR. This is the
-    # SAME fallback the supervisor's relay invocation uses, so
-    # both code paths now read the same run_context.json.
-    try:
-        from .supervisor import STATE_DIR
-        return str(STATE_DIR)
-    except ImportError:
-        return None
+    return None
 
 
 def _resolve_orchestration_evidence_root(state_root: Optional[str]) -> str:

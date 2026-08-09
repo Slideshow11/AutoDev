@@ -19,7 +19,6 @@ next round refuses the exact-head guard".
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -90,28 +89,85 @@ def test_run_state_used_when_no_env(monkeypatch, run_state_path) -> None:
     assert _resolve_orchestration_state_root() == "/from/run/state"
 
 
-def test_state_dir_is_last_resort(monkeypatch, run_state_path) -> None:
+def test_state_root_fails_closed_when_run_state_missing(monkeypatch, run_state_path) -> None:
     """Without env or ``RUN_STATE`` field, the resolver MUST
-    fall back to ``str(STATE_DIR)`` so the relay can still
-    find the run_context.json the controller wrote.
+    fail closed (return ``None``) rather than silently
+    substituting ``STATE_DIR``. The user explicitly forbids
+    silent STATE_DIR substitution (round-27 P1#3): the
+    supervisor is the canonical init point and must persist
+    the value to ``RUN_STATE`` so the relay can find it.
+
+    Production code MUST handle ``None`` (e.g. surface a
+    supervisor error and exit the heartbeat).
     """
     monkeypatch.delenv("AED_ORCHESTRATION_STATE_ROOT", raising=False)
     run_state_path.joinpath("run_state.json").write_text(json.dumps({}))
     from autocoder_supervisor.relay_wiring import _resolve_orchestration_state_root
     resolved = _resolve_orchestration_state_root()
-    assert resolved == str(run_state_path)
+    assert resolved is None, (
+        f"resolver MUST return None when no positively-known state "
+        f"root is configured; got {resolved!r}"
+    )
 
 
-def test_missing_run_state_file_falls_through_to_state_dir(
+def test_missing_run_state_file_fails_closed(
     monkeypatch, run_state_path
 ) -> None:
-    """An unreadable ``RUN_STATE`` MUST NOT crash; the resolver
-    falls through to ``STATE_DIR``.
+    """An unreadable ``RUN_STATE`` MUST NOT silently substitute
+    ``STATE_DIR``; the resolver fails closed with ``None``.
     """
     monkeypatch.delenv("AED_ORCHESTRATION_STATE_ROOT", raising=False)
     run_state_path.joinpath("run_state.json").unlink()
     from autocoder_supervisor.relay_wiring import _resolve_orchestration_state_root
-    assert _resolve_orchestration_state_root() == str(run_state_path)
+    assert _resolve_orchestration_state_root() is None
+
+
+def test_supervisor_init_persists_orchestration_state_root(
+    monkeypatch, tmp_path
+) -> None:
+    """Round-27 P1#3 production-path test: a normally-initialized
+    supervisor run discovers the real ``run_context.json`` even
+    WITHOUT the env var.
+
+    Sequence: the supervisor's ``read_run_state`` is the
+    canonical init point. On first read, it persists
+    ``STATE_DIR`` into ``RUN_STATE['orchestration_state_root']``.
+    Subsequent calls to ``_resolve_orchestration_state_root``
+    find the value via the ``RUN_STATE`` precedence (no env var
+    set) and return it. The relay can therefore find the
+    authoritative ``run_context.json`` automatically.
+
+    This is the user-specified invariant: "Add a production-
+    path test with no ``AED_ORCHESTRATION_STATE_ROOT`` env var
+    proving a normally initialized run discovers the real
+    run_context.json automatically."
+    """
+    monkeypatch.delenv("AED_ORCHESTRATION_STATE_ROOT", raising=False)
+    state_dir = tmp_path / "supervisor_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    run_state_file = state_dir / "run_state.json"
+    run_state_file.write_text(json.dumps({}))
+    from autocoder_supervisor import supervisor
+    from autocoder_supervisor import relay_wiring
+    monkeypatch.setattr(supervisor, "RUN_STATE", run_state_file, raising=False)
+    monkeypatch.setattr(supervisor, "STATE_DIR", state_dir, raising=False)
+    monkeypatch.setattr(relay_wiring, "RUN_STATE", run_state_file, raising=False)
+    monkeypatch.setattr(relay_wiring, "STATE_DIR", state_dir, raising=False)
+    # First read: the supervisor persists the canonical value.
+    state = supervisor.read_run_state()
+    assert state.get("orchestration_state_root") == str(state_dir), (
+        f"first read MUST persist orchestration_state_root="
+        f"{state_dir}; got {state.get('orchestration_state_root')!r}"
+    )
+    # RUN_STATE on disk now contains the persisted value.
+    on_disk = json.loads(run_state_file.read_text())
+    assert on_disk["orchestration_state_root"] == str(state_dir)
+    # The resolver finds the value via RUN_STATE (no env var).
+    from autocoder_supervisor.relay_wiring import _resolve_orchestration_state_root
+    assert _resolve_orchestration_state_root() == str(state_dir), (
+        f"resolver MUST discover the persisted state_root "
+        f"without an env var; got {_resolve_orchestration_state_root()!r}"
+    )
 
 
 def test_evidence_root_helpers(monkeypatch, run_state_path) -> None:

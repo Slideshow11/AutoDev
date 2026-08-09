@@ -97,7 +97,7 @@ def _write_artifacts(evidence: Path, authorized_head: str) -> dict:
 
 
 def _make_inputs(paths, repo, state, evidence, authorized_head: str):
-    return MergeTransactionInputs(
+    inputs = MergeTransactionInputs(
         authorization_artifact_path=paths["auth"],
         candidate_artifact_path=paths["cand"],
         verifier_artifact_path=paths["ver"],
@@ -117,8 +117,48 @@ def _make_inputs(paths, repo, state, evidence, authorized_head: str):
         live_review_state={"latest_coderabbit_state": "APPROVED"},
         live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
         working_tree_clean=True,
-        require_oid_reachable=False,
+        required_ci_names=(),
     )
+    inputs._set_bypass_oid_reachability(True)
+    # Round-27 P1#2: inject test-owned live fetchers that
+    # return canned dicts for every gate. Tests that want a
+    # divergence override these after construction.
+    inputs._set_live_fetchers({
+        "pr_payload": lambda: {
+            "state": "open", "merged": False, "isDraft": False,
+            "head": {"sha": authorized_head},
+            "baseRefName": "main", "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "autoMergeRequest": None,
+            "reviewDecision": "APPROVED",
+            "repo": "owner/repo",
+        },
+        "required_ci": lambda: {
+            "head_sha": "",
+            "checks": {
+                name: {"state": "SUCCESS", "head_sha": ""}
+                for name in inputs.required_ci_names or ()
+            },
+        },
+        "review_state": lambda: {
+            "head_sha": "",
+            "reviews": [{
+                "state": "APPROVED",
+                "author": "coderabbitai[bot]",
+                "submitted_at": "2026-01-01T00:00:00Z",
+            }],
+            "latest_coderabbit_state": "APPROVED",
+            "repo": "owner/repo",
+        },
+        "thread_inventory": lambda: {
+            "head_sha": "",
+            "unresolved_current": 0,
+            "unresolved_outdated": 0,
+            "paginated_completely": True,
+            "error": None,
+        },
+    })
+    return inputs
 
 
 class MutableGateRefetchTests(unittest.TestCase):
@@ -145,6 +185,65 @@ class MutableGateRefetchTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
+
+    def _inject_divergence(self, inputs, *, refetch_payload: dict) -> None:
+        """Round-27: override the injected live fetchers so the
+        gate comparator sees a diverging live payload.
+
+        Tests that want to exercise a divergence (e.g. ``CHANGES_REQUESTED``
+        appearing between the bound snapshot and the locked
+        transaction) pass the diverging PR payload here. The
+        helper sets the ``pr_payload`` fetcher to return the
+        diverging dict; the other gates' fetchers stay at the
+        default (live == bound).
+
+        The diverging payload accepts the raw ``fetch_live_pr_payload``
+        shape (``headRefOid`` field, not ``head.sha``). The
+        helper normalizes to the gate's expected shape.
+        """
+        head_sha = refetch_payload.get("headRefOid")
+        if head_sha is None:
+            head = refetch_payload.get("head") or {}
+            head_sha = head.get("sha", "")
+        inputs._set_live_fetchers({
+            "pr_payload": lambda: {
+                "state": refetch_payload.get("state", "open"),
+                "merged": refetch_payload.get("merged", False),
+                "isDraft": refetch_payload.get("isDraft", False),
+                "head": {"sha": head_sha},
+                "baseRefName": refetch_payload.get(
+                    "baseRefName", "main",
+                ),
+                "mergeable": refetch_payload.get("mergeable", "MERGEABLE"),
+                "mergeStateStatus": refetch_payload.get(
+                    "mergeStateStatus", "CLEAN",
+                ),
+                "autoMergeRequest": refetch_payload.get("autoMergeRequest"),
+                "reviewDecision": refetch_payload.get("reviewDecision"),
+                "repo": refetch_payload.get("repo", "owner/repo"),
+            },
+            "required_ci": lambda: {
+                "head_sha": "",
+                "checks": {},
+            },
+            "review_state": lambda: {
+                "head_sha": "",
+                "reviews": [{
+                    "state": "APPROVED",
+                    "author": "coderabbitai[bot]",
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                }],
+                "latest_coderabbit_state": "APPROVED",
+                "repo": "owner/repo",
+            },
+            "thread_inventory": lambda: {
+                "head_sha": "",
+                "unresolved_current": 0,
+                "unresolved_outdated": 0,
+                "paginated_completely": True,
+                "error": None,
+            },
+        })
 
     def _fake_safe_run(self, *, refetch_payload: dict, post_subproc_payload=None):
         """Build a fake ``_safe_run`` whose first ``pr view``
@@ -199,21 +298,17 @@ class MutableGateRefetchTests(unittest.TestCase):
         paths = _write_artifacts(self.evidence, self.authorized_head)
         inputs = _make_inputs(paths, self.repo, self.state, self.evidence, self.authorized_head)
         # Both refetch and post-subproc payload match the bound.
-        fake = self._fake_safe_run(refetch_payload=self._open_payload())
-        with mock.patch(
-            "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake,
-        ):
-            # The transaction reaches the OID gate, which
-            # fails (no real OID) and writes PARTIAL. The
-            # critical invariant is that the refetch gate
-            # PASSED — the transaction did NOT raise
-            # MergeGateChanged.
-            with self.assertRaises(Exception) as ctx:
-                execute_guarded_merge_transaction(inputs)
-            self.assertNotIsInstance(ctx.exception, MergeGateChanged,
-                f"refetch matched snapshot; MergeGateChanged MUST NOT "
-                f"be raised; got {ctx.exception!r}")
+        self._inject_divergence(inputs, refetch_payload=self._open_payload())
+        # The transaction reaches the OID gate, which
+        # fails (no real OID) and writes PARTIAL. The
+        # critical invariant is that the refetch gate
+        # PASSED — the transaction did NOT raise
+        # MergeGateChanged.
+        with self.assertRaises(Exception) as ctx:
+            execute_guarded_merge_transaction(inputs)
+        self.assertNotIsInstance(ctx.exception, MergeGateChanged,
+            f"refetch matched snapshot; MergeGateChanged MUST NOT "
+            f"be raised; got {ctx.exception!r}")
 
     def test_refetch_changes_requested_raises_merge_gate_changed(self) -> None:
         """A same-head ``CHANGES_REQUESTED`` posted AFTER the
@@ -227,13 +322,9 @@ class MutableGateRefetchTests(unittest.TestCase):
         # Refetch sees a CHANGES_REQUESTED.
         refetch = self._open_payload()
         refetch["reviewDecision"] = "CHANGES_REQUESTED"
-        fake = self._fake_safe_run(refetch_payload=refetch)
-        with mock.patch(
-            "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake,
-        ):
-            with self.assertRaises(MergeGateChanged) as ctx:
-                execute_guarded_merge_transaction(inputs)
+        self._inject_divergence(inputs, refetch_payload=refetch)
+        with self.assertRaises(MergeGateChanged) as ctx:
+            execute_guarded_merge_transaction(inputs)
         self.assertIn("CHANGES_REQUESTED", str(ctx.exception))
         # The merge record was NOT written — the gate fires
         # BEFORE the merge subprocess.
@@ -249,12 +340,8 @@ class MutableGateRefetchTests(unittest.TestCase):
         inputs = _make_inputs(paths, self.repo, self.state, self.evidence, self.authorized_head)
         refetch = self._open_payload()
         refetch["state"] = "closed"
-        fake = self._fake_safe_run(refetch_payload=refetch)
-        with mock.patch(
-            "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake,
-        ):
-            with self.assertRaises(MergeGateChanged) as ctx:
+        self._inject_divergence(inputs, refetch_payload=refetch)
+        with self.assertRaises(MergeGateChanged) as ctx:
                 execute_guarded_merge_transaction(inputs)
         self.assertIn("state became 'closed'", str(ctx.exception))
 
@@ -267,12 +354,8 @@ class MutableGateRefetchTests(unittest.TestCase):
         refetch = self._open_payload()
         refetch["merged"] = True
         refetch["mergedAt"] = "2026-08-09T00:00:00Z"
-        fake = self._fake_safe_run(refetch_payload=refetch)
-        with mock.patch(
-            "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake,
-        ):
-            with self.assertRaises(MergeGateChanged) as ctx:
+        self._inject_divergence(inputs, refetch_payload=refetch)
+        with self.assertRaises(MergeGateChanged) as ctx:
                 execute_guarded_merge_transaction(inputs)
         self.assertIn("was merged", str(ctx.exception))
 
@@ -286,12 +369,8 @@ class MutableGateRefetchTests(unittest.TestCase):
         refetch = self._open_payload()
         # Different head SHA — production MUST halt.
         refetch["headRefOid"] = "9" * 40
-        fake = self._fake_safe_run(refetch_payload=refetch)
-        with mock.patch(
-            "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake,
-        ):
-            with self.assertRaises(MergeGateChanged) as ctx:
+        self._inject_divergence(inputs, refetch_payload=refetch)
+        with self.assertRaises(MergeGateChanged) as ctx:
                 execute_guarded_merge_transaction(inputs)
         self.assertIn("head advanced", str(ctx.exception))
 
@@ -312,12 +391,8 @@ class MutableGateRefetchTests(unittest.TestCase):
         # fails. Here we exercise the live_pr reviewDecision
         # by removing it entirely.
         refetch["reviewDecision"] = None
-        fake = self._fake_safe_run(refetch_payload=refetch)
-        with mock.patch(
-            "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake,
-        ):
-            with self.assertRaises(MergeGateChanged) as ctx:
+        self._inject_divergence(inputs, refetch_payload=refetch)
+        with self.assertRaises(MergeGateChanged) as ctx:
                 execute_guarded_merge_transaction(inputs)
         self.assertIn("reviewDecision became None", str(ctx.exception))
 

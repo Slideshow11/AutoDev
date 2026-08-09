@@ -24,8 +24,6 @@ AMBIGUOUS contract holds in every case.
 from __future__ import annotations
 
 import json
-import os
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -36,7 +34,7 @@ from unittest import mock
 from autocoder_orchestration.merge_authorization import (
     MergeAmbiguousOutcome,
     MergeTransactionInputs,
-    MergeRecord,
+    _build_default_live_fetchers,
     _fetch_and_validate_merge_oid,
     execute_guarded_merge_transaction,
 )
@@ -141,7 +139,7 @@ def _canonical_file_digest(path: Path) -> str:
 
 
 def _make_inputs(paths, repo, state, evidence, authorized_head: str):
-    return MergeTransactionInputs(
+    inputs = MergeTransactionInputs(
         authorization_artifact_path=paths["auth"],
         candidate_artifact_path=paths["cand"],
         verifier_artifact_path=paths["ver"],
@@ -161,11 +159,17 @@ def _make_inputs(paths, repo, state, evidence, authorized_head: str):
         live_review_state={"latest_coderabbit_state": "APPROVED"},
         live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
         working_tree_clean=True,
-        # Hermetic test: skip the OID reachability check at
-        # the fetch site (we test the gate explicitly below)
-        # — the GATE itself is what we're exercising here.
-        require_oid_reachable=False,
+        # Hermetic test: opt out of the OID reachability check
+        # via the test seam (not a public bypass).
+        required_ci_names=(),
     )
+    inputs._set_bypass_oid_reachability(True)
+    # Round-27: inject the default live fetchers so the
+    # mutable-gate comparator sees live == bound (no divergence).
+    # Tests that want to exercise a divergence override these
+    # with their own fetchers.
+    inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+    return inputs
 
 
 def _fake_subprocess_with_oid(oid_or_empty: str, authorized_head: str):
@@ -385,7 +389,10 @@ class UnreachableServerOidTests(unittest.TestCase):
     transaction MUST persist PARTIAL and raise
     ``MergeAmbiguousOutcome``.
 
-    Note: when ``require_oid_reachable=False`` (hermetic test
+    Note: when ``_set_bypass_oid_reachability(True)`` (hermetic test
+    setup); production MUST NOT call this helper. The bypass
+    is private (leading underscore on the field) to flag the
+    production intent.
     setup) the gate does NOT trigger on the reachability
     check. The gate IS triggered when
     ``require_oid_reachable=True`` and the OID is missing
@@ -436,8 +443,12 @@ class UnreachableServerOidTests(unittest.TestCase):
             live_review_state={"latest_coderabbit_state": "APPROVED"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
-            require_oid_reachable=True,
+            required_ci_names=(),
         )
+        # Round-27 P1#4: the reachability check is MANDATORY
+        # by default. ``require_oid_reachable=True`` (the
+        # production invariant) is the default; do NOT bypass.
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
         # A well-formed but unreachable OID. The repo has no
         # object with this SHA.
         unreachable_oid = "9" * 40
@@ -446,7 +457,7 @@ class UnreachableServerOidTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
             side_effect=fake,
         ):
-            with self.assertRaises(MergeAmbiguousOutcome) as ctx:
+            with self.assertRaises(MergeAmbiguousOutcome):
                 execute_guarded_merge_transaction(inputs)
         # PARTIAL record was persisted BEFORE the raise.
         rec = json.loads(paths["rec"].read_text())

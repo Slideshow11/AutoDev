@@ -349,9 +349,9 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
 
     def _build_inputs(self, ctx, paths, fixtures):
         from autocoder_orchestration.merge_authorization import (
-            MergeTransactionInputs,
+            MergeTransactionInputs, _build_default_live_fetchers,
         )
-        return MergeTransactionInputs(
+        inputs = MergeTransactionInputs(
             authorization_artifact_path=paths["authorization"],
             candidate_artifact_path=paths["candidate"],
             verifier_artifact_path=paths["verifier"],
@@ -364,7 +364,20 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
             live_review_state=fixtures["live_review_state"],
             live_thread_inventory=fixtures["live_thread_inventory"],
             working_tree_clean=fixtures["working_tree_clean"],
+            required_ci_names=(),
+            _bypass_oid_reachability=True,
         )
+        # Round-27 P1#2: the control fixture must exercise
+        # the production refetch path with a SUCCESS return.
+        # The default live fetchers see live == bound and
+        # pass; the production code does NOT call ``_safe_run``
+        # from the gate (the fetchers return canned dicts).
+        # ``_safe_run`` is then called only for the merge
+        # subprocess (and the post-subprocess re-query /
+        # OID-fetch retry) which ``_safe_run_successful``
+        # handles.
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+        return inputs
 
     def _safe_run_successful(self):
         """Build a ``_safe_run`` mock that returns a successful
