@@ -527,15 +527,39 @@ def _is_actionable_provider_comment(body: str) -> bool:
     findings — they are reviews in progress, not review
     findings. Filtering them out prevents the relay from
     turning a clean head into a persistent repair loop.
+
+    Anchoring: a body is only a status marker when its
+    FIRST non-empty line is exactly (or starts with) a
+    status marker. A body that merely mentions "walkthrough"
+    in passing (e.g. "P1: the walkthrough above is stale")
+    is NOT a status marker and is treated as actionable.
+    This prevents the filter from dropping real findings.
     """
     if not body:
         return False
-    # If the body is JUST a status marker (no other content),
-    # it is not a finding.
-    if _NON_FINDING_COMMENT_RE.search(body.strip()):
-        # An empty / single-line status marker is not a finding.
-        non_empty = body.strip()
-        if len(non_empty) < 200 and non_empty.count("\n") <= 2:
+    stripped = body.strip()
+    if not stripped:
+        return False
+    # The first non-empty line sets the comment's intent.
+    first_line = stripped.split("\n", 1)[0].strip().rstrip(".,;:!?")
+    # Strip leading emoji / decorative characters. A
+    # status marker may be prefixed with a traffic-light
+    # emoji (🚦), a bell (🔔), etc. The alpha-stripped
+    # first line is the canonical form.
+    alphanumeric_first_line = "".join(
+        c for c in first_line if c.isalnum() or c.isspace()
+    ).strip()
+    # If the first line is a status marker (with optional
+    # emoji / whitespace prefix), the entire comment is a
+    # status marker.
+    if (
+        _NON_FINDING_COMMENT_RE.match(first_line)
+        or _NON_FINDING_COMMENT_RE.match(alphanumeric_first_line)
+    ):
+        # And the body is short (single-line status marker).
+        # Long bodies with a status-marker first line are
+        # treated as actionable (the body has real content).
+        if len(stripped) < 200 and stripped.count("\n") <= 2:
             return False
     return True
 
@@ -598,6 +622,43 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
     # If no per-provider subset exists, fall back to the filtered
     # list of CodeRabbit issue comments.
     if not findings:
+        # Inline review comments (path + line + body) are
+        # surfaced when the supervisor's ``use_reviews_api``
+        # flag is enabled. These are the headline
+        # CodeRabbit / Codex findings — actionable inline
+        # comments tied to a specific file/line. Treat
+        # them as findings.
+        for c in snapshot.get("review_comments", []) or []:
+            if not isinstance(c, dict):
+                continue
+            cid = c.get("id")
+            if cid is None:
+                continue
+            finding_id = f"inline:{cid}"
+            if finding_id in seen_ids:
+                continue
+            seen_ids.add(finding_id)
+            body = str(c.get("body") or "")
+            if not _is_actionable_provider_comment(body):
+                continue
+            severity = _classify_severity(body)
+            path = c.get("path")
+            line = c.get("line")
+            title = body.splitlines()[0] if body else "(no body)"
+            findings.append(Finding(
+                finding_id=finding_id,
+                source="coderabbit",
+                severity=severity,
+                title=title[:120],
+                body=body,
+                file_path=str(path) if path else None,
+                line=int(line) if isinstance(line, int) else None,
+                url=None,
+                suggested_test=None,
+                review_id=None,
+                comment_id=cid,
+                check_name=None,
+            ))
         for c in snapshot.get("issue_comments", []) or []:
             if not isinstance(c, dict):
                 continue
@@ -1049,7 +1110,16 @@ def evaluate_round(
     # the relay cannot rely on review evidence that does not
     # correspond to the exact head it is acting on.
     snapshot_head = snapshot.get("head_sha")
-    if snapshot_head is not None and snapshot_head != head_sha:
+    if snapshot_head is None:
+        # Missing head metadata. The exact-head guard
+        # requires a concrete SHA; a snapshot without
+        # one cannot be verified. Reject as InvalidSnapshot.
+        raise InvalidSnapshot(
+            "snapshot is missing head_sha; the relay cannot "
+            "verify the exact-head guard without it. The "
+            "snapshot MUST be re-captured."
+        )
+    if snapshot_head != head_sha:
         raise InvalidSnapshot(
             f"snapshot head {snapshot_head!r} != requested head {head_sha!r}; "
             "stale snapshot rejected"

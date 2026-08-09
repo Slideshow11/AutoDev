@@ -60,6 +60,7 @@ def _make_snapshot(
     required_checks: dict | None = None,
     head_sha: str = "a" * 40,
     head_match: bool = True,
+    review_comments: list | None = None,
 ) -> dict:
     return {
         "captured_at": "2026-08-08T00:00:00Z",
@@ -72,6 +73,7 @@ def _make_snapshot(
         "required_checks": required_checks or {},
         "providers": {},
         "_provider_issue_comments": per_provider or {},
+        "review_comments": review_comments or [],
         "unconsumed_event_ids": [],
     }
 
@@ -611,6 +613,37 @@ class TestNonFindingCommentsAreFiltered:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
                 {"id": 1, "body": "Review in progress."},
+            ],
+        })
+        findings = collect_findings(snap)
+        assert findings == []
+
+    def test_walkthrough_mentioned_in_passing_is_actionable(self) -> None:
+        """Round-3 P1: a body that merely mentions 'walkthrough'
+        in passing (e.g. 'P1: see walkthrough above is stale')
+        MUST NOT be filtered as a status marker. The
+        anchoring fix only filters bodies whose FIRST
+        line is a status marker.
+        """
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [
+                {"id": 1, "body": "P1: see walkthrough above is stale"},
+            ],
+        })
+        findings = collect_findings(snap)
+        # The body has a P1 marker and actionable content.
+        # The 'walkthrough' appears in the middle, not the
+        # first line. The anchor keeps it actionable.
+        assert len(findings) == 1
+        assert findings[0].severity == "P1"
+
+    def test_walkthrough_first_line_short_is_filtered(self) -> None:
+        """A short body whose first line is a status marker
+        (with optional emoji) is filtered.
+        """
+        snap = _make_snapshot(per_provider={
+            "coderabbit": [
+                {"id": 1, "body": "🚦 Walkthrough comment."},
             ],
         })
         findings = collect_findings(snap)
@@ -1199,18 +1232,10 @@ class TestRunUntilHeadAdvances:
         snap = _make_snapshot(per_provider={
             "coderabbit": [{"id": 1, "body": "P0 critical: stop the run"}],
         })
-        # Wire the loop's _await_head_advance to mock a
-        # worker that pushes a new head.
         calls = {"count": 0}
         def mock_provider(head: str) -> dict:
             calls["count"] += 1
             return snap
-        def mock_advance(head_sha: str) -> Optional[str]:
-            # The first call returns None (no advance yet),
-            # then we return a new head to continue the loop.
-            if calls["count"] < 2:
-                return None
-            return None
         with pytest.raises(EscalateToHuman):
             loop.run_until_head_advances(
                 mock_provider, head_sha="a" * 40,
@@ -1279,6 +1304,101 @@ class TestRunUntilHeadAdvances:
 
 
 
+
+
+
+
+
+class TestMissingHeadMetadataRejected:
+    """Round-3 P1: a snapshot with missing head_sha MUST
+    be rejected. The exact-head guard requires a concrete
+    SHA; a snapshot without one cannot be verified.
+    """
+
+    def test_missing_head_sha_is_rejected(self) -> None:
+        snap = {
+            "captured_at": "2026-08-08T00:00:00Z",
+            # head_sha is intentionally missing
+            "head_match": True,
+            "mergeable": True,
+            "formal_reviews": [],
+            "review_threads": {},
+            "issue_comments": [],
+            "required_checks": {},
+            "providers": [],
+            "_provider_issue_comments": {},
+            "review_comments": [],
+            "unconsumed_event_ids": [],
+        }
+        with pytest.raises(InvalidSnapshot):
+            evaluate_round(
+                snapshot=snap,
+                head_sha="a" * 40,
+                repo="owner/repo",
+                pr_number=4,
+                round_index=1,
+            )
+
+    def test_explicit_null_head_sha_is_rejected(self) -> None:
+        # The snapshot preserves an explicit null head_sha.
+        snap = {
+            "captured_at": "2026-08-08T00:00:00Z",
+            "head_sha": None,
+            "head_match": True,
+            "mergeable": True,
+            "formal_reviews": [],
+            "review_threads": {},
+            "issue_comments": [],
+            "required_checks": {},
+            "providers": [],
+            "_provider_issue_comments": {},
+            "review_comments": [],
+            "unconsumed_event_ids": [],
+        }
+        with pytest.raises(InvalidSnapshot):
+            evaluate_round(
+                snapshot=snap,
+                head_sha="a" * 40,
+                repo="owner/repo",
+                pr_number=4,
+                round_index=1,
+            )
+
+
+class TestInlineReviewCommentsAreFindings:
+    """Round-3 P1: inline review comments (path + line + body)
+    MUST be included as findings. The supervisor's snapshot
+    may carry inline review comments via the
+    ``use_reviews_api`` flag; the relay must consume them.
+    """
+
+    def test_inline_review_comment_is_finding(self) -> None:
+        snap = _make_snapshot(review_comments=[
+            {
+                "id": 99,
+                "path": "foo.py",
+                "line": 12,
+                "body": "P1: foo.py:12 broken",
+            },
+        ])
+        findings = collect_findings(snap)
+        assert len(findings) == 1
+        assert findings[0].severity == "P1"
+        assert findings[0].file_path == "foo.py"
+        assert findings[0].line == 12
+
+    def test_inline_walkthrough_marker_is_filtered(self) -> None:
+        snap = _make_snapshot(review_comments=[
+            {
+                "id": 99,
+                "path": "foo.py",
+                "line": 12,
+                "body": "🚦 Walkthrough comment.",
+            },
+        ])
+        findings = collect_findings(snap)
+        # The status marker is filtered.
+        assert findings == []
 
 
 class TestLaunchWorkerDoesNotTransition:
