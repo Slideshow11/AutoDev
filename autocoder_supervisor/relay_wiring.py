@@ -238,6 +238,62 @@ def should_invoke_relay(snapshot: dict) -> bool:
     return False
 
 
+def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
+    """Bind the worker push to the orchestration state machine.
+
+    The supervisor calls this when the live PR head
+    advances (the worker pushed a new commit). The
+    transition fires only on a real head advance, so a
+    launch failure leaves the repair state recoverable.
+
+    A subprocess is avoided here because the supervisor
+    is already in the supervisor's event loop; spawning
+    a subprocess for a single state-machine transition
+    would add latency without isolation benefit. The
+    helper instantiates a RelayLoop with the supervisor's
+    state_root and calls ``mark_head_advanced`` directly.
+    """
+    from autocoder_orchestration.controller import Controller
+    from autocoder_orchestration.review_repair_relay import RelayLoop
+    from autocoder_orchestration.store import StateStore
+    state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    if not state_root:
+        state_root = str(
+            os.environ.get("AED_STATE_DIR", "/tmp/aed-supervisor-state"),
+        )
+    evidence_root = os.environ.get("AED_EVIDENCE_ROOT")
+    if not evidence_root:
+        evidence_root = os.path.join(state_root, "evidence")
+    store = StateStore(state_root)
+    if not store.read_optional("state.json"):
+        # Controller state not initialized yet; nothing
+        # to transition. The next round will pick up the
+        # new head when the supervisor re-reads the state.
+        return
+    from autocoder_orchestration.context import RunContext
+    ctx_dict = store.read_optional("run_context.json")
+    if not ctx_dict:
+        return
+    ctx = RunContext.from_dict(ctx_dict)
+    controller = Controller(
+        context=ctx,
+        store=store,
+    )
+    from autocoder_orchestration.review_repair_relay import DirectiveStore
+    directive_store = DirectiveStore(
+        store=store,
+        evidence_root=evidence_root,
+    )
+    loop = RelayLoop(
+        context=ctx,
+        store=store,
+        directive_store=directive_store,
+        controller=controller,
+        required_check_names=(),
+    )
+    loop.mark_head_advanced(old_head_sha, new_head_sha)
+
+
 def delete_directive_if_present(evidence_root: str) -> None:
     """Delete the canonical directive file when the head is clean.
 

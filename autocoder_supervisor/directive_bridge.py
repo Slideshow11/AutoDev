@@ -259,14 +259,22 @@ def _load_directive_payload(path: Path) -> dict:
             path,
         )
     # Verify the canonical directive .sha256 sidecar file
-    # matches the on-disk content. The sidecar is the
-    # publish-side artifact indicator; a directive without a
-    # verifiable sidecar is not yet durable and cannot
-    # launch a worker. The artifact writer stores the sidecar
-    # at ``<directive>.sha256`` (sibling file, not suffix
-    # replacement).
+    # matches the on-disk artifact bytes. The artifact writer
+    # hashes the COMPLETE serialized file (including the
+    # ``_sha256`` field). The sidecar must therefore equal the
+    # SHA-256 of the on-disk file bytes, NOT the canonical-
+    # fields digest. This is the durable binding between the
+    # publish-side shell and the consume-side relay: the
+    # sidecar is what disk durability guarantees.
+    try:
+        on_disk_bytes = path.read_bytes()
+    except OSError as exc:
+        raise DirectiveLoadFailure(
+            f"directive_unreadable: {exc!r}",
+            path,
+        )
+    on_disk_digest = hashlib.sha256(on_disk_bytes).hexdigest()
     sidecar_path = Path(str(path) + ".sha256")
-    expected_sidecar = stored_sha + "\n"
     try:
         actual_sidecar = sidecar_path.read_text()
     except OSError as exc:
@@ -274,10 +282,12 @@ def _load_directive_payload(path: Path) -> dict:
             f"sidecar_unreadable: {exc!r}",
             path,
         )
-    if actual_sidecar != expected_sidecar:
+    actual_sidecar_digest = actual_sidecar.strip()
+    if actual_sidecar_digest != on_disk_digest:
         raise DirectiveLoadFailure(
-            f"sidecar_mismatch: expected={expected_sidecar[:64]!r} "
-            f"actual={actual_sidecar[:64]!r}",
+            f"sidecar_mismatch: on_disk_digest={on_disk_digest[:12]}.. "
+            f"actual_sidecar={actual_sidecar_digest[:12]}.. "
+            f"canonical_fields_digest={recomputed[:12]}..",
             path,
         )
     return directive

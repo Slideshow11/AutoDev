@@ -1278,3 +1278,185 @@ class TestRunUntilHeadAdvances:
             )
 
 
+
+
+
+class TestLaunchWorkerDoesNotTransition:
+    """Round-3 P1: when the relay decides launch_worker,
+    it must NOT trigger report_repair_pushed. The
+    transition REPAIRING_REVIEW_FINDINGS -> AWAITING_CI
+    fires only AFTER the worker successfully pushes and a
+    new head is observed, via the explicit
+    mark_head_advanced method.
+
+    Previously the relay called report_repair_pushed
+    immediately on launch_worker, which committed the
+    transition BEFORE the worker had actually pushed. A
+    launch failure could leave the run in AWAITING_CI
+    with no new head, and the next round would refuse
+    the exact-head guard.
+    """
+
+    def _make_snapshot_with_finding(self) -> dict:
+        return {
+            "captured_at": "2026-08-08T00:00:00Z",
+            "head_sha": "a" * 40,
+            "head_match": True,
+            "mergeable": True,
+            "formal_reviews": [],
+            "review_threads": {},
+            "issue_comments": [],
+            "required_checks": {},
+            "providers": [],
+            "_provider_issue_comments": {
+                "coderabbit": [
+                    {"id": 1, "body": "P1: foo.py:1 broken"},
+                ],
+            },
+            "unconsumed_event_ids": [],
+        }
+
+    def _setup_loop(self, tmp_path):
+        from autocoder_orchestration.review_repair_relay import (
+            RELAY_SCHEMA_VERSION, RelayLoop,
+        )
+        from autocoder_orchestration.store import StateStore
+        store = StateStore(str(tmp_path / "state"))
+        store.write_atomic("run_context.json", {
+            "schema_version": "autocoder.run_context.v1",
+            "run_id": "r1",
+            "repo_owner": "owner",
+            "repo_name": "repo",
+            "local_checkout": str(tmp_path),
+            "base_branch": "main",
+            "authorized_base_sha": "a" * 64,
+            "feature_branch": "feat/test",
+            "task_specification_path": "/tmp/task",
+            "task_specification_sha256": "b" * 64,
+            "required_ci_jobs": [],
+            "implementation_worker_command": [],
+            "evidence_root": str(tmp_path / "evidence"),
+            "state_root": str(tmp_path / "state"),
+            "pr_number": 4,
+            "current_authorized_head": "a" * 40,
+        })
+        from autocoder_orchestration.state_machine import (
+            StateMachine, STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        sm = StateMachine(current_state=STATE_REPAIRING_REVIEW_FINDINGS)
+        store.write_atomic("state.json", sm.to_dict())
+
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.context import RunContext
+        from autocoder_orchestration.review_repair_relay import DirectiveStore
+        ctx = RunContext.from_dict(store.read_optional("run_context.json"))
+        controller = Controller(
+            context=ctx,
+            store=store,
+        )
+        directive_store = DirectiveStore(
+            store=store,
+            evidence_root=str(tmp_path / "evidence"),
+        )
+        loop = RelayLoop(
+            context=ctx,
+            store=store,
+            directive_store=directive_store,
+            controller=controller,
+            required_check_names=(),
+        )
+        return loop, controller
+
+    def test_launch_worker_does_not_call_report_repair_pushed(
+        self, tmp_path
+    ) -> None:
+        """The relay's run_once must NOT call
+        report_repair_pushed on launch_worker. The
+        transition is the supervisor's responsibility
+        after observing the new head_sha.
+        """
+        from autocoder_orchestration.state_machine import (
+            STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        loop, controller = self._setup_loop(tmp_path)
+        snapshot = self._make_snapshot_with_finding()
+        decision = loop.run_once(
+            snapshot,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+        )
+        # The decision is launch_worker.
+        assert decision.action == "launch_worker"
+        # The controller's state machine MUST still be in
+        # REPAIRING_REVIEW_FINDINGS. The transition does NOT
+        # fire on launch_worker.
+        sm_after = controller.load_state_machine()
+        assert sm_after.current_state == STATE_REPAIRING_REVIEW_FINDINGS, (
+            f"controller MUST stay in REPAIRING_REVIEW_FINDINGS "
+            f"after launch_worker; got {sm_after.current_state!r}"
+        )
+
+    def test_mark_head_advanced_fires_transition(
+        self, tmp_path
+    ) -> None:
+        """mark_head_advanced is the explicit hook that
+        fires the transition REPAIRING_REVIEW_FINDINGS ->
+        AWAITING_CI. The supervisor calls this after the
+        worker pushes a new commit.
+        """
+        from autocoder_orchestration.state_machine import (
+            STATE_AWAITING_CI,
+        )
+        loop, controller = self._setup_loop(tmp_path)
+        # The worker pushed new head = b*40.
+        loop.mark_head_advanced("a" * 40, "b" * 40)
+        sm_after = controller.load_state_machine()
+        assert sm_after.current_state == STATE_AWAITING_CI, (
+            f"mark_head_advanced MUST transition to AWAITING_CI; "
+            f"got {sm_after.current_state!r}"
+        )
+
+    def test_launch_failure_keeps_repair_state_recoverable(
+        self, tmp_path
+    ) -> None:
+        """A launch failure leaves the state machine in
+        REPAIRING_REVIEW_FINDINGS. The next round can
+        retry the same repair or issue a fresh one. The
+        run is recoverable.
+        """
+        from autocoder_orchestration.state_machine import (
+            STATE_REPAIRING_REVIEW_FINDINGS,
+        )
+        loop, controller = self._setup_loop(tmp_path)
+        # The relay decides launch_worker.
+        snapshot = self._make_snapshot_with_finding()
+        decision = loop.run_once(
+            snapshot,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+        )
+        assert decision.action == "launch_worker"
+        # Simulate a launch failure: no mark_head_advanced
+        # call. The state machine must still be in
+        # REPAIRING_REVIEW_FINDINGS.
+        sm_after = controller.load_state_machine()
+        assert sm_after.current_state == STATE_REPAIRING_REVIEW_FINDINGS
+        # The next round can retry with the same head.
+        decision2 = loop.run_once(
+            snapshot,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+        )
+        assert decision2.action == "launch_worker"
+        # The state machine is still in REPAIRING_REVIEW_FINDINGS
+        # (a recoverable state).
+        sm_after2 = controller.load_state_machine()
+        assert sm_after2.current_state == STATE_REPAIRING_REVIEW_FINDINGS, (
+            f"after a launch failure, the state MUST remain "
+            f"recoverable in REPAIRING_REVIEW_FINDINGS; "
+            f"got {sm_after2.current_state!r}"
+        )
+

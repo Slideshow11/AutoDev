@@ -87,7 +87,8 @@ def _write_directive_with_digest(
     payload["_sha256"] = digest
     target.write_text(json.dumps(payload, indent=2, sort_keys=True))
     sidecar_path = Path(str(target) + ".sha256")
-    sidecar_path.write_text(digest + "\n")
+    on_disk_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    sidecar_path.write_text(on_disk_digest + "\n")
     return payload
 
 
@@ -232,6 +233,130 @@ class TestResolveWorkerPrompt:
         assert resolve_worker_prompt(
             directive_path="/nonexistent/file.json",
         ) is None
+
+
+class TestBridgeProductionRoundTrip:
+    """Production-path round-trip: a real DirectiveStore.write_directive()
+    artifact must be accepted by the bridge.
+
+    The relay writes the directive via the canonical artifact
+    writer (``write_artifact``). The sidecar MUST equal the
+    SHA-256 of the COMPLETE serialized artifact file (including
+    the ``_sha256`` field), not the canonical-fields digest.
+    Previously the bridge compared the sidecar against the
+    canonical-fields digest, which silently rejected every
+    real directive.
+    """
+
+    def test_directivestore_artifact_accepted_by_bridge(
+        self, tmp_path: Path,
+    ) -> None:
+        from autocoder_orchestration.review_repair_relay import (
+            DirectiveStore, ReviewDirective, Finding, RELAY_SCHEMA_VERSION,
+        )
+        evidence_root = tmp_path / "evidence"
+        evidence_root.mkdir()
+        from autocoder_orchestration.store import StateStore
+        store = DirectiveStore(
+            store=StateStore(str(tmp_path)),
+            evidence_root=str(evidence_root),
+        )
+        # Build a real directive.
+        finding = Finding(
+            finding_id="f1",
+            source="coderabbit",
+            severity="P1",
+            title="broken",
+            body="P1: foo.py:1 broken",
+            file_path="foo.py",
+            line=1,
+            url=None,
+            suggested_test=None,
+            review_id=None,
+            comment_id=1,
+            check_name=None,
+        )
+        directive = ReviewDirective(
+            schema_version=RELAY_SCHEMA_VERSION,
+            directive_id="dir-1",
+            round_index=1,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            created_at="2026-08-08T00:00:00Z",
+            findings=(finding,),
+            summary="1 findings: P1=1",
+            coordinator_actor="controller",
+        )
+        # Write the directive via the real production path.
+        digest = store.write_directive(directive)
+        directive_path = evidence_root / "directive.json"
+        sidecar_path = evidence_root / "directive.json.sha256"
+        assert directive_path.is_file()
+        assert sidecar_path.is_file()
+        # The sidecar must equal the on-disk digest of the
+        # complete artifact file (including _sha256).
+        on_disk_bytes = directive_path.read_bytes()
+        on_disk_digest = hashlib.sha256(on_disk_bytes).hexdigest()
+        assert sidecar_path.read_text().strip() == on_disk_digest
+        # The bridge must accept this directive.
+        from autocoder_supervisor.directive_bridge import (
+            _load_directive_payload,
+        )
+        loaded = _load_directive_payload(directive_path)
+        assert loaded["directive_id"] == "dir-1"
+        assert loaded["head_sha"] == "a" * 40
+
+    def test_directivestore_artifact_rejected_when_sidecar_tampered(
+        self, tmp_path: Path,
+    ) -> None:
+        from autocoder_orchestration.review_repair_relay import (
+            DirectiveStore, ReviewDirective, Finding, RELAY_SCHEMA_VERSION,
+        )
+        from autocoder_supervisor.directive_bridge import (
+            _load_directive_payload, DirectiveLoadFailure,
+        )
+        evidence_root = tmp_path / "evidence"
+        evidence_root.mkdir()
+        from autocoder_orchestration.store import StateStore
+        store = DirectiveStore(
+            store=StateStore(str(tmp_path)),
+            evidence_root=str(evidence_root),
+        )
+        finding = Finding(
+            finding_id="f1",
+            source="coderabbit",
+            severity="P1",
+            title="broken",
+            body="P1: foo.py:1 broken",
+            file_path="foo.py",
+            line=1,
+            url=None,
+            suggested_test=None,
+            review_id=None,
+            comment_id=1,
+            check_name=None,
+        )
+        directive = ReviewDirective(
+            schema_version=RELAY_SCHEMA_VERSION,
+            directive_id="dir-1",
+            round_index=1,
+            head_sha="a" * 40,
+            repo="owner/repo",
+            pr_number=4,
+            created_at="2026-08-08T00:00:00Z",
+            findings=(finding,),
+            summary="1 findings: P1=1",
+            coordinator_actor="controller",
+        )
+        store.write_directive(directive)
+        directive_path = evidence_root / "directive.json"
+        sidecar_path = evidence_root / "directive.json.sha256"
+        # Tamper with the sidecar to a wrong digest.
+        sidecar_path.write_text("0" * 64 + "\n")
+        with pytest.raises(DirectiveLoadFailure) as exc:
+            _load_directive_payload(directive_path)
+        assert exc.value.reason.startswith("sidecar_mismatch")
 
 
 class TestBridgePromptByteIdenticalToRelay:

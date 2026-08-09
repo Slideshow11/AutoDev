@@ -1361,26 +1361,31 @@ class RelayLoop:
         # REPAIRING_REVIEW_FINDINGS through AWAITING_CI and
         # into QUALIFYING_READINESS on the qualifying path.
         if decision.action == "launch_worker":
-            # REPAIRING_REVIEW_FINDINGS -> AWAITING_CI. The
-            # worker push drives the next transition once the
-            # head advances.
-            try:
-                self.controller.report_repair_pushed(
+            # The relay does NOT drive the state transition
+            # here. The controller's state machine is the
+            # only place where a new head is bound; the
+            # transition REPAIRING_REVIEW_FINDINGS ->
+            # AWAITING_CI fires only when the worker
+            # actually pushes and a new head is observed.
+            # Per the explicit transition contract: the
+            # controller's transition method is the
+            # authoritative bond, and the round's
+            # head_observed value is the new head SHA.
+            #
+            # A launch failure leaves the state machine
+            # in REPAIRING_REVIEW_FINDINGS — the next round
+            # retries with the same repair directive or a
+            # refreshed one. The relay preserves the
+            # repairable state so the run is recoverable.
+            log_attr = getattr(self.controller, "log", None)
+            if log_attr is not None:
+                log_attr(
+                    "info",
+                    "relay dispatched worker; controller stays in "
+                    "REPAIRING_REVIEW_FINDINGS until new head is observed",
+                    round_index=round_index,
                     head_observed=head_sha,
                 )
-            except Exception as exc:
-                # The integrity of the state machine is
-                # critical: a failed transition is a real
-                # defect, not a silent skip.
-                log = getattr(self.controller, "log", None)
-                if log is not None:
-                    log(
-                        "error",
-                        "relay failed to drive REPAIRING_REVIEW_FINDINGS -> AWAITING_CI",
-                        round_index=round_index,
-                        error=str(exc),
-                    )
-                raise
         elif decision.action == "enter_qualifying_readiness":
             # REPAIRING_REVIEW_FINDINGS -> AWAITING_CI -> QUALIFYING_READINESS.
             # The head is clean; the controller enters the
@@ -1499,6 +1504,40 @@ class RelayLoop:
                     return decision
                 current_head = new_head
                 continue
+
+    def mark_head_advanced(self, old_head_sha: str, new_head_sha: str) -> None:
+        """Bind the worker push to the state machine.
+
+        The supervisor calls this when the worker's push
+        is observed (the live PR reports a new head SHA
+        that differs from the head the relay was acting
+        on). The transition fires only on a real head
+        advance — the controller's transition method is
+        the authoritative bond between the previous
+        REPAIRING_REVIEW_FINDINGS round and the new
+        AWAITING_CI observation.
+
+        The transition is conditional: if the controller
+        is not in REPAIRING_REVIEW_FINDINGS, the
+        transition is a no-op (the controller may have
+        already advanced via a manual operator action,
+        or the CI runner drove the transition). The
+        head_observed is the new head SHA.
+        """
+        if new_head_sha == old_head_sha:
+            return
+        result = self.controller.report_repair_pushed(
+            head_observed=new_head_sha,
+        )
+        log_attr = getattr(self.controller, "log", None)
+        if log_attr is not None:
+            log_attr(
+                "info",
+                "relay bound worker push to AWAITING_CI",
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                new_head=new_head_sha[:12],
+                new_state=result.current_state,
+            )
 
     def _await_head_advance(self, head_sha: str) -> Optional[str]:
         """Hook for the supervisor's worker-completion wait.

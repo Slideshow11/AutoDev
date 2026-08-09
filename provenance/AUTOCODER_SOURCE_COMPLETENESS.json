@@ -983,9 +983,9 @@
         "destination_path": "autocoder_supervisor/supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
-        "destination_sha256": "682b516afc5ba3ad56dbf7a66d7e35db2a0f6a0f5ff69e9b3b9ead14f817a885",
+        "destination_sha256": "df7328b39afa41a1c0a4e71fdc77c155513e43e83d6c5e9ea4642a38ee43adb2",
         "source_size_bytes": 86428,
-        "destination_size_bytes": 107123,
+        "destination_size_bytes": 110303,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
       },
       {
@@ -1313,9 +1313,9 @@
         "destination_path": "tests/test_directive_bridge.py",
         "transformation_classification": "standalone_test_addition",
         "source_sha256": null,
-        "destination_sha256": "bc62b964c46a74907a4ed3ad89d02472496540817c6e02e5b0bc3e700e85bd98",
+        "destination_sha256": "e27ac29ba5d569ae9d89a83f788172333faa8dc8fa91b334ae90a9fbe219d7c9",
         "source_size_bytes": null,
-        "destination_size_bytes": 21402,
+        "destination_size_bytes": 26192,
         "transformation_explanation": "Tests for the directive bridge. 20 tests covering resolve_directive failure modes, byte-identical relay bridge pairing, supervisor launch_worker integration, and the head-mismatch / digest-mismatch guards."
       },
       {
@@ -1323,9 +1323,9 @@
         "destination_path": "autocoder_supervisor/relay_wiring.py",
         "transformation_classification": "standalone_source_addition",
         "source_sha256": null,
-        "destination_sha256": "d1192905ce1d9c91c415b5eb2b72440893f1755df3b5c99c41c8cc37c494b934",
+        "destination_sha256": "8614a9518136900f686aea6d797daae2866c71eb243d437f90897e9126bfce4f",
         "source_size_bytes": null,
-        "destination_size_bytes": 9815,
+        "destination_size_bytes": 11991,
         "transformation_explanation": "Persistent relay wiring for the supervisor's event loop. Spawns the relay CLI subprocess on every new actionable event so review->repair->push->CI->review->repair repeats automatically. No package cycle: the supervisor uses subprocess to talk to the orchestration package."
       },
       {
@@ -1353,10 +1353,10 @@
         "destination_path": "tests/test_strict_quiet_window_canary.py",
         "transformation_classification": "standalone_test_addition",
         "source_sha256": null,
-        "destination_sha256": "2a1253858208fe7302cadbc5b86ebd5848417fa7cfc70d3e2f486811e48c1cc6",
+        "destination_sha256": "761d8fd18ada81fc72a4542dbfe1444f2b7445dbf0903373e9603a05d123e061",
         "source_size_bytes": null,
-        "destination_size_bytes": 11900,
-        "transformation_explanation": "Production-path behavioral canary for the strict quiet-window. 3 tests prove the supervisor polls continuously, resets on non-qualifying observations, and halts on the controller's BLOCKED state."
+        "destination_size_bytes": 19670,
+        "transformation_explanation": "Production-path behavioral canary for the strict quiet-window. 5 tests: 3 for the polling-with-reset behavior, 2 for the new-event preservation (the new event MUST be preserved across the quiet-window reset, NOT cleared by the post-loop cleanup; the function returns 'new_event' so the caller routes to handle_new_events)."
       }
     ]
   },

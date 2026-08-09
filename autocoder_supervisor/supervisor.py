@@ -2275,7 +2275,7 @@ def active_repair_quiet_window(
     token: str,
     quiet_window: int,
     pre_unconsumed_ids: set,
-) -> None:
+) -> Optional[str]:
     """Run the ACTIVE_REPAIR quiet-window transition.
 
     Strict quiet-window: the supervisor polls continuously
@@ -2291,11 +2291,36 @@ def active_repair_quiet_window(
     and snapshot B captured ``quiet_window`` seconds apart
     that match, with no new events emerging and the
     controller not in BLOCKED.
+
+    Returns:
+      - ``"escalation"``: controller is in BLOCKED; the
+        caller must halt the run.
+      - ``"new_event"``: a new event arrived during the
+        window; the caller must route to handle_new_events.
+      - ``"ready"``: the qualifying interval elapsed;
+        readiness can be promoted. The caller should advance
+        to PROVISIONAL_READY.
+      - ``None``: the run stays in ACTIVE_REPAIR without
+        advancing.
+
+    New-event preservation: events that arrive DURING the
+    quiet-window polling are NOT cleared by the post-loop
+    cleanup. The post-loop clear only removes the
+    pre-existing unconsumed events (the original set
+    captured at the start). Newly arriving events remain
+    in the unconsumed ledger so the next iteration's
+    new_events list is populated and the supervisor
+    routes them to handle_new_events. Previously the
+    post-loop clear wiped ALL unconsumed events, allowing
+    a new event to be silently absorbed without ever
+    reaching handle_new_events.
     """
     import time as _time
     snap_a = capture_and_store_snapshot("A", rs, token)
     qualifying_started_at = _time.monotonic()
     last_blocked_check_at = 0.0
+    new_event_observed = False
+    controller_blocked = False
     while True:
         _time.sleep(min(2, quiet_window))
         # Controller BLOCKED check at every heartbeat so
@@ -2315,7 +2340,8 @@ def active_repair_quiet_window(
                             "(relay escalated to human); operator must inspect",
                             head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
                         )
-                        return
+                        controller_blocked = True
+                        break
             except (OSError, json.JSONDecodeError):
                 pass
         snap_b = capture_live_snapshot(rs, token or "")
@@ -2328,6 +2354,19 @@ def active_repair_quiet_window(
             snap_a, snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
         )
         elapsed = _time.monotonic() - qualifying_started_at
+        if new_events_during_window:
+            # A new event arrived during the window. It
+            # MUST NOT be cleared by the post-loop
+            # cleanup; the caller will route it to
+            # handle_new_events. The window resets.
+            new_event_observed = True
+            log(
+                "info",
+                "quiet-window: new event arrived during polling; "
+                "preserving for handle_new_events",
+                event_count=len(new_events_during_window),
+                elapsed=round(elapsed, 1),
+            )
         if reasons or new_events_during_window:
             log(
                 "info",
@@ -2350,31 +2389,35 @@ def active_repair_quiet_window(
             # One uninterrupted >=quiet_window second
             # qualifying interval has elapsed.
             break
+    if controller_blocked:
+        return "escalation"
+    if new_event_observed:
+        # Do NOT clear unconsumed events here. The new
+        # event is preserved for the next iteration's
+        # new_events list.
+        return "new_event"
     # Snapshot is stable AND no new events emerged during the
-    # quiet window. Clear pre-existing unconsumed events
-    # BEFORE evaluating readiness so the readiness gate can
-    # pass — the ``unconsumed_events`` check inside
-    # ``evaluate_readiness`` would otherwise reject readiness
-    # even though the system has stabilised.
-    if list_unconsumed_events():
+    # quiet window. Clear ONLY the pre-existing unconsumed
+    # events (the original set captured at the start), so
+    # the readiness gate can pass. The post-loop clear
+    # does not affect events that arrived during the
+    # window, because the new_event_observed flag would
+    # have triggered the early return above.
+    pre_existing = [
+        e for e in list_unconsumed_events()
+        if e.get("id") in pre_unconsumed_ids
+    ]
+    if pre_existing:
         log(
             "info",
             "snapshot stable across quiet window; "
             "clearing pre-existing unconsumed events",
-            count=len(list_unconsumed_events()),
+            count=len(pre_existing),
         )
         write_json(
             UNCONSUMED_EVENTS_PATH,  # type: ignore[name-defined]
             {"events": []},
         )
-    # Escalation guard. When the relay escalates to
-    # human, the orchestration controller is in BLOCKED.
-    # The supervisor's quiet-window logic must NOT promote
-    # readiness in that case; the operator's halt point
-    # takes precedence. The controller state is read from
-    # ``<state_dir>/state.json`` (the orchestration's
-    # StateStore) and BLOCKED halts the quiet-window
-    # transition.
     try:
         state_path = Path(STATE_DIR) / "state.json"  # type: ignore[name-defined]
         if state_path.is_file():
@@ -2388,16 +2431,14 @@ def active_repair_quiet_window(
                     "(relay escalated to human); operator must inspect",
                     head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
                 )
-                return
+                return "escalation"
     except (OSError, json.JSONDecodeError):
-        # Fail closed: if the state file is unreadable,
-        # do not promote readiness.
         log(
             "warning",
             "quiet-window halted: could not read controller state",
             head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
         )
-        return
+        return "escalation"
     result = evaluate_readiness(
         snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
     )
@@ -2408,12 +2449,13 @@ def active_repair_quiet_window(
             "entered PROVISIONAL_READY (snapshot A == B)",
             head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
         )
-    else:
-        log(
-            "info",
-            "readiness denied",
-            reason=result.get("reason"),
-        )
+        return "ready"
+    log(
+        "info",
+        "readiness denied",
+        reason=result.get("reason"),
+    )
+    return None
 
 
 def _invoke_relay_for_events(
@@ -2870,6 +2912,28 @@ def main(argv: Optional[list[str]] = None) -> int:
             ):
                 old_head = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
                 globals()["AUTHORITATIVE_HEAD"] = live_head
+                # Bind the worker push to the state machine.
+                # The relay's mark_head_advanced fires the
+                # transition REPAIRING_REVIEW_FINDINGS ->
+                # AWAITING_CI only on a real head advance, so
+                # a launch failure leaves the repair state
+                # recoverable. When the worker pushes a new
+                # commit, the rebind here triggers the
+                # transition.
+                try:
+                    from . import relay_wiring as _relay_wiring
+                    _relay_wiring.mark_head_advanced_public(
+                        old_head, live_head,
+                    )
+                except Exception as exc:
+                    log(
+                        "warning",
+                        "mark_head_advanced failed; controller "
+                        "state may not match",
+                        old_head=old_head[:12] if old_head else "",
+                        new_head=live_head[:12],
+                        error=str(exc),
+                    )
                 # Persist the rebind in the supervisor's
                 # run_state.json so a restart picks it up.
                 try:
@@ -2933,9 +2997,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                 pre_unconsumed_ids = {
                     e.get("id") for e in list_unconsumed_events()
                 }
-                active_repair_quiet_window(
+                quiet_window_outcome = active_repair_quiet_window(
                     rs, token or "", quiet_window, pre_unconsumed_ids,
                 )
+                # If a new event arrived during the window,
+                # the relay preserved it. The next iteration
+                # sees it in new_events and routes to
+                # handle_new_events. The escalation / None
+                # outcomes are handled inline.
+                if quiet_window_outcome == "escalation":
+                    log(
+                        "warning",
+                        "main loop paused: controller in BLOCKED",
+                    )
 
             elif cur_state in READINESS_STATES:
                 snap_now = capture_live_snapshot(rs, token or "")
