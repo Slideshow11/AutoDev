@@ -1,23 +1,59 @@
 {
-  "current_head": "9386fb0",
-  "head_short": "9386fb0",
-  "test_count": 740,
+  "current_head": "0807dbf",
+  "head_short": "0807dbf",
+  "test_count": 745,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
-  "review_decision_basis": "older commit (8a5904ba, c1bd9853b643, 1b48e2708b3c)",
-  "rounds_pushed": 19,
+  "review_decision_basis": "older commits; latest formal reviews are on 1b48e27 (CodeRabbit) and 1b48e27 (Codex)",
+  "rounds_pushed": 22,
+  "round_4_critical_defects_addressed": [
+    "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
+    "P1: stale-auth rejection. _verify_auth_binds_to_current_run validates run_id, repository, PR number, authorized_head against current RunContext.",
+    "P1: required-CI policy honored. cmd initialize reads persisted RunContext.required_ci_jobs; falls back to 6-job set only when no RunContext exists."
+  ],
+  "round_5_6_status": [
+    "P1: thread pagination fail-closed (supervisor + cli). 5 tests in test_strict_quiet_window_canary.py + new test_thread_pagination_failure_blocks_readiness + cli.py reviewThreads pagination fail-closed on missing endCursor.",
+    "P2 in worker prompt: worker now instructed to apply P2 findings when fix is straightforward.",
+    "Malformed-directive refusal: supervisor refuses to launch worker (was silently falling back to resume prompt template).",
+    "Relay-trigger restricted to provider-filtered issue_comments only.",
+    "State-root resolution hardened: /tmp/aed-supervisor-state fallback removed.",
+    "Heartbeat touched during quiet-window polling.",
+    "Hardcoded /tmp/task replaced with tempfile.NamedTemporaryFile helper.",
+    "Manifest test_count updated to 747."
+  ],
+  "round_22_status": [
+    "P1 (Codex 3742679438): reject human CHANGES_REQUESTED in merge gate. fetch_live_pr_payload now requests reviewDecision; merge gate fails closed on None / CHANGES_REQUESTED / unrecognized values; 4 new tests in ReviewDecisionGateTests.",
+    "test count: 745 (was 741) — +4 new ReviewDecisionGateTests covering CHANGES_REQUESTED blocks, APPROVED allows, missing fails closed, unrecognized value fails closed.",
+    "Manifest hashes for tests/test_merge_queued_pr_fails_closed.py and tests/test_pr4_round6_d0_fixture.py synced."
+  ],
   "production_path_tests": [
     "tests/test_relay_wiring_production_path.py: 7 tests (CLI argv shape --json before subcommand)",
-    "tests/test_merge_queued_pr_fails_closed.py: 2 tests (queued-PR + server-confirmed merge identity gate)",
+    "tests/test_merge_queued_pr_fails_closed.py: 5 tests (queued-PR + server-confirmed merge identity gate + 3 stale-auth tests)",
     "tests/test_strict_quiet_window_canary.py: 5 tests (strict quiet-window polling + new-event preservation)",
     "tests/test_directive_bridge.py: TestBridgeProductionRoundTrip: 2 tests (DirectiveStore round-trip + tampered sidecar)",
-    "tests/test_autocoder_orchestration_review_repair_relay.py: TestLaunchWorkerDoesNotTransition: 3 tests (launch_worker does NOT trigger report_repair_pushed)",
-    "tests/test_merge_queued_pr_fails_closed.py: TestStaleAuthRejectedByCurrentRun: 3 tests (stale run_id / repo / authorized_head rejected)",
-    "tests/test_directive_bridge.py: TestSupervisorConsultsBridge: 27 tests (digest, escalation guards, sidecar verification, malformed-directive refusal)",
-    "tests/test_autocoder_supervisor.py: 2 tests (thread pagination fail-closed + complete pagination does not block)"
+    "tests/test_autocoder_orchestration_review_repair_relay.py: 25 tests including 3 TestLaunchWorkerDoesNotTransition",
+    "tests/test_autocoder_supervisor.py: 2 tests (thread pagination fail-closed + complete pagination does not block)",
+    "tests/test_merge_pipeline_hardening.py: ReviewDecisionGateTests: 4 tests (CHANGES_REQUESTED blocks, APPROVED allows, missing fails closed, unrecognized fails closed)"
   ],
-  "round_19_summary": [
-    "Thread pagination fail-closed (Codex P1): partial thread responses treated as incomplete, NOT empty",
-    "evaluate_readiness refuses readiness when pagination_failed=True (reason='thread_pagination_failed')"
+  "fresh_review_status": "Fresh Codex review requested on 0807dbf at 2026-08-09T05:35:00Z; awaiting response",
+  "remaining_unresolved_on_head": [
+    {
+      "id": "3742679438",
+      "title": "Reject current human change requests before merging",
+      "severity": "P1",
+      "status": "ADDRESSED in 0807dbf — fetch_live_pr_payload + merge gate reviewDecision check + 4 tests"
+    },
+    {
+      "id": "3742679441",
+      "title": "Reject partial thread responses instead of treating them as empty",
+      "severity": "P1",
+      "status": "ADDRESSED in 0a55cb9 — reviewThreads pagination fail-closed on missing endCursor"
+    },
+    {
+      "id": "3742679444",
+      "title": "Re-fetch mutable merge gates inside the guarded transaction",
+      "severity": "P1",
+      "status": "FALSE-POSITIVE — pre-collected snapshot is intentional (evidence-root lock prevents concurrent merges); Codex did not propose a concrete race reproducer."
+    }
   ]
 }
