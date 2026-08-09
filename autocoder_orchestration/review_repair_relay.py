@@ -1104,6 +1104,19 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
         raise InvalidSnapshot("snapshot must be a dict")
     findings: List[Finding] = []
     seen_ids: set = set()
+    # Round-29 review (Codex): filter out issue comments
+    # that are bound to a previous head. The
+    # ``_provider_issue_comments`` list is the supervisor's
+    # snapshot of every provider comment across the PR
+    # history; an old CodeRabbit comment on commit A is
+    # NOT a finding for the current head B. We retain
+    # only comments whose bound commit (or, if missing,
+    # whose creation timestamp) is consistent with the
+    # current head. The ``commit_id`` field is what GitHub
+    # emits; absent ``commit_id`` we conservatively keep
+    # the comment (the supervisor's snapshot already
+    # filters by the current head's review API).
+    current_head = snapshot.get("head_sha")
     # Prefer the per-provider subset when present, fall back to
     # the unfiltered list. The supervisor's snapshot guarantees
     # that the subset is a filtered copy of the unfiltered list.
@@ -1116,6 +1129,16 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
                 continue
             cid = c.get("id")
             if cid is None:
+                continue
+            # Round-29: skip comments bound to a different
+            # commit than the current head.
+            cmt = c.get("commit_id") or c.get("commit_oid")
+            if (
+                isinstance(cmt, str)
+                and cmt
+                and current_head
+                and cmt != current_head
+            ):
                 continue
             finding_id = f"{provider}:{cid}"
             if finding_id in seen_ids:
