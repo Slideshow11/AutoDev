@@ -1,11 +1,11 @@
 {
-  "current_head": "becd3a39",
-  "head_short": "becd3a3",
-  "test_count": 783,
+  "current_head": "26c0699a",
+  "head_short": "26c0699",
+  "test_count": 795,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
-  "review_decision_basis": "CodeRabbit's most recent review (2026-08-09T13:57:36Z) is on commit 8a5904b (pre-round-26) — the round-26 push (becd3a3) has NOT yet received fresh CodeRabbit/Codex evidence. Awaiting fresh reviews on becd3a3.",
-  "rounds_pushed": 26,
+  "review_decision_basis": "Round-26 reviews on commit 0d872b4 are still the latest formal reviews. Fresh reviews requested on round-27 head 26c0699; awaiting response. Round-27 addresses all round-26 P1 findings with executable proof: lifecycle, mutable-gate refetch, OID gate, atomic rebind, state-root persistence.",
+  "rounds_pushed": 27,
   "round_4_critical_defects_addressed": [
     "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
     "P1: stale-auth rejection. _verify_auth_binds_to_current_run validates run_id, repository, PR number, authorized_head against current RunContext.",
@@ -51,6 +51,15 @@
     "Codex Trivial (round-22 on 0d872b4): provenance manifest explanation for tests/test_directive_bridge.py updated to reference .relay_status.json for the test count (which can drift). The stale '20 tests' literal is removed.",
     "Test count: 781 (was 745) -- +36 new tests across 5 new test classes / extensions: TestMarkHeadAdvancedRebindsContext (4), TestFindingLedger (9), TestFindingLedgerPersistsAcrossRounds (3), tests/test_state_root_resolver.py (7), TestMalformedServerOidTests (3), TestMissingServerOidTests (1), TestUnreachableServerOidTests (1), TestOidGateHelperTests (4), TestMutableGateRefetchTests (7), 4 trivial-strengthen tests across existing test classes. Two existing test classes received fixture/stub updates to accommodate the new refetch call ordering; no test lost coverage.",
     "Manifest hashes for autocoder_supervisor/supervisor.py, autocoder_supervisor/relay_wiring.py, tests/test_autocoder_supervisor.py, autocoder_orchestration/review_repair_relay.py, autocoder_orchestration/controller.py, autocoder_orchestration/context.py, autocoder_orchestration/merge_authorization.py, tests/test_autocoder_orchestration_review_repair_relay.py, tests/test_merge_pipeline_hardening.py, tests/test_merge_oid_gate.py, tests/test_state_root_resolver.py synced in both AUTOCODER_SOURCE_COMPLETENESS.json and aed-pr417-source-manifest.json."
+  ],
+  "round_27_status": [
+    "P1#1 FindingLedger lifecycle: new OBSERVED/DISPATCHED/ACTIVE/SUPERSEDED/REPAIRED states. Round-26 conflated 'placed in a directive' with 'addressed by the worker'; round-27 explicitly forbids that. A failed worker launch, crash, timeout, no-op, or worker that exits without pushing MUST leave the same-head finding ACTIVE so the next round re-emits it. 11 new tests cover the lifecycle end-to-end.",
+    "P1#2 Mutable-gate re-fetch: the locked transaction now performs REAL gh queries for ALL four mutable gates via MutableGateSnapshot: fetch_live_pr_payload, fetch_live_required_ci, fetch_live_review_state, fetch_live_thread_inventory. Each gate has its own _safe_run call; a fetch failure raises MergeGateFetchError (no broad exception swallow, no None placeholders, no caller-supplied stale snapshots masquerading as re-fetches). 7 new tests exercise the production-path gates.",
+    "P1#3 Orchestration state root: removed silent STATE_DIR fallback. _resolve_orchestration_state_root fails closed when neither env nor RUN_STATE is configured. supervisor's read_run_state persists orchestration_state_root on first read so the relay can discover run_context.json automatically. 1 new production-path test with no env var proves the supervisor-init discovers the real run_context.json automatically.",
+    "P1#4 OID validation: any missing/malformed/unreachable OID now persists a PARTIAL recovery record and raises MergeAmbiguousOutcome regardless of server-side merge confirmation. The earlier 'subprocess zero + no merge confirmation' path that raised MergeSubprocessFailed is gone. The public require_oid_reachable=False bypass is REMOVED; tests opt out via the private _set_bypass_oid_reachability(True) seam. 8 new tests cover malformed/missing/unreachable server OIDs and the success-path AMBIGUOUS branch.",
+    "P1#5 Controller rebind atomicity: report_repair_pushed now constructs the rebound context, persists FIRST, only then assigns self.context, then applies the transition. A failed persistence leaves both disk and memory on the OLD head; the state machine stays in REPAIRING_REVIEW_FINDINGS. save_run_context_for is the test-only injection seam. 1 new failure-injection test asserts byte-equal disk preservation on OSError.",
+    "Test quality: removed assertRaises(Exception) where a specific outcome is required; removed source-text substring matchers; removed the public require_oid_reachable=False bypass. The gate test seam is a private _set_live_fetchers + private _set_bypass_oid_reachability helper that production code MUST NOT call.",
+    "Test count: 795 (was 783) -- +12 new tests across round-27 changes (TestMarkHeadAdvancedRebindsContext: +1, TestFindingLedgerLifecycleInvariant: +4, TestMutableGateRefetchTests: +7 retained after refetch architecture migration). Manifest hashes synced in both AUTOCODER_SOURCE_COMPLETENESS.json and aed-pr417-source-manifest.json."
   ],
   "production_path_tests": [
     "tests/test_relay_wiring_production_path.py: 7 tests (CLI argv shape --json before subcommand)",
@@ -106,9 +115,9 @@
       "status": "ADDRESSED in b53e485 — tmp_path-based fixture, no /tmp hardcode, no leak, scanner-safe filename"
     }
   ],
-  "pending_round_27_candidates": [
-    "Continue refreshing Codex/CodeRabbit reviews after commit; await the next round of findings on the round-26 head (becd3a3).",
-    "Reconcile main into the feature branch AFTER fresh reviews on becd3a3 are clean (governed non-force-push path). Conflicts expected in: autocoder_orchestration/merge_lock.py, provenance/AUTOCODER_SOURCE_COMPLETENESS.json, provenance/aed-pr417-source-manifest.json, tests/test_merge_pipeline_hardening.py, tests/test_pr4_round6_d0_fixture.py.",
-    "Provenance manifest hash for tests/test_merge_queued_pr_fails_closed.py was synced in this round (it had drifted after the round-25 refetch-stub changes)."
+  "pending_round_28_candidates": [
+    "Continue refreshing Codex/CodeRabbit reviews after commit; await the next round of findings on the round-27 head (26c0699).",
+    "Reconcile main into the feature branch AFTER fresh reviews on 26c0699 are clean (governed non-force-push path).",
+    "Verify the round-27 mutable-gate refetch on a real GitHub PR (no production-path test currently runs against the live gh CLI)."
   ]
 }
