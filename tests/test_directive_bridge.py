@@ -70,7 +70,14 @@ def _make_directive() -> dict:
 def _write_directive_with_digest(
     target: Path, directive: dict
 ) -> dict:
-    """Write the directive with a valid _sha256 sidecar value."""
+    """Write the directive with a valid _sha256 sidecar value.
+
+    The directive body is written with the canonical
+    serialization (sorted keys, indent=2). The sidecar file
+    is the canonical digest + newline, matching the bridge's
+    sidecar verification contract. The artifact writer
+    stores the sidecar at <directive>.sha256 (sibling file).
+    """
     canonical_fields = {k: v for k, v in directive.items() if k != "_sha256"}
     canonical = json.dumps(
         canonical_fields, sort_keys=True, separators=(",", ":"),
@@ -79,7 +86,10 @@ def _write_directive_with_digest(
     payload = dict(directive)
     payload["_sha256"] = digest
     target.write_text(json.dumps(payload, indent=2, sort_keys=True))
+    sidecar_path = Path(str(target) + ".sha256")
+    sidecar_path.write_text(digest + "\n")
     return payload
+
 
 
 class TestResolveDirective:

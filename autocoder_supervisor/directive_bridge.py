@@ -236,11 +236,9 @@ def _load_directive_payload(path: Path) -> dict:
                     path,
                 )
     # Verify the directive's stored _sha256 against its payload.
-    # The relay writes the directive's _sha256 sidecar value into
-    # the artifact body so the bridge can verify it without
-    # touching the sidecar file. The canonical digest is the
-    # SHA-256 of the canonical serialization of the directive
-    # fields, excluding the persisted metadata ``_sha256`` itself.
+    # The canonical digest is the SHA-256 of the canonical
+    # serialization of the directive fields, excluding the
+    # persisted metadata ``_sha256`` itself.
     stored_sha = directive.get("_sha256")
     if not stored_sha or not isinstance(stored_sha, str):
         raise DirectiveLoadFailure(
@@ -258,6 +256,28 @@ def _load_directive_payload(path: Path) -> dict:
         raise DirectiveLoadFailure(
             f"digest_mismatch: stored={stored_sha[:12]}.. "
             f"recomputed={recomputed[:12]}..",
+            path,
+        )
+    # Verify the canonical directive .sha256 sidecar file
+    # matches the on-disk content. The sidecar is the
+    # publish-side artifact indicator; a directive without a
+    # verifiable sidecar is not yet durable and cannot
+    # launch a worker. The artifact writer stores the sidecar
+    # at ``<directive>.sha256`` (sibling file, not suffix
+    # replacement).
+    sidecar_path = Path(str(path) + ".sha256")
+    expected_sidecar = stored_sha + "\n"
+    try:
+        actual_sidecar = sidecar_path.read_text()
+    except OSError as exc:
+        raise DirectiveLoadFailure(
+            f"sidecar_unreadable: {exc!r}",
+            path,
+        )
+    if actual_sidecar != expected_sidecar:
+        raise DirectiveLoadFailure(
+            f"sidecar_mismatch: expected={expected_sidecar[:64]!r} "
+            f"actual={actual_sidecar[:64]!r}",
             path,
         )
     return directive

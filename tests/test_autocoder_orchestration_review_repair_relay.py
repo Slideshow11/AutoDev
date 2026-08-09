@@ -161,21 +161,21 @@ class TestCollectFindings:
             "test (3.11)": {"conclusion": "failure", "run_id": "x"},
             "extra": {"conclusion": "failure", "run_id": "y"},
         })
-        # When no required_check_names supplied, the collector
-        # surfaces both required and non-required failures for
-        # visibility.
+        # When no required_check_names supplied, the relay
+        # has no authoritative required-check list and emits
+        # no findings. The relay drives the operator's
+        # authoritative required-check list; non-required
+        # failures are surfaced through the existing
+        # readiness gate, not through the repair loop.
         findings = collect_findings(snap)
-        assert {f.check_name for f in findings} == {
-            "test (3.11)",
-            "extra",
-        }
-        # When required_check_names is supplied, exact failures
-        # are emitted for the required set, and non-required
-        # failures are also surfaced (extra visibility).
+        assert {f.check_name for f in findings} == set()
+        # When required_check_names is supplied, only those
+        # failures emit findings. Non-required failures are
+        # NOT surfaced as repair findings.
         findings = collect_findings(
             snap, required_check_names=("test (3.11)",),
         )
-        assert {f.check_name for f in findings} == {"test (3.11)", "extra"}
+        assert {f.check_name for f in findings} == {"test (3.11)"}
 
     def test_in_progress_ci_check_does_not_emit_finding(self) -> None:
         snap = _make_snapshot(required_checks={
@@ -220,6 +220,40 @@ class TestCollectFindings:
 
 
 # === build_directive tests ===
+
+class TestCancelledChecks:
+    """Cancelled required checks must NOT be treated as clean.
+    A cancelled check is a non-actionable terminal state;
+    the relay surfaces it as a finding so the readiness
+    gate can decide.
+    """
+    def test_cancelled_required_check_is_finding(self) -> None:
+        snap = _make_snapshot(
+            required_checks={
+                "tests": {"conclusion": "cancelled", "run_id": "x"},
+            },
+        )
+        findings = collect_findings(
+            snap, required_check_names=("tests",),
+        )
+        # Cancelled is NOT in the success set.
+        assert len(findings) == 1
+        assert findings[0].check_name == "tests"
+        assert findings[0].severity == "CI_FAILURE"
+
+    def test_skipped_required_check_is_passing(self) -> None:
+        # Skipped is a positive terminal state for required
+        # checks (the check was intentionally not run).
+        snap = _make_snapshot(
+            required_checks={
+                "tests": {"conclusion": "skipped"},
+            },
+        )
+        findings = collect_findings(
+            snap, required_check_names=("tests",),
+        )
+        assert findings == []
+
 
 class TestRequiredCheckMissing:
     """If the operator names required checks, they MUST be

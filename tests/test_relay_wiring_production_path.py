@@ -56,13 +56,16 @@ def _write_directive_with_digest(target: Path, directive: dict) -> dict:
 
 
 def _init_run_context(state_root: Path, evidence_root: Path, head_sha: str) -> None:
-    """Write a real ``run_context.json`` to ``state_root`` so the
-    relay CLI loads it via the StateStore.
+    """Write a real ``run_context.json`` and state machine to
+    ``state_root`` so the relay CLI loads them via the
+    StateStore.
 
     The relay's ``cmd_review_repair_round`` reads
     ``run_context.json`` directly and refuses to run when
-    one is absent. The context fields mirror the production
-    layout (aerial 4 PR, base main, head <a*40>).
+    one is absent. The state machine MUST be in
+    REPAIRING_REVIEW_FINDINGS for the relay to accept the
+    round. The context fields mirror the production layout
+    (PR 4, base main, head <a*40>).
     """
     state_root.mkdir(parents=True, exist_ok=True)
     evidence_root.mkdir(parents=True, exist_ok=True)
@@ -87,6 +90,22 @@ def _init_run_context(state_root: Path, evidence_root: Path, head_sha: str) -> N
     with open(state_root / "run_context.json", "w") as f:
         json.dump(ctx, f)
     os.chmod(state_root / "run_context.json", 0o600)
+    # Initialize the state machine in REPAIRING_REVIEW_FINDINGS.
+    sm_path = state_root / "state.json"
+    sm_payload = {
+        "schema_version": "autocoder.state_machine.v1",
+        "current_state": "REPAIRING_REVIEW_FINDINGS",
+        "revision": 1,
+        "expected_revision": 0,
+        "head_observed": head_sha,
+        "transitions": [],
+        "journal": [],
+        "evidence": {},
+    }
+    with open(sm_path, "w") as f:
+        json.dump(sm_payload, f)
+    os.chmod(state_root / "run_context.json", 0o600)
+    os.chmod(sm_path, 0o600)
 
 
 def _snapshot_clean(head_sha: str) -> dict:
@@ -237,9 +256,10 @@ class TestInvokeRelayRoundProductionPath:
     def test_invoke_returns_escalation_when_p0_present(
         self, tmp_path: Path,
     ) -> None:
-        """A P0 finding causes the relay to block the run via
-        the controller and the round decision carries the
-        escalate reasons.
+        """A P0 finding causes the relay to block the run;
+        the CLI surfaces this as a structured
+        ``action == escalate_to_human`` decision with
+        populated ``escalate_reasons``.
         """
         head_sha = "a" * 40
         state_root, evidence_root = self._init(tmp_path, head_sha)
@@ -260,21 +280,17 @@ class TestInvokeRelayRoundProductionPath:
             },
             "unconsumed_event_ids": [],
         }
-        # build_directive raises EscalateToHuman before the
-        # command can complete. The CLI's exception handler
-        # maps this to EXIT_STATE (4) with a structured error.
-        with pytest.raises(RelayWiringError) as exc:
-            invoke_relay_round(
-                snapshot=snapshot,
-                head_sha=head_sha,
-                state_root=str(state_root),
-                run_id="r1",
-                pr_number=4,
-                evidence_root=str(evidence_root),
-                required_check_names=(),
-            )
-        assert exc.value.reason == "non_zero_exit"
-        assert exc.value.returncode == 4
+        decision = invoke_relay_round(
+            snapshot=snapshot,
+            head_sha=head_sha,
+            state_root=str(state_root),
+            run_id="r1",
+            pr_number=4,
+            evidence_root=str(evidence_root),
+            required_check_names=(),
+        )
+        assert decision["action"] == "escalate_to_human"
+        assert len(decision["escalate_reasons"]) >= 1
 
     def test_invoke_rejects_stale_snapshot(
         self, tmp_path: Path,

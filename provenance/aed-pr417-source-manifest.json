@@ -421,8 +421,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/directive_bridge.py",
-      "destination_sha256": "d7de46ebddb3ed76d631e809edfe84af1facf4b03124f93b3a60ccaf1b122c4c",
-      "destination_size_bytes": 11818,
+      "destination_sha256": "6273963ab56a72db8d75dcf1c00f0c67527040a39ffa91e5a40a67c8c207697b",
+      "destination_size_bytes": 12538,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,
@@ -441,8 +441,8 @@
     },
     {
       "destination_path": "tests/test_directive_bridge.py",
-      "destination_sha256": "f7e9f3cdc0a95eef89a3ed88a2d2720223c93e712f74dd13e907a652650d1ec4",
-      "destination_size_bytes": 21013,
+      "destination_sha256": "bc62b964c46a74907a4ed3ad89d02472496540817c6e02e5b0bc3e700e85bd98",
+      "destination_size_bytes": 21402,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,
@@ -461,8 +461,8 @@
     },
     {
       "destination_path": "tests/test_relay_wiring_production_path.py",
-      "destination_sha256": "11e39f36083962116f77519b5071fed9e6ecc90aa2047777134edb5fe17311e2",
-      "destination_size_bytes": 15317,
+      "destination_sha256": "9760b4d909dfb59eab2fdf462c4750ee2b39ed68bd8d7298bc15bac0c659f20d",
+      "destination_size_bytes": 15796,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,

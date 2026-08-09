@@ -1293,9 +1293,9 @@
         "destination_path": "autocoder_supervisor/directive_bridge.py",
         "transformation_classification": "standalone_source_addition",
         "source_sha256": null,
-        "destination_sha256": "d7de46ebddb3ed76d631e809edfe84af1facf4b03124f93b3a60ccaf1b122c4c",
+        "destination_sha256": "6273963ab56a72db8d75dcf1c00f0c67527040a39ffa91e5a40a67c8c207697b",
         "source_size_bytes": null,
-        "destination_size_bytes": 11818,
+        "destination_size_bytes": 12538,
         "transformation_explanation": "Direct consumer of the canonical directive.json artifact written by autocoder_orchestration.review_repair_relay. Renders the matching worker prompt without importing the orchestration package (avoids cycle)."
       },
       {
@@ -1313,9 +1313,9 @@
         "destination_path": "tests/test_directive_bridge.py",
         "transformation_classification": "standalone_test_addition",
         "source_sha256": null,
-        "destination_sha256": "f7e9f3cdc0a95eef89a3ed88a2d2720223c93e712f74dd13e907a652650d1ec4",
+        "destination_sha256": "bc62b964c46a74907a4ed3ad89d02472496540817c6e02e5b0bc3e700e85bd98",
         "source_size_bytes": null,
-        "destination_size_bytes": 21013,
+        "destination_size_bytes": 21402,
         "transformation_explanation": "Tests for the directive bridge. 20 tests covering resolve_directive failure modes, byte-identical relay bridge pairing, supervisor launch_worker integration, and the head-mismatch / digest-mismatch guards."
       },
       {
@@ -1333,9 +1333,9 @@
         "destination_path": "tests/test_relay_wiring_production_path.py",
         "transformation_classification": "standalone_test_addition",
         "source_sha256": null,
-        "destination_sha256": "11e39f36083962116f77519b5071fed9e6ecc90aa2047777134edb5fe17311e2",
+        "destination_sha256": "9760b4d909dfb59eab2fdf462c4750ee2b39ed68bd8d7298bc15bac0c659f20d",
         "source_size_bytes": null,
-        "destination_size_bytes": 15317,
+        "destination_size_bytes": 15796,
         "transformation_explanation": "Production-path behavioral tests for the relay wiring. Spawns the real CLI binary through subprocess and verifies the production argv shape (--json before the subcommand). Round-1 regression test: the wiring must produce the top-level --json form."
       }
     ]

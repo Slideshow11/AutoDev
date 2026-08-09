@@ -696,11 +696,16 @@ def _collect_ci_findings(
             continue
         conclusion = str(info.get("conclusion") or "").lower()
         status = str(info.get("status") or "").lower()
-        # A successful / neutral / skipped / cancelled conclusion
-        # is never a finding. These conclusions all represent a
+        # A successful / neutral / skipped conclusion is never
+        # a finding. These conclusions all represent a
         # non-actionable terminal state and equate to "the
         # required check produced no work for the operator".
-        if conclusion in ("success", "neutral", "skipped", "cancelled"):
+        # NOTE: ``cancelled`` is NOT in the success set. A
+        # cancelled check is an UNPLANNED terminal state; the
+        # readiness gate does not accept it as a positive
+        # observation. The relay surfaces it as a finding so
+        # the operator can investigate.
+        if conclusion in ("success", "neutral", "skipped"):
             continue
         # A still-running check is not a "failure" finding, but
         # it MUST block the relay from calling the head clean:
@@ -751,37 +756,13 @@ def _collect_ci_findings(
             comment_id=None,
             check_name=str(name),
         ))
-    # Also emit findings for any non-required check seen as a
-    # failure, so the operator sees the full CI failure
-    # surface regardless of the required-list filter.
-    for name, info in checks.items():
-        if name in required_check_names:
-            continue
-        if not isinstance(info, dict):
-            continue
-        conclusion = str(info.get("conclusion") or "").lower()
-        if conclusion in ("success", "neutral", "skipped", "cancelled", ""):
-            continue
-        run_id = info.get("run_id")
-        findings.append(Finding(
-            finding_id=f"ci:{name}:{run_id or 'unknown'}:extra",
-            source="ci",
-            severity=SEVERITY_CI_FAILURE,
-            title=f"CI check failed: {name}",
-            body=(
-                f"Non-required CI check {name!r} failed at run "
-                f"{run_id or 'unknown'}. The relay surfaces this "
-                "for visibility; the existing readiness gate is "
-                "the authority on required checks."
-            ),
-            file_path=None,
-            line=None,
-            url=None,
-            suggested_test=None,
-            review_id=None,
-            comment_id=None,
-            check_name=str(name),
-        ))
+    # NOTE: non-required check failures are NOT surfaced as
+    # repair findings. The relay drives the operator's
+    # authoritative required-check list; non-required
+    # failures are surfaced through the existing readiness
+    # gate, not through the repair loop. Surfacing them
+    # here would create permanent repair findings on
+    # irrelevant CI fluctuations.
     return findings
 
 
@@ -1374,6 +1355,70 @@ class RelayLoop:
             ci_failure_count=ci,
             escalate_reasons=reasons,
         ))
+        # Drive the controller through the required state
+        # transitions. The relay is the integration point that
+        # drives the orchestration state machine from
+        # REPAIRING_REVIEW_FINDINGS through AWAITING_CI and
+        # into QUALIFYING_READINESS on the qualifying path.
+        if decision.action == "launch_worker":
+            # REPAIRING_REVIEW_FINDINGS -> AWAITING_CI. The
+            # worker push drives the next transition once the
+            # head advances.
+            try:
+                self.controller.report_repair_pushed(
+                    head_observed=head_sha,
+                )
+            except Exception as exc:
+                # The integrity of the state machine is
+                # critical: a failed transition is a real
+                # defect, not a silent skip.
+                log = getattr(self.controller, "log", None)
+                if log is not None:
+                    log(
+                        "error",
+                        "relay failed to drive REPAIRING_REVIEW_FINDINGS -> AWAITING_CI",
+                        round_index=round_index,
+                        error=str(exc),
+                    )
+                raise
+        elif decision.action == "enter_qualifying_readiness":
+            # REPAIRING_REVIEW_FINDINGS -> AWAITING_CI -> QUALIFYING_READINESS.
+            # The head is clean; the controller enters the
+            # qualification path so the existing readiness
+            # gate can certify the head.
+            try:
+                self.controller.report_repair_pushed(
+                    head_observed=head_sha,
+                )
+            except Exception as exc:
+                # The state machine may already be past
+                # REPAIRING_REVIEW_FINDINGS (e.g. if the CI
+                # runner already drove the transition). The
+                # report_ci_pass is the authoritative next
+                # step; log and continue.
+                log = getattr(self.controller, "log", None)
+                if log is not None:
+                    log(
+                        "warning",
+                        "relay could not transition REPAIRING_REVIEW_FINDINGS -> AWAITING_CI; "
+                        "continuing to QUALIFYING_READINESS",
+                        round_index=round_index,
+                        error=str(exc),
+                    )
+            try:
+                self.controller.report_ci_pass(
+                    head_observed=head_sha,
+                )
+            except Exception as exc:
+                log = getattr(self.controller, "log", None)
+                if log is not None:
+                    log(
+                        "error",
+                        "relay failed to drive AWAITING_CI -> QUALIFYING_READINESS",
+                        round_index=round_index,
+                        error=str(exc),
+                    )
+                raise
         # If the decision is to escalate, drive the controller
         # into BLOCKED so the operator has a single halt point.
         if decision.action == "escalate_to_human":
