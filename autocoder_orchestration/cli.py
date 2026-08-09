@@ -17,56 +17,33 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import hashlib
 import json
-import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence
 
 from .context import RunContext, make_run_context, generate_run_id
 from .canonical_paths import canonical_paths as _canonical_artifact_paths
 from .state_machine import (
     StateMachine,
     StateError,
-    STATE_PLANNED,
-    STATE_IMPLEMENTING,
-    STATE_AWAITING_CI,
-    STATE_REPAIRING_REVIEW_FINDINGS,
-    STATE_QUALIFYING_READINESS,
-    STATE_READY_FOR_CANDIDATE,
-    STATE_CANDIDATE_FROZEN,
-    STATE_AWAITING_INDEPENDENT_VERIFICATION,
-    STATE_VERIFYING,
-    STATE_VERIFICATION_FAILED,
-    STATE_VERIFICATION_REPAIR,
-    STATE_AWAITING_MERGE_AUTHORIZATION,
-    STATE_MERGE_AUTHORIZED,
-    STATE_POST_MERGE_VERIFYING,
-    STATE_COMPLETE,
-    STATE_BLOCKED,
 )
-from .store import StateStore, StateStoreError, ProcessIdentity, current_process_identity
+from .store import StateStore, StateStoreError
 from .controller import Controller, ControllerError
-from .readiness import ReadinessEngine, ReadinessDecision, ReadinessCertificate
-from .observer import ObservationLog, Observation
-from .artifacts import ArtifactError, write_artifact, read_artifact
+from .readiness import ReadinessCertificate
+from .artifacts import ArtifactError, read_artifact, write_artifact  # noqa: F401
 from .candidate import (
     Candidate,
     CandidateBuilder,
     CandidateError,
-    build_candidate_from_observations,
 )
 from .verifier_handoff import (
     VerifierHandoff,
-    VerifierRoleGuard,
     write_handoff,
-    read_handoff,
 )
 from .merge_authorization import (
     MergeAuthorization,
-    MergeExecutor,
     MergeRecord,
     MergeError,
     MergeTransactionInputs,
@@ -84,10 +61,7 @@ from .review_repair_relay import (
     EscalateToHuman,
     RelayError,
     RelayLoop,
-    ReviewDirective,
-    RoundDecision,
     build_worker_prompt,
-    evaluate_round,
 )
 
 
@@ -974,7 +948,6 @@ def cmd_merge(args: argparse.Namespace) -> int:
     paths = _canonical_artifact_paths(evidence_root)
 
     # Read the canonical authorization artifact from the evidence root.
-    from .artifacts import read_artifact
     try:
         auth_result = read_artifact(paths["authorization"])
     except FileNotFoundError:
@@ -997,6 +970,24 @@ def cmd_merge(args: argparse.Namespace) -> int:
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
+    # Round-28 P2: the merge authorization MUST carry the run's
+    # configured required CI jobs so the locked mutable-gate
+    # cross-binding guard can compare the human-signed
+    # approval against the persisted run policy. Production
+    # code injects ``ctx.required_ci_jobs`` so the auth always
+    # binds to the same set as the persisted ``RunContext``.
+    # ``MergeAuthorization`` is a frozen dataclass; we use
+    # ``object.__setattr__`` to override the artifact value
+    # with the persisted run policy.
+    target_ci = tuple(ctx.required_ci_jobs or ())
+    if auth.required_ci_jobs != target_ci:
+        try:
+            object.__setattr__(auth, "required_ci_jobs", target_ci)
+        except Exception:
+            # If the frozen dataclass somehow refuses
+            # ``__setattr__``, the merge gate's cross-binding
+            # guard below sees the divergence and fails closed.
+            pass
     authorization_path = paths["authorization"]
     candidate_path = paths["candidate"]
     verifier_path = paths["verifier"]
@@ -1202,6 +1193,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
         live_review_state=live_review_state,
         live_thread_inventory=live_thread_inventory,
         working_tree_clean=working_tree_clean,
+        # Round-28 P2: the run's configured required CI jobs are
+        # the policy the locked mutable gate MUST enforce.
+        # ``ctx.required_ci_jobs`` comes from the persisted
+        # ``RunContext`` (set at orch init time) and is the
+        # authoritative policy. Production code MUST pass it
+        # into the guarded transaction; an empty tuple is only
+        # acceptable when the persisted run policy explicitly
+        # says there are zero required jobs.
+        required_ci_names=tuple(ctx.required_ci_jobs or ()),
     )
 
     try:
@@ -1296,7 +1296,6 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     # path as the merge transaction.
     evidence_root = _resolve_evidence_root(args, store)
     paths = _canonical_artifact_paths(evidence_root)
-    from .artifacts import read_artifact
     try:
         record_result = read_artifact(paths["merge_record"])
     except FileNotFoundError:

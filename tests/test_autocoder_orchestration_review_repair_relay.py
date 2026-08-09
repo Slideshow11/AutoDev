@@ -1968,13 +1968,18 @@ class TestFindingLedger:
         ledger_b = FindingLedger(store, head_sha="b" * 40)
         assert ledger_b.is_fresh(self._finding()) is True
 
-    def test_head_advance_with_supersede_is_not_fresh(self, tmp_path) -> None:
-        """Once ``mark_superseded_by_head`` has promoted the
-        prior head's entries to SUPERSEDED, the new head
-        evaluates each finding from scratch. A finding whose
-        signature matches the SUPERSEDED row on the prior
-        head is NOT fresh (terminal). A finding whose
-        signature differs IS fresh (new evidence at the new
+    def test_head_advance_with_supersede_is_fresh_on_new_head(
+        self, tmp_path: Path,
+    ) -> None:
+        """Round-28 P5: a SUPERSEDED row on the OLD head does NOT
+        silence a fresh observation of the same finding on the
+        NEW head. The user explicitly rejected the round-27
+        cross-head shadowing: a stale SUPERSEDED on A is NOT
+        positive cross-head resolution evidence, and the
+        finding on B remains active.
+
+        A finding whose signature differs IS fresh (different
+        body / title / severity is new evidence at the new
         head).
         """
         from autocoder_orchestration.review_repair_relay import FindingLedger
@@ -1983,7 +1988,7 @@ class TestFindingLedger:
         # The finding was ACTIVE on the OLD head (the worker
         # had acknowledged it but had not yet resolved it
         # when the head advanced). ``mark_superseded_by_head``
-        # is called with the OLD head, not the new head.
+        # is called with the OLD head.
         old_head = "a" * 40
         new_head = "b" * 40
         ledger_a = FindingLedger(store, head_sha=old_head)
@@ -1993,12 +1998,16 @@ class TestFindingLedger:
         ledger_a.mark_active(f)
         promoted = ledger_a.mark_superseded_by_head(old_head)
         assert promoted == 1
-        # On the new head, same signature -> NOT fresh (the
-        # SUPERSEDED row on the prior head shadows it).
+        # Round-28 P5: on the new head, the same signature is
+        # NOT silenced by the SUPERSEDED row on the OLD head
+        # (no positive cross-head resolution evidence). The
+        # finding on B is FRESH.
         ledger_b = FindingLedger(store, head_sha=new_head)
-        assert ledger_b.is_fresh(self._finding()) is False
-        # On the new head, different signature -> fresh (new
-        # evidence at the new head).
+        assert ledger_b.is_fresh(self._finding()) is True, (
+            f"Round-28 P5: cross-head SUPERSEDED MUST NOT silence "
+            f"a fresh observation on the new head."
+        )
+        # A different signature is fresh too.
         assert ledger_b.is_fresh(self._finding(body="new body")) is True
 
     def test_body_edit_reopens_finding(self, tmp_path) -> None:
@@ -2044,65 +2053,51 @@ class TestFindingLedger:
         # has not yet responded). The next round re-emits.
         assert ledger2.is_fresh(self._finding()) is True
 
-    def test_filter_drops_superseded_and_repaired_keeps_active(self, tmp_path) -> None:
+    def test_filter_drops_superseded_and_repaired_on_same_head(
+        self, tmp_path: Path,
+    ) -> None:
         """``filter_findings_to_current_head`` removes findings
         the ledger has marked SUPERSEDED or REPAIRED on the
         CURRENT head, but keeps ACTIVE findings so the next
         round re-emits them.
 
-        ``mark_superseded_by_head`` is called with an OLD
-        head to simulate head advance; ``filter_findings_to_current_head``
-        is then called with the NEW head as the current head.
+        Round-28 P5: cross-head SUPERSEDED on a DIFFERENT head
+        does NOT suppress. The test focuses on same-head
+        SUPERSEDED + REPAIRED, where the filter MUST drop them
+        (terminal on the current head). To test ACTIVE
+        survival we add a NEW ACTIVE finding on the new head.
         """
         from autocoder_orchestration.review_repair_relay import (
             filter_findings_to_current_head,
         )
-        # Use the round-27 lifecycle: build the ledger on the
-        # OLD head, mark supersede, then evaluate against the
-        # NEW head.
         from autocoder_orchestration.review_repair_relay import FindingLedger
         from autocoder_orchestration.store import StateStore
         store = StateStore(str(tmp_path / "state"))
-        old_head = "a" * 40
-        new_head = "b" * 40
-        ledger_a = FindingLedger(store, head_sha=old_head)
-        a = self._finding(finding_id="coderabbit:1", comment_id=1)
+        head = "a" * 40
+        ledger = FindingLedger(store, head_sha=head)
+        # Three findings on the SAME head.
         b = self._finding(finding_id="coderabbit:2", comment_id=2)
         c = self._finding(finding_id="coderabbit:3", comment_id=3)
-        # ``a`` is ACTIVE on the OLD head (worker not done).
-        # It is NOT yet terminal. After head advance it stays
-        # ACTIVE on the new head (the same finding is still
-        # open at the new head until REPAIRED or SUPERSEDED).
-        ledger_a.record_observed(a)
-        ledger_a.record_dispatched(a)
-        ledger_a.mark_active(a)
-        # ``b`` is REPAIRED on the OLD head -> terminal.
-        ledger_a.record_observed(b)
-        ledger_a.record_dispatched(b)
-        ledger_a.mark_active(b)
-        ledger_a.mark_repaired(b, resolution_evidence="upstream resolved")
-        # ``c`` is SUPERSEDED on the OLD head -> terminal.
-        ledger_a.record_observed(c)
-        ledger_a.record_dispatched(c)
-        ledger_a.mark_active(c)
-        promoted = ledger_a.mark_superseded_by_head(old_head)
-        assert promoted == 2, (
-            f"mark_superseded_by_head MUST promote ACTIVE + DISPATCHED "
-            f"entries for the OLD head; got promoted={promoted}"
-        )
-        # Now construct a ledger at the NEW head and run the
-        # filter. ``a`` was promoted by the supersede call —
-        # so ``a`` is now SUPERSEDED too. To test that ACTIVE
-        # findings survive, we add a NEW ACTIVE finding on
-        # the new head.
-        ledger_b = FindingLedger(store, head_sha=new_head)
-        d = self._finding(finding_id="coderabbit:4", comment_id=4, body="active on new head")
-        ledger_b.record_observed(d)
-        ledger_b.record_dispatched(d)
-        ledger_b.mark_active(d)
-        out = filter_findings_to_current_head([a, b, c, d], ledger_b)
+        # ``b`` is REPAIRED on the current head -> terminal.
+        ledger.record_observed(b)
+        ledger.record_dispatched(b)
+        ledger.mark_active(b)
+        ledger.mark_repaired(b, resolution_evidence="upstream resolved")
+        # ``c`` is SUPERSEDED on the current head -> terminal.
+        ledger.record_observed(c)
+        ledger.record_dispatched(c)
+        ledger.mark_active(c)
+        ledger.mark_superseded_by_head(head)
+        # Add a fresh ACTIVE finding on the same head. The
+        # filter MUST keep it (terminal-on-head does not apply).
+        d = self._finding(finding_id="coderabbit:4", comment_id=4, body="active on current head")
+        ledger.record_observed(d)
+        ledger.record_dispatched(d)
+        ledger.mark_active(d)
+        out = filter_findings_to_current_head([b, c, d], ledger)
         ids = {f.finding_id for f in out}
-        # Only ``d`` (ACTIVE on the new head) is re-emitted.
+        # ``b`` REPAIRED -> dropped. ``c`` SUPERSEDED -> dropped.
+        # ``d`` ACTIVE on the current head -> KEPT.
         assert ids == {"coderabbit:4"}, (
             f"only ACTIVE findings on the current head should be "
             f"re-emitted; got {ids}"
@@ -2337,20 +2332,24 @@ class TestFindingLedgerLifecycleInvariant:
             f"next directive; got {d2.action!r}"
         )
 
-    def test_head_advance_supersedes_finding(self, tmp_path) -> None:
-        """Scenario 3: Head A has F -> worker pushes B ->
-        A/F may now be treated as superseded subject to
-        fresh B evidence. The relay calls
-        ``mark_head_advanced`` which promotes the prior
-        entries to SUPERSEDED.
+    def test_head_advance_supersedes_finding_on_old_head_only(
+        self, tmp_path: Path,
+    ) -> None:
+        """Round-28 P5: ``mark_head_advanced`` promotes the prior
+        ACTIVE / DISPATCHED entries to SUPERSEDED on the OLD
+        head. Round-28 P5 explicitly forbids the round-27
+        behavior where the same finding observed on the NEW
+        head was silenced by the SUPERSEDED row on the OLD
+        head. The ledger MUST remain ACTIVE for B/F until
+        positive cross-head resolution evidence arrives.
 
-        The relay's ``run_once`` on head B requires the
-        controller to be in REPAIRING_REVIEW_FINDINGS, but
-        ``mark_head_advanced`` advances it to AWAITING_CI
-        (canonical post-head-advance transition). We
-        therefore exercise the ledger promotion and
-        ``is_fresh`` semantics directly, which is the
-        underlying invariant the relay depends on.
+        Sequence:
+          Head A: finding F is ACTIVE
+          Worker pushes head B; ``mark_head_advanced`` is called
+          ``mark_head_advanced`` promotes A/F to SUPERSEDED
+          Reviewer reports identical F on B
+          Round-28 P5: B/F is FRESH — the directive MUST
+          contain F, qualification is blocked.
         """
         loop, store = self._setup_loop(tmp_path)
         snap_a = self._snap_with_finding("a" * 40, 99, "P1 finding")
@@ -2360,30 +2359,25 @@ class TestFindingLedgerLifecycleInvariant:
         )
         # Worker pushes head B. The supervisor calls
         # ``mark_head_advanced`` which (a) promotes prior
-        # ACTIVE / DISPATCHED entries to SUPERSEDED and (b)
-        # binds the controller to AWAITING_CI.
+        # ACTIVE / DISPATCHED entries to SUPERSEDED on the OLD
+        # head and (b) binds the controller to AWAITING_CI.
         loop.mark_head_advanced("a" * 40, "b" * 40)
         from autocoder_orchestration.review_repair_relay import (
             FindingLedger, FINDING_STATE_SUPERSEDED,
         )
-        # The ledger promoted the prior entry to SUPERSEDED.
+        # The ledger promoted the prior entry to SUPERSEDED
+        # on the OLD head.
         ledger_a = FindingLedger(store, head_sha="a" * 40)
         entries = ledger_a.load()
         assert entries["coderabbit:99"]["state"] == FINDING_STATE_SUPERSEDED, (
             f"mark_head_advanced MUST promote prior ACTIVE/DISPATCHED "
-            f"entries to SUPERSEDED; got {entries['coderabbit:99']['state']!r}"
+            f"entries to SUPERSEDED on the OLD head; got "
+            f"{entries['coderabbit:99']['state']!r}"
         )
-        # On head B with the same signature, the SUPERSEDED row
-        # makes the finding NOT fresh. The relay's
-        # ``evaluate_round`` would return
-        # ``enter_qualifying_readiness`` IF it could run on
-        # head B; the controller's transition to AWAITING_CI
-        # prevents that. The ledger's ``is_fresh`` is the
-        # correct invariant: NOT fresh.
+        # Round-28 P5: on head B with the SAME signature, the
+        # finding is FRESH. The cross-head SUPERSEDED on A is
+        # NOT positive cross-head resolution evidence.
         ledger_b = FindingLedger(store, head_sha="b" * 40)
-        # The signature includes the title (the first line of
-        # the body, per ``_collect_review_findings``), so the
-        # rebuild must match the relay's construction.
         from autocoder_orchestration.review_repair_relay import Finding
         f_b = Finding(
             finding_id="coderabbit:99",
@@ -2395,9 +2389,11 @@ class TestFindingLedgerLifecycleInvariant:
             suggested_test=None, review_id=None,
             comment_id=99, check_name=None,
         )
-        assert ledger_b.is_fresh(f_b) is False, (
-            "on head B with the same body, the SUPERSEDED row MUST "
-            "make the finding NOT fresh (the prior is terminal)"
+        assert ledger_b.is_fresh(f_b) is True, (
+            "Round-28 P5: on head B with the same body, the "
+            "finding MUST be FRESH (no positive cross-head "
+            "resolution evidence); the SUPERSEDED row on A "
+            "does NOT silence B/F."
         )
 
     def test_fresh_evidence_at_new_head_reopens(self, tmp_path) -> None:

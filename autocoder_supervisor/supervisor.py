@@ -20,7 +20,6 @@ by every persistent artifact are described by TypedDicts in
 from __future__ import annotations
 
 import argparse
-import errno
 import fcntl
 import json
 import os
@@ -30,7 +29,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -46,6 +44,7 @@ from .directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the p
     resolve_directive,
     resolve_worker_prompt,
 )
+from .orchestration_state_root import OrchestrationRootUnverified  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -408,29 +407,52 @@ def acquire_lock() -> bool:
 def read_run_state() -> dict:
     """Read the persistent ``RUN_STATE`` JSON document.
 
-    Round-27 P1#3: on first read, ensure the document records
-    the canonical ``orchestration_state_root`` (the supervisor's
-    own ``STATE_DIR``). Persisting the value on the supervisor
-    side gives the relay and the controller a single,
-    positively-known source of truth for the orchestration
-    run state directory. Without this, the relay's resolver
-    would fall back to ``STATE_DIR`` at the relay side
-    (silently substituting an unrelated directory if the
-    modules diverge).
+    Round-28 invariant: this function MUST NOT auto-persist
+    ``STATE_DIR`` as the ``orchestration_state_root``. The
+    supervisor's private ``STATE_DIR`` is conceptually separate
+    from the orchestration controller/run state root, and the
+    user's invariant forbids silently substituting them.
+
+    The orchestration state root enters RUN_STATE via the
+    canonical handoff path ``persist_orchestration_state_root``
+    in ``autocoder_supervisor.orchestration_state_root``. This
+    function only reads.
+
+    Init safety:
+
+      - Missing ``RUN_STATE`` file → return empty dict (the
+        caller decides whether to initialize via
+        ``init_run_state_safely``).
+      - Existing ``RUN_STATE`` whose JSON parses → return as-is.
+      - Existing ``RUN_STATE`` whose JSON does NOT parse →
+        raise (the caller MUST route to BLOCKED / escalation
+        rather than silently destroying supervisor state).
     """
+    if not RUN_STATE.exists():  # type: ignore[name-defined]
+        return {}
     try:
-        state = json.loads(RUN_STATE.read_text())  # type: ignore[name-defined]
-    except Exception as e:
-        log("error", "read_run_state failed", error=str(e))
-        state = {}
-    # First-read: persist the canonical orchestration state root.
-    if "orchestration_state_root" not in state:
-        try:
-            state["orchestration_state_root"] = str(STATE_DIR)  # type: ignore[name-defined]
-            state.setdefault("schema_version", "autocoder.run_state.v1")
-            write_json(RUN_STATE, state)  # type: ignore[name-defined]
-        except (OSError, NameError):
-            pass
+        text = RUN_STATE.read_text()  # type: ignore[name-defined]
+    except OSError:
+        # Unreadable file → return empty dict; the caller may
+        # decide to recover via ``init_run_state_safely`` if
+        # appropriate. We do NOT auto-overwrite here.
+        return {}
+    try:
+        state = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # Round-28 invariant: refuse to overwrite a corrupt run
+        # state document. Re-raise so the caller can route to
+        # BLOCKED / escalation.
+        raise OrchestrationRootUnverified(
+            f"RUN_STATE at {RUN_STATE} is not valid JSON: {exc!r}; "  # type: ignore[name-defined]
+            "refusing to overwrite a corrupt run state document. "
+            "Route to BLOCKED / escalation."
+        ) from exc
+    if not isinstance(state, dict):
+        raise OrchestrationRootUnverified(
+            f"RUN_STATE at {RUN_STATE} is not a JSON object: "  # type: ignore[name-defined]
+            f"got {type(state).__name__}; refusing to overwrite."
+        )
     return state
 
 
@@ -2578,26 +2600,33 @@ def _invoke_relay_for_events(
     )
     if not should_invoke_relay(snapshot):
         return "no_action"
-    # Resolve the canonical state and evidence roots via the
-    # shared helper in ``relay_wiring``. Round-27 P1#3: the
-    # helper's precedence is env, then
-    # ``RUN_STATE['orchestration_state_root']``. The
-    # supervisor persists the value at first read so the
-    # relay always finds it. We do NOT silently substitute
-    # ``STATE_DIR`` here.
+    # Resolve the canonical state and evidence roots. Round-28
+    # invariant: ``STATE_DIR`` is NOT a fallback. If neither the
+    # env var nor ``RUN_STATE`` yields a positively-identified
+    # orchestration state root, the relay invocation MUST
+    # surface a fail-closed error and the supervisor MUST NOT
+    # launch a generic worker — it routes to the BLOCKED /
+    # escalation path and stops autonomous progression.
+    from .orchestration_state_root import (
+        OrchestrationRootError,
+        resolve_orchestration_state_root,
+    )
     from .relay_wiring import (
-        _resolve_orchestration_state_root,
         _resolve_orchestration_evidence_root,
     )
-    state_root = _resolve_orchestration_state_root()
-    if not state_root:
-        # Hard misconfiguration: the helper itself returned
-        # ``None``, which only happens when STATE_DIR cannot be
-        # imported either. Surface the failure to the operator
-        # rather than silently falling back to a stray default.
+    try:
+        state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+    except OrchestrationRootError as exc:
+        # Fail-closed: the supervisor routes to BLOCKED /
+        # escalation. We do NOT fall back to STATE_DIR.
         log(
             "error",
-            "relay_invocation_failed: no orchestration state_root resolvable",
+            "relay_invocation_failed: orchestration state_root not positively identified",
+            error=str(exc),
         )
         return "no_action"
     evidence_root = _resolve_orchestration_evidence_root(state_root)

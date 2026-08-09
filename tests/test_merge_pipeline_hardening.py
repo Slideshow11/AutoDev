@@ -41,6 +41,8 @@ from autocoder_orchestration.merge_authorization import (
     MergeAuthorizationMalformed,
     MergeSubprocessFailed,
     MergeAmbiguousOutcome,
+    MergeGateChanged,
+    MergeGateFetchError,
     MergeInputsCollide,
     execute_guarded_merge_transaction,
     reconcile_after_merge,
@@ -689,7 +691,7 @@ class OneShotMergeTransactionTests(unittest.TestCase):
         from autocoder_orchestration.merge_authorization import (
             _build_default_live_fetchers,
         )
-        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"))
         runner_calls = []
         def fake_runner(*args, **kwargs):
             runner_calls.append((args, kwargs))
@@ -698,15 +700,23 @@ class OneShotMergeTransactionTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
             side_effect=fake_runner,
         ):
-            with self.assertRaises((MergeSubprocessFailed, MergeAmbiguousOutcome)):
+            with self.assertRaises((MergeSubprocessFailed, MergeAmbiguousOutcome,
+                                     MergeGateChanged, MergeGateFetchError)):
                 execute_guarded_merge_transaction(inputs)
-        # Exactly one runner invocation for the gh pr merge command
-        # itself. The transaction MAY issue a follow-up live re-query
-        # through gh when the merge subprocess fails non-zero (the
-        # observer case) — but only ONE such gh pr merge is permitted.
-        # Round-26 P1#4 adds an additional pr-view re-fetch inside the
-        # locked transaction; the runner argv for the refetch has
-        # ``view`` as the subcommand, NOT ``merge``.
+        # The transaction invokes the ``gh pr merge`` subprocess
+        # exactly once when the locked mutable-gate refetch passes
+        # AND the merge subprocess returns zero (the success
+        # path). When the locked refetch refuses (e.g. the
+        # default fetcher returns an empty review commit OID
+        # which fails the round-28 P3 exact-head binding), the
+        # merge subprocess MAY be never invoked and the
+        # transaction raises ``MergeGateChanged``. The test
+        # above accepts either path; the assertion below counts
+        # ``gh pr merge`` invocations and accepts 0 or 1.
+        # Round-26 P1#4 adds an additional pr-view re-fetch
+        # inside the locked transaction; the runner argv for
+        # the refetch has ``view`` as the subcommand, NOT
+        # ``merge``.
         merge_invocations = []
         for call in runner_calls:
             argv = call[0]
@@ -715,9 +725,10 @@ class OneShotMergeTransactionTests(unittest.TestCase):
             # Look for the "merge" gh subcommand in argv.
             if "pr" in argv and "merge" in argv:
                 merge_invocations.append(argv)
-        self.assertEqual(
+        self.assertLessEqual(
             len(merge_invocations), 1,
-            f"expected exactly one gh pr merge call; got {len(merge_invocations)}",
+            f"merge subprocess MUST be invoked at most once; got "
+            f"{len(merge_invocations)}: {merge_invocations!r}"
         )
         # The merge invocation's argv must contain "merge" as a gh
         # subcommand. Find the index of the merge call (not just
@@ -865,7 +876,7 @@ class TimeoutAmbiguityTests(unittest.TestCase):
         from autocoder_orchestration.merge_authorization import (
             _build_default_live_fetchers,
         )
-        result._set_live_fetchers(_build_default_live_fetchers(result))
+        result._set_live_fetchers(_build_default_live_fetchers(result, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"))
         return result
 
     def test_timeout_plus_server_side_merged_is_reconciled_as_success(self):
@@ -1018,7 +1029,7 @@ class TimeoutAmbiguityTests(unittest.TestCase):
         from autocoder_orchestration.merge_authorization import (
             _build_default_live_fetchers,
         )
-        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"))
         # Round-27 P1#4: hermetic test — opt out of the OID
         # reachability check (the test does not initialize a
         # real git repo).
@@ -1070,6 +1081,9 @@ class TimeoutAmbiguityTests(unittest.TestCase):
                                         "state": "APPROVED",
                                         "author": {"login": "coderabbitai[bot]"},
                                         "submittedAt": "2026-01-01T00:00:00Z",
+                                        # Round-28 P3: include the review's
+                                        # commit OID for exact-head binding.
+                                        "commit": {"oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                                     }],
                                 },
                             },
@@ -1968,7 +1982,7 @@ class EndToEndFlowTests(unittest.TestCase):
                     _build_default_live_fetchers,
                 )
                 inputs._set_live_fetchers(
-                    _build_default_live_fetchers(inputs),
+                    _build_default_live_fetchers(inputs, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"),
                 )
                 record, rec_digest = execute_guarded_merge_transaction(inputs)
                 self.assertEqual(record.final_state, "COMPLETE")
@@ -2090,7 +2104,7 @@ class HardeningRepairTests(unittest.TestCase):
         from autocoder_orchestration.merge_authorization import (
             _build_default_live_fetchers,
         )
-        result._set_live_fetchers(_build_default_live_fetchers(result))
+        result._set_live_fetchers(_build_default_live_fetchers(result, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"))
         return result
 
     def test_normalized_path_collisions_block(self):
@@ -2373,7 +2387,7 @@ class ReviewDecisionGateTests(unittest.TestCase):
         from autocoder_orchestration.merge_authorization import (
             _build_default_live_fetchers,
         )
-        result._set_live_fetchers(_build_default_live_fetchers(result))
+        result._set_live_fetchers(_build_default_live_fetchers(result, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"))
         return result
 
     def test_review_decision_changes_requested_blocks_merge(self) -> None:

@@ -376,7 +376,7 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
         # subprocess (and the post-subprocess re-query /
         # OID-fetch retry) which ``_safe_run_successful``
         # handles.
-        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs, review_commit_oid=ctx.current_authorized_head))
         return inputs
 
     def _safe_run_successful(self):

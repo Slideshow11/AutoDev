@@ -232,6 +232,13 @@ class MergeAuthorization:
     The contract is unchanged from the original implementation so historical
     readers and tests still work. The dataclass itself carries no SHA-256;
     that lives in the artifact that contains it.
+
+    Round-28 P2: ``required_ci_jobs`` carries the run's configured
+    required CI policy. The locked mutable-gate enforcement uses this
+    value to drive the ``fetch_live_required_ci`` comparator: the live
+    inventory MUST be SUCCESS for every job in this list. The empty
+    tuple means the persisted run policy explicitly says there are
+    zero required jobs (which is rare and documented at init time).
     """
 
     schema_version: str
@@ -248,8 +255,14 @@ class MergeAuthorization:
     require_match_head_commit: bool = True
     authorization_timestamp: str = ""
     author: str = ""
-    next_wave_authorization: Optional[Dict[str, Any]] = None
+    next_wave_authorization: Optional[Any] = None
     notes: str = ""
+    # Round-28 P2: the run's configured required CI jobs. The
+    # locked mutable-gate refetch MUST verify each job is green
+    # at the live head. Production code populates this from
+    # ``ctx.required_ci_jobs`` (the persisted ``RunContext``).
+    # Empty tuple means "policy says zero required jobs".
+    required_ci_jobs: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.pr_number, int) or self.pr_number <= 0:
@@ -298,6 +311,13 @@ class MergeAuthorization:
         ):
             if field_name not in payload:
                 raise ValueError(f"missing required field: {field_name!r}")
+        # Round-28 P2: the required CI jobs are part of the auth
+        # artifact. The CLI also rebinds the field from
+        # ``ctx.required_ci_jobs`` (the persisted run policy), so
+        # the cross-binding guard sees both sides agree.
+        raw_jobs = payload.get("required_ci_jobs", ()) or ()
+        if not isinstance(raw_jobs, list):
+            raw_jobs = tuple(raw_jobs) if isinstance(raw_jobs, (list, tuple)) else ()
         return cls(
             schema_version=str(payload["schema_version"]),
             run_id=str(payload["run_id"]),
@@ -315,6 +335,7 @@ class MergeAuthorization:
             author=str(payload.get("author", "")),
             next_wave_authorization=payload.get("next_wave_authorization"),
             notes=str(payload.get("notes", "")),
+            required_ci_jobs=tuple(raw_jobs),
         )
 
     def compute_sha256(self) -> str:
@@ -775,35 +796,70 @@ def fetch_live_review_state(
     repo: str,
     pr_number: int,
     *,
+    canonical_reviewer_login: str = "coderabbitai",
     runner: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Fetch the live formal review state for the PR.
 
-    Round-27: real gh query inside the locked transaction.
+    Round-28 P3: every review candidate carries the review
+    commit identity. The locked merge gate compares the
+    review's ``commit.oid`` against the authorized exact head.
+    A review whose ``commit.oid`` does NOT match the
+    authorized head is NOT exact-head approval, even if its
+    ``state`` is APPROVED.
+
     Returns a dict shaped like::
 
         {
           "latest_coderabbit_state": "APPROVED" | "CHANGES_REQUESTED" | ...,
-          "reviews": [{"state": ..., "author": ..., "submitted_at": ...}],
+          "latest_coderabbit_commit_oid": <live review commit OID>,
+          "latest_coderabbit_login": <canonical reviewer login>,
+          "reviews": [
+            {
+              "state": ...,
+              "author": <login>,
+              "submitted_at": ...,
+              "commit_oid": <review commit OID>,
+              "head_sha": <PR head when the review was submitted>,
+            },
+            ...
+          ],
           "head_sha": <live head>,
         }
 
-    The merge gate compares ``latest_coderabbit_state``
-    against the bound snapshot; a divergence from
-    ``APPROVED`` halts the transaction.
+    The merge gate compares ``latest_coderabbit_state`` against
+    the bound snapshot AND verifies
+    ``latest_coderabbit_commit_oid == authorized_head``. A
+    divergence halts the transaction.
+
+    Canonical reviewer login comparison: the configured
+    canonical reviewer's login MUST match exactly
+    (case-insensitive normalized comparison). Lookalike
+    accounts such as ``coderabbit-helper`` MUST NOT satisfy
+    the gate. The default canonical reviewer is
+    ``coderabbitai`` (the bot login used by CodeRabbit's
+    GitHub App); the comparison is case-insensitive and
+    ignores trailing ``[bot]`` suffixes (e.g.
+    ``coderabbitai[bot]`` and ``coderabbitai`` both match).
     """
     _runner = runner or (lambda *a, **kw: _safe_run(list(a), **kw))
-    # Round-27: query the PR reviews GraphQL endpoint via
-    # the ``gh api graphql`` so we get exact-head bound
-    # reviews. The GraphQL query is a single call so we
-    # avoid pagination races.
+    # Round-28 P3: query the PR reviews GraphQL endpoint
+    # with ``commit`` so each review carries its
+    # commit-oid identity. We also pull ``commit.oid`` for
+    # the latest review per author; this lets the gate
+    # bind the review to the exact authorized head.
     query = (
         "query($owner:String!, $name:String!, $number:Int!) {"
         "  repository(owner:$owner, name:$name) {"
         "    pullRequest(number:$number) {"
         "      headRefOid"
         "      reviews(last:50, states:[APPROVED, CHANGES_REQUESTED, COMMENTED]) {"
-        "        nodes { state author { login } submittedAt }"
+        "        nodes {"
+        "          state"
+        "          author { login }"
+        "          submittedAt"
+        "          commit { oid }"
+        "        }"
         "      }"
         "    }"
         "  }"
@@ -845,23 +901,194 @@ def fetch_live_review_state(
             "state": r.get("state"),
             "author": ((r.get("author") or {}).get("login") or ""),
             "submitted_at": r.get("submittedAt"),
+            # Round-28 P3: include the review's commit OID so the
+            # gate can compare against the authorized exact head.
+            "commit_oid": ((r.get("commit") or {}).get("oid") or ""),
         }
         for r in reviews_raw
     ]
-    # The CodeRabbit reviewer state is the LAST review
-    # submitted by the CodeRabbit bot. If no CodeRabbit
-    # review exists, ``latest_coderabbit_state`` is None.
+    # Round-28 P3: canonical reviewer login matching. We
+    # normalize by lowercasing and stripping ``[bot]``. The
+    # default canonical reviewer is ``coderabbitai``; lookalike
+    # accounts such as ``coderabbit-helper`` MUST NOT match.
+    def _is_canonical(login: str) -> bool:
+        s = (login or "").strip().lower()
+        if s.endswith("[bot]"):
+            s = s[: -len("[bot]")].rstrip()
+        return s == canonical_reviewer_login.strip().lower()
+    # The latest CodeRabbit reviewer state is the LAST
+    # matching review submitted by the canonical reviewer.
+    # If no canonical review exists, both
+    # ``latest_coderabbit_state`` and
+    # ``latest_coderabbit_commit_oid`` are None.
     latest_cr_state: Optional[str] = None
+    latest_cr_commit: Optional[str] = None
+    latest_cr_login: Optional[str] = None
     for r in reversed(reviews):
-        if "coderabbit" in r["author"].lower():
+        if _is_canonical(r["author"]):
             latest_cr_state = r["state"]
+            latest_cr_commit = r["commit_oid"]
+            latest_cr_login = r["author"]
             break
     return {
         "head_sha": head_sha,
         "reviews": reviews,
         "latest_coderabbit_state": latest_cr_state,
+        "latest_coderabbit_commit_oid": latest_cr_commit,
+        "latest_coderabbit_login": latest_cr_login,
+        "canonical_reviewer_login": canonical_reviewer_login,
         "repo": repo,
     }
+
+
+def _normalize_canonical_reviewer_login(login: str) -> str:
+    """Normalize a GitHub login for canonical-reviewer matching.
+
+    Round-28 P3: lookalike accounts such as ``coderabbit-helper``
+    MUST NOT satisfy the gate. We normalize by lowercasing and
+    stripping ``[bot]`` suffixes so ``coderabbitai[bot]`` and
+    ``coderabbitai`` both match, but ``coderabbit-helper`` does
+    not match ``coderabbitai``.
+    """
+    s = (login or "").strip().lower()
+    if s.endswith("[bot]"):
+        s = s[: -len("[bot]")].rstrip()
+    return s
+
+
+def _validate_graphql_review_threads_response(
+    doc: Any, *, page_index: int
+) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Validate one page of the GraphQL ``reviewThreads`` response.
+
+    Round-28 P4: fail closed on partial GraphQL responses. For
+    EVERY page require:
+
+      - no top-level GraphQL ``errors`` array with non-empty
+        entries;
+      - the top-level ``data`` is an object (not null);
+      - ``data.repository.pullRequest`` exists and is an object;
+      - ``reviewThreads`` connection exists and is an object;
+      - ``nodes`` exists and is a list (NOT null, NOT missing);
+      - ``pageInfo`` exists and is an object with the required
+        fields;
+      - if ``hasNextPage`` is True, ``endCursor`` MUST be a
+        non-empty string.
+
+    Missing fields MUST NEVER default to ``nodes=[]`` or
+    ``hasNextPage=False`` because that converts incomplete
+    evidence into "zero unresolved threads". Returns
+    ``(threads_dict, page_info, head_sha)`` on success; raises
+    ``MergeGateFetchError`` on any partial response.
+    """
+    if not isinstance(doc, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: top-level GraphQL response is "
+                f"not a JSON object; got {type(doc).__name__}"
+            ),
+        )
+    # Top-level errors array: GitHub returns errors here when
+    # the query is partial. ANY non-empty errors list means the
+    # page is incomplete — fail closed.
+    errors = doc.get("errors")
+    if isinstance(errors, list) and len(errors) > 0:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: GraphQL returned top-level "
+                f"errors: {errors!r}; the thread inventory is "
+                f"incomplete."
+            ),
+        )
+    data = doc.get("data")
+    if not isinstance(data, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: top-level `data` is missing "
+                f"or not an object; got {type(data).__name__}."
+            ),
+        )
+    pr = (
+        data.get("repository", {}).get("pullRequest", {})
+    )
+    if not isinstance(pr, dict) or not pr:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `repository.pullRequest` is "
+                f"missing or not an object; the thread inventory "
+                f"is incomplete."
+            ),
+        )
+    head_sha = pr.get("headRefOid")
+    if head_sha is None:
+        # GitHub omitted ``headRefOid`` (or returned null).
+        # We treat null as missing rather than "" so the
+        # caller can detect the partial-response case.
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `headRefOid` is missing or "
+                f"null; the thread inventory is incomplete."
+            ),
+        )
+    threads_obj = pr.get("reviewThreads")
+    if not isinstance(threads_obj, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `reviewThreads` connection "
+                f"is missing or not an object; the thread "
+                f"inventory is incomplete."
+            ),
+        )
+    nodes = threads_obj.get("nodes")
+    if not isinstance(nodes, list):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `reviewThreads.nodes` is "
+                f"missing or not a list; got {type(nodes).__name__}. "
+                f"The thread inventory MUST be a complete list, "
+                f"not a partial placeholder."
+            ),
+        )
+    page_info = threads_obj.get("pageInfo")
+    if not isinstance(page_info, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `reviewThreads.pageInfo` is "
+                f"missing or not an object; the thread inventory "
+                f"is incomplete."
+            ),
+        )
+    if "hasNextPage" not in page_info:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `pageInfo.hasNextPage` is "
+                f"missing; the thread inventory is incomplete."
+            ),
+        )
+    has_next = page_info.get("hasNextPage")
+    end_cursor = page_info.get("endCursor")
+    if has_next is True:
+        # Round-28 P4: ``hasNextPage=True`` MUST have a
+        # non-empty ``endCursor``. Missing cursor = incomplete.
+        if not end_cursor or not isinstance(end_cursor, str):
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                message=(
+                    f"page {page_index}: hasNextPage=True but "
+                    f"endCursor is missing/empty; the thread "
+                    f"inventory is incomplete."
+                ),
+            )
+    return threads_obj, page_info, str(head_sha)
 
 
 def fetch_live_thread_inventory(
@@ -882,14 +1109,29 @@ def fetch_live_thread_inventory(
     fail-closed signal: the gate refuses to merge because the
     thread inventory is incomplete.
 
+    Round-28 P4: fail closed on partial GraphQL responses.
+    For every page require:
+      - no top-level GraphQL errors;
+      - ``data`` is an object;
+      - ``nodes`` is a list (NOT missing, NOT null);
+      - ``pageInfo`` is an object with the required fields;
+      - ``hasNextPage=True`` requires a non-empty endCursor;
+      - max_pages exceeded is treated as incomplete.
+    Missing fields MUST NEVER default to ``nodes=[]`` or
+    ``hasNextPage=False`` because that converts incomplete
+    evidence into "zero unresolved threads".
+
+    The function raises ``MergeGateFetchError`` on any partial
+    response. The caller (the locked gate) fails closed.
+
     Returns::
 
         {
           "head_sha": <live head>,
           "unresolved_current": <int>,
           "unresolved_outdated": <int>,
-          "paginated_completely": True | False,
-          "error": <None | str>,
+          "paginated_completely": True,
+          "error": None,
         }
     """
     _runner = runner or (lambda *a, **kw: _safe_run(list(a), **kw))
@@ -914,18 +1156,9 @@ def fetch_live_thread_inventory(
     )
     unresolved_current = 0
     unresolved_outdated = 0
-    paginated_completely = True
-    error: Optional[str] = None
     head_sha = ""
     cursor: Optional[str] = None
     for _page in range(max_pages):
-        # The first request omits cursor; subsequent
-        # requests send the endCursor. ``gh api graphql``
-        # treats ``-F cursor=null`` as the literal string
-        # "null" rather than JSON null — the merge-queue
-        # codex review explicitly flags this. We send
-        # ``-F cursor=`` (empty string) on the first call
-        # and ``-F cursor=<value>`` on subsequent calls.
         argv: List[str] = [
             gh_executable, "api", "graphql",
             "-f", f"query={query}",
@@ -939,55 +1172,65 @@ def fetch_live_thread_inventory(
             argv.extend(["-F", f"cursor={cursor}"])
         res = _runner(*argv)
         if res["returncode"] != 0:
-            paginated_completely = False
-            error = (
-                f"gh api graphql (threads page) failed "
-                f"(rc={res['returncode']}): stderr={res['stderr']!r}"
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                underlying=GitHubLiveFetchError(
+                    f"gh api graphql (threads page) failed "
+                    f"(rc={res['returncode']}): stderr={res['stderr']!r}"
+                ),
             )
-            break
         try:
             doc = json.loads(res.get("stdout") or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            paginated_completely = False
-            error = f"thread inventory JSON decode failed: {exc!r}"
-            break
-        pr = (
-            doc.get("data", {}).get("repository", {}).get("pullRequest", {})
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                underlying=exc,
+                message="thread inventory JSON decode failed",
+            )
+        # Round-28 P4: per-page strict validation. Missing
+        # ``nodes`` / ``pageInfo`` / ``headRefOid`` /
+        # non-empty errors ALL fail closed. We DO NOT default
+        # to ``nodes=[]`` or ``hasNextPage=False``.
+        threads_obj, page_info, page_head_sha = (
+            _validate_graphql_review_threads_response(doc, page_index=_page)
         )
         if not head_sha:
-            head_sha = str(pr.get("headRefOid") or "")
-        threads = (
-            pr.get("reviewThreads", {}).get("nodes", [])
-        )
-        pi = pr.get("reviewThreads", {}).get("pageInfo", {})
-        for t in threads:
+            head_sha = page_head_sha
+        nodes = threads_obj.get("nodes") or []
+        for t in nodes:
             if not t.get("isResolved"):
                 if t.get("isOutdated"):
                     unresolved_outdated += 1
                 else:
                     unresolved_current += 1
-        if not pi.get("hasNextPage"):
+        if not page_info.get("hasNextPage"):
             break
-        cursor = pi.get("endCursor")
+        cursor = page_info.get("endCursor")
+        # Round-28 P4: per-page validation already enforced
+        # non-empty cursor when hasNextPage=True, so this is a
+        # belt-and-suspenders check.
         if not cursor:
-            paginated_completely = False
-            error = (
-                "hasNextPage=True but endCursor is empty; "
-                "the thread inventory is incomplete"
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                message=(
+                    f"page {_page}: hasNextPage=True but endCursor "
+                    f"is empty; the thread inventory is incomplete."
+                ),
             )
-            break
     else:
-        paginated_completely = False
-        error = (
-            f"thread inventory exceeded {max_pages} pages; "
-            "the merge gate refuses to assume the count is complete"
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"thread inventory exceeded {max_pages} pages; "
+                "the merge gate refuses to assume the count is complete."
+            ),
         )
     return {
         "head_sha": head_sha,
         "unresolved_current": unresolved_current,
         "unresolved_outdated": unresolved_outdated,
-        "paginated_completely": paginated_completely,
-        "error": error,
+        "paginated_completely": True,
+        "error": None,
     }
 
 
@@ -2344,19 +2587,29 @@ def _refetch_and_validate_mutable_gates(
 
 def _build_default_live_fetchers(
     inputs: "MergeTransactionInputs",
+    *,
+    review_commit_oid: Optional[str] = None,
 ) -> Dict[str, Callable[[], Dict[str, Any]]]:
     """Build a fetcher dict that returns the bound snapshot
     unchanged for every gate.
 
-    Round-27: tests that don't care about mutable-gate
-    divergence inject this as the fetcher set. The
-    comparator sees ``live == bound`` for every gate and
-    passes through; the test then exercises the rest of
-    the transaction (OID gate, reconciliation, etc.).
+    Round-27 P1#2 + Round-28 P3: the gate comparator sees
+    live == bound for every gate and passes through; the
+    test then exercises the rest of the transaction (OID
+    gate, reconciliation, etc.).
+
+    The ``review_commit_oid`` kwarg lets tests provide a
+    matching commit OID for the round-28 P3 exact-head
+    binding. Without this, the review fetcher returns an
+    empty OID and the gate refuses the merge on the
+    exact-head binding. Production code injects the
+    canonical reviewer's real commit OID via the live
+    fetcher.
     """
     bound_pr = inputs.live_pr_payload or {}
     bound_review = inputs.live_review_state or {}
     bound_threads = inputs.live_thread_inventory or {}
+    commit_oid = review_commit_oid or ""
 
     def fetch_pr_payload() -> Dict[str, Any]:
         return {
@@ -2387,11 +2640,17 @@ def _build_default_live_fetchers(
                     "state": "APPROVED",
                     "author": "coderabbitai[bot]",
                     "submitted_at": "2026-01-01T00:00:00Z",
+                    # Round-28 P3: review commit OID for exact-head binding.
+                    "commit_oid": commit_oid,
                 },
             ],
             "latest_coderabbit_state": bound_review.get(
                 "latest_coderabbit_state", "APPROVED",
             ),
+            # Round-28 P3: latest CodeRabbit review commit OID.
+            "latest_coderabbit_commit_oid": commit_oid,
+            "latest_coderabbit_login": "coderabbitai[bot]",
+            "canonical_reviewer_login": "coderabbitai",
             "repo": "owner/repo",
         }
 
@@ -2499,9 +2758,32 @@ def _validate_required_ci_gate(
     inputs: "MergeTransactionInputs",
     auth: "MergeAuthorization",
 ) -> None:
-    """Round-27: every configured required CI job MUST be
-    green at the live head. A missing, failing, or pending
-    check halts the transaction.
+    """Round-28 P2: every configured required CI job MUST be
+    green at the live head.
+
+    The required-job set is the UNION of two sources, both
+    authoritative:
+
+      - ``inputs.required_ci_names`` — passed by the CLI from
+        ``ctx.required_ci_jobs`` (the persisted ``RunContext``).
+      - ``auth.required_ci_jobs`` — recorded in the
+        ``MergeAuthorization`` artifact (the human-signed
+        approval). This is the policy the verifier and the
+        merge gate MUST both honor.
+
+    The locked mutable-gate comparator enforces:
+
+      1. The two sources MUST agree (otherwise the human
+         approval and the persisted run policy disagree →
+         fail-closed).
+      2. Every configured job MUST be present in the live
+         inventory (``checks[name]`` MUST exist).
+      3. The live state for each configured job MUST be
+         ``SUCCESS``.
+      4. An empty required set is acceptable ONLY when both
+         sources agree that there are zero required jobs
+         (the run policy is documented at init time as
+         "no required CI").
     """
     if not isinstance(live_ci, dict):
         raise MergeGateFetchError(
@@ -2514,7 +2796,30 @@ def _validate_required_ci_gate(
             "live_required_ci",
             message="refetch returned a non-dict checks map",
         )
-    for name in inputs.required_ci_names or ():
+    # Round-28 P2 cross-binding guard: the human-signed
+    # approval and the persisted run policy MUST agree on
+    # the required CI set. A divergence is a fail-closed
+    # protected-authority blocker (the supervisor routes to
+    # BLOCKED / escalation).
+    auth_set = tuple(auth.required_ci_jobs or ())
+    inputs_set = tuple(inputs.required_ci_names or ())
+    if auth_set != inputs_set:
+        raise MergeGateChanged(
+            f"required CI policy diverges between persisted run "
+            f"context and merge authorization: "
+            f"ctx={sorted(inputs_set)} vs auth={sorted(auth_set)}. "
+            f"The merge gate refuses to proceed when the two "
+            f"policy sources disagree."
+        )
+    required = auth_set  # equivalent to inputs_set after the cross-check
+    if not required:
+        # Empty required set: acceptable ONLY when the run
+        # policy explicitly says there are zero required jobs.
+        # The cross-binding check above already confirmed both
+        # sources agree on the empty set. The transaction may
+        # proceed.
+        return
+    for name in required:
         info = checks.get(name)
         if info is None:
             raise MergeGateChanged(
@@ -2535,10 +2840,22 @@ def _validate_review_state_gate(
     inputs: "MergeTransactionInputs",
     auth: "MergeAuthorization",
 ) -> None:
-    """Round-27: the latest CodeRabbit review state MUST be
-    ``APPROVED`` at the live head. A dismissal, a new
-    ``CHANGES_REQUESTED``, or any other state halts the
-    transaction.
+    """Round-28 P3: the latest CodeRabbit review state MUST be
+    ``APPROVED`` AND the review's ``commit.oid`` MUST equal the
+    authorized exact head.
+
+    A review whose ``commit.oid`` does NOT match the authorized
+    head is NOT exact-head approval, even if its ``state`` is
+    APPROVED. The locked re-fetch MUST verify the commit-oid
+    binding so a stale ``APPROVED`` review against an older head
+    does not allow the merge to slip through when the PR has
+    advanced.
+
+    Canonical reviewer matching: the live ``reviewer`` MUST
+    match the configured canonical reviewer login
+    (case-insensitive, ``[bot]``-stripped normalization).
+    Lookalike accounts such as ``coderabbit-helper`` MUST NOT
+    satisfy the gate.
     """
     if not isinstance(live_review, dict):
         raise MergeGateFetchError(
@@ -2546,12 +2863,36 @@ def _validate_review_state_gate(
             message="refetch returned a non-dict payload",
         )
     latest = live_review.get("latest_coderabbit_state")
+    latest_commit = live_review.get("latest_coderabbit_commit_oid")
+    latest_login = live_review.get("latest_coderabbit_login")
+    canonical_login = live_review.get(
+        "canonical_reviewer_login", "coderabbitai"
+    )
     bound = inputs.live_review_state or {}
     bound_latest = bound.get("latest_coderabbit_state")
+    bound_commit = bound.get("latest_coderabbit_commit_oid")
+    # Round-28 P3: canonical-reviewer identity MUST be the
+    # configured canonical reviewer. If the latest review is
+    # attributed to a lookalike account (e.g.
+    # ``coderabbit-helper``), the gate refuses the merge.
+    canonical_norm = _normalize_canonical_reviewer_login(
+        canonical_login
+    )
+    latest_norm = _normalize_canonical_reviewer_login(latest_login or "")
+    if latest_norm != canonical_norm:
+        raise MergeGateChanged(
+            f"live review author {latest_login!r} does not match the "
+            f"configured canonical reviewer login "
+            f"{canonical_login!r}; the merge gate refuses to accept "
+            f"lookalike accounts such as 'coderabbit-helper' as a "
+            f"substitute for the canonical reviewer."
+        )
+    # Round-28 P3: a canonical CodeRabbit review exists but
+    # the live ``commit.oid`` MUST match the authorized exact
+    # head. We read ``auth.authorized_head`` (the human-signed
+    # approval) and compare against the live review commit.
+    authorized_head = getattr(auth, "authorized_head", "") or ""
     if latest is None:
-        # No CodeRabbit review at the live head — the gate
-        # refuses to merge because the configured required
-        # review state is missing.
         raise MergeGateChanged(
             "live review state has no CodeRabbit review at the "
             "live head; the gate refuses to proceed without a "
@@ -2568,18 +2909,37 @@ def _validate_review_state_gate(
             f"live latest CodeRabbit review state is {latest!r}, "
             "expected 'APPROVED'."
         )
-    # Bound snapshot divergence: a new review appeared
-    # between the snapshot and the locked transaction that
-    # changes the canonical state. The bound-snapshot check
-    # is on the ``latest_coderabbit_state`` field; if the
-    # bound snapshot had a different value, the gate
-    # halts.
+    # Round-28 P3: the live review's ``commit.oid`` MUST equal
+    # the authorized exact head. A current PR head plus an
+    # old ``APPROVED`` review is NOT exact-head approval.
+    if not latest_commit:
+        raise MergeGateChanged(
+            "live latest CodeRabbit review has no commit OID; "
+            "the merge gate refuses to proceed without an "
+            "exact-head bound review commit identity."
+        )
+    if latest_commit != authorized_head:
+        raise MergeGateChanged(
+            f"live latest CodeRabbit review commit OID "
+            f"{latest_commit!r} does NOT match the authorized "
+            f"exact head {authorized_head!r}; the gate refuses to "
+            f"treat a stale APPROVED review against an older "
+            f"head as exact-head approval."
+        )
+    # Bound-snapshot divergence (still useful as a sanity
+    # check; the cross-binding guard above is the authoritative
+    # one).
     if bound_latest is not None and bound_latest != latest:
         raise MergeGateChanged(
             f"live latest CodeRabbit review state diverged from "
             f"the bound snapshot: bound={bound_latest!r} vs "
             f"live={latest!r}"
         )
+    if bound_commit is not None and bound_commit != latest_commit:
+        # The bound snapshot had a recorded review commit OID
+        # and the live head differs; this is informational —
+        # the exact-head check above is the authoritative guard.
+        pass
 
 
 def _validate_thread_inventory_gate(

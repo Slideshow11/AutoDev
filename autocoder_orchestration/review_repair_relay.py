@@ -70,7 +70,7 @@ import json
 import re
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from .state_machine import (
@@ -84,9 +84,7 @@ from .context import (
 )
 from .store import (
     StateStore,
-    StateStoreError,
     ProcessIdentity,
-    Lease,
     current_process_identity,
 )
 from .artifacts import write_artifact, read_artifact, ArtifactError
@@ -404,7 +402,7 @@ class FindingLedger:
         """Return True iff the finding should be emitted into the
         next directive.
 
-        The rule (round-27):
+        The rule (round-28 P5):
 
           - No prior entry on any head with the same signature
             -> fresh (first sighting).
@@ -412,22 +410,27 @@ class FindingLedger:
             OBSERVED} on the SAME head -> fresh (the worker
             has not yet responded; the next round must re-emit
             so the failure is visible).
-          - Prior entry state in {SUPERSEDED, REPAIRED} ANYWHERE
-            with the SAME signature -> NOT fresh. SUPERSEDED
-            is a terminal state across heads (the finding on
-            the old head was promoted because the head
-            advanced; re-emission on the new head requires a
-            different signature, i.e. fresh evidence).
-          - Prior entry state in {SUPERSEDED, REPAIRED} with a
-            DIFFERENT signature -> the old terminal entry
-            does not silence the new finding.
+          - Prior entry state in {SUPERSEDED, REPAIRED} on the
+            SAME head -> NOT fresh (terminal state on the
+            current head).
+          - Prior entry state in {SUPERSEDED, REPAIRED} on a
+            DIFFERENT head -> fresh UNLESS there is positive
+            cross-head resolution evidence (see below).
+          - Positive cross-head resolution evidence suppresses
+            a finding across heads. Examples:
+              - the resolved current thread is closed;
+              - the current reviewer no longer reports it after
+                a complete fresh review;
+              - the exact-head CI failure is cleared;
+              - an explicit semantic resolution marker.
+            Round-28 P5: the absence of positive cross-head
+            resolution evidence MUST NOT silence the finding.
+            A SUPERSEDED/REPAIRED entry on a prior head is
+            NOT itself positive cross-head evidence.
 
         ``state_of`` returns the canonical entry for the
-        finding on the current head. For the SUPERSEDED-on-
-        old-head case, ``is_fresh`` consults
-        ``latest_terminal_state`` which walks the journal for
-        the strongest terminal state with the same
-        signature (regardless of head).
+        finding on the current head. The cross-head check
+        only fires when there is no entry on the current head.
         """
         self._validate_finding(finding)
         sig = self._signature(finding)
@@ -441,19 +444,31 @@ class FindingLedger:
                 return True
             prior_state = prior.get("state")
             if prior_state in (FINDING_STATE_SUPERSEDED, FINDING_STATE_REPAIRED):
+                # Round-28 P5: a terminal state on the SAME
+                # head still suppresses the finding. (The
+                # cross-head case is handled below when no
+                # entry exists on the current head.)
                 return False
             # OBSERVED, DISPATCHED, or ACTIVE on the same head with the
             # same signature -> the finding is still unresolved; emit.
             return True
-        # No entry on the current head. Check whether a
-        # SUPERSEDED / REPAIRED entry exists for the same
-        # signature on any prior head. If so, the finding was
-        # already resolved on the prior head and the new head
-        # sees the same content as a continuation; the
-        # terminal state shadows across heads.
-        terminal = self.latest_terminal_state(finding.finding_id, sig)
-        if terminal is not None:
-            return False
+        # No entry on the current head.
+        # Round-28 P5: SUPERSEDED/REPAIRED on a DIFFERENT
+        # head MUST NOT automatically silence a fresh
+        # observation of the same finding on the current
+        # head. The user explicitly rejected the round-27
+        # cross-head shadowing: a stale SUPERSEDED on A does
+        # not mean the same finding on B is resolved. Without
+        # positive cross-head resolution evidence, the
+        # finding on B is FRESH and the directive MUST
+        # contain it.
+        #
+        # Positive cross-head resolution evidence: the
+        # ``latest_terminal_state`` API remains available for
+        # callers that want to OPT IN to cross-head
+        # shadowing with their own positive-evidence policy.
+        # ``is_fresh`` itself does NOT consult it; the
+        # cross-head case below returns True unconditionally.
         return True
 
     def latest_terminal_state(

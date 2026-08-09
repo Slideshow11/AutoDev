@@ -27,11 +27,13 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Any, Dict, List
 from unittest import mock
 
 
 from autocoder_orchestration.merge_authorization import (
     MergeGateChanged,
+    MergeGateFetchError,
     MergeTransactionInputs,
     execute_guarded_merge_transaction,
 )
@@ -146,8 +148,14 @@ def _make_inputs(paths, repo, state, evidence, authorized_head: str):
                 "state": "APPROVED",
                 "author": "coderabbitai[bot]",
                 "submitted_at": "2026-01-01T00:00:00Z",
+                # Round-28 P3: review commit OID for exact-head binding.
+                "commit_oid": "a" * 40,
             }],
             "latest_coderabbit_state": "APPROVED",
+            # Round-28 P3: latest CodeRabbit review commit OID.
+            "latest_coderabbit_commit_oid": "a" * 40,
+            "latest_coderabbit_login": "coderabbitai[bot]",
+            "canonical_reviewer_login": "coderabbitai",
             "repo": "owner/repo",
         },
         "thread_inventory": lambda: {
@@ -232,8 +240,18 @@ class MutableGateRefetchTests(unittest.TestCase):
                     "state": "APPROVED",
                     "author": "coderabbitai[bot]",
                     "submitted_at": "2026-01-01T00:00:00Z",
+                    # Round-28 P3: the review commit OID MUST match
+                    # the authorized exact head. We use the test
+                    # instance's authorized head as the OID; tests
+                    # that want to test exact-head binding divergence
+                    # override the fetcher after calling
+                    # ``_inject_divergence``.
+                    "commit_oid": self.authorized_head,
                 }],
                 "latest_coderabbit_state": "APPROVED",
+                "latest_coderabbit_commit_oid": self.authorized_head,
+                "latest_coderabbit_login": "coderabbitai[bot]",
+                "canonical_reviewer_login": "coderabbitai",
                 "repo": "owner/repo",
             },
             "thread_inventory": lambda: {
@@ -396,47 +414,66 @@ class MutableGateRefetchTests(unittest.TestCase):
                 execute_guarded_merge_transaction(inputs)
         self.assertIn("reviewDecision became None", str(ctx.exception))
 
-    def test_refetch_soft_signal_on_subprocess_failure(self) -> None:
-        """A failed refetch is a SOFT signal: the original
-        snapshot is still authoritative. The transaction
-        proceeds to the OID gate (which fails here for
-        hermetic reasons, raising PARTIAL — not
-        MergeGateChanged).
+    def test_refetch_subprocess_failure_fails_closed(self) -> None:
+        """Round-28 P2 / P7: a failing live fetcher MUST fail
+        closed. The transaction MUST raise ``MergeGateFetchError``
+        so the supervisor routes to BLOCKED / escalation.
+
+        The test injects an ACTUAL failing fetcher (not just a
+        subprocess mock) and asserts the gate fails closed. The
+        merge subprocess MUST NEVER be invoked.
         """
         paths = _write_artifacts(self.evidence, self.authorized_head)
         inputs = _make_inputs(paths, self.repo, self.state, self.evidence, self.authorized_head)
-        # The fake fails on the refetch (returncode != 0) but
-        # succeeds on subsequent calls (the merge subprocess
-        # and any OID fetches).
-        def fake(*args, **kwargs):
-            argv = args[0] if args else []
-            joined = " ".join(str(x) for x in argv)
-            if (
-                "pr view" in joined
-                and " pr merge " not in f" {joined} "
-                and "mergeCommit" not in joined
-            ):
-                return {
-                    "returncode": 1, "stdout": "",
-                    "stderr": "transient gh error", "timed_out": False,
-                }
-            if " pr merge " in f" {joined} ":
-                return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
-            return {"returncode": 0, "stdout": "{}", "stderr": "", "timed_out": False}
+        # Inject an ACTUAL failing live fetcher: every gate
+        # fetch raises a transient ``gh`` failure. Production
+        # code wraps the fetcher call in
+        # ``MergeGateFetchError``; the gate must surface that
+        # without invoking the merge subprocess.
+        from autocoder_orchestration.merge_authorization import (
+            MergeGateFetchError as _OuterGateFetchError,
+        )
+
+        def failing_fetcher() -> Dict[str, Any]:
+            raise _OuterGateFetchError(
+                "live_pr_payload",
+                underlying=RuntimeError("transient gh error"),
+            )
+
+        inputs._set_live_fetchers({
+            "pr_payload": failing_fetcher,
+            "required_ci": failing_fetcher,
+            "review_state": failing_fetcher,
+            "thread_inventory": failing_fetcher,
+        })
+
+        merge_invocations: List[List[str]] = []
+        def fake_safe_run(cmd, **kwargs):
+            merge_invocations.append(list(cmd))
+            return {"returncode": 1, "stdout": "", "stderr": "no gh", "timed_out": False}
 
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            side_effect=fake,
+            side_effect=fake_safe_run,
         ):
-            with self.assertRaises(Exception) as ctx:
+            with self.assertRaises(MergeGateFetchError) as ctx:
                 execute_guarded_merge_transaction(inputs)
-            # The refetch MUST NOT have raised MergeGateChanged
-            # because the original snapshot is authoritative
-            # when the refetch fails.
-            self.assertNotIsInstance(ctx.exception, MergeGateChanged,
-                f"a failed refetch is a soft signal; the gate "
-                f"MUST pass through with the original snapshot; "
-                f"got {ctx.exception!r}")
+        msg = str(ctx.exception)
+        assert "live_pr_payload" in msg, (
+            f"MergeGateFetchError MUST attribute the failure to a "
+            f"specific gate; got {msg!r}"
+        )
+        # Round-28 P7: assert the merge subprocess was NEVER
+        # invoked. The fake records every call; we verify zero
+        # ``gh pr merge`` invocations.
+        merge_calls = [
+            c for c in merge_invocations
+            if len(c) >= 3 and c[0] == "gh" and c[1] == "pr" and c[2] == "merge"
+        ]
+        assert not merge_calls, (
+            f"merge subprocess MUST NEVER be invoked when a fetcher "
+            f"fails; got {merge_calls!r}"
+        )
 
 
 if __name__ == "__main__":

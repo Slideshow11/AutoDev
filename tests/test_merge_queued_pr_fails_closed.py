@@ -529,7 +529,7 @@ class TestServerConfirmedMergeRequiresValidOID:
         from autocoder_orchestration.merge_authorization import (
             _build_default_live_fetchers,
         )
-        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs, review_commit_oid=main_sha))
 
         def fake_run(cmd, **kwargs):
             cmd_str = " ".join(str(c) for c in cmd) if cmd else ""

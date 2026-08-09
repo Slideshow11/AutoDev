@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "6ee7ab209bf62e3692a0442969c4f5790d4873610090ea3fe5096f6a620cf47b",
-      "destination_size_bytes": 113188,
+      "destination_sha256": "fe729b8422fa838f82bf10e9dced7368af8b558dd995a3aeac7d16f99b141f13",
+      "destination_size_bytes": 114526,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -375,8 +375,8 @@
     },
     {
       "destination_path": "autocoder_orchestration/cli.py",
-      "destination_sha256": "af78a63e75d83ea9ab6c75ed2804d22a8d674958ce7200e026ff75152932c0b9",
-      "destination_size_bytes": 65432,
+      "destination_sha256": "8f3ba789d9d1584924c2aacd6b5ea3f77b5a689712a1e1069c158ab9e126d4ea",
+      "destination_size_bytes": 66037,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
@@ -402,8 +402,8 @@
     },
     {
       "destination_path": "tests/test_pr4_round6_d0_fixture.py",
-      "destination_sha256": "40166581e5cb62d01bf0478e32deb893a1a8b048f2de6c8be17c0cd6edb6cf5c",
-      "destination_size_bytes": 27457,
+      "destination_sha256": "8a7910d0bd104c1330074773d5922e324032ed17eaf1d6a47c86af500a48b0b7",
+      "destination_size_bytes": 27504,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
@@ -451,8 +451,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/relay_wiring.py",
-      "destination_sha256": "50ad83c376b8eec5261f622e7b66b8ac92012725ca42edca6c75f2690667bcdc",
-      "destination_size_bytes": 14509,
+      "destination_sha256": "481b60c3d9bfdf264294f700f6ca2ffbd6ea240d86cd36e8629af2bc73ed65e4",
+      "destination_size_bytes": 14527,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,
@@ -471,8 +471,8 @@
     },
     {
       "destination_path": "tests/test_merge_queued_pr_fails_closed.py",
-      "destination_sha256": "ba5333d26fb37e157b195f3d1c5b5264a5b71198856250c5c6ae1dbb7fc325ef",
-      "destination_size_bytes": 33360,
+      "destination_sha256": "600b7eaaa5185d2c6b93f79eae95f083ebea59f0a617f6b3f08a0b759b879ca0",
+      "destination_size_bytes": 33388,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,
@@ -488,6 +488,72 @@
       "source_size_bytes": null,
       "transformation_classification": "standalone_test_addition",
       "transformation_explanation": "Production-path behavioral canary for the strict quiet-window. 5 tests: 3 for the polling-with-reset behavior, 2 for the new-event preservation (the new event MUST be preserved across the quiet-window reset, NOT cleared by the post-loop cleanup; the function returns 'new_event' so the caller routes to handle_new_events)."
+    },
+    {
+      "description": "autocoder_supervisor.orchestration_state_root module",
+      "destination_path": "autocoder_supervisor/orchestration_state_root.py",
+      "destination_sha256": "7dc388c7e0c4d47125a6bab749f3b803474d5f833c64471b01269be224e6ffc1",
+      "destination_size_bytes": 19323,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_module_in_round_28",
+      "transformation_explanation": "Round-28 P1 introduced a dedicated module for the orchestration state-root identification."
+    },
+    {
+      "description": "Round-28 P1: state-root architecture production-path tests",
+      "destination_path": "tests/test_orchestration_state_root_round28.py",
+      "destination_sha256": "033b2105bff7d147de54fe78aa3c44fa08ba0362f6fec7d6b455bd1c89791754",
+      "destination_size_bytes": 14645,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_test_in_round_28",
+      "transformation_explanation": "Round-28 P1 production-path tests."
+    },
+    {
+      "description": "Round-28 P2: locked mutable merge gates production-path tests",
+      "destination_path": "tests/test_merge_locked_required_ci_round28.py",
+      "destination_sha256": "529f9fa6f2de7f0b2a71c09a5567533a18a6e69e8225403343919f138c0fb66e",
+      "destination_size_bytes": 22243,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_test_in_round_28",
+      "transformation_explanation": "Round-28 P2 production-path tests."
+    },
+    {
+      "description": "Round-28 P3: review exact-head binding production-path tests",
+      "destination_path": "tests/test_merge_review_exact_head_binding_round28.py",
+      "destination_sha256": "f0c8d7b1d707e6b1fa5c2b51c37eb72269c0c54e89a3c01b7f48114cbf53572f",
+      "destination_size_bytes": 21481,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_test_in_round_28",
+      "transformation_explanation": "Round-28 P3 production-path tests."
+    },
+    {
+      "description": "Round-28 P4: partial GraphQL fail-closed production-path tests",
+      "destination_path": "tests/test_merge_partial_graphql_round28.py",
+      "destination_sha256": "6202fb19beac350b9dffdb6744073756bae0aa860e7b27a24c8ebd5b733c06f2",
+      "destination_size_bytes": 10071,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_test_in_round_28",
+      "transformation_explanation": "Round-28 P4 partial GraphQL fail-closed tests."
+    },
+    {
+      "description": "Round-28 P5: FindingLedger cross-head semantics production-path tests",
+      "destination_path": "tests/test_finding_ledger_cross_head_round28.py",
+      "destination_sha256": "7d4bf0a6e4bb5f914bd12aa4928a654cbb3d33c25cdf5402b5304d7f44e43ed2",
+      "destination_size_bytes": 7640,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_test_in_round_28",
+      "transformation_explanation": "Round-28 P5 FindingLedger cross-head semantics tests."
     }
   ],
   "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",

@@ -56,9 +56,8 @@ import shlex
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Optional, Tuple
 
 
 # The path to the relay CLI. The supervisor uses subprocess so
@@ -240,38 +239,26 @@ def should_invoke_relay(snapshot: dict) -> bool:
 
 
 def _resolve_orchestration_state_root() -> Optional[str]:
-    """Return the orchestration's state_root using the canonical precedence.
+    """Legacy fail-closed entry point used by the round-26 tests.
 
-    Round-27 P1#3: production code MUST NOT silently substitute
-    the supervisor's ``STATE_DIR`` for the orchestration run
-    state root. The supervisor persists the canonical value to
-    ``RUN_STATE['orchestration_state_root']`` at first read
-    (see ``read_run_state``); the relay reads it from there.
-    The resolver fails closed when neither the env var nor
-    ``RUN_STATE`` provides a value.
+    Round-28 deprecation: ``STATE_DIR`` is NOT a fallback. The
+    new contract is ``resolve_orchestration_state_root`` from
+    ``orchestration_state_root`` which raises
+    ``OrchestrationRootError`` for fail-closed semantics. This
+    shim exists only so the legacy call sites return ``None``
+    when the resolver fails closed (the caller still treats
+    ``None`` as fail-closed).
 
-    Precedence:
-
-      1. ``AED_ORCHESTRATION_STATE_ROOT`` environment variable.
-      2. ``orchestration_state_root`` field of the supervisor's
-         ``RUN_STATE`` JSON (recorded when the supervisor hands
-         off to the relay).
-
-    Returns ``None`` only when no positively-known state root
-    is configured. Callers MUST treat ``None`` as fail-closed.
+    Production code MUST migrate to
+    ``resolve_orchestration_state_root`` and treat the raised
+    exception as a protected-authority blocker.
     """
-    state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
-    if state_root:
-        return state_root
     try:
         from .supervisor import RUN_STATE
-        run_state = json.loads(RUN_STATE.read_text())
-        state_root = run_state.get("orchestration_state_root")
-        if state_root:
-            return state_root
-    except (OSError, json.JSONDecodeError):
-        pass
-    return None
+        from .orchestration_state_root import resolve_orchestration_state_root
+        return resolve_orchestration_state_root(run_state_path=Path(RUN_STATE))
+    except Exception:
+        return None
 
 
 def _resolve_orchestration_evidence_root(state_root: Optional[str]) -> str:
@@ -313,16 +300,26 @@ def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
     from autocoder_orchestration.controller import Controller
     from autocoder_orchestration.review_repair_relay import RelayLoop
     from autocoder_orchestration.store import StateStore
-    state_root = _resolve_orchestration_state_root()
-    if not state_root:
-        # Fail closed with a visible warning. The supervisor's
-        # heartbeat will retry on the next tick.
+    from .orchestration_state_root import (
+        OrchestrationRootError,
+        resolve_orchestration_state_root,
+    )
+    from .supervisor import RUN_STATE  # type: ignore[name-defined]
+    try:
+        state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),
+        )
+    except OrchestrationRootError as exc:
+        # Round-28 invariant: fail closed. The supervisor MUST NOT
+        # fall back to STATE_DIR; if the orchestration state root
+        # cannot be positively identified, route to BLOCKED /
+        # escalation and stop autonomous progression.
         try:
             from .supervisor import log
             log(
-                "warning",
-                "no orchestration state_root resolvable; "
-                "mark_head_advanced is a no-op",
+                "error",
+                "mark_head_advanced failed: orchestration state_root not positively identified",
+                error=str(exc),
                 old_head=old_head_sha[:12] if old_head_sha else "",
                 new_head=new_head_sha[:12],
             )

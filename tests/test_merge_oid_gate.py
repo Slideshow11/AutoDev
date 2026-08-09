@@ -168,7 +168,24 @@ def _make_inputs(paths, repo, state, evidence, authorized_head: str):
     # mutable-gate comparator sees live == bound (no divergence).
     # Tests that want to exercise a divergence override these
     # with their own fetchers.
-    inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+    inputs._set_live_fetchers(_build_default_live_fetchers(inputs, review_commit_oid=authorized_head))
+    # Round-28 P3: override the review fetcher so the
+    # latest_coderabbit_commit_oid matches the authorized head.
+    # Without this, the round-28 P3 exact-head binding fires
+    # BEFORE the OID gate (which is what the OID tests want to
+    # exercise).
+    fetchers = inputs._live_fetchers
+    if fetchers is not None:
+        original_review_fetcher = fetchers["review_state"]
+        def _review_with_oid() -> dict:
+            data = original_review_fetcher()
+            data["latest_coderabbit_commit_oid"] = authorized_head
+            data["reviews"] = [
+                {**r, "commit_oid": authorized_head}
+                for r in data["reviews"]
+            ]
+            return data
+        fetchers["review_state"] = _review_with_oid
     return inputs
 
 
@@ -448,7 +465,24 @@ class UnreachableServerOidTests(unittest.TestCase):
         # Round-27 P1#4: the reachability check is MANDATORY
         # by default. ``require_oid_reachable=True`` (the
         # production invariant) is the default; do NOT bypass.
-        inputs._set_live_fetchers(_build_default_live_fetchers(inputs))
+        inputs._set_live_fetchers(_build_default_live_fetchers(inputs, review_commit_oid=self.authorized_head))
+        # Round-28 P3: override the review fetcher so the
+        # latest_coderabbit_commit_oid matches the authorized
+        # head, otherwise the round-28 P3 exact-head binding
+        # fires BEFORE the OID gate (which is what this test
+        # wants to exercise).
+        fetchers = inputs._live_fetchers
+        if fetchers is not None:
+            original = fetchers["review_state"]
+            def _review_with_oid() -> dict:
+                data = original()
+                data["latest_coderabbit_commit_oid"] = self.authorized_head
+                data["reviews"] = [
+                    {**r, "commit_oid": self.authorized_head}
+                    for r in data["reviews"]
+                ]
+                return data
+            fetchers["review_state"] = _review_with_oid
         # A well-formed but unreachable OID. The repo has no
         # object with this SHA.
         unreachable_oid = "9" * 40
