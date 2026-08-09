@@ -1790,7 +1790,7 @@ class TestMarkHeadAdvancedRebindsContext:
         """
         from autocoder_orchestration.controller import ControllerError
         from autocoder_orchestration.context import RunContext
-        loop, controller, store, _run_id = self._setup_loop(tmp_path)
+        loop, _controller, store, _run_id = self._setup_loop(tmp_path)
         with pytest.raises(ControllerError):
             loop.mark_head_advanced("a" * 40, "not-a-sha")
         # Persisted context MUST still point at A.
