@@ -383,11 +383,41 @@ def cmd_initialize(args: argparse.Namespace) -> int:
                 json_mode=args.json,
                 exit_code=EXIT_INVARG,
             )
-    required_ci_jobs = (
-        args.required_ci_jobs.split(",") if args.required_ci_jobs else
-        ("test (3.10)", "test (3.11)", "test (3.12)",
-         "package-smoke", "provenance", "committed-state-scan")
-    )
+    # Required CI jobs precedence:
+    # 1. --required-ci-jobs flag from operator (explicit).
+    # 2. Existing RunContext's required_ci_jobs (persisted
+    #    by a prior initialize call or supervisor config).
+    # 3. Default 6-job set (test 3.10/3.11/3.12,
+    #    package-smoke, provenance, committed-state-scan).
+    # The persisted RunContext MUST take precedence over
+    # the default set when no explicit flag is provided.
+    # A configured gate such as ``security-scan`` MUST
+    # be able to block qualification/merge.
+    required_ci_jobs: list = []
+    if args.required_ci_jobs:
+        required_ci_jobs = args.required_ci_jobs.split(",")
+    else:
+        # Read the persisted RunContext if it exists.
+        # The persisted RunContext MUST take precedence
+        # over the default set when no explicit flag is
+        # provided. A configured gate such as
+        # ``security-scan`` MUST be able to block
+        # qualification/merge.
+        existing_ctx_dict = StateStore(args.state_root).read_optional(
+            "run_context.json",
+        )
+        if (
+            existing_ctx_dict is not None
+            and existing_ctx_dict.get("required_ci_jobs")
+        ):
+            required_ci_jobs = list(
+                existing_ctx_dict["required_ci_jobs"],
+            )
+        else:
+            required_ci_jobs = [
+                "test (3.10)", "test (3.11)", "test (3.12)",
+                "package-smoke", "provenance", "committed-state-scan",
+            ]
     impl_cmd = tuple(args.impl_worker_command.split()) if args.impl_worker_command else (
         "/usr/bin/env", "true", "{prompt}", "{session_id}"
     )

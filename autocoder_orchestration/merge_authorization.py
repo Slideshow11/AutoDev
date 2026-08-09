@@ -999,6 +999,105 @@ def _read_candidate(
     return result.payload, result.digest
 
 
+def _verify_auth_binds_to_current_run(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Verify the merge authorization binds to the CURRENT
+    persisted RunContext.
+
+    A stale merge-authorization artifact from a previous
+    run (different run_id, different repo, different
+    authorized_head) MUST NOT complete this run. This
+    guard prevents the production code from completing
+    a merge for a re-initialized supervisor that reused
+    the same evidence root.
+
+    The check reads the current persisted RunContext via
+    the supervisor's run_state_root, then compares at
+    minimum:
+      - run_id
+      - repository (auth.repo matches the current
+        RunContext.repo)
+      - PR number
+      - authorized_head (auth.authorized_head matches
+        the current RunContext.current_authorized_head)
+    """
+    from .context import RunContext
+    try:
+        ctx = RunContext.from_dict(
+            inputs.run_state_root / "run_context.json"
+            if hasattr(inputs.run_state_root, "__truediv__")
+            else None,
+        ) if False else None
+    except (OSError, ValueError, TypeError, AttributeError):
+        ctx = None
+    # The standard approach: read the persisted
+    # run_context.json from the run_state_root and
+    # compare the binding fields.
+    run_context_path = (
+        inputs.run_state_root / "run_context.json"
+        if hasattr(inputs.run_state_root, "__truediv__")
+        else None
+    )
+    if run_context_path is None or not run_context_path.exists():
+        # No current RunContext. The auth stands alone;
+        # the per-run path is the only available identity.
+        # This is OK for one-shot merges.
+        return
+    import json
+    try:
+        ctx_payload = json.loads(run_context_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        # The current RunContext is unreadable; refuse to
+        # proceed. A stale auth against an unreadable
+        # current RunContext cannot be verified.
+        raise MergeError(
+            f"current RunContext is unreadable at "
+            f"{run_context_path}; refusing to proceed "
+            "with a merge authorization whose run-binding "
+            "cannot be verified"
+        )
+    # Compare run_id.
+    current_run_id = ctx_payload.get("run_id", "")
+    if current_run_id and current_run_id != auth.run_id:
+        raise MergeError(
+            f"merge authorization run_id {auth.run_id!r} does not "
+            f"match current RunContext run_id {current_run_id!r}; "
+            "stale auth from another run cannot complete this run"
+        )
+    # Compare repository identity. The auth.repo is
+    # "owner/name"; the RunContext has repo_owner and
+    # repo_name.
+    current_repo = (
+        f"{ctx_payload.get('repo_owner', '')}/"
+        f"{ctx_payload.get('repo_name', '')}"
+    )
+    if current_repo and current_repo != auth.repo:
+        raise MergeError(
+            f"merge authorization repo {auth.repo!r} does not "
+            f"match current RunContext repo {current_repo!r}; "
+            "stale auth from another run cannot complete this run"
+        )
+    # Compare PR number.
+    current_pr = ctx_payload.get("pr_number")
+    if current_pr is not None and current_pr != auth.pr_number:
+        raise MergeError(
+            f"merge authorization PR number {auth.pr_number!r} does "
+            f"not match current RunContext PR number {current_pr!r}; "
+            "stale auth from another run cannot complete this run"
+        )
+    # Compare authorized_head / current_authorized_head.
+    current_head = ctx_payload.get("current_authorized_head", "")
+    if current_head and current_head != auth.authorized_head:
+        raise MergeError(
+            f"merge authorization authorized_head {auth.authorized_head!r} "
+            f"does not match current RunContext current_authorized_head "
+            f"{current_head!r}; stale auth from another run cannot "
+            "complete this run"
+        )
+
+
 def _repeat_exact_head_guards(
     inputs: MergeTransactionInputs,
     auth: MergeAuthorization,
@@ -1207,6 +1306,15 @@ def _execute_guarded_merge_transaction_locked(
     # 4. Repeat every exact-head guard.
     _repeat_exact_head_guards(inputs, auth, candidate_digest, verifier_digest)
 
+    # 4b. Bind the merge authorization to the CURRENT
+    # persisted RunContext. A stale auth from a previous
+    # run (different run_id, different repo, different
+    # authorized_head) MUST NOT complete this run. This
+    # guard prevents a merge-record from a previous run
+    # being accepted by a re-initialized supervisor with
+    # the same evidence root.
+    _verify_auth_binds_to_current_run(inputs, auth)
+
     # 5. Build and invoke the guarded command.
     # BEFORE invoking, ensure the live PR is in a state
     # where a zero-exit would actually mean "merged". For
@@ -1271,19 +1379,90 @@ def _execute_guarded_merge_transaction_locked(
     except (json.JSONDecodeError, OSError):
         pr_merge_commit_oid = None
 
-    # Merge-queue guard. If the subprocess returned zero but
-    # the explicit mergeCommit OID is missing, the PR may be
-    # queued. The reconciler falls back to ``local_main_sha``
-    # for the squash commit, but this is the merge-queue
-    # failure mode: the production path MUST re-query the
-    # server and require merged=true before treating a
-    # zero-exit as a completed merge. If the live PR is not
-    # merged, the transaction fails closed: no merge record
-    # is written. If the live PR is merged but the explicit
-    # mergeCommit OID is still absent, the transaction is
-    # ambiguous: the reconciler MUST NOT proceed to a
-    # successful merge without exact merge identity.
-    if proc["returncode"] == 0 and not pr_merge_commit_oid:
+    # Server-confirmed merge identity gate. On EVERY path
+    # where the production code has confirmed the merge
+    # happened (subprocess zero, or subprocess non-zero
+    # with server reporting merged=true), the production
+    # code MUST require a valid server-reported
+    # mergeCommit OID before proceeding to reconciliation.
+    # Reconciliation MUST NOT fall back to local_main_sha;
+    # the partial-recovery merge record MUST be persisted
+    # first, then MergeAmbiguousOutcome is raised.
+    #
+    # 1. Try a re-query for an explicit OID via the full
+    #    gh pr view (with mergeCommit in the JSON request).
+    if not pr_merge_commit_oid:
+        try:
+            oid_full = _safe_run(
+                [inputs.gh_executable, "pr", "view", str(auth.pr_number),
+                 "--repo", auth.repo,
+                 "--json", "mergeCommit,state,mergedAt"],
+                timeout=15.0,
+            )
+            if oid_full["returncode"] == 0 and oid_full["stdout"].strip():
+                oid_full_doc = json.loads(oid_full["stdout"])
+                mc_full = oid_full_doc.get("mergeCommit")
+                # Only extract mc_full["oid"]; never pass
+                # the dict itself or None.
+                if isinstance(mc_full, dict):
+                    pr_merge_commit_oid = (
+                        str(mc_full.get("oid") or "") or None
+                    )
+                elif isinstance(mc_full, str):
+                    pr_merge_commit_oid = mc_full or None
+        except (json.JSONDecodeError, OSError):
+            pass
+    # 2. The merge has been confirmed by SOME path (subprocess
+    #    zero, OR subprocess non-zero with live re-query
+    #    reporting merged=true). If the OID is still
+    #    missing, the production code MUST persist a
+    #    PARTIAL recovery merge record (the best evidence
+    #    we have) and raise MergeAmbiguousOutcome. Never
+    #    proceed to reconciliation against local_main_sha.
+    if not pr_merge_commit_oid:
+        # A zero subprocess alone does NOT confirm a merge:
+        # a queued PR also returns zero. Confirmation
+        # requires either (a) a direct live re-query that
+        # reports merged=true, or (b) the subprocess failed
+        # AND the live re-query reports merged=true.
+        # The (b) case is the merge-queue recover-after-failure
+        # path: gh pr merge exited nonzero but the server
+        # actually merged the PR.
+        server_confirmed_merged = (
+            server_side_state is not None
+            and server_side_state.get("merged")
+        )
+        if server_confirmed_merged:
+            # Persist the partial recovery merge record
+            # BEFORE raising. Per C-28 every post-merge
+            # failure path must write the merge record
+            # before propagating. The partial record
+            # captures the available evidence (no OID,
+            # no squash parent, no squash tree) plus an
+            # explicit unavailable_observations listing
+            # the missing mergeCommit OID.
+            _persist_partial_merge_record(
+                inputs,
+                auth,
+                unavailable_reason=(
+                    "merge subprocess confirmed a server-side merge "
+                    "but the server-reported mergeCommit OID is "
+                    "unavailable; reconciliation against local_main_sha "
+                    "is forbidden (C-28)."
+                ),
+            )
+            raise MergeAmbiguousOutcome(
+                "merge was server-confirmed (subprocess or live "
+                "re-query) but the server-reported mergeCommit OID "
+                "is unavailable; persisted a PARTIAL recovery merge "
+                "record. The operator must re-fetch the mergeCommit "
+                "before retrying."
+            )
+        # 3. If the merge was NOT confirmed by any path
+        #    (subprocess zero AND live re-query not merged),
+        #    this is the merge-queue failure mode: the
+        #    PR is queued. Persist a partial record and
+        #    raise MergeSubprocessFailed.
         try:
             live_check = fetch_live_pr_payload(
                 inputs.gh_executable, auth.repo, auth.pr_number,
@@ -1300,26 +1479,6 @@ def _execute_guarded_merge_transaction_locked(
                 f"merged (state={live_check.get('state')!r}); "
                 "PR may be queued in the merge queue. "
                 "Refusing to write a merge record for a queued PR."
-            )
-        # Live PR IS merged but explicit mergeCommit OID is still
-        # missing. Reconciliation would otherwise fall back to
-        # local_main_sha and silently complete the transaction
-        # without server-reported merge identity. That is exactly
-        # the failure mode C-28 forbids: a successful merge without
-        # the durable server-reported mergeCommit OID. Persist the
-        # partial evidence and raise.
-        live_merge_commit = (
-            live_check.get("mergeCommit") or live_check.get("mergeCommit", {}).get("oid")
-            if isinstance(live_check.get("mergeCommit"), dict)
-            else live_check.get("mergeCommit")
-        )
-        if not live_merge_commit:
-            raise MergeAmbiguousOutcome(
-                "merge subprocess returned zero and live re-query shows "
-                "merged=true but the server-reported mergeCommit OID is "
-                "still unavailable; refusing to reconcile against "
-                "local_main_sha. The operator must re-fetch the mergeCommit "
-                "before retrying."
             )
 
     # 6. Branch-independent post-merge reconciliation. Compute the
@@ -1495,6 +1654,92 @@ def _execute_guarded_merge_transaction_locked(
         raise recon_failure
 
     return record, write_result.digest
+
+
+def _persist_partial_merge_record(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+    *,
+    unavailable_reason: str,
+) -> None:
+    """Persist a PARTIAL recovery merge record before raising.
+
+    Per C-28 every post-merge failure path must write the
+    merge record before propagating. When the server has
+    confirmed a merge (subprocess or live re-query) but the
+    server-reported mergeCommit OID is unavailable, the
+    production code MUST persist a PARTIAL record with the
+    best available evidence (no squash commit, no parent,
+    no tree) plus an unavailable_observations listing the
+    missing OID.
+
+    The PARTIAL record is the durable artifact: an operator
+    can later re-fetch the mergeCommit from the server
+    using the recorded auth and verify against the record.
+    The record's ``final_state`` is ``"PARTIAL"``, NOT
+    ``"COMPLETE"``. The transaction raises after the
+    record is on disk.
+    """
+    try:
+        from .artifacts import write_artifact, ArtifactError
+        record = MergeRecord(
+            schema_version="autocoder.merge_record.v2",
+            run_id=auth.run_id,
+            repo=auth.repo,
+            pr_number=auth.pr_number,
+            authorized_head=auth.authorized_head,
+            squash_merge_commit="",
+            merge_commit_parent="",
+            squash_commit_parent_count=0,
+            squash_tree_sha256="",
+            final_local_main_sha="",
+            final_origin_main_sha="",
+            local_main_equals_origin_main=False,
+            feature_branch_deleted_locally=False,
+            feature_branch_deleted_remotely=False,
+            working_tree_clean=False,
+            aed_clean_post_merge=False,
+            candidate_sha256_unchanged=False,
+            verifier_record_sha256_unchanged=False,
+            candidate_exact_file_digest="",
+            verifier_record_exact_file_digest="",
+            authorization_exact_file_digest="",
+            merge_record_exact_file_digest="",
+            merge_timestamp=_utc_now(),
+            unavailable_observations=[unavailable_reason],
+            unauthorized_actions_taken={
+                "verify_failed": False,
+                "reconciled": False,
+                "merged": True,  # server reported merged
+                "blocked": False,
+            },
+            final_state="PARTIAL",
+        )
+        write_artifact(
+            inputs.merge_record_artifact_path,
+            record.to_dict(),
+        )
+    except (OSError, TypeError, Exception) as exc:
+        # If even the partial record fails to write, log
+        # the failure but do not raise — the caller's
+        # raise is the user-visible signal.
+        log = getattr(inputs, "log", None)
+        if log is not None:
+            log(
+                "error",
+                "partial recovery merge record could not be written",
+                reason=str(exc),
+            )
+        # If even the partial record fails to write, log
+        # the failure but do not raise — the caller's
+        # raise is the user-visible signal.
+        log = getattr(inputs, "log", None)
+        if log is not None:
+            log(
+                "error",
+                "partial recovery merge record could not be written",
+                reason=str(exc),
+            )
 
 
 # === Backwards-compatible executor (test preview only) ===

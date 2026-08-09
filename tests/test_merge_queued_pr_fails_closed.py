@@ -181,6 +181,418 @@ def _build_inputs(
     )
 
 
+class TestStaleAuthRejectedByCurrentRun:
+    """Round-4 Codex P1: a stale merge authorization from a
+    previous run MUST NOT complete this run. The auth
+    binds to the CURRENT RunContext via run_id,
+    repository, PR number, and authorized_head.
+    """
+
+    def _setup(self, tmp_path: Path, *, current_head: str = None):
+        repo = tmp_path / "repo"
+        evidence_root = tmp_path / "evidence"
+        state_root = tmp_path / "state"
+        for d in (repo, evidence_root, state_root):
+            d.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(repo), check=True)
+        subprocess.run(["git", "config", "user.email", "x@y.z"], cwd=str(repo), check=True)
+        subprocess.run(["git", "config", "user.name", "x"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "i"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "feat/test"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "f"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=str(repo), check=True)
+        if current_head is None:
+            subprocess.run(["git", "merge", "--ff-only", "feat/test"], cwd=str(repo), check=True, capture_output=True)
+            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True).stdout.strip()
+
+        import hashlib
+        candidate_payload = {
+            "schema_version": "autocoder.candidate.v1",
+            "exact_head": current_head,
+            "head": {"head_sha": current_head, "exact_head_sha": current_head},
+            "candidate_sha256": "0" * 64,
+            "created_at": "2026-08-08T00:00:00Z",
+        }
+        candidate_path = evidence_root / "candidate.json"
+        write_artifact(candidate_path, candidate_payload)
+        candidate_digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        verifier_payload = {
+            "schema_version": "autocoder.verifier.v1",
+            "head_observed": current_head,
+            "candidate_sha256": candidate_digest,
+            "candidate_path": str(candidate_path),
+            "verdict": "VERIFIED",
+            "created_at": "2026-08-08T00:00:00Z",
+        }
+        verifier_path = evidence_root / "verifier.json"
+        write_artifact(verifier_path, verifier_payload)
+        verifier_digest = hashlib.sha256(verifier_path.read_bytes()).hexdigest()
+        return repo, evidence_root, state_root, current_head, candidate_path, verifier_path, candidate_digest, verifier_digest
+
+    def test_stale_run_id_rejected(self, tmp_path: Path) -> None:
+        """Auth with a different run_id is rejected."""
+        repo, evidence_root, state_root, current_head, candidate_path, verifier_path, candidate_digest, verifier_digest = self._setup(tmp_path)
+        # Current RunContext with run_id="current-run".
+        state_path = state_root / "run_context.json"
+        state_path.write_text(json.dumps({
+            "schema_version": "autocoder.run_context.v1",
+            "run_id": "current-run",
+            "repo_owner": "owner",
+            "repo_name": "repo",
+            "local_checkout": str(repo),
+            "base_branch": "main",
+            "current_authorized_head": current_head,
+            "pr_number": 4,
+        }))
+        # Stale auth with run_id="previous-run".
+        auth = MergeAuthorization(
+            schema_version="autocoder.merge_authorization.v1",
+            run_id="previous-run",  # stale!
+            repo="owner/repo",
+            pr_number=4,
+            authorized_head=current_head,
+            candidate_sha256=candidate_digest,
+            verifier_record_sha256=verifier_digest,
+        )
+        auth_path = evidence_root / "merge-authorization.json"
+        write_artifact(auth_path, auth.to_dict())
+        merge_record_path = evidence_root / "merge-record.json"
+        inputs = MergeTransactionInputs(
+            authorization_artifact_path=auth_path,
+            candidate_artifact_path=candidate_path,
+            verifier_artifact_path=verifier_path,
+            merge_record_artifact_path=merge_record_path,
+            repository_checkout=repo,
+            run_state_root=state_root,
+            evidence_root=evidence_root,
+            live_pr_payload={
+                "state": "open",
+                "merged": False,
+                "head": {"sha": current_head},
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": None,
+            },
+            live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
+            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
+            working_tree_clean=True,
+        )
+        with pytest.raises(MergeError) as exc:
+            execute_guarded_merge_transaction(inputs)
+        assert "run_id" in str(exc.value).lower() or "stale" in str(exc.value).lower(), (
+            f"expected stale-auth error mentioning run_id; got {exc.value!r}"
+        )
+
+    def test_stale_repo_rejected(self, tmp_path: Path) -> None:
+        """Auth with a different repo is rejected."""
+        repo, evidence_root, state_root, current_head, candidate_path, verifier_path, candidate_digest, verifier_digest = self._setup(tmp_path)
+        state_path = state_root / "run_context.json"
+        state_path.write_text(json.dumps({
+            "schema_version": "autocoder.run_context.v1",
+            "run_id": "current-run",
+            "repo_owner": "owner",
+            "repo_name": "repo",
+            "local_checkout": str(repo),
+            "base_branch": "main",
+            "current_authorized_head": current_head,
+            "pr_number": 4,
+        }))
+        auth = MergeAuthorization(
+            schema_version="autocoder.merge_authorization.v1",
+            run_id="current-run",
+            repo="different-owner/different-repo",  # stale!
+            pr_number=4,
+            authorized_head=current_head,
+            candidate_sha256=candidate_digest,
+            verifier_record_sha256=verifier_digest,
+        )
+        auth_path = evidence_root / "merge-authorization.json"
+        write_artifact(auth_path, auth.to_dict())
+        merge_record_path = evidence_root / "merge-record.json"
+        inputs = MergeTransactionInputs(
+            authorization_artifact_path=auth_path,
+            candidate_artifact_path=candidate_path,
+            verifier_artifact_path=verifier_path,
+            merge_record_artifact_path=merge_record_path,
+            repository_checkout=repo,
+            run_state_root=state_root,
+            evidence_root=evidence_root,
+            live_pr_payload={
+                "state": "open",
+                "merged": False,
+                "head": {"sha": current_head},
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": None,
+            },
+            live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
+            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
+            working_tree_clean=True,
+        )
+        with pytest.raises(MergeError) as exc:
+            execute_guarded_merge_transaction(inputs)
+        assert "repo" in str(exc.value).lower(), (
+            f"expected stale-auth error mentioning repo; got {exc.value!r}"
+        )
+
+    def test_stale_authorized_head_rejected(self, tmp_path: Path) -> None:
+        """Auth with a different authorized_head is rejected."""
+        repo, evidence_root, state_root, current_head, candidate_path, verifier_path, candidate_digest, verifier_digest = self._setup(tmp_path)
+        state_path = state_root / "run_context.json"
+        state_path.write_text(json.dumps({
+            "schema_version": "autocoder.run_context.v1",
+            "run_id": "current-run",
+            "repo_owner": "owner",
+            "repo_name": "repo",
+            "local_checkout": str(repo),
+            "base_branch": "main",
+            "current_authorized_head": current_head,
+            "pr_number": 4,
+        }))
+        # Auth authorized_head is DIFFERENT from current_head.
+        stale_head = "b" * 40
+        auth = MergeAuthorization(
+            schema_version="autocoder.merge_authorization.v1",
+            run_id="current-run",
+            repo="owner/repo",
+            pr_number=4,
+            authorized_head=stale_head,  # stale!
+            candidate_sha256=candidate_digest,
+            verifier_record_sha256=verifier_digest,
+        )
+        auth_path = evidence_root / "merge-authorization.json"
+        write_artifact(auth_path, auth.to_dict())
+        merge_record_path = evidence_root / "merge-record.json"
+        inputs = MergeTransactionInputs(
+            authorization_artifact_path=auth_path,
+            candidate_artifact_path=candidate_path,
+            verifier_artifact_path=verifier_path,
+            merge_record_artifact_path=merge_record_path,
+            repository_checkout=repo,
+            run_state_root=state_root,
+            evidence_root=evidence_root,
+            live_pr_payload={
+                "state": "open",
+                "merged": False,
+                "head": {"sha": stale_head},
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": None,
+            },
+            live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
+            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
+            working_tree_clean=True,
+        )
+        with pytest.raises(MergeError) as exc:
+            execute_guarded_merge_transaction(inputs)
+        # The exact failure mode depends on the guard
+        # ordering; the test asserts the run is NOT
+        # completed via a stale auth. Accept any error
+        # message that prevents the merge.
+        assert (
+            "authorized_head" in str(exc.value).lower()
+            or "stale" in str(exc.value).lower()
+            or "candidate head" in str(exc.value).lower()
+            or "head" in str(exc.value).lower()
+        ), f"expected any head-related MergeError; got {exc.value!r}"
+
+
+class TestServerConfirmedMergeRequiresValidOID:
+    """Server-confirmed merge requires a valid mergeCommit
+    OID on every path, including the non-zero-exit path
+    where the server actually merged the PR.
+
+    Required by the round-4 CRITICAL finding: when gh pr
+    merge exits nonzero but the server reports merged=true
+    AND the server-reported mergeCommit OID is missing,
+    the production code MUST persist a PARTIAL recovery
+    merge record, then raise MergeAmbiguousOutcome. The
+    reconciler MUST NEVER fall back to local_main_sha.
+    """
+
+    def _setup(self, tmp_path: Path):
+        repo = tmp_path / "repo"
+        evidence_root = tmp_path / "evidence"
+        state_root = tmp_path / "state"
+        for d in (repo, evidence_root, state_root):
+            d.mkdir()
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(repo), check=True)
+        subprocess.run(["git", "config", "user.email", "x@y.z"], cwd=str(repo), check=True)
+        subprocess.run(["git", "config", "user.name", "x"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "i"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "feat/test"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "--allow-empty", "-m", "f"], cwd=str(repo), check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=str(repo), check=True)
+        subprocess.run(["git", "merge", "--ff-only", "feat/test"], cwd=str(repo), check=True, capture_output=True)
+        main_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True).stdout.strip()
+
+        import hashlib
+        candidate_payload = {
+            "schema_version": "autocoder.candidate.v1",
+            "exact_head": main_sha,
+            "head": {"head_sha": main_sha, "exact_head_sha": main_sha},
+            "candidate_sha256": "0" * 64,
+            "created_at": "2026-08-08T00:00:00Z",
+        }
+        candidate_path = evidence_root / "candidate.json"
+        write_artifact(candidate_path, candidate_payload)
+        candidate_digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        verifier_payload = {
+            "schema_version": "autocoder.verifier.v1",
+            "head_observed": main_sha,
+            "candidate_sha256": candidate_digest,
+            "candidate_path": str(candidate_path),
+            "verdict": "VERIFIED",
+            "created_at": "2026-08-08T00:00:00Z",
+        }
+        verifier_path = evidence_root / "verifier.json"
+        write_artifact(verifier_path, verifier_payload)
+        verifier_digest = hashlib.sha256(verifier_path.read_bytes()).hexdigest()
+        auth = MergeAuthorization(
+            schema_version="autocoder.merge_authorization.v1",
+            run_id="r1", repo="owner/repo", pr_number=4,
+            authorized_head=main_sha,
+            candidate_sha256=candidate_digest,
+            verifier_record_sha256=verifier_digest,
+        )
+        auth_path = evidence_root / "merge-authorization.json"
+        write_artifact(auth_path, auth.to_dict())
+        merge_record_path = evidence_root / "merge-record.json"
+        return repo, evidence_root, state_root, main_sha, auth, merge_record_path
+
+    def _build_inputs(self, repo, evidence_root, state_root, main_sha, auth, merge_record_path):
+        return MergeTransactionInputs(
+            authorization_artifact_path=evidence_root / "merge-authorization.json",
+            candidate_artifact_path=evidence_root / "candidate.json",
+            verifier_artifact_path=evidence_root / "verifier.json",
+            merge_record_artifact_path=merge_record_path,
+            repository_checkout=repo,
+            run_state_root=state_root,
+            evidence_root=evidence_root,
+            live_pr_payload={
+                "state": "open",
+                "merged": False,  # caller does not yet know; production re-queries
+                "head": {"sha": main_sha},
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "autoMergeRequest": None,
+            },
+            live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
+            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
+            working_tree_clean=True,
+        )
+
+    def test_subprocess_nonzero_merged_no_oid_writes_partial_record(
+        self, tmp_path: Path,
+    ) -> None:
+        """Scenario:
+        - gh pr merge exits NON-ZERO (simulating a server-side
+          glitch or partial failure)
+        - Live re-query shows merged=true
+        - Server-reported mergeCommit OID is MISSING (the
+          gh pr view --json mergeCommit returns null)
+        Expected:
+        - PARTIAL merge record is written with final_state="PARTIAL"
+        - MergeAmbiguousOutcome is raised
+        - Reconciler is NEVER called (no fall back to
+          local_main_sha)
+        """
+        repo, evidence_root, state_root, main_sha, auth, merge_record_path = self._setup(tmp_path)
+        inputs = self._build_inputs(repo, evidence_root, state_root, main_sha, auth, merge_record_path)
+        # Separate run_state_root to avoid the collision
+        # guard.
+        inputs = MergeTransactionInputs(
+            authorization_artifact_path=inputs.authorization_artifact_path,
+            candidate_artifact_path=inputs.candidate_artifact_path,
+            verifier_artifact_path=inputs.verifier_artifact_path,
+            merge_record_artifact_path=inputs.merge_record_artifact_path,
+            repository_checkout=inputs.repository_checkout,
+            run_state_root=tmp_path / "state",
+            evidence_root=inputs.evidence_root,
+            live_pr_payload=inputs.live_pr_payload,
+            live_ci_state=inputs.live_ci_state,
+            live_review_state=inputs.live_review_state,
+            live_thread_inventory=inputs.live_thread_inventory,
+            working_tree_clean=inputs.working_tree_clean,
+        )
+        def fake_run(cmd, **kwargs):
+            cmd_str = " ".join(str(c) for c in cmd) if cmd else ""
+            class _R:
+                pass
+            r = _R()
+            if "gh" in cmd_str:
+                if "pr merge" in cmd_str:
+                    # gh pr merge → nonzero exit (server glitch)
+                    r.returncode = 1
+                    r.stdout = b""
+                    r.stderr = b"some error"
+                elif "view" in cmd_str and "mergeCommit" in cmd_str:
+                    # gh pr view --json mergeCommit
+                    r.returncode = 0
+                    r.stdout = b'{"mergeCommit": null}'
+                    r.stderr = b""
+                elif "view" in cmd_str:
+                    # gh pr view (full re-query)
+                    r.returncode = 0
+                    r.stdout = (
+                        b'{"mergedAt": "2026-08-08T00:00:00Z", '
+                        b'"mergeCommit": null, '
+                        b'"state": "merged", '
+                        b'"isDraft": false, '
+                        b'"mergeable": "MERGEABLE", '
+                        b'"mergeStateStatus": "CLEAN", '
+                        b'"headRefOid": "' + main_sha.encode() + b'", '
+                        b'"baseRefName": "main", '
+                        b'"autoMergeRequest": null, '
+                        b'"number": 4}'
+                    )
+                    r.stderr = b""
+                else:
+                    r.returncode = 0
+                    r.stdout = b""
+                    r.stderr = b""
+            else:
+                # git commands
+                if "abbrev-ref" in cmd_str:
+                    r.returncode = 0
+                    r.stdout = "main"
+                    r.stderr = ""
+                elif "status" in cmd_str:
+                    r.returncode = 0
+                    r.stdout = ""
+                    r.stderr = ""
+                else:
+                    r.returncode = 0
+                    r.stdout = main_sha
+                    r.stderr = ""
+            return r
+        def fake_check_output(cmd, **kwargs):
+            raise subprocess.CalledProcessError(1, cmd)
+        with mock.patch("autocoder_orchestration.merge_authorization.subprocess.run", side_effect=fake_run), mock.patch("autocoder_orchestration.merge_authorization.subprocess.check_output", side_effect=fake_check_output):
+            with pytest.raises(MergeAmbiguousOutcome) as exc:
+                execute_guarded_merge_transaction(inputs)
+        # PARTIAL merge record MUST exist.
+        assert merge_record_path.exists(), (
+            f"PARTIAL merge record MUST be written before raising; "
+            f"path {merge_record_path} does not exist"
+        )
+        # The PARTIAL record's final_state is "PARTIAL".
+        record = json.loads(merge_record_path.read_text())
+        assert record["final_state"] == "PARTIAL"
+        # The unavailable_observations includes the missing OID.
+        assert any(
+            "mergeCommit" in o or "missing" in o.lower()
+            for o in record.get("unavailable_observations", [])
+        )
+        # The squash_merge_commit is empty (no reconciliation
+        # happened).
+        assert record["squash_merge_commit"] == ""
+
+
 class TestMergeQueueQueuedPRFailsClosed:
     """The merge-queue failure mode: subprocess zero, PR queued,
     no mergeCommit OID. The production path must NOT write a

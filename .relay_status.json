@@ -1,0 +1,25 @@
+{
+  "current_head": "cfdb12b",
+  "head_short": "cfdb12b",
+  "test_count": 735,
+  "skipped_count": 8,
+  "review_decision": "CHANGES_REQUESTED",
+  "review_decision_basis": "older CodeRabbit CHANGES_REQUESTED on 1b3ace2",
+  "last_full_review_on_current_head": true,
+  "rounds_pushed": 18,
+  "fix_round_summary": "Round-18 (cfdb12b): 2 outside-diff CodeRabbit Major fixes on commit 7ece662 (id 4890391011 at 2026-08-09T02:58:41Z). The review flagged: (1) MergeRecord.from_dict accepted missing schema_version and coerced Boolean fields through bool() (a legacy 'false' string silently appeared as a positive verification flag); (2) the merge-queue guard allowed a zero-exit subprocess with merged=true but absent mergeCommit to fall through to reconciliation against local_main_sha, returning a successful transaction without exact merge identity (C-28 violation). Both fixes landed. The 3 Major actionable findings from the prior CodeRabbit review on 1b3ace2 were already fixed at 7ece662.",
+  "production_path_tests": [
+    "tests/test_relay_wiring_production_path.py: 7 tests (CLI argv shape --json before subcommand)",
+    "tests/test_merge_queued_pr_fails_closed.py: 1 test (merge-queue guard fails closed)",
+    "tests/test_strict_quiet_window_canary.py: 5 tests (strict quiet-window polling + new-event preservation)",
+    "tests/test_directive_bridge.py: TestBridgeProductionRoundTrip: 2 tests (real DirectiveStore.write_directive is accepted by bridge)",
+    "tests/test_autocoder_orchestration_review_repair_relay.py: TestLaunchWorkerDoesNotTransition: 3 tests (launch_worker does NOT trigger report_repair_pushed)",
+    "tests/test_directive_bridge.py: 29 tests (digest, escalation guards, sidecar verification)"
+  ],
+  "review_inventory": {
+    "comments_on_latest_head": 20,
+    "comments_addressed": 20,
+    "remaining_unresolved": 0,
+    "comment_status": "20 inline comments on the prior current head (8be9329) all addressed in round-3 fixes. CodeRabbit's review on 7ece662 (id 4890391011) posted 2 new outside-diff Major findings which are now fixed at cfdb12b. The formal review decision at the PR level is still CHANGES_REQUESTED because the most recent CHANGES_REQUESTED was on 1b3ace2 (round-17); the most recent reviews on cfdb12b are COMMENTED. Continuing to wait for fresh reviews on cfdb12b."
+  }
+}
