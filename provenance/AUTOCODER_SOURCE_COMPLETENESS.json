@@ -843,9 +843,9 @@
   },
   "extracted_manifest_match": {
     "manifest_file": "provenance/aed-pr417-source-manifest.json",
-    "manifest_files_count": 50,
+    "manifest_files_count": 51,
     "manifest_source_files_count": 17,
-    "manifest_standalone_additions_count": 33,
+    "manifest_standalone_additions_count": 34,
     "all_manifest_source_paths_classified_as_extracted": true,
     "manifest_records": [
       {
@@ -1347,6 +1347,16 @@
         "source_size_bytes": null,
         "destination_size_bytes": 10650,
         "transformation_explanation": "Production-path behavioral tests for the merge-queue failure mode. Proves the production logic fails closed: a queued PR (no explicit mergeCommit OID) cannot produce a merge record. This is the production-path behavioral test for the merge-queue P1."
+      },
+      {
+        "source_path": null,
+        "destination_path": "tests/test_strict_quiet_window_canary.py",
+        "transformation_classification": "standalone_test_addition",
+        "source_sha256": null,
+        "destination_sha256": "2a1253858208fe7302cadbc5b86ebd5848417fa7cfc70d3e2f486811e48c1cc6",
+        "source_size_bytes": null,
+        "destination_size_bytes": 11900,
+        "transformation_explanation": "Production-path behavioral canary for the strict quiet-window. 3 tests prove the supervisor polls continuously, resets on non-qualifying observations, and halts on the controller's BLOCKED state."
       }
     ]
   },
@@ -7921,11 +7931,11 @@
   ],
   "metrics": {
     "extracted_manifest_match": {
-      "manifest_files_count": 50,
+      "manifest_files_count": 51,
       "manifest_source_files_count": 17,
-      "manifest_standalone_additions_count": 33
+      "manifest_standalone_additions_count": 34
     },
     "total_source_paths_in_manifest": 17,
-    "manifest_standalone_additions": 33
+    "manifest_standalone_additions": 34
   }
 }
