@@ -1077,6 +1077,16 @@ def cmd_merge(args: argparse.Namespace) -> int:
             all_nodes.extend(page.get("nodes", []))
             page_info = page.get("pageInfo", {})
             has_next = bool(page_info.get("hasNextPage"))
+            # If hasNextPage is set but endCursor is missing,
+            # the inventory is incomplete: fail closed.
+            # A partial thread response MUST NOT be treated
+            # as empty.
+            if has_next and not page_info.get("endCursor"):
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    "reported hasNextPage=True but endCursor is "
+                    "missing; inventory is incomplete"
+                )
             # ``endCursor`` is None on the final page; the
             # loop terminates via ``has_next``. We do NOT
             # default to the string "null" — that would

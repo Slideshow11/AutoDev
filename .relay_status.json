@@ -1,11 +1,11 @@
 {
-  "current_head": "f2c59ce",
-  "head_short": "f2c59ce",
-  "test_count": 739,
+  "current_head": "9386fb0",
+  "head_short": "9386fb0",
+  "test_count": 740,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
   "review_decision_basis": "older commit (8a5904ba, c1bd9853b643, 1b48e2708b3c)",
-  "rounds_pushed": 18,
+  "rounds_pushed": 19,
   "production_path_tests": [
     "tests/test_relay_wiring_production_path.py: 7 tests (CLI argv shape --json before subcommand)",
     "tests/test_merge_queued_pr_fails_closed.py: 2 tests (queued-PR + server-confirmed merge identity gate)",
@@ -13,18 +13,11 @@
     "tests/test_directive_bridge.py: TestBridgeProductionRoundTrip: 2 tests (DirectiveStore round-trip + tampered sidecar)",
     "tests/test_autocoder_orchestration_review_repair_relay.py: TestLaunchWorkerDoesNotTransition: 3 tests (launch_worker does NOT trigger report_repair_pushed)",
     "tests/test_merge_queued_pr_fails_closed.py: TestStaleAuthRejectedByCurrentRun: 3 tests (stale run_id / repo / authorized_head rejected)",
-    "tests/test_directive_bridge.py: TestSupervisorConsultsBridge: 27 tests (digest, escalation guards, sidecar verification, malformed-directive refusal)"
+    "tests/test_directive_bridge.py: TestSupervisorConsultsBridge: 27 tests (digest, escalation guards, sidecar verification, malformed-directive refusal)",
+    "tests/test_autocoder_supervisor.py: 2 tests (thread pagination fail-closed + complete pagination does not block)"
   ],
-  "round_18_summary": [
-    "Server-confirmed merge identity gate (CRITICAL): PARTIAL merge record written before raise on missing OID; mc['oid'] extracted only (not dict, not None)",
-    "Stale-auth rejection (Codex P1): merge authorization bound to current RunContext via run_id, repo, PR number, authorized_head",
-    "Required-CI policy honored (Codex P1): persisted RunContext.required_ci_jobs takes precedence over hardcoded 6-job set",
-    "P2 in worker prompt: worker now instructed to apply P2 findings when fix is straightforward",
-    "Malformed-directive refusal: supervisor refuses to launch worker (was silently falling back to resume prompt template)",
-    "Relay trigger restricted: human-authored issue_comments no longer trigger the relay",
-    "State-root resolution hardened: /tmp/aed-supervisor-state fallback removed; operator MUST configure AED_ORCHESTRATION_STATE_ROOT",
-    "Heartbeat touched during quiet-window polling: heartbeat_touch() called at every polling iteration",
-    "Hardcoded /tmp/task replaced with tempfile.NamedTemporaryFile helper",
-    "Manifest test_count updated to 747"
+  "round_19_summary": [
+    "Thread pagination fail-closed (Codex P1): partial thread responses treated as incomplete, NOT empty",
+    "evaluate_readiness refuses readiness when pagination_failed=True (reason='thread_pagination_failed')"
   ]
 }
