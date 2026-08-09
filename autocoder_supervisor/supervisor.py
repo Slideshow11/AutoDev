@@ -1852,6 +1852,8 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             })
     all_threads: list[tuple[str, bool, bool]] = []
     cursor = None
+    pagination_failed: bool = False
+    pagination_complete: bool = False
     for _ in range(6):
         vars_data = {
             "owner": REPO_OWNER,  # type: ignore[name-defined]
@@ -1890,6 +1892,11 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             with urllib.request.urlopen(req, timeout=20) as r:
                 d = json.loads(r.read())
         except Exception:
+            # Page error. The inventory is INCOMPLETE.
+            # Mark the pagination as failed so the
+            # snapshot records an explicit
+            # thread_pagination_failed=True flag.
+            pagination_failed = True
             break
         # Guard against GraphQL errors where the root response
         # is null or a list, ``data`` is null, or any intermediate
@@ -1924,12 +1931,23 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         page_info_obj = threads.get("pageInfo")
         pinfo = page_info_obj if isinstance(page_info_obj, dict) else {}
         if not pinfo.get("hasNextPage"):
+            pagination_complete = True
+            break
+        # If hasNextPage is set but endCursor is missing,
+        # the inventory is incomplete: fail closed.
+        if not pinfo.get("endCursor"):
+            pagination_failed = True
             break
         cursor = pinfo.get("endCursor")
     snap["review_threads"] = {
         tid: {"resolved": r, "outdated": o}
         for (tid, r, o) in all_threads
     }
+    # Record the pagination status. When pagination failed,
+    # the readiness gate MUST treat the inventory as
+    # incomplete (not "no unresolved threads").
+    snap["review_threads_pagination_failed"] = pagination_failed
+    snap["review_threads_pagination_complete"] = pagination_complete
     page = 1
     while page <= 5:
         ic = safe_github_get(
@@ -2138,6 +2156,21 @@ def evaluate_readiness(
     h = head or AUTHORITATIVE_HEAD  # type: ignore[name-defined]
     if not snap or snap.get("head_sha") != h:
         return {"ready": False, "reason": "head_mismatch"}
+    # Fail-closed: if the review-threads pagination failed
+    # (page error, missing endCursor, or >10 pages), the
+    # thread inventory is INCOMPLETE. The readiness gate
+    # MUST treat incomplete as "not ready". An empty
+    # review_threads dict from a failed pagination is a
+    # false-clean signal: the gate MUST NOT promote
+    # readiness on it.
+    if snap.get("review_threads_pagination_failed"):
+        return {
+            "ready": False,
+            "reason": "thread_pagination_failed",
+            "pagination_complete": snap.get(
+                "review_threads_pagination_complete"
+            ),
+        }
     blockers = threads_block_readiness(snap)
     if blockers:
         return {

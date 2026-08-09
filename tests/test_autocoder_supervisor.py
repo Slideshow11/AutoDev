@@ -1740,3 +1740,43 @@ def test_capture_live_snapshot_handles_null_graphql_data(
     assert "review_threads" in snap
     assert snap["review_threads"] == {}
 
+
+
+
+def test_thread_pagination_failure_blocks_readiness():
+    """Round-5 Codex P1: partial thread pagination responses
+    MUST NOT be treated as empty. The readiness gate MUST
+    refuse to promote readiness when the inventory is
+    incomplete.
+    """
+    from autocoder_supervisor import supervisor as sup
+    snap = {
+        "head_sha": "a" * 40,
+        "review_threads": {},
+        "review_threads_pagination_failed": True,
+        "review_threads_pagination_complete": False,
+    }
+    result = sup.evaluate_readiness(snap, head="a" * 40)
+    assert result["ready"] is False, (
+        f"pagination_failed=True MUST block readiness; got {result!r}"
+    )
+    assert result["reason"] == "thread_pagination_failed"
+
+
+def test_complete_thread_pagination_does_not_block():
+    """A complete pagination does NOT block readiness on
+    the pagination flag alone.
+    """
+    from autocoder_supervisor import supervisor as sup
+    snap = {
+        "head_sha": "a" * 40,
+        "review_threads": {},
+        "review_threads_pagination_failed": False,
+        "review_threads_pagination_complete": True,
+    }
+    result = sup.evaluate_readiness(snap, head="a" * 40)
+    if result["ready"] is False:
+        # The pagination flag is not the blocker; other
+        # gates (checks, unconsumed_events, etc.) may
+        # still be open.
+        assert result["reason"] != "thread_pagination_failed"
