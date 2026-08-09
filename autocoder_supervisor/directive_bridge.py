@@ -131,7 +131,10 @@ class ResolvedDirective:
     directive_sha256: str
 
 
-def _resolve_directive_path(explicit: Optional[str] = None) -> Optional[Path]:
+def _resolve_directive_path(
+    explicit: Optional[str] = None,
+    evidence_root_override: Optional[str] = None,
+) -> Optional[Path]:
     """Locate the canonical directive artifact.
 
     Returns ``None`` when no directive is configured; the caller
@@ -139,9 +142,19 @@ def _resolve_directive_path(explicit: Optional[str] = None) -> Optional[Path]:
     template.
 
     Lookup order is operator-supplied explicit path, then
-    ``AED_DIRECTIVE_PATH``, then ``AED_EVIDENCE_ROOT/directive.json``.
+    ``AED_DIRECTIVE_PATH``, then ``<evidence_root_override>/directive.json``
+    (the canonical supervisor-resolved root), then
+    ``AED_EVIDENCE_ROOT/directive.json``.
     Each candidate is checked for ``is_file()`` so a missing
     file is silently treated as "no directive configured".
+
+    Round-29 P1#20: the supervisor's resolved evidence
+    root MUST take precedence over the env var so the
+    bridge finds the canonical ``directive.json`` written
+    by the relay. Without this precedence the bridge
+    silently uses the operator's resume prompt for any
+    deployment that did not set ``AED_EVIDENCE_ROOT``
+    explicitly, bypassing the structured directive.
     """
     if explicit:
         p = Path(explicit)
@@ -151,6 +164,14 @@ def _resolve_directive_path(explicit: Optional[str] = None) -> Optional[Path]:
         p = Path(env_path)
         if p.is_file():
             return p
+    # Round-29 P1#20: the supervisor passes the resolved
+    # evidence root here (the canonical location the relay
+    # writes to). Prefer this over the env var so the
+    # bridge searches the right directory.
+    if evidence_root_override:
+        candidate = Path(evidence_root_override) / "directive.json"
+        if candidate.is_file():
+            return candidate
     evidence_root = os.environ.get("AED_EVIDENCE_ROOT")
     if evidence_root:
         candidate = Path(evidence_root) / "directive.json"
@@ -297,6 +318,7 @@ def resolve_directive(
     *,
     expected_head: Optional[str] = None,
     directive_path: Optional[str] = None,
+    evidence_root_override: Optional[str] = None,
 ) -> Optional[ResolvedDirective]:
     """Resolve the relay-authored directive, if present and valid.
 
@@ -309,8 +331,17 @@ def resolve_directive(
     ``head_sha`` does not match are rejected with reason
     ``head_mismatch`` (invariant I-08: review evidence is bound
     to the exact current head).
+
+    Round-29 P1#20: ``evidence_root_override`` carries the
+    supervisor's resolved evidence root (canonical location
+    the relay writes to). It takes precedence over
+    ``AED_EVIDENCE_ROOT`` so the bridge finds the canonical
+    directive.json written by the relay even when the
+    operator did not set the env var.
     """
-    path = _resolve_directive_path(directive_path)
+    path = _resolve_directive_path(
+        directive_path, evidence_root_override=evidence_root_override,
+    )
     if path is None:
         return None
     directive = _load_directive_payload(path)

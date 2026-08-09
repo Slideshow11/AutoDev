@@ -147,6 +147,29 @@ def isolated_state(monkeypatch, tmp_path: Path):
         "current_head": supervisor.AUTHORITATIVE_HEAD,
         "round103_resume": {"resume_classification": "ACTIVE_REPAIR"},
     }))
+    # Round-29 P1#7: ``isolated_state`` also creates the
+    # canonical orchestration state root (a directory
+    # containing ``run_context.json`` + ``state.json``) and
+    # records its path in ``RUN_STATE`` so the supervisor's
+    # BLOCKED checks resolve the orch state root positively
+    # instead of failing closed. The orch state root is
+    # distinct from ``STATE_DIR`` per the round-29 invariant.
+    orch_state_root = tmp_path / "orch_state"
+    orch_state_root.mkdir(parents=True, exist_ok=True)
+    (orch_state_root / "run_context.json").write_text(json.dumps({
+        "schema_version": "autocoder.run_context.v1",
+        "run_id": "isolated",
+        "repo_owner": "owner/repo",
+        "pr_number": 4,
+        "current_authorized_head": supervisor.AUTHORITATIVE_HEAD,
+    }))
+    (orch_state_root / "state.json").write_text(json.dumps({
+        "schema_version": "autocoder.state_machine.v1",
+        "current_state": "REPAIRING_REVIEW_FINDINGS",
+    }))
+    run_state_payload = json.loads(run_state_path.read_text())
+    run_state_payload["orchestration_state_root"] = str(orch_state_root)
+    run_state_path.write_text(json.dumps(run_state_payload))
 
     monkeypatch.setattr(supervisor, "STATE_DIR", state_dir)
     monkeypatch.setattr(supervisor, "LEASE_PATH", lease_path)
@@ -165,6 +188,9 @@ def isolated_state(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(supervisor, "READINESS_STATE_PATH",
                         readiness_state_path)
     monkeypatch.setattr(supervisor, "INSTANCE_ID", "test-instance-001")
+    monkeypatch.setattr(supervisor, "PR_NUMBER", 4)
+    monkeypatch.setattr(supervisor, "REPO_OWNER", "owner")
+    monkeypatch.setattr(supervisor, "REPO_NAME", "repo")
     supervisor.write_readiness_state({
         "state": supervisor.STATE_ACTIVE_REPAIR,
         "achieved_at": "2026-08-04T00:00:00Z",

@@ -35,10 +35,31 @@ def _setup_isolated_state(tmp_path: Path) -> dict:
       ``readiness_state.json``.
     - ``unconsumed_events_path``: where unconsumed events
       live.
+
+    Round-29 P1#7: the helper also creates the canonical
+    orchestration state root (a directory containing
+    ``run_context.json`` + ``state.json``) and records its
+    path in ``run_state.json``. The orch state root is
+    distinct from ``STATE_DIR`` per the round-29 invariant.
     """
     state_dir = tmp_path / "supervisor_state"
     state_dir.mkdir()
+    orch = tmp_path / "orch_state"
+    orch.mkdir()
+    (orch / "run_context.json").write_text(json.dumps({
+        "schema_version": "autocoder.run_context.v1",
+        "run_id": "isolated", "repo_owner": "owner/repo",
+        "pr_number": 4, "current_authorized_head": "a" * 40,
+    }))
+    (orch / "state.json").write_text(json.dumps({
+        "schema_version": "autocoder.state_machine.v1",
+        "current_state": "REPAIRING_REVIEW_FINDINGS",
+    }))
     run_state = state_dir / "run_state.json"
+    run_state.write_text(json.dumps({
+        "current_head": "a" * 40,
+        "orchestration_state_root": str(orch),
+    }))
     readiness = state_dir / "readiness_state.json"
     unconsumed = state_dir / "unconsumed_events.json"
     return {
@@ -65,8 +86,25 @@ class TestQuietWindowNewEventPreservation:
             "unconsumed_events_path": tmp_path / "supervisor_state" / "unconsumed_events.json",
         }
         paths["state_dir"].mkdir()
+        # Round-29 P1#7: create the canonical orchestration
+        # state root so the BLOCKED check resolves the orch
+        # state root positively rather than failing closed.
+        orch = tmp_path / "orch_state"
+        orch.mkdir()
+        (orch / "run_context.json").write_text(json.dumps({
+            "schema_version": "autocoder.run_context.v1",
+            "run_id": "isolated", "repo_owner": "owner/repo",
+            "pr_number": 4, "current_authorized_head": "a" * 40,
+        }))
+        (orch / "state.json").write_text(json.dumps({
+            "schema_version": "autocoder.state_machine.v1",
+            "current_state": "REPAIRING_REVIEW_FINDINGS",
+        }))
         paths["run_state_path"].write_text(
-            json.dumps({"current_head": "a" * 40}),
+            json.dumps({
+                "current_head": "a" * 40,
+                "orchestration_state_root": str(orch),
+            }),
         )
         paths["unconsumed_events_path"].write_text(
             json.dumps({"events": []}),
@@ -90,6 +128,9 @@ class TestQuietWindowNewEventPreservation:
         sup.READINESS_STATE_PATH = paths["readiness_state_path"]  # type: ignore
         sup.UNCONSUMED_EVENTS_PATH = paths["unconsumed_events_path"]  # type: ignore
         sup.AUTHORITATIVE_HEAD = "a" * 40  # type: ignore
+        sup.PR_NUMBER = 4  # type: ignore
+        sup.REPO_OWNER = "owner"  # type: ignore
+        sup.REPO_NAME = "repo"  # type: ignore
         quiet_window = 3
         pre_unconsumed_ids = set()
 
@@ -181,6 +222,9 @@ class TestQuietWindowNewEventPreservation:
         sup.READINESS_STATE_PATH = paths["readiness_state_path"]  # type: ignore
         sup.UNCONSUMED_EVENTS_PATH = paths["unconsumed_events_path"]  # type: ignore
         sup.AUTHORITATIVE_HEAD = "a" * 40  # type: ignore
+        sup.PR_NUMBER = 4  # type: ignore
+        sup.REPO_OWNER = "owner"  # type: ignore
+        sup.REPO_NAME = "repo"  # type: ignore
         quiet_window = 5
         pre_unconsumed_ids = set()
 
@@ -251,12 +295,23 @@ class TestStrictQuietWindowCanary:
     """
 
     def _write_state(self, run_state_path: Path, head: str = "a" * 40) -> None:
-        run_state_path.write_text(json.dumps({
+        # Round-29 P1#7: preserve the orchestration_state_root
+        # field (written by ``_setup_isolated_state``) so the
+        # BLOCKED check resolves the orch state root
+        # positively rather than failing closed. If the file
+        # already has the field, merge it in; otherwise write
+        # only the head + round103_resume (back-compat).
+        try:
+            existing = json.loads(run_state_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        existing.update({
             "current_head": head,
             "round103_resume": {
                 "resume_classification": "PR416_ROUND111_IN_PROGRESS",
             },
-        }))
+        })
+        run_state_path.write_text(json.dumps(existing))
 
     def _write_unconsumed(self, unconsumed_path: Path, events: list) -> None:
         unconsumed_path.write_text(json.dumps({"events": events}))
@@ -283,6 +338,9 @@ class TestStrictQuietWindowCanary:
         sup.UNCONSUMED_EVENTS_PATH = paths["unconsumed_events_path"]  # type: ignore
         # The head must be a valid lowercase hex SHA.
         sup.AUTHORITATIVE_HEAD = "a" * 40  # type: ignore
+        sup.PR_NUMBER = 4  # type: ignore
+        sup.REPO_OWNER = "owner"  # type: ignore
+        sup.REPO_NAME = "repo"  # type: ignore
         # Quiet window: 2 seconds for the canary (so the
         # test runs quickly).
         # Use a quiet_window that allows multiple polling
@@ -370,6 +428,9 @@ class TestStrictQuietWindowCanary:
         sup.READINESS_STATE_PATH = paths["readiness_state_path"]  # type: ignore
         sup.UNCONSUMED_EVENTS_PATH = paths["unconsumed_events_path"]  # type: ignore
         sup.AUTHORITATIVE_HEAD = "a" * 40  # type: ignore
+        sup.PR_NUMBER = 4  # type: ignore
+        sup.REPO_OWNER = "owner"  # type: ignore
+        sup.REPO_NAME = "repo"  # type: ignore
         quiet_window = 1
         pre_unconsumed_ids = set()
 
@@ -442,9 +503,17 @@ class TestStrictQuietWindowCanary:
         sup.READINESS_STATE_PATH = paths["readiness_state_path"]  # type: ignore
         sup.UNCONSUMED_EVENTS_PATH = paths["unconsumed_events_path"]  # type: ignore
         sup.AUTHORITATIVE_HEAD = "a" * 40  # type: ignore
-        # Write the orchestration controller's state.json
-        # with BLOCKED.
-        state_path = paths["state_dir"] / "state.json"
+        sup.PR_NUMBER = 4  # type: ignore
+        sup.REPO_OWNER = "owner"  # type: ignore
+        sup.REPO_NAME = "repo"  # type: ignore
+        # Round-29 P1#7: write the controller's state.json
+        # to the ORCHESTRATION state root, NOT the supervisor's
+        # STATE_DIR. The supervisor reads the BLOCKED state from
+        # the orch state root (canonical location).
+        orch_root = json.loads(
+            paths["run_state_path"].read_text()
+        )["orchestration_state_root"]
+        state_path = Path(orch_root) / "state.json"
         state_path.write_text(json.dumps({
             "current_state": "BLOCKED",
         }))

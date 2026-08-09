@@ -44,7 +44,7 @@ from .directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the p
     resolve_directive,
     resolve_worker_prompt,
 )
-from .orchestration_state_root import OrchestrationRootUnverified  # noqa: F401
+from .orchestration_state_root import OrchestrationRootError, OrchestrationRootMissing, OrchestrationRootUnverified, resolve_orchestration_state_root  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -996,8 +996,29 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     directive_prompt: Optional[str] = None
     resolved_directive = None
     expected_head = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+    # Round-29 P1#20: pass the resolved evidence root so the
+    # bridge finds the canonical directive written by the
+    # relay. The resolved root comes from
+    # ``_resolve_orchestration_evidence_root`` (relay-side)
+    # or ``run_state.json``; passing it through the bridge
+    # ensures the bridge searches the canonical directory
+    # even when the operator did not set ``AED_EVIDENCE_ROOT``.
+    evidence_root_override: Optional[str] = None
     try:
-        resolved_directive = resolve_directive(expected_head=expected_head)
+        from .relay_wiring import _resolve_orchestration_evidence_root
+        try:
+            evidence_root_override = _resolve_orchestration_evidence_root(
+                None  # type: ignore[arg-type]
+            ) or None
+        except Exception:
+            evidence_root_override = None
+    except ImportError:
+        pass
+    try:
+        resolved_directive = resolve_directive(
+            expected_head=expected_head,
+            evidence_root_override=evidence_root_override,
+        )
     except DirectiveLoadFailure as exc:
         # The directive is malformed (digest mismatch,
         # head_mismatch, schema-invalid, etc.). This is a
@@ -2020,6 +2041,19 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             c for c in snap["issue_comments"]
             if c.get("login") in bot_logins
         ]
+    # Round-29 P1#11 / P1#25: include the provider-authored
+    # inline review comments (the bodies the relay needs
+    # to build repair directives for file / line / patch
+    # suggestions). ``collect_provider_surfaces`` already
+    # fetches them; here we attach the bodies to the
+    # snapshot so the relay's ``_collect_review_findings``
+    # sees them. Without this step the relay would only
+    # see issue comments and never build directives for
+    # the actual findings on file/line.
+    snap.setdefault("review_comments", [])  # type: ignore[arg-type]
+    for provider, surfaces in snap.get("provider_surfaces", {}).items():  # type: ignore[union-attr]
+        for comment in surfaces.get("review_comments", []):
+            snap["review_comments"].append(comment)
     cr = safe_github_get(
         f"/repos/{REPO_OWNER}/{REPO_NAME}/commits/{snap['head_sha'] or ''}/check-runs",  # type: ignore[name-defined]
         token,
@@ -2434,10 +2468,31 @@ def active_repair_quiet_window(
             pass
         # Controller BLOCKED check at every heartbeat so
         # an escalation mid-window halts the transition.
+        # Round-29 P1#7: the BLOCKED state is recorded by the
+        # orchestration controller under the canonical
+        # orchestration state root, NOT the supervisor's
+        # private ``STATE_DIR``. Reading from ``STATE_DIR``
+        # would route to a stale / empty location and the
+        # supervisor would clear the escalation and promote
+        # readiness despite the human halt. Resolve the
+        # orch state root via the canonical resolver and
+        # read ``<orch_state_root>/state.json``. If the
+        # orch state root cannot be positively identified,
+        # the supervisor MUST NOT proceed with the quiet
+        # window; it routes to BLOCKED / escalation.
         if _time.monotonic() - last_blocked_check_at > 1.0:
             last_blocked_check_at = _time.monotonic()
             try:
-                state_path = Path(STATE_DIR) / "state.json"  # type: ignore[name-defined]
+                from .orchestration_state_root import (
+                    OrchestrationRootError,
+                    resolve_orchestration_state_root,
+                )
+                orch_state_root = resolve_orchestration_state_root(
+                    run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+                    expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+                    expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+                )
+                state_path = Path(orch_state_root) / "state.json"
                 if state_path.is_file():
                     controller_state = json.loads(
                         state_path.read_text(),
@@ -2451,8 +2506,29 @@ def active_repair_quiet_window(
                         )
                         controller_blocked = True
                         break
-            except (OSError, json.JSONDecodeError):
-                pass
+                # Round-29 P1#19: refresh the heartbeat
+                # INSIDE the polling loop so an external
+                # watchdog does not treat the supervisor as
+                # dead while the loop is waiting for a
+                # stable interval.
+                try:
+                    heartbeat_touch()
+                except (OSError, NameError):
+                    pass
+            except (OSError, json.JSONDecodeError, OrchestrationRootError):
+                # Round-29 P1#7: orch-state-root resolution
+                # failure is a protected-authority blocker.
+                # The supervisor MUST NOT silently proceed;
+                # route to BLOCKED / escalation. The outer
+                # main iteration handles the BLOCKED signal.
+                log(
+                    "error",
+                    "quiet-window halted: orchestration state_root "
+                    "cannot be positively identified; BLOCKED/escalation",
+                    head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                )
+                controller_blocked = True
+                break
         snap_b = capture_live_snapshot(rs, token or "")
         new_events_during_window = [
             e
@@ -2528,7 +2604,18 @@ def active_repair_quiet_window(
             {"events": []},
         )
     try:
-        state_path = Path(STATE_DIR) / "state.json"  # type: ignore[name-defined]
+        # Round-29 P1#7: read from the canonical
+        # orchestration state root, NOT the supervisor's
+        # private ``STATE_DIR``. BLOCKED recorded under the
+        # orch state root MUST halt the supervisor's quiet
+        # window; reading STATE_DIR would silently promote
+        # readiness despite the human halt.
+        orch_state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+        state_path = Path(orch_state_root) / "state.json"
         if state_path.is_file():
             controller_state = json.loads(
                 state_path.read_text(),
@@ -2541,10 +2628,11 @@ def active_repair_quiet_window(
                     head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
                 )
                 return "escalation"
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, OrchestrationRootError):
         log(
             "warning",
-            "quiet-window halted: could not read controller state",
+            "quiet-window halted: could not read controller state "
+            "(orchestration state_root not positively identified)",
             head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
         )
         return "escalation"
@@ -2756,9 +2844,65 @@ def handle_new_events(
             mark_event_launched(eid)
         return
     if relay_action == "enter_qualifying_readiness":
-        # The head is clean. The supervisor does NOT
-        # launch a worker; the existing readiness gate
-        # evaluates the head on the next heartbeat.
+        # The head is clean. The supervisor MUST drive the
+        # orchestration controller through the canonical
+        # state-machine transitions so the durable
+        # ``state.json`` records the qualifying-readiness
+        # transition. Without this, ``Controller.record_readiness_certificate``
+        # cannot persist a readiness certificate because
+        # the controller is still in REPAIRING_REVIEW_FINDINGS.
+        # Round-29 P1#12: the relay drives the first
+        # transition (REPAIRING_REVIEW_FINDINGS ->
+        # AWAITING_CI) inside ``run_once``. The supervisor
+        # drives the second transition (AWAITING_CI ->
+        # QUALIFYING_READINESS) here so the qualification
+        # is durable.
+        try:
+            from autocoder_orchestration.controller import Controller
+            from autocoder_orchestration.context import RunContext
+            from autocoder_orchestration.store import (
+                StateStore, StateStoreError,
+            )
+            from .orchestration_state_root import (
+                OrchestrationRootError,
+                resolve_orchestration_state_root,
+            )
+            orch_state_root = resolve_orchestration_state_root(
+                run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+                expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+                expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+            )
+            store = StateStore(orch_state_root)
+            rc = store.read_optional("run_context.json")
+            if rc is not None:
+                ctx = RunContext.from_dict(rc)
+                controller = Controller(context=ctx, store=store)
+                sm = controller.load_state_machine()
+                if sm is not None and sm.current_state == "AWAITING_CI":
+                    try:
+                        controller.report_ci_pass(
+                            head_observed=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                        )
+                        log(
+                            "info",
+                            "supervisor persisted QUALIFYING_READINESS via "
+                            "Controller.report_ci_pass()",
+                            head=AUTHORITATIVE_HEAD[:12],  # type: ignore[name-defined]
+                        )
+                    except Exception as exc:
+                        log(
+                            "warning",
+                            "supervisor report_ci_pass failed; controller may "
+                            "still be in AWAITING_CI",
+                            error=str(exc),
+                        )
+        except (OSError, ImportError, OrchestrationRootError,
+                StateStoreError, ValueError, KeyError) as exc:
+            log(
+                "warning",
+                "supervisor persistence of qualifying-readiness failed",
+                error=str(exc),
+            )
         log(
             "info",
             "supervisor halted: relay indicated qualifying readiness",

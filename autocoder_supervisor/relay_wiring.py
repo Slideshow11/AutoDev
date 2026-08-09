@@ -177,6 +177,39 @@ def invoke_relay_round(
             f"cli_not_found: {cli}", stderr=str(exc),
         ) from exc
     if proc.returncode != 0:
+        # Round-29: the CLI exits non-zero when the relay
+        # raises ``RelayError``, ``InvalidSnapshot``, or
+        # ``DirectiveContractError``. The CLI emits a JSON
+        # payload with ``{"error": "<ClassName>: ..."}``.
+        # We MUST re-raise the original exception class so the
+        # supervisor surfaces the failure rather than
+        # silently treating it as a wiring error.
+        # ``EscalateToHuman`` is converted to a structured
+        # decision in the CLI (see ``cmd_review_repair_round``)
+        # so this branch only fires for non-escalation
+        # failures.
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            error_str = payload.get("error") or ""
+            for cls_name in (
+                "RelayError",
+                "InvalidSnapshot",
+                "DirectiveContractError",
+                "MergeAuthorizationError",
+            ):
+                if error_str.startswith(f"{cls_name}:"):
+                    mod = __import__(
+                        "autocoder_orchestration.review_repair_relay",
+                        fromlist=[cls_name],
+                    )
+                    cls = getattr(mod, cls_name, None)
+                    if cls is not None:
+                        raise cls(
+                            error_str.split(":", 1)[1].strip()
+                        )
         raise RelayWiringError(
             "non_zero_exit", returncode=proc.returncode,
             stdout=proc.stdout, stderr=proc.stderr,
@@ -204,14 +237,23 @@ def should_invoke_relay(snapshot: dict) -> bool:
     can address (CodeRabbit review findings, CI failures).
     Quota / paused-provider events fall through to the
     existing review-request path.
+
+    Round-29 P1#3: the supervisor MUST NOT invoke the relay
+    on a provider walkthrough / in-progress / completion
+    status comment. ``_is_actionable_provider_comment`` is
+    the canonical actionable classifier used by the relay;
+    the supervisor's trigger MUST consult it. A provider
+    status comment that survives the actionable filter
+    does NOT trigger the relay here.
     """
+    from autocoder_orchestration.review_repair_relay import (
+        _is_actionable_provider_comment,
+    )
     if not isinstance(snapshot, dict):
         return False
-    # The supervisor's snapshot shape carries per-provider
-    # issue comments and required checks. The relay's
-    # ``collect_findings`` is the canonical classifier.
     per_provider = snapshot.get("_provider_issue_comments") or {}
     required_checks = snapshot.get("required_checks") or {}
+    has_actionable_provider_comment = False
     if per_provider:
         for provider, comments in per_provider.items():
             if (
@@ -219,7 +261,14 @@ def should_invoke_relay(snapshot: dict) -> bool:
                 and isinstance(comments, list)
                 and comments
             ):
-                return True
+                for comment in comments:
+                    if _is_actionable_provider_comment(comment):
+                        has_actionable_provider_comment = True
+                        break
+            if has_actionable_provider_comment:
+                break
+    if has_actionable_provider_comment:
+        return True
     # CI failures — any required check concluded failure.
     # The relay's CI filter is stricter than this trigger
     # (it requires the conclusion to be on the current

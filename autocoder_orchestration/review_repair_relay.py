@@ -1018,7 +1018,7 @@ def _extract_suggested_test(body: str) -> Optional[str]:
 # relay does not repeatedly launch workers for a clean
 # head.
 _NON_FINDING_COMMENT_RE = re.compile(
-    r"(?i)\b("
+    r"^\s*(?:"  # Anchor to start of body (first line).
     r"walkthrough|"
     r"in progress|"
     r"review in progress|"
@@ -1029,8 +1029,15 @@ _NON_FINDING_COMMENT_RE = re.compile(
     r"review request|"
     r"finished review|"
     r"commented on your changes|"
-    r"finished"
-    r")\b"
+    r"finished|"
+    r"started review|"
+    r"approved these changes|"
+    r"left a comment|"
+    r"requested changes|"
+    r"p1\b.*review|"
+    r"p2\b.*review"
+    r")\b[^\n]*$"  # Status markers are short single-line.
+    , re.IGNORECASE
 )
 
 
@@ -1653,8 +1660,19 @@ def evaluate_round(
             f"snapshot head {snapshot_head!r} != requested head {head_sha!r}; "
             "stale snapshot rejected"
         )
-    # When the snapshot's head_match flag is explicitly False,
-    # the capture was for a different head. Refuse.
+    # Round-29 P1#4: ``head_match`` MUST be present and True.
+    # ``False`` is an explicit mismatch (already rejected below).
+    # Missing entirely = unknown provenance = fail closed.
+    # The same positive-observation rule that applies to
+    # required CI checks applies here: absent evidence is
+    # not a pass.
+    if "head_match" not in snapshot:
+        raise InvalidSnapshot(
+            "snapshot is missing head_match; the exact-head "
+            "guard cannot verify the head binding without "
+            "an explicit True/False marker. Absent evidence "
+            "is not a pass — re-capture the snapshot."
+        )
     if snapshot.get("head_match") is False:
         raise InvalidSnapshot(
             f"snapshot head_match is False for requested head {head_sha!r}; "
@@ -2054,6 +2072,17 @@ class RelayLoop:
             self.controller.block(
                 reason=next(iter(reasons), "relay escalated")
             )
+            # NOTE: round-29 originally added a redundant
+            # ``raise EscalateToHuman`` here. The canonical
+            # wire contract is the returned ``RoundDecision``
+            # (whose ``action == "escalate_to_human"`` carries
+            # the signal); the CLI surfaces that as a
+            # structured JSON decision. Raising here would
+            # make the round-29 P0 escalation path round-trip
+            # through both an exception AND a structured
+            # decision, complicating the supervisor's wire
+            # contract. The relay's caller MUST inspect
+            # ``decision.action`` to know the round halted.
         return decision
 
     def run_until_head_advances(

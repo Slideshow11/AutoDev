@@ -104,6 +104,7 @@ def _init_run_context(state_root: Path, evidence_root: Path, head_sha: str) -> N
     }
     with open(sm_path, "w") as f:
         json.dump(sm_payload, f)
+    os.chmod(sm_path, 0o600)
     os.chmod(state_root / "run_context.json", 0o600)
     os.chmod(sm_path, 0o600)
 
@@ -296,30 +297,28 @@ class TestInvokeRelayRoundProductionPath:
         self, tmp_path: Path,
     ) -> None:
         """A snapshot whose head_sha differs from the
-        requested head is rejected with ``InvalidSnapshot``;
-        the CLI surfaces this as a non-zero exit.
+        requested head is rejected; the CLI surfaces this as
+        a structured ``action == escalate_to_human``
+        decision with populated ``escalate_reasons``.
+        ``InvalidSnapshot`` is a failure that halts the run
+        (the controller cannot bind to an unknown head), so
+        the relay marks the round as ``escalate_to_human``.
         """
         head_sha = "a" * 40
         stale_head = "b" * 40
         state_root, evidence_root = self._init(tmp_path, head_sha)
         snapshot = _snapshot_clean(stale_head)
-        with pytest.raises(RelayWiringError) as exc:
-            invoke_relay_round(
-                snapshot=snapshot,
-                head_sha=head_sha,
-                state_root=str(state_root),
-                run_id="r1",
-                pr_number=4,
-                evidence_root=str(evidence_root),
-                required_check_names=(),
-            )
-        # A stale snapshot is rejected (non-zero exit). The
-        # CLI maps InvalidSnapshot to either EXIT_STATE (4)
-        # or EXIT_INTERNAL (5) depending on the trap.
-        assert exc.value.returncode != 0, (
-            f"stale snapshot must be rejected with non-zero exit, "
-            f"got rc={exc.value.returncode}"
+        decision = invoke_relay_round(
+            snapshot=snapshot,
+            head_sha=head_sha,
+            state_root=str(state_root),
+            run_id="r1",
+            pr_number=4,
+            evidence_root=str(evidence_root),
+            required_check_names=(),
         )
+        assert decision["action"] == "escalate_to_human"
+        assert any("stale" in r.lower() for r in decision["escalate_reasons"])
 
 
 class TestInvokeRelayRoundArgvShape:

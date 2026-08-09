@@ -208,13 +208,29 @@ class TestReviewRepairRoundCLI:
         }
         snap_file = tmp_path / "snap.json"
         snap_file.write_text(json.dumps(snap))
-        rc = cli_module.main([
-            "--json", "review-repair-round",
-            "--state-root", str(state_root),
-            "--run-id", "r1",
-            "--snapshot-file", str(snap_file),
-        ])
-        assert rc == 5  # EXIT_INTERNAL
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = cli_module.main([
+                "--json", "review-repair-round",
+                "--state-root", str(state_root),
+                "--run-id", "r1",
+                "--snapshot-file", str(snap_file),
+            ])
+        payload = json.loads(buf.getvalue())
+        # Round-29: the CLI surfaces RelayError-driven halts
+        # as a structured ``action=escalate_to_human``
+        # decision (exit 0) so the supervisor's wiring can
+        # convert it to the canonical escalation signal
+        # rather than wrapping every subprocess in a
+        # try/except for non-zero exit codes.
+        assert rc == 0
+        assert payload["action"] == "escalate_to_human"
+        assert any(
+            "REPAIRING_REVIEW_FINDINGS" in r or "PLANNED" in r
+            for r in payload["escalate_reasons"]
+        )
 
     def test_status_reports_no_directive(self, tmp_path: Path) -> None:
         from autocoder_orchestration.context import make_run_context

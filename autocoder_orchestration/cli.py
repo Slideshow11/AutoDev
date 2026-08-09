@@ -210,6 +210,11 @@ def _fetch_coderabbit_review_state(
             doc = json.loads(proc.stdout)
         except json.JSONDecodeError:
             return None
+        # Round-29 P1#6: fail closed on partial GraphQL
+        # responses. Top-level ``errors`` means the page is
+        # partial even if ``data`` is present.
+        if isinstance(doc, dict) and isinstance(doc.get("errors"), list) and doc["errors"]:
+            return None
         page = (
             doc.get("data", {})
             .get("repository", {})
@@ -217,6 +222,12 @@ def _fetch_coderabbit_review_state(
             .get("latestReviews", {})
         )
         if not page:
+            return None
+        # Round-29 P1#6: ``nodes`` MUST be a list. Missing
+        # ``nodes`` / ``pageInfo`` is a partial response.
+        if not isinstance(page.get("nodes"), list):
+            return None
+        if not isinstance(page.get("pageInfo"), dict):
             return None
         # Filter for CodeRabbit matches on this page.
         match = _filter_coderabbit_review_state(doc)
@@ -1464,10 +1475,24 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
             repo=repo, pr_number=int(ctx.pr_number or 0),
         )
     except (EscalateToHuman, RelayError) as e:
+        # Round-29: the canonical escalation signal is
+        # carried by the ``EscalateToHuman`` exception; the
+        # CLI surfaces it as a structured decision (NOT a
+        # non-zero exit) so the supervisor's wiring can
+        # convert it to a real ``escalate_to_human`` action.
+        # Returning a non-zero exit would force every
+        # supervisor caller to wrap the subprocess in a
+        # try/except; emitting the structured JSON decision
+        # keeps the wire contract symmetric with the
+        # non-escalation path.
         return _emit(
-            {"error": f"{type(e).__name__}: {e}"},
+            {
+                "action": "escalate_to_human",
+                "escalate_reasons": [str(e)],
+                "error": f"{type(e).__name__}: {e}",
+            },
             json_mode=args.json,
-            exit_code=EXIT_INTERNAL,
+            exit_code=EXIT_OK,
         )
     payload = decision.to_dict()
     # When the action is "launch_worker", also render the worker
