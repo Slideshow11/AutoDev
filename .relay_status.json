@@ -1,11 +1,11 @@
 {
-  "current_head": "7fb0b79",
-  "head_short": "7fb0b79",
+  "current_head": "39851aa",
+  "head_short": "39851aa",
   "test_count": 745,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
-  "review_decision_basis": "older commits; latest formal reviews are on 1b48e27 (CodeRabbit) and 1b48e27 (Codex); new CodeRabbit round-19 at 2026-08-09T05:42:38Z and Codex round-22 at 2026-08-09T05:20:58Z posted on current head",
-  "rounds_pushed": 23,
+  "review_decision_basis": "older commits; latest formal reviews are on 1b48e27 (CodeRabbit) and 1b48e27 (Codex); new CodeRabbit round-19 at 2026-08-09T05:42:38Z and Codex round-22 at 2026-08-09T05:20:58Z posted on recent heads",
+  "rounds_pushed": 24,
   "round_4_critical_defects_addressed": [
     "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
     "P1: stale-auth rejection. _verify_auth_binds_to_current_run validates run_id, repository, PR number, authorized_head against current RunContext.",
@@ -30,6 +30,11 @@
     "Major (CodeRabbit 3742791224): PARTIAL recovery merge record now uses canonical 13-key unauthorized_actions_taken shape. The merge confirmation is recorded in notes instead of in the unauthorized_actions map. _persist_partial_merge_record accepts the OID; test_subprocess_nonzero_merged_no_oid_writes_partial_record asserts canonical shape + False values + notes mention.",
     "Provenance hashes for tests/test_merge_queued_pr_fails_closed.py synced in both AUTOCODER_SOURCE_COMPLETENESS.json and aed-pr417-source-manifest.json."
   ],
+  "round_24_status": [
+    "Minor (CodeRabbit 3742791240): stale-auth tests now assert on the SPECIFIC stale value (different-owner/different-repo, 'b' * 40) instead of generic words like 'repo' or 'head' that any MergeError could match.",
+    "Minor (CodeRabbit 3742791232): _setup lost the implicit Optional[None] default and the unused current_head parameter; the only branch was the None branch, simplified to a single fast-forward-and-read sequence.",
+    "Provenance manifest hashes for tests/test_merge_queued_pr_fails_closed.py synced."
+  ],
   "production_path_tests": [
     "tests/test_relay_wiring_production_path.py: 7 tests (CLI argv shape --json before subcommand)",
     "tests/test_merge_queued_pr_fails_closed.py: 5 tests (queued-PR + server-confirmed merge identity gate + 3 stale-auth tests + PARTIAL record canonical 13-key shape)",
@@ -39,7 +44,7 @@
     "tests/test_autocoder_supervisor.py: 2 tests (thread pagination fail-closed + complete pagination does not block)",
     "tests/test_merge_pipeline_hardening.py: ReviewDecisionGateTests: 4 tests (CHANGES_REQUESTED blocks, APPROVED allows, missing fails closed, unrecognized fails closed)"
   ],
-  "fresh_review_status": "Fresh Codex/CodeRabbit reviews requested on 7fb0b79 at 2026-08-09T05:55:00Z; awaiting response",
+  "fresh_review_status": "Fresh Codex/CodeRabbit reviews requested on 39851aa at 2026-08-09T05:55:00Z; awaiting response",
   "remaining_unresolved_on_head": [
     {
       "id": "3742679438",
@@ -64,9 +69,21 @@
       "title": "The partial record breaks the unauthorized_actions_taken contract",
       "severity": "Major",
       "status": "ADDRESSED in 7fb0b79 — canonical 13-key shape; merge confirmation in notes; test asserts canonical shape"
+    },
+    {
+      "id": "3742791240",
+      "title": "Stale-auth tests assert on error substrings that any MergeError can satisfy",
+      "severity": "Minor",
+      "status": "ADDRESSED in 39851aa — value-based assertions on the specific stale value"
+    },
+    {
+      "id": "3742791232",
+      "title": "Fix implicit Optional + remove unused current_head parameter",
+      "severity": "Minor",
+      "status": "ADDRESSED in 39851aa — implicit Optional removed; current_head parameter removed (was dead)"
     }
   ],
-  "pending_round_24_candidates": [
+  "pending_round_25_candidates": [
     {
       "id": "3742735665",
       "title": "Rebind the run context before reporting the new head",
@@ -89,25 +106,11 @@
       "complexity": "Medium — requires cross-process state_root discovery via run_context.json; needs a wire-up layer."
     },
     {
-      "id": "3742791232",
-      "title": "Fix implicit Optional + remove unused current_head parameter",
-      "severity": "Minor",
-      "file": "tests/test_merge_queued_pr_fails_closed.py:207",
-      "complexity": "Low — type annotation + dead parameter removal."
-    },
-    {
       "id": "3742791230",
       "title": "Helper hardcodes /tmp and leaks a file on every call",
       "severity": "Minor",
       "file": "tests/test_autocoder_orchestration_review_repair_relay.py",
       "complexity": "Low — pass tmp_path through to NamedTemporaryFile."
-    },
-    {
-      "id": "3742791240",
-      "title": "Stale-auth tests assert on error substrings that any MergeError can satisfy",
-      "severity": "Minor",
-      "file": "tests/test_merge_queued_pr_fails_closed.py:341",
-      "complexity": "Low — replace generic substring matches with value assertions."
     }
   ]
 }
