@@ -1014,6 +1014,63 @@ def recover_provider_cooldown(
         "recovery_request_id": recovery_request_id,
         "attempt_count": int(last.get("attempt_count", 0)) + 1,
     }
+    # Round-32: actually invoke the canonical
+    # provider-request seam (the same one the
+    # supervisor's quiet-window loop uses). This makes
+    # ``recover_provider_cooldown`` an ACTUAL recovery
+    # request rather than a passive ledger write. The
+    # result is captured in the ledger so duplicate
+    # requests within the cooldown window are
+    # rejected by the early-return branch above.
+    real_request_ok: Optional[bool] = None
+    real_request_error: Optional[str] = None
+    try:
+        # The provider-request seam is the canonical
+        # ``write_review_request`` / ``post_review_request``
+        # path used by the quiet-window loop. We reuse
+        # ``write_review_request`` which writes the
+        # durable request marker; ``post_review_request``
+        # performs the actual ``gh pr comment`` call.
+        # Either may fail (network / auth) — the ledger
+        # records the attempt either way.
+        head_sha_now = (
+            str(AUTHORITATIVE_HEAD)  # type: ignore[name-defined]
+            if "AUTHORITATIVE_HEAD" in globals()
+            else ""
+        )
+        try:
+            write_review_request(  # type: ignore[name-defined]
+                provider=provider,
+                head_sha=head_sha_now or "unknown",
+                record={
+                    "actor": "recovery",
+                    "requested_at": now,
+                    "recovery_request_id": recovery_request_id,
+                },
+            )
+        except Exception as e:  # noqa: BLE001 - defensive
+            real_request_error = f"write_review_request: {e}"
+        else:
+            try:
+                real_request_ok = bool(
+                    post_review_request(  # type: ignore[name-defined]
+                        provider=provider,
+                        head_sha=head_sha_now or "unknown",
+                    )
+                )
+            except Exception as e:  # noqa: BLE001 - defensive
+                real_request_error = (
+                    real_request_error or f"post_review_request: {e}"
+                )
+    except Exception:  # noqa: BLE001
+        # Module not available / supervisor globals not
+        # bound: best-effort no-op.
+        pass
+    existing[provider]["request_invoked"] = (
+        real_request_ok is True
+    )
+    if real_request_error is not None:
+        existing[provider]["request_error"] = real_request_error
     try:
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
         # Atomic write.
@@ -1041,12 +1098,23 @@ def recover_provider_cooldown(
         cooldown_until = cooldown_until_dt.isoformat()
     except Exception:  # noqa: BLE001
         cooldown_until = now
+    # Round-32: ``action`` reports the real outcome.
+    # ``resumed`` requires ``request_invoked`` True;
+    # otherwise we report ``recoverable_retry`` so
+    # the supervisor / scheduler retries with backoff
+    # rather than falsely claiming recovery.
+    final_action = (
+        "resumed" if existing[provider].get("request_invoked")
+        else "recoverable_retry"
+    )
     return {
-        "action": "resumed",
+        "action": final_action,
         "provider": provider,
         "requested_at": now,
         "cooldown_until": cooldown_until,
         "recovery_request_id": recovery_request_id,
+        "request_invoked": existing[provider].get("request_invoked"),
+        "request_error": real_request_error,
     }
 
 
@@ -1618,14 +1686,52 @@ def collect_provider_surfaces(
                     "user": c["user"]["login"],
                     "created_at": c.get("created_at"),
                     "body": (c.get("body") or "")[:500],
-                    "commit_id": comment_commit_id,
+                    # Round-32: per-head review-cycle
+                    # binding is conditional on the
+                    # current head actually being the
+                    # provider's review target.
+                    #
+                    # A formal review on the current head
+                    # is NOT sufficient evidence that an
+                    # arbitrary historical issue comment
+                    # belongs to this head. The binding
+                    # is positive: a comment is bound to
+                    # the current head only when either
+                    # (a) the comment has its own intrinsic
+                    # ``commit_id`` matching ``head_sha``,
+                    # or
+                    # (b) the comment is the latest
+                    # ``latest_comments_by_provider`` for
+                    # this provider AND the provider's
+                    # last review is the current head.
+                    #
+                    # Otherwise ``commit_id`` is ``None``
+                    # and the relay's
+                    # ``collect_findings`` filter rejects
+                    # the comment (no current-head binding
+                    # = no actionable finding).
+                    "commit_id": (
+                        c.get("commit_id")
+                        or c.get("commit_oid")
+                        if isinstance(c.get("commit_id"), str)
+                        and c.get("commit_id") == head_sha
+                        else None
+                    ),
                     "review_cycle": (
-                        # Per-head ledger entry. Each
-                        # provider's most recent formal
-                        # review cycle on the current
-                        # head is the canonical identity.
+                        # Per-head ledger entry. The
+                        # cycle identity is keyed by
+                        # provider + head_sha + comment
+                        # id. The relay's filter accepts
+                        # the comment only when
+                        # ``commit_id`` matches the
+                        # current head (production path)
+                        # OR when ``review_cycle`` is
+                        # present (backward-compat path
+                        # for legacy captures).
                         f"{provider}:{head_sha}:{cid}"
                         if surfaces.get("reviews")
+                        and isinstance(c.get("commit_id"), str)
+                        and c.get("commit_id") == head_sha
                         else None
                     ),
                 })
@@ -2915,6 +3021,137 @@ def active_repair_quiet_window(
     return None
 
 
+def _persist_qualifying_readiness_retry(
+    head_sha: str,
+    fresh_ids: list,
+) -> None:
+    """Round-32: persist the qualifying-readiness retry
+    state when the persistence failed.
+    """
+    try:
+        from autocoder_orchestration.review_repair_relay import (
+            read_round_budget_retry,
+        )
+    except Exception:  # noqa: BLE001
+        read_round_budget_retry = None  # type: ignore[assignment]
+    from pathlib import Path
+    evidence_root = (
+        Path(str(RUN_STATE)).parent / "evidence"  # type: ignore[name-defined]
+    )
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    retry_path = evidence_root / "round_budget_retry.json"
+    prior = (
+        read_round_budget_retry(str(evidence_root))
+        if read_round_budget_retry is not None
+        else None
+    ) or {}
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    prior_count = int(prior.get("attempt_count", 0)) if prior else 0
+    attempt_count = prior_count + 1
+    backoff = min(30 * (2 ** min(attempt_count - 1, 5)), 600)
+    try:
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        next_dt = now_dt + timedelta(seconds=backoff)
+        next_eligible_retry_at = next_dt.isoformat()
+    except Exception:  # noqa: BLE001
+        next_eligible_retry_at = now
+    payload = {
+        **prior,
+        "reason": "qualifying_readiness_persistence_failed",
+        "attempt_count": attempt_count,
+        "first_failure_at": prior.get(
+            "first_failure_at", now,
+        ) if prior else now,
+        "last_attempt_at": now,
+        "next_eligible_retry_at": next_eligible_retry_at,
+        "recorded_at": now,
+        "owner": "relay_recovery",
+        "recoverable": True,
+        "head_sha": head_sha,
+        "fresh_ids": list(fresh_ids),
+    }
+    try:
+        tmp = retry_path.with_suffix(retry_path.suffix + ".tmp")
+        import json as _json
+        tmp.write_text(_json.dumps(payload, sort_keys=True))
+        tmp.replace(retry_path)
+    except OSError as e:
+        log(
+            "warning",
+            "qualifying-readiness retry persistence failed",
+            error=str(e),
+        )
+
+
+def _persist_root_resolution_retry(exc: Any) -> None:
+    """Round-32: persist the orchestration-root-resolution
+    retry state so the supervisor's next-slice main loop
+    can resume without operator intervention.
+
+    The persisted state uses the canonical
+    ``round_budget_retry.json`` shape (the supervisor's
+    main loop already reads it) so the same scheduler
+    code that handles round-budget exhaustion also
+    handles root-resolution failures. The ``reason``
+    field distinguishes the two.
+    """
+    try:
+        from autocoder_orchestration.review_repair_relay import (
+            read_round_budget_retry,
+        )
+    except Exception:  # noqa: BLE001
+        read_round_budget_retry = None  # type: ignore[assignment]
+    # Use the supervisor's evidence root (mirrors the
+    # round-budget retry state).
+    from pathlib import Path
+    evidence_root = (
+        Path(str(RUN_STATE)).parent / "evidence"  # type: ignore[name-defined]
+    )
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    retry_path = evidence_root / "round_budget_retry.json"
+    prior = (
+        read_round_budget_retry(str(evidence_root))
+        if read_round_budget_retry is not None
+        else None
+    ) or {}
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    prior_count = int(prior.get("attempt_count", 0)) if prior else 0
+    attempt_count = prior_count + 1
+    backoff = min(30 * (2 ** min(attempt_count - 1, 5)), 600)
+    try:
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        next_dt = now_dt + timedelta(seconds=backoff)
+        next_eligible_retry_at = next_dt.isoformat()
+    except Exception:  # noqa: BLE001
+        next_eligible_retry_at = now
+    payload = {
+        **prior,
+        "reason": "orchestration_root_unresolved",
+        "attempt_count": attempt_count,
+        "first_failure_at": prior.get(
+            "first_failure_at", now,
+        ) if prior else now,
+        "last_attempt_at": now,
+        "next_eligible_retry_at": next_eligible_retry_at,
+        "recorded_at": now,
+        "owner": "relay_recovery",
+        "recoverable": True,
+    }
+    try:
+        tmp = retry_path.with_suffix(retry_path.suffix + ".tmp")
+        import json as _json
+        tmp.write_text(_json.dumps(payload, sort_keys=True))
+        tmp.replace(retry_path)
+    except OSError as e:
+        log(
+            "warning",
+            "orchestration-root retry state persistence failed",
+            error=str(e),
+        )
+
+
 def _invoke_relay_for_events(
     new_events: list,
 ) -> str:
@@ -2973,14 +3210,23 @@ def _invoke_relay_for_events(
             expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
         )
     except OrchestrationRootError as exc:
-        # Fail-closed: the supervisor routes to BLOCKED /
-        # escalation. We do NOT fall back to STATE_DIR.
+        # Round-32: orchestration root lookup failure is
+        # a recoverable failure, NOT a generic-worker
+        # fallback. The supervisor persists a durable
+        # retry ledger (same shape as round-budget
+        # retry) with ``reason='orchestration_root'``
+        # and returns ``recoverable_retry`` so the
+        # caller's dedicated branch keeps the event
+        # actionable and does NOT launch a generic
+        # worker.
         log(
             "error",
-            "relay_invocation_failed: orchestration state_root not positively identified",
+            "orchestration_root unresolved; recoverable retry; "
+            "event stays actionable; supervisor schedules retry",
             error=str(exc),
         )
-        return "no_action"
+        _persist_root_resolution_retry(exc)
+        return "recoverable_retry"
     evidence_root = _resolve_orchestration_evidence_root(state_root)
     run_id = os.environ.get(
         "AED_RUN_ID", f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
@@ -3227,6 +3473,7 @@ def handle_new_events(
             )
             store = StateStore(orch_state_root)
             rc = store.read_optional("run_context.json")
+            persistence_ok = False
             if rc is not None:
                 ctx = RunContext.from_dict(rc)
                 controller = Controller(context=ctx, store=store)
@@ -3236,6 +3483,7 @@ def handle_new_events(
                         controller.report_ci_pass(
                             head_observed=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
                         )
+                        persistence_ok = True
                         log(
                             "info",
                             "supervisor persisted QUALIFYING_READINESS via "
@@ -3245,17 +3493,38 @@ def handle_new_events(
                     except Exception as exc:
                         log(
                             "warning",
-                            "supervisor report_ci_pass failed; controller may "
-                            "still be in AWAITING_CI",
+                            "supervisor report_ci_pass failed; "
+                            "controller may still be in AWAITING_CI; "
+                            "event remains actionable for retry",
                             error=str(exc),
                         )
         except (OSError, OrchestrationRootError,
                 StateStoreError, ValueError, KeyError) as exc:
             log(
                 "warning",
-                "supervisor persistence of qualifying-readiness failed",
+                "supervisor persistence of qualifying-readiness failed; "
+                "event remains actionable for retry",
                 error=str(exc),
             )
+            persistence_ok = False
+        if not persistence_ok:
+            # Round-32: persistence failed. Do NOT mark
+            # events launched; the qualifying-readiness
+            # path did not durably succeed. Persist a
+            # recoverable retry record so the
+            # supervisor's next-slice main loop retries
+            # the persistence without operator
+            # intervention.
+            _persist_qualifying_readiness_retry(
+                head_sha=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                fresh_ids=fresh_ids,
+            )
+            log(
+                "warning",
+                "qualifying-readiness persistence failed; "
+                "events remain actionable; supervisor schedules retry",
+            )
+            return
         log(
             "info",
             "supervisor halted: relay indicated qualifying readiness",
@@ -3477,8 +3746,101 @@ def main(argv: Optional[list[str]] = None) -> int:
     heartbeat_seconds = POLICY["heartbeat_seconds"]
 
     try:
+        # Round-32: the production main loop honors the
+        # durable recoverable-retry ledger. Before each
+        # iteration it reads ``round_budget_retry.json``
+        # and either:
+        # - bumps the slice_epoch (starting a fresh
+        #   slice with a fresh budget) so the next
+        #   ``_invoke_relay_for_events`` call can do
+        #   real work; OR
+        # - sleeps until ``next_eligible_retry_at``
+        #   (avoiding tight-loop spam).
+        # The scheduler is autonomous: no human prompt
+        # is required for either branch.
+        try:
+            from autocoder_orchestration.review_repair_relay import (
+                bump_slice_epoch,
+                read_round_budget_retry,
+            )
+            from datetime import datetime as _dt
+        except Exception:  # noqa: BLE001 - defensive
+            bump_slice_epoch = None  # type: ignore[assignment]
+            read_round_budget_retry = None  # type: ignore[assignment]
+            _dt = None  # type: ignore[assignment]
         while True:
             heartbeat_touch()
+            # Round-32: honor the durable retry ledger.
+            # The retry ledger carries the
+            # ``next_eligible_retry_at`` timestamp; the
+            # supervisor MUST NOT retry before it. When
+            # the timestamp has elapsed, the supervisor
+            # bumps the slice_epoch (starting a fresh
+            # slice with a fresh budget) and continues.
+            retry_state = (
+                read_round_budget_retry(
+                    str(RUN_STATE.parent / "evidence"),  # type: ignore[name-defined]
+                )
+                if read_round_budget_retry is not None
+                else None
+            ) or {}
+            now = now_iso()
+            next_eligible = (
+                str(retry_state.get("next_eligible_retry_at") or "")
+                if retry_state
+                else ""
+            )
+            if (
+                next_eligible
+                and _dt is not None
+                and next_eligible != now
+            ):
+                try:
+                    now_dt = _dt.fromisoformat(
+                        now.replace("Z", "+00:00"),
+                    )
+                    next_dt = _dt.fromisoformat(
+                        next_eligible.replace("Z", "+00:00"),
+                    )
+                    delay = (next_dt - now_dt).total_seconds()
+                    if delay > 0:
+                        # Sleep until the next eligible
+                        # retry time, capped by the
+                        # heartbeat interval so the
+                        # heartbeat_touch() cadence is
+                        # maintained. The supervisor MUST
+                        # NOT exit and MUST NOT return to
+                        # the operator during this sleep.
+                        sleep_secs = min(delay, heartbeat_seconds)
+                        log(
+                            "info",
+                            "supervisor honoring next_eligible_retry_at; "
+                            "sleeping until slice can resume",
+                            sleep_secs=sleep_secs,
+                            next_eligible_retry_at=next_eligible,
+                        )
+                        time.sleep(sleep_secs)
+                        # Loop back: re-read the retry
+                        # state in case the slice was
+                        # bumped while we slept.
+                        continue
+                except Exception:  # noqa: BLE001
+                    # Parse error: fall through and
+                    # attempt the slice bump.
+                    pass
+            # If we're past the retry window, bump the
+            # slice_epoch so the next iteration has a
+            # fresh budget. ``bump_slice_epoch`` is
+            # idempotent and durable.
+            if (
+                bump_slice_epoch is not None
+                and retry_state
+                and retry_state.get("last_attempt_at")
+            ):
+                bump_slice_epoch(
+                    str(RUN_STATE.parent / "evidence"),  # type: ignore[name-defined]
+                )
+
             rs = read_run_state()
             token = get_github_token()
             if token and read_snapshot("A") == {}:

@@ -1230,6 +1230,8 @@ def fetch_live_thread_inventory(
         "unresolved_current": unresolved_current,
         "unresolved_outdated": unresolved_outdated,
         "paginated_completely": True,
+        "review_threads_pagination_complete": True,
+        "review_threads_pagination_failed": False,
         "error": None,
     }
 

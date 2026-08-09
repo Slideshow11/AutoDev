@@ -696,30 +696,50 @@ def test_round30_provider_surface_failure_blocks_readiness(
 # ===========================================================================
 
 def test_round30_provider_cooldown_recovery(tmp_path) -> None:
-    """Round-30: ``recover_provider_cooldown`` is a
+    """Round-30/32: ``recover_provider_cooldown`` is a
     production function with a durable per-provider
-    request ledger. Multiple calls in succession are
-    idempotent (a duplicate request within the cooldown
-    window returns False rather than re-issuing).
+    request ledger. The function MUST actually invoke
+    the canonical provider-request seam (``gh pr
+    comment``) when the cooldown is over. The result's
+    ``action`` reports the real outcome: ``resumed``
+    only when the request was actually invoked;
+    ``recoverable_retry`` when the request failed (the
+    supervisor / scheduler retries with backoff).
+    Multiple calls within the cooldown window return
+    ``noop`` (idempotent).
     """
     from autocoder_supervisor.supervisor import (
         recover_provider_cooldown,
     )
     # First call: provider is paused; recovery issues
-    # a fresh review request.
+    # a fresh review request. In the test environment
+    # the ``gh pr comment`` subprocess fails (no auth /
+    # no GitHub); the function reports the failure as
+    # ``recoverable_retry`` rather than falsely claiming
+    # ``resumed``.
     result_first = recover_provider_cooldown(
         "coderabbit", tmp_path / "evidence",
     )
-    assert result_first["action"] in {"resumed", "pending", "requested"}, (
-        f"first call MUST act; got {result_first!r}"
+    assert result_first["action"] in (
+        "resumed", "recoverable_retry",
+    ), (
+        f"first call MUST report real outcome (resumed "
+        f"or recoverable_retry); got {result_first!r}"
+    )
+    assert "request_invoked" in result_first, (
+        f"first call MUST report request_invoked; "
+        f"got {result_first!r}"
     )
     # Second call within the cooldown window: MUST be
     # idempotent (no duplicate request).
     result_second = recover_provider_cooldown(
         "coderabbit", tmp_path / "evidence",
     )
-    assert result_second["action"] in {"noop", "pending", "cached"}, (
-        f"second call MUST be idempotent; got {result_second!r}"
+    assert result_second["action"] in (
+        "noop", "pending", "cached",
+    ), (
+        f"second call MUST be idempotent; "
+        f"got {result_second!r}"
     )
     # Cooldown ledger MUST persist on disk.
     ledger_path = tmp_path / "evidence" / "provider_cooldown.json"

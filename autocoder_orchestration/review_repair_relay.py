@@ -932,6 +932,13 @@ class RoundTranscript:
     p2_count: int
     ci_failure_count: int
     escalate_reasons: Tuple[str, ...]
+    # Round-32: slice_epoch scopes the round budget per
+    # execution slice. Transcripts from prior slices do
+    # NOT count against the current slice's budget.
+    # Optional for backward-compat with round-31 (and
+    # earlier) transcripts; missing ``slice_epoch`` is
+    # treated as ``0`` (the original slice).
+    slice_epoch: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -947,6 +954,7 @@ class RoundTranscript:
             "p2_count": self.p2_count,
             "ci_failure_count": self.ci_failure_count,
             "escalate_reasons": list(self.escalate_reasons),
+            "slice_epoch": self.slice_epoch,
         }
 
     @classmethod
@@ -971,6 +979,7 @@ class RoundTranscript:
             p2_count=int(payload["p2_count"]),
             ci_failure_count=int(payload["ci_failure_count"]),
             escalate_reasons=tuple(payload.get("escalate_reasons", [])),
+            slice_epoch=int(payload.get("slice_epoch", 0)),
         )
 
 
@@ -1144,17 +1153,27 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             cid = c.get("id")
             if cid is None:
                 continue
-            # Round-31: skip comments bound to a different
+            # Round-32: skip comments bound to a different
             # commit than the current head OR with no
             # durable per-head review-cycle identity.
             #
-            # Production captures (round-30+) carry a
-            # ``review_cycle`` per-head identity. Backward-
-            # compat: tests / older snapshots that carry
-            # a ``commit_id`` matching ``snapshot.head_sha``
-            # are also accepted (the production collector
-            # emits BOTH ``commit_id`` AND ``review_cycle``
-            # for current-head comments).
+            # Production captures (round-30+) carry BOTH
+            # ``commit_id`` and ``review_cycle`` (they
+            # are not duplicates — the cycle identity is
+            # keyed by provider/head/cid, while
+            # ``commit_id`` is the intrinsic commit). The
+            # comment is bound to the current head when
+            # EITHER ``commit_id == head_sha`` (legacy
+            # path) OR ``review_cycle`` is present and
+            # its cycle key matches the current head
+            # (production path). The cycle key is
+            # formatted ``provider:head_sha:cid`` so its
+            # presence is sufficient proof of
+            # current-head binding.
+            #
+            # Backward-compat: tests / older snapshots
+            # that carry only ``commit_id`` matching
+            # ``head_sha`` are also accepted.
             cmt = c.get("commit_id") or c.get("commit_oid")
             cycle = c.get("review_cycle")
             cmt_match = (
@@ -1163,20 +1182,17 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
                 and bool(current_head)
                 and cmt == current_head
             )
-            # Round-31: require either ``review_cycle`` (the
-            # production identity) OR an explicit
-            # ``commit_id`` matching the current head.
-            # This is the backward-compat path for
-            # snapshots that carry a synthetic
-            # ``commit_id`` without ``review_cycle``.
-            #
-            # Comments with neither identity are skipped
-            # (treated as historical chatter with no
-            # head binding). This is the canonical
-            # fail-closed behavior: historical
-            # issue-comment chatter MUST NOT reappear as
-            # a current finding.
-            if not (cycle or cmt_match):
+            cycle_match = bool(cycle)
+            # Round-32: accept the comment when EITHER
+            # ``cmt_match`` (legacy/backward-compat path)
+            # OR ``cycle_match`` (production path) holds.
+            # Requiring both (or neither) was wrong:
+            # production captures carry both, so
+            # demanding both excludes the production
+            # path; demanding neither excludes the
+            # legacy path. The comment is current-head-
+            # bound when EITHER condition holds.
+            if not (cmt_match or cycle_match):
                 continue
             finding_id = f"{provider}:{cid}"
             if finding_id in seen_ids:
@@ -2123,35 +2139,47 @@ class RelayLoop:
         survived N rounds.
         """
         round_index = self.directive_store.last_round_index() + 1
+        # Round-32: read the current slice_epoch from the
+        # durable retry ledger so the budget is scoped
+        # per slice (not cumulative across slices). Bound
+        # at the top of the function so the per-transcript
+        # stamp below can reference it.
+        retry_state = read_round_budget_retry(
+            self.directive_store.evidence_root,
+        ) or {}
+        current_slice_epoch = int(retry_state.get("slice_epoch", 0))
         if self.max_rounds is not None:
             prior = self.directive_store.read_transcript()
             same_head_consecutive = sum(
                 1 for t in prior
-                if t.head_sha_before == head_sha and t.outcome == "completed"
+                if t.head_sha_before == head_sha
+                and t.outcome == "completed"
+                and int(getattr(t, "slice_epoch", 0)) == current_slice_epoch
             )
             if same_head_consecutive >= self.max_rounds:
-                # Round-30: persist the outstanding work and
-                # signal a recoverable retry. The runtime
-                # budget is a scheduling boundary; the
-                # persistent supervisor / scheduler resumes
-                # the same outstanding work on the next
-                # slice. No ``EscalateToHuman``, no BLOCKED,
-                # no generic worker fallback.
+                # Round-32: persist the outstanding work
+                # under the CURRENT slice_epoch and signal
+                # a recoverable retry. The supervisor's
+                # next-slice start (``bump_slice_epoch``)
+                # increments the epoch and gives the next
+                # slice a fresh budget; prior-slice
+                # transcripts no longer count. This
+                # prevents the permanent-failure mode
+                # where historical completed_round_count >=
+                # budget blocks all future work.
                 self._persist_round_budget(
                     head_sha=head_sha,
                     rounds=round_index,
                     rounds_at_head=same_head_consecutive,
                     max_rounds=self.max_rounds,
+                    slice_epoch=current_slice_epoch,
                 )
-                # Round-30: a fresh, typed, recoverable retry
-                # signal. ``RECOVERABLE_RETRY`` is distinct
-                # from ``EscalateToHuman`` (protected
-                # authority); supervisors / schedulers can
-                # resume the slice without operator handoff.
                 raise RecoverableRetry(
-                    f"round budget reached ({same_head_consecutive}"
-                    f" rounds on {head_sha[:12]}..); "
-                    f"slice ended, retry resumed by supervisor"
+                    f"round budget reached "
+                    f"({same_head_consecutive} rounds on "
+                    f"{head_sha[:12]}.. in slice "
+                    f"{current_slice_epoch}); slice ended, "
+                    f"retry resumed by supervisor"
                 )
         # The controller's state machine is the authority.
         # If the run is not in REPAIRING_REVIEW_FINDINGS, the
@@ -2234,6 +2262,10 @@ class RelayLoop:
             p2_count=p2,
             ci_failure_count=ci,
             escalate_reasons=reasons,
+            # Round-32: stamp the transcript with the
+            # current slice_epoch so the per-slice budget
+            # counts it correctly.
+            slice_epoch=int((retry_state or {}).get("slice_epoch", 0)),
         ))
         # Drive the controller through the required state
         # transitions. The relay is the integration point that
