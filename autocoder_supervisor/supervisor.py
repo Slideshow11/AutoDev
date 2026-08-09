@@ -35,6 +35,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+#: Strict lowercase hex SHA-1/256 pattern. Used to validate
+#: rebind targets and any other 40-or-64-char head SHA.
+_HEX_SHA_RE = re.compile(r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
+
 from .config import default_config_from_env
 from .contracts import SupervisorConfig
 from .directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the public back-compat surface
@@ -2326,6 +2330,37 @@ def active_repair_quiet_window(
             UNCONSUMED_EVENTS_PATH,  # type: ignore[name-defined]
             {"events": []},
         )
+    # Escalation guard. When the relay escalates to
+    # human, the orchestration controller is in BLOCKED.
+    # The supervisor's quiet-window logic must NOT promote
+    # readiness in that case; the operator's halt point
+    # takes precedence. The controller state is read from
+    # ``<state_dir>/state.json`` (the orchestration's
+    # StateStore) and BLOCKED halts the quiet-window
+    # transition.
+    try:
+        state_path = Path(STATE_DIR) / "state.json"  # type: ignore[name-defined]
+        if state_path.is_file():
+            controller_state = json.loads(
+                state_path.read_text(),
+            ).get("current_state")
+            if controller_state == "BLOCKED":
+                log(
+                    "warning",
+                    "quiet-window halted: controller is in BLOCKED "
+                    "(relay escalated to human); operator must inspect",
+                    head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                )
+                return
+    except (OSError, json.JSONDecodeError):
+        # Fail closed: if the state file is unreadable,
+        # do not promote readiness.
+        log(
+            "warning",
+            "quiet-window halted: could not read controller state",
+            head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+        )
+        return
     result = evaluate_readiness(
         snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
     )
@@ -2377,10 +2412,49 @@ def _invoke_relay_for_events(
     )
     if not should_invoke_relay(snapshot):
         return "no_action"
-    state_root = str(STATE_DIR)  # type: ignore[name-defined]
-    evidence_root = os.environ.get(
-        "AED_EVIDENCE_ROOT", state_root + "/evidence",
-    )
+    # Resolve the canonical state and evidence roots. The
+    # supervisor's STATE_DIR is the supervisor's private
+    # state; the orchestration's run context may use a
+    # different state_root. The supervisor must pass the
+    # orchestration's state_root (NOT the supervisor's
+    # STATE_DIR) so the relay CLI's StateStore reads the
+    # same run_context.json the controller wrote. The
+    # lookup order: explicit env var, then
+    # ``<STATE_DIR>/run_state.json`` (the supervisor's
+    # own run-state record), then a derived default.
+    state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    if not state_root:
+        # The supervisor stores its own run_state.json;
+        # the orchestration's state_root is recorded there
+        # when the supervisor hands off. Fall back to the
+        # supervisor's STATE_DIR only as a last resort.
+        try:
+            supervisor_run_state = json.loads(
+                RUN_STATE.read_text()  # type: ignore[name-defined]
+            )
+            state_root = supervisor_run_state.get(
+                "orchestration_state_root"
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
+    if not state_root:
+        state_root = str(STATE_DIR)  # type: ignore[name-defined]
+    evidence_root = os.environ.get("AED_EVIDENCE_ROOT")
+    if not evidence_root:
+        # Use the orchestration's evidence_root if the
+        # supervisor's run_state has it; otherwise derive
+        # from the state_root.
+        try:
+            supervisor_run_state = json.loads(
+                RUN_STATE.read_text()  # type: ignore[name-defined]
+            )
+            evidence_root = supervisor_run_state.get(
+                "orchestration_evidence_root"
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
+    if not evidence_root:
+        evidence_root = str(Path(state_root) / "evidence")
     run_id = os.environ.get(
         "AED_RUN_ID", f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
     )
@@ -2705,6 +2779,46 @@ def main(argv: Optional[list[str]] = None) -> int:
                 new_event_count=len(new_events),
                 paused_providers=paused,
             )
+
+            # Head rebinding. When the worker has pushed a
+            # new commit, the live head advances. The
+            # supervisor MUST update AUTHORITATIVE_HEAD so
+            # the next round operates on the new head. The
+            # rebind is observable: the next heartbeat's
+            # run_iteration_v5 will report the new head,
+            # and the relay's exact-head guard will accept
+            # it.
+            live_head = iteration.get("head_sha")
+            if (
+                live_head
+                and isinstance(live_head, str)
+                and live_head != AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+                and _HEX_SHA_RE.match(live_head)  # type: ignore[name-defined]
+            ):
+                old_head = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+                globals()["AUTHORITATIVE_HEAD"] = live_head
+                # Persist the rebind in the supervisor's
+                # run_state.json so a restart picks it up.
+                try:
+                    rs["current_head"] = live_head
+                    write_json(  # type: ignore[name-defined]
+                        RUN_STATE,  # type: ignore[name-defined]
+                        rs,
+                    )
+                except (OSError, TypeError) as exc:
+                    log(
+                        "warning",
+                        "could not persist AUTHORITATIVE_HEAD rebind",
+                        old_head=old_head[:12] if old_head else "",
+                        new_head=live_head[:12],
+                        error=str(exc),
+                    )
+                log(
+                    "info",
+                    "AUTHORITATIVE_HEAD rebinding: worker pushed new head",
+                    old_head=old_head[:12] if old_head else "",
+                    new_head=live_head[:12],
+                )
 
             if args.dry_sim:
                 # --dry-sim: print the decision and skip every
