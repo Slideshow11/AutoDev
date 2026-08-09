@@ -1343,9 +1343,9 @@
         "destination_path": "tests/test_merge_queued_pr_fails_closed.py",
         "transformation_classification": "standalone_test_addition",
         "source_sha256": null,
-        "destination_sha256": "35bbf85de5ef9a6f162318866dd66beaa339f0dc2e0d5efc251d0c3bcafce764",
+        "destination_sha256": "203476b529c79203d53d68503e089f7d2a2e3a974180e26a732e7e4a60b7c278",
         "source_size_bytes": null,
-        "destination_size_bytes": 32509,
+        "destination_size_bytes": 32702,
         "transformation_explanation": "Production-path behavioral tests for the merge-queue failure mode. Proves the production logic fails closed: a queued PR (no explicit mergeCommit OID) cannot produce a merge record. This is the production-path behavioral test for the merge-queue P1."
       },
       {

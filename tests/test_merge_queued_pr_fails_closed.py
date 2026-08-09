@@ -189,7 +189,7 @@ class TestStaleAuthRejectedByCurrentRun:
     repository, PR number, and authorized_head.
     """
 
-    def _setup(self, tmp_path: Path, *, current_head: str = None):
+    def _setup(self, tmp_path: Path):
         repo = tmp_path / "repo"
         evidence_root = tmp_path / "evidence"
         state_root = tmp_path / "state"
@@ -202,9 +202,8 @@ class TestStaleAuthRejectedByCurrentRun:
         subprocess.run(["git", "checkout", "-q", "-b", "feat/test"], cwd=str(repo), check=True)
         subprocess.run(["git", "commit", "--allow-empty", "-m", "f"], cwd=str(repo), check=True, capture_output=True)
         subprocess.run(["git", "checkout", "-q", "main"], cwd=str(repo), check=True)
-        if current_head is None:
-            subprocess.run(["git", "merge", "--ff-only", "feat/test"], cwd=str(repo), check=True, capture_output=True)
-            current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True).stdout.strip()
+        subprocess.run(["git", "merge", "--ff-only", "feat/test"], cwd=str(repo), check=True, capture_output=True)
+        current_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True).stdout.strip()
 
         import hashlib
         candidate_payload = {
@@ -336,8 +335,13 @@ class TestStaleAuthRejectedByCurrentRun:
         )
         with pytest.raises(MergeError) as exc:
             execute_guarded_merge_transaction(inputs)
-        assert "repo" in str(exc.value).lower(), (
-            f"expected stale-auth error mentioning repo; got {exc.value!r}"
+        # Assert the SPECIFIC stale-repo value is in the error,
+        # not the generic word "repo" which can match many
+        # unrelated guards (CodeRabbit round-19 finding 3742791240).
+        msg = str(exc.value)
+        assert "different-owner/different-repo" in msg, (
+            f"expected stale-repo error mentioning "
+            f"\"different-owner/different-repo\"; got {msg!r}"
         )
 
     def test_stale_authorized_head_rejected(self, tmp_path: Path) -> None:
@@ -393,15 +397,15 @@ class TestStaleAuthRejectedByCurrentRun:
         with pytest.raises(MergeError) as exc:
             execute_guarded_merge_transaction(inputs)
         # The exact failure mode depends on the guard
-        # ordering; the test asserts the run is NOT
-        # completed via a stale auth. Accept any error
-        # message that prevents the merge.
-        assert (
-            "authorized_head" in str(exc.value).lower()
-            or "stale" in str(exc.value).lower()
-            or "candidate head" in str(exc.value).lower()
-            or "head" in str(exc.value).lower()
-        ), f"expected any head-related MergeError; got {exc.value!r}"
+        # Assert the SPECIFIC stale authorized_head value is in
+        # the error, not the generic word "head" which can match
+        # many unrelated guards (CodeRabbit round-19 finding
+        # 3742791240). The stale head we set is "b" * 40.
+        msg = str(exc.value)
+        assert "b" * 40 in msg, (
+            f"expected stale-head error mentioning the stale "
+            f"authorized_head ({'b' * 40!r}); got {msg!r}"
+        )
 
 
 class TestServerConfirmedMergeRequiresValidOID:
