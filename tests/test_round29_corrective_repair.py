@@ -463,43 +463,50 @@ def test_round29_review_filters_stale_head_comments(tmp_path) -> None:
     ``collect_findings`` MUST skip comments bound to a
     different commit than the current head.
     """
-from autocoder_orchestration.review_repair_relay import (
-    collect_findings,
-)
-head_a = "a" * 40
-head_b = "b" * 40
-snap = {
-    "captured_at": "2026-08-09T00:00:00Z",
-    "head_sha": head_b, "head_match": True,
-    "mergeable": True, "formal_reviews": [],
-    "review_threads": {}, "issue_comments": [],
-    "required_checks": {}, "providers": [],
-    "_provider_issue_comments": {
-        "coderabbit": [
-            {
-                "id": 1, "login": "coderabbitai[bot]",
-                "commit_id": head_a,  # STALE
-                "body": "P1: foo.py:42 retry loop never recovers",
-            },
-            {
-                "id": 2, "login": "coderabbitai[bot]",
-                "commit_id": head_b,  # current
-                "body": "P2: bar.py:10 unused import",
-            },
-        ],
-    },
-    "unconsumed_event_ids": [],
-}
-findings = collect_findings(snap)
-# The stale A comment MUST NOT be a finding.
-ids = [f.finding_id for f in findings]
-assert "coderabbit:1" not in ids, (
-    f"Stale A-bound comment MUST be filtered; got {ids!r}"
-)
-# The current-head B comment IS a finding.
-assert "coderabbit:2" in ids, (
-    f"Current-head B comment MUST be a finding; got {ids!r}"
-)
+    from autocoder_orchestration.review_repair_relay import (
+        collect_findings,
+    )
+    head_a = "a" * 40
+    head_b = "b" * 40
+    snap = {
+        "captured_at": "2026-08-09T00:00:00Z",
+        "head_sha": head_b, "head_match": True,
+        "mergeable": True, "formal_reviews": [],
+        "review_threads": {}, "issue_comments": [],
+        "required_checks": {}, "providers": [],
+        "_provider_issue_comments": {
+            "coderabbit": [
+                {
+                    "id": 1, "login": "coderabbitai[bot]",
+                    "commit_id": head_a,  # STALE
+                    # Round-31: missing review_cycle means
+                    # the comment cannot be bound to the
+                    # current head. ``collect_findings``
+                    # MUST skip it.
+                    "body": "P1: foo.py:42 retry loop never recovers",
+                },
+                {
+                    "id": 2, "login": "coderabbitai[bot]",
+                    "commit_id": head_b,  # current
+                    "review_cycle": (
+                        f"coderabbit:{head_b}:2"
+                    ),
+                    "body": "P2: bar.py:10 unused import",
+                },
+            ],
+        },
+        "unconsumed_event_ids": [],
+    }
+    findings = collect_findings(snap)
+    # The stale A comment MUST NOT be a finding.
+    ids = [f.finding_id for f in findings]
+    assert "coderabbit:1" not in ids, (
+        f"Stale A-bound comment MUST be filtered; got {ids!r}"
+    )
+    # The current-head B comment IS a finding.
+    assert "coderabbit:2" in ids, (
+        f"Current-head B comment MUST be a finding; got {ids!r}"
+    )
 
 
 def test_recoverable_states_classification() -> None:

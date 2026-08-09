@@ -138,9 +138,11 @@ def _snapshot_with_finding(head_sha: str) -> dict:
         "issue_comments": [],
         "required_checks": {},
         "providers": [],
+        "provider_surface_complete": True,
         "_provider_issue_comments": {
             "coderabbit": [
-                {"id": 1, "body": "P1: foo.py:1 broken"},
+                {"id": 1, "body": "P1: foo.py:1 broken",
+                 "commit_id": head_sha},
             ],
         },
         "unconsumed_event_ids": [],
@@ -276,9 +278,11 @@ class TestInvokeRelayRoundProductionPath:
             "providers": [],
             "_provider_issue_comments": {
                 "coderabbit": [
-                    {"id": 1, "body": "P0: critical: stop the run"},
+                    {"id": 1, "body": "P0: critical: stop the run",
+                     "commit_id": head_sha},
                 ],
             },
+            "provider_surface_complete": True,
             "unconsumed_event_ids": [],
         }
         decision = invoke_relay_round(

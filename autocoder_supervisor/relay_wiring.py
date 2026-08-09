@@ -60,8 +60,10 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from autocoder_orchestration.review_repair_relay import (  # noqa: F401
+    EscalateToHuman,
     InvalidSnapshot,
     RecoverableRetry,
+    RelayError,
 )
 
 

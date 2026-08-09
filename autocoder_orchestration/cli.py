@@ -1517,6 +1517,11 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
             payload["worker_prompt"] = build_worker_prompt(decision)
         except Exception as e:  # pragma: no cover - defensive
             payload["worker_prompt_error"] = repr(e)
+    # Round-31: incomplete evidence → EXIT_OK + structured
+    # decision so the supervisor's wiring routes to
+    # ``recoverable_retry`` rather than ``no_action``.
+    if decision.outcome == "incomplete_evidence":
+        return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
     return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
 
 

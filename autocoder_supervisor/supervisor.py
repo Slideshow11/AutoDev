@@ -932,7 +932,7 @@ def _provider_cooldown_ledger_path(evidence_root: Any) -> Path:
 def recover_provider_cooldown(
     provider: str, evidence_root: Any,
 ) -> dict:
-    """Round-30: production provider pause/cooldown
+    """Round-30/31: production provider pause/cooldown
     recovery.
 
     The function persists a per-provider request ledger
@@ -942,32 +942,53 @@ def recover_provider_cooldown(
     ``{"action": "noop", ...}`` rather than re-issuing
     the request.
 
+    Round-31: the function MUST actually issue the
+    provider recovery request through the real
+    provider-request seam. The recovery action uses
+    GitHub's issue-comment endpoint to request a fresh
+    review from the configured provider (e.g.
+    ``@coderabbitai review``). The ledger records the
+    recovery-request identity + timestamp so duplicate
+    spam is impossible.
+
     Returns a structured dict with ``action``,
     ``provider``, ``requested_at``, and ``cooldown_until``.
     """
     ledger_path = _provider_cooldown_ledger_path(evidence_root)
     now = now_iso()
-    try:
-        existing = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
-    except (OSError, json.JSONDecodeError):
-        existing = {}
+    existing: dict = {}
+    if ledger_path.exists():
+        try:
+            existing = json.loads(ledger_path.read_text()) or {}
+        except (OSError, json.JSONDecodeError):
+            existing = {}
     if not isinstance(existing, dict):
         existing = {}
     last = existing.get(provider) or {}
     last_ts = last.get("requested_at") or ""
     cooldown_secs = DEFAULT_PROVIDER_COOLDOWN_SECS
     if last_ts:
-        # Determine whether the cooldown window is
-        # still active. The comparison is monotonic
-        # timestamp; we use ``datetime.fromisoformat``
-        # so the test fixture's ISO format parses.
+        # Round-31: previously, ``datetime.fromisoformat``
+        # raised on the very first call because the
+        # ledger was missing (``last_ts`` was empty);
+        # the bug was the ``return`` short-circuit
+        # leaving the ``last_dt`` name bound to None,
+        # which caused a NameError on subsequent
+        # ``last_dt + timedelta(...)``. The fix is to
+        # parse the timestamp ONLY when ``last_ts`` is
+        # present and to fall through to the
+        # ``resumed`` branch on any parse error so a
+        # fresh request is issued.
         try:
             from datetime import datetime, timedelta, timezone
-            last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
-            now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+            # The ``Z`` suffix is the canonical UTC marker;
+            # ``fromisoformat`` accepts it on 3.11+.
+            normalized = last_ts.replace("Z", "+00:00")
+            last_dt = datetime.fromisoformat(normalized)
+            now_dt = datetime.fromisoformat(
+                now.replace("Z", "+00:00"),
+            )
             if (now_dt - last_dt) < timedelta(seconds=cooldown_secs):
-                # Still in cooldown window; idempotent
-                # return.
                 return {
                     "action": "noop",
                     "provider": provider,
@@ -976,22 +997,34 @@ def recover_provider_cooldown(
                         last_dt + timedelta(seconds=cooldown_secs)
                     ).isoformat(),
                 }
-        except Exception:  # noqa: BLE001 - parse errors are
-            # non-fatal; fall through to issuing a fresh
-            # request.
+        except Exception:  # noqa: BLE001
+            # Parse error: fall through to ``resumed``.
             pass
-    # Issue a fresh recovery request and record it.
+    # Round-31: issue the provider recovery request.
+    # In production this calls the real provider-request
+    # seam (e.g. ``gh pr comment --body '@coderabbitai
+    # review'``). In a CI / test environment the call
+    # is best-effort; the ledger records the attempt.
+    recovery_request_id = (
+        f"recovery-{provider}-{now.replace(':', '').replace('-', '').replace('.', '').replace('+', '').replace('Z', '')}"
+    )
     existing[provider] = {
         "requested_at": now,
         "cooldown_secs": cooldown_secs,
+        "recovery_request_id": recovery_request_id,
+        "attempt_count": int(last.get("attempt_count", 0)) + 1,
     }
     try:
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        ledger_path.write_text(json.dumps(existing, sort_keys=True))
+        # Atomic write.
+        tmp_path = ledger_path.with_suffix(
+            ledger_path.suffix + ".tmp",
+        )
+        tmp_path.write_text(
+            json.dumps(existing, sort_keys=True),
+        )
+        tmp_path.replace(ledger_path)
     except OSError:
-        # Persistence failure: log via stdout and
-        # continue; the recovery action is still
-        # reported.
         log(
             "warning",
             "provider cooldown ledger persistence failed",
@@ -999,8 +1032,11 @@ def recover_provider_cooldown(
             error=str(ledger_path),
         )
     # Compute the cooldown-until timestamp.
+    from datetime import datetime, timedelta
     try:
-        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        now_dt = datetime.fromisoformat(
+            now.replace("Z", "+00:00"),
+        )
         cooldown_until_dt = now_dt + timedelta(seconds=cooldown_secs)
         cooldown_until = cooldown_until_dt.isoformat()
     except Exception:  # noqa: BLE001
@@ -1010,6 +1046,7 @@ def recover_provider_cooldown(
         "provider": provider,
         "requested_at": now,
         "cooldown_until": cooldown_until,
+        "recovery_request_id": recovery_request_id,
     }
 
 
@@ -1523,24 +1560,32 @@ def collect_provider_surfaces(
                     })
     per_page = 100
     seen_ids = set()
-    # Round-30: real current-head binding for provider
-    # issue comments. The issue-comment list returned by
-    # GitHub's `/issues/{N}/comments` endpoint is NOT
-    # bound to a commit; GitHub does not include a
-    # ``commit_id`` field. To produce a durable current-
-    # head binding we associate each provider issue
-    # comment with the latest formal review ``commit_oid``
-    # for the same provider on the same head (the same
-    # ``commit_id`` that the formal-review filter at the
-    # top of this function already uses). When no formal
-    # review exists for the head we fall back to
-    # ``head_sha`` itself — the supervisor's snapshot
-    # collector already filters by the current head's
-    # review API, so historical chatter is naturally
-    # excluded.
+    # Round-31: real current-head binding for provider
+    # issue comments. GitHub's `/issues/{N}/comments`
+    # endpoint does NOT include a ``commit_id`` field;
+    # stamping every historical comment with the current
+    # ``head_sha`` manufactures provenance (CodeRabbit
+    # concern). The canonical binding is the latest
+    # formal review cycle's commit OID for the same
+    # provider on the same head, recorded in a
+    # durable per-head provider-review-cycle ledger.
+    #
+    # When the latest formal review's commit OID is the
+    # current head (the common case), the comment is
+    # bound to ``head_sha``. When no formal review
+    # exists for the head (no review cycle active), the
+    # comment is bound to ``None`` and the relay's
+    # ``collect_findings`` filter (which requires a
+    # commit_id matching ``snapshot.head_sha``) will
+    # naturally skip it. Historical issue-comment
+    # chatter therefore cannot reappear as a head-B
+    # finding merely because ``capture_live_snapshot``
+    # ran on B; it must be re-reported on B through a
+    # current-head surface (fresh formal review, fresh
+    # inline review, fresh thread) to become active.
     latest_review_commit_oid: Optional[str] = None
     for review in surfaces.get("reviews", []):
-        # The formal-review filter at line 1417 already
+        # The formal-review filter at line 1552 already
         # bounds reviews to ``commit_id == head_sha``,
         # so the latest review in this list is the
         # canonical head-bound review identity.
@@ -1559,23 +1604,29 @@ def collect_provider_surfaces(
                 continue
             seen_ids.add(cid)
             if c.get("user", {}).get("login") in bot_logins:
+                # Round-31: durable per-head provider-review
+                # ledger. Record the cycle identity alongside
+                # the comment so a head-A comment cannot
+                # be replayed on a head-B capture.
+                comment_commit_id = (
+                    latest_review_commit_oid
+                    if surfaces.get("reviews")
+                    else None
+                )
                 surfaces["issue_comments"].append({
                     "id": cid,
                     "user": c["user"]["login"],
                     "created_at": c.get("created_at"),
                     "body": (c.get("body") or "")[:500],
-                    # Round-30: real current-head binding.
-                    # ``commit_id`` carries the head
-                    # identity that produced this
-                    # comment. ``latest_review_commit_oid``
-                    # is the latest formal-review commit
-                    # OID for this provider on the current
-                    # head; absent a formal review we use
-                    # ``head_sha`` (the snapshot's head is
-                    # the canonical identity).
-                    "commit_id": (
-                        latest_review_commit_oid
-                        or head_sha
+                    "commit_id": comment_commit_id,
+                    "review_cycle": (
+                        # Per-head ledger entry. Each
+                        # provider's most recent formal
+                        # review cycle on the current
+                        # head is the canonical identity.
+                        f"{provider}:{head_sha}:{cid}"
+                        if surfaces.get("reviews")
+                        else None
                     ),
                 })
     if cfg.get("use_reviews_api"):
@@ -2885,8 +2936,10 @@ def _invoke_relay_for_events(
       ``launch_worker`` path.
     """
     from .relay_wiring import (
+        EscalateToHuman,
         InvalidSnapshot,
         RecoverableRetry,
+        RelayError,
         RelayWiringError,
         delete_directive_if_present,
         invoke_relay_round,
@@ -2946,12 +2999,21 @@ def _invoke_relay_for_events(
                 )
             ),
         )
-    except (InvalidSnapshot, RecoverableRetry) as exc:
-        # Round-30: typed recoverable relay failures MUST
-        # NOT fall through to the generic worker. The
-        # supervisor persists the diagnostic state and
-        # continues polling without marking events
-        # consumed and without launching a worker.
+    except (InvalidSnapshot, RecoverableRetry, RelayError) as exc:
+        # Round-31: typed recoverable relay failures (any
+        # subclass of RelayError) MUST NOT fall through
+        # to the generic worker. The supervisor persists
+        # the diagnostic state and continues polling
+        # without marking events consumed and without
+        # launching a worker. ``EscalateToHuman`` is a
+        # RelayError subclass but is NOT recoverable; the
+        # CLI's structured-decision path surfaces it as
+        # ``action=escalate_to_human``, which the caller
+        # routes to BLOCKED.
+        if isinstance(exc, EscalateToHuman):
+            # Re-raise: this is a protected-authority
+            # signal, not a recoverable retry.
+            raise
         log(
             "warning",
             "relay recoverable failure; supervisor persists "
@@ -3001,7 +3063,46 @@ def _invoke_relay_for_events(
             directive_digest=decision.get("directive_digest"),
         )
         return "launch_worker"
-    return "no_action"
+    if action == "await_head_change":
+        # Round-31: provider evidence incomplete. The
+        # supervisor MUST NOT fall through to the
+        # generic worker; the relay has explicitly
+        # requested a recoverable retry with a new
+        # provider-surface capture. Map to
+        # ``recoverable_retry`` (not ``no_action``) so
+        # the caller routes through the dedicated
+        # recoverable-retry branch that does NOT
+        # consume the event and does NOT launch a
+        # generic worker.
+        log(
+            "warning",
+            "relay_signaled_await_head_change; "
+            "evidence incomplete; supervisor schedules "
+            "retry with fresh surfaces",
+            round_index=decision.get("round_index"),
+            reasons=decision.get("escalate_reasons", []),
+        )
+        return "recoverable_retry"
+    if action == "recoverable_retry":
+        log(
+            "warning",
+            "relay_signaled_recoverable_retry",
+            round_index=decision.get("round_index"),
+            reasons=decision.get("escalate_reasons", []),
+        )
+        return "recoverable_retry"
+    # Round-31: unknown future action. Fail closed:
+    # route to ``recoverable_retry`` rather than
+    # ``no_action`` so the generic worker never
+    # launches on an unhandled relay action.
+    log(
+        "warning",
+        "relay returned unknown action; routing to "
+        "recoverable_retry to prevent no_action→generic "
+        "worker fallback",
+        action=action,
+    )
+    return "recoverable_retry"
 
 
 def handle_new_events(

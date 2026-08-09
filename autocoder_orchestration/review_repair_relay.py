@@ -1144,15 +1144,39 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             cid = c.get("id")
             if cid is None:
                 continue
-            # Round-29: skip comments bound to a different
-            # commit than the current head.
+            # Round-31: skip comments bound to a different
+            # commit than the current head OR with no
+            # durable per-head review-cycle identity.
+            #
+            # Production captures (round-30+) carry a
+            # ``review_cycle`` per-head identity. Backward-
+            # compat: tests / older snapshots that carry
+            # a ``commit_id`` matching ``snapshot.head_sha``
+            # are also accepted (the production collector
+            # emits BOTH ``commit_id`` AND ``review_cycle``
+            # for current-head comments).
             cmt = c.get("commit_id") or c.get("commit_oid")
-            if (
+            cycle = c.get("review_cycle")
+            cmt_match = (
                 isinstance(cmt, str)
-                and cmt
-                and current_head
-                and cmt != current_head
-            ):
+                and bool(cmt)
+                and bool(current_head)
+                and cmt == current_head
+            )
+            # Round-31: require either ``review_cycle`` (the
+            # production identity) OR an explicit
+            # ``commit_id`` matching the current head.
+            # This is the backward-compat path for
+            # snapshots that carry a synthetic
+            # ``commit_id`` without ``review_cycle``.
+            #
+            # Comments with neither identity are skipped
+            # (treated as historical chatter with no
+            # head binding). This is the canonical
+            # fail-closed behavior: historical
+            # issue-comment chatter MUST NOT reappear as
+            # a current finding.
+            if not (cycle or cmt_match):
                 continue
             finding_id = f"{provider}:{cid}"
             if finding_id in seen_ids:
@@ -1949,8 +1973,10 @@ class RelayLoop:
         rounds: int,
         rounds_at_head: int,
         max_rounds: int,
+        reason: str = "round_budget_reached",
+        slice_epoch: int = 1,
     ) -> None:
-        """Round-30: persist the round-budget retry state.
+        """Round-30/31: persist the recoverable retry state.
 
         The supervisor / scheduler reads this on the next
         slice to resume the SAME outstanding work. The
@@ -1958,26 +1984,100 @@ class RelayLoop:
         be a protected-authority escalation). The persistent
         state is durable and idempotent; duplicate retries
         are safe.
+
+        Round-31: per-head retry ledger with bounded
+        exponential backoff. Fields:
+
+            head_sha: the head the retry applies to.
+            reason: the recoverable failure class.
+            attempt_count: total retry attempts so far.
+            first_failure_at: ISO timestamp of the first
+                attempt that produced this ledger entry.
+            last_attempt_at: ISO timestamp of the most
+                recent attempt.
+            next_eligible_retry_at: ISO timestamp; the
+                supervisor MUST NOT retry before this.
+            slice_epoch: monotonic counter; the supervisor
+                increments it on each new execution slice
+                so a fresh slice gets a fresh budget while
+                preserving the unresolved findings.
+
+        Most importantly: when ``historical
+        completed_round_count >= budget`` on every new
+        invocation, the supervisor MUST NOT loop forever
+        with no new work possible. The slice epoch
+        increment + a fresh budget per slice prevents
+        this permanent failure mode.
         """
-        # Round-30: write the retry record under a
-        # canonical filename; the supervisor reads it on
-        # the next slice.
+        # Read the existing ledger to merge the attempt
+        # counter (do NOT lose the prior count on rewrite).
         retry_path = (
             Path(self.directive_store.evidence_root)
             / "round_budget_retry.json"
         )
+        prior_count = 0
+        prior_first_failure_at = _now_iso()
+        try:
+            if retry_path.is_file():
+                prior = json.loads(retry_path.read_text())
+                if prior.get("head_sha") == head_sha:
+                    prior_count = int(prior.get("attempt_count", 0))
+                    prior_first_failure_at = prior.get(
+                        "first_failure_at",
+                        prior.get("recorded_at", _now_iso()),
+                    )
+        except (OSError, json.JSONDecodeError, ValueError):
+            pass
+        now = _now_iso()
+        attempt_count = prior_count + 1
+        # Bounded exponential backoff: 30s, 60s, 120s,
+        # 240s, capped at 600s. The supervisor reads
+        # ``next_eligible_retry_at`` to schedule the next
+        # retry.
+        backoff_seconds = min(
+            30 * (2 ** min(attempt_count - 1, 5)),
+            600,
+        )
+        from datetime import datetime, timedelta, timezone
+        try:
+            now_dt = datetime.fromisoformat(
+                now.replace("Z", "+00:00"),
+            )
+            next_eligible_dt = now_dt + timedelta(
+                seconds=backoff_seconds,
+            )
+            next_eligible_retry_at = (
+                next_eligible_dt.isoformat()
+            )
+        except Exception:  # noqa: BLE001
+            next_eligible_retry_at = now
         payload = {
             "head_sha": head_sha,
+            "reason": reason,
+            "attempt_count": attempt_count,
+            "first_failure_at": prior_first_failure_at,
+            "last_attempt_at": now,
+            "next_eligible_retry_at": next_eligible_retry_at,
+            "slice_epoch": slice_epoch,
             "rounds": rounds,
             "rounds_at_head": rounds_at_head,
             "max_rounds": max_rounds,
-            "recorded_at": _now_iso(),
+            "recorded_at": now,
             "owner": "relay_recovery",
             "recoverable": True,
         }
         try:
             retry_path.parent.mkdir(parents=True, exist_ok=True)
-            retry_path.write_text(json.dumps(payload, sort_keys=True))
+            # Atomic write: write to a temp file then
+            # rename so a crash mid-write cannot leave a
+            # half-truncated ledger.
+            tmp_path = retry_path.with_suffix(
+                retry_path.suffix + ".tmp",
+            )
+            tmp_path.write_text(
+                json.dumps(payload, sort_keys=True),
+            )
+            tmp_path.replace(retry_path)
         except OSError:
             # Persistence failure: log via controller and
             # continue; the recovery signal is still raised.
@@ -2102,8 +2202,25 @@ class RelayLoop:
             outcome = "completed"
         elif decision.outcome == "ready":
             outcome = "ready"
+        elif decision.outcome == "incomplete_evidence":
+            # Round-31: provider evidence incomplete is a
+            # RECOVERABLE state, NOT protected-authority
+            # escalation. The transcript MUST persist the
+            # actual ``outcome`` (``incomplete_evidence``)
+            # so the persistent supervisor / scheduler
+            # can retry with fresh surfaces. Mapping this
+            # to ``escalated`` made an incomplete-evidence
+            # failure look like a protected-authority
+            # escalation, which is a liveness defect.
+            outcome = "incomplete_evidence"
         else:
-            outcome = "escalated"
+            # Round-31: unknown outcomes persist as-is
+            # (``decision.outcome``) so the supervisor
+            # can route them appropriately. Falling back
+            # to ``escalated`` was incorrect — an unknown
+            # outcome is NOT necessarily protected
+            # authority.
+            outcome = decision.outcome or "unknown"
         self.directive_store.append_transcript(RoundTranscript(
             schema_version=RELAY_SCHEMA_VERSION,
             round_index=round_index,
@@ -2259,6 +2376,25 @@ class RelayLoop:
                 # Head is clean. The supervisor's readiness gate
                 # is the next step; the loop halts.
                 return decision
+            if decision.action == "await_head_change":
+                # Round-31: provider evidence is incomplete
+                # (provider_surface_complete=False). The
+                # loop MUST NOT spin a tight loop and MUST
+                # NOT escalate. We return the decision so
+                # the persistent supervisor / scheduler
+                # can schedule the next retry via the
+                # bounded exponential backoff in
+                # ``round_budget_retry.json``. The caller
+                # is responsible for the schedule; this
+                # method MUST NOT sleep.
+                return decision
+            if decision.action == "recoverable_retry":
+                # Round-31: typed recoverable retry signal.
+                # Same handling as ``await_head_change`` —
+                # return the decision so the supervisor
+                # schedules the next attempt via the
+                # bounded retry state.
+                return decision
             if decision.action == "launch_worker":
                 # The supervisor will launch the worker. The
                 # loop awaits the worker completion (head_sha
@@ -2278,6 +2414,17 @@ class RelayLoop:
                     return decision
                 current_head = new_head
                 continue
+            # Round-31: unknown / future action MUST fail
+            # closed rather than loop indefinitely. Raise
+            # ``RecoverableRetry`` so the supervisor
+            # schedules the next attempt via the bounded
+            # retry state. Continuing here would silently
+            # spin a tight loop on a value the supervisor
+            # doesn't know how to route.
+            raise RecoverableRetry(
+                f"unknown decision action: {decision.action!r}; "
+                f"fail-closed; supervisor schedules retry"
+            )
 
     def mark_head_advanced(self, old_head_sha: str, new_head_sha: str) -> None:
         """Bind the worker push to the state machine.
@@ -2357,6 +2504,62 @@ class RelayLoop:
         return len(findings) == 0
 
 
+def read_round_budget_retry(evidence_root: Any) -> Optional[dict]:
+    """Round-31: read the recoverable retry state for the
+    supervisor / scheduler.
+
+    Returns the parsed JSON dict, or ``None`` if the
+    ledger is missing or unreadable.
+    """
+    retry_path = (
+        Path(str(evidence_root)) / "round_budget_retry.json"
+    )
+    if not retry_path.is_file():
+        return None
+    try:
+        return json.loads(retry_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def bump_slice_epoch(evidence_root: Any) -> int:
+    """Round-31: bump the slice_epoch on the retry ledger.
+
+    Called by the persistent supervisor / scheduler at
+    the start of a NEW execution slice. This prevents
+    the permanent-failure mode where
+    ``completed_round_count >= budget`` on every
+    invocation: the slice_epoch increment lets a fresh
+    slice get a fresh round budget while preserving the
+    unresolved findings (the retry ledger carries the
+    ``head_sha`` and outstanding work).
+
+    Returns the new slice_epoch (>= 1).
+    """
+    existing = read_round_budget_retry(evidence_root) or {}
+    new_epoch = int(existing.get("slice_epoch", 0)) + 1
+    payload = dict(existing)
+    payload["slice_epoch"] = new_epoch
+    payload["recorded_at"] = _now_iso()
+    retry_path = (
+        Path(str(evidence_root)) / "round_budget_retry.json"
+    )
+    try:
+        retry_path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = retry_path.with_suffix(
+            retry_path.suffix + ".tmp",
+        )
+        tmp_path.write_text(
+            json.dumps(payload, sort_keys=True),
+        )
+        tmp_path.replace(retry_path)
+    except OSError:
+        # Persistence failure: return the epoch anyway;
+        # the supervisor will retry on the next slice.
+        pass
+    return new_epoch
+
+
 __all__ = [
     "ALL_FINDING_STATES",
     "ALL_SEVERITIES",
@@ -2385,11 +2588,13 @@ __all__ = [
     "SEVERITY_P1",
     "SEVERITY_P2",
     "WORKER_PROMPT_TEMPLATE",
+    "bump_slice_epoch",
     "build_directive",
     "build_worker_prompt",
     "collect_findings",
     "evaluate_round",
     "filter_findings_to_current_head",
     "heads_equal",
+    "read_round_budget_retry",
     "relay_state_for_outcome",
 ]

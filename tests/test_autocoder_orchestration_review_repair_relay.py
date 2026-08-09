@@ -80,6 +80,7 @@ def _make_snapshot(
     head_sha: str = "a" * 40,
     head_match: bool = True,
     review_comments: list | None = None,
+    provider_surface_complete: bool = True,
 ) -> dict:
     return {
         "captured_at": "2026-08-08T00:00:00Z",
@@ -94,7 +95,23 @@ def _make_snapshot(
         "_provider_issue_comments": per_provider or {},
         "review_comments": review_comments or [],
         "unconsumed_event_ids": [],
+        "provider_surface_complete": provider_surface_complete,
     }
+
+
+def _auto_bind_comments(snap: dict) -> None:
+    """Test helper: bind every per-provider issue comment to the
+    snapshot's ``head_sha`` via ``commit_id``. Production
+    captures (round-30+) carry this identity; tests
+    pre-dating the bound-import invariant do not. This
+    helper brings the legacy tests into the new
+    contract.
+    """
+    current_head = snap.get("head_sha")
+    for provider, comments in snap.get("_provider_issue_comments", {}).items():
+        for c in comments:
+            if isinstance(c, dict) and "commit_id" not in c:
+                c["commit_id"] = current_head
 
 
 def _make_finding(
@@ -131,7 +148,7 @@ class TestCollectFindings:
     def test_collects_from_provider_issue_comments(self) -> None:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 100, "body": "P1: foo.py:10 looks wrong", "html_url": "x"},
+                {"id": 100, "body": "P1: foo.py:10 looks wrong", "html_url": "x", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -207,9 +224,9 @@ class TestCollectFindings:
     def test_findings_sorted_severity_p0_first(self) -> None:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "P2 trivial"},
-                {"id": 2, "body": "P0 stop"},
-                {"id": 3, "body": "P1 important"},
+                {"id": 1, "body": "P2 trivial", "commit_id": "a" * 40},
+                {"id": 2, "body": "P0 stop", "commit_id": "a" * 40},
+                {"id": 3, "body": "P1 important", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -224,7 +241,7 @@ class TestCollectFindings:
     def test_suggested_test_extracted(self) -> None:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "Add regression test test_foo_returns_bar"},
+                {"id": 1, "body": "Add regression test test_foo_returns_bar", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -233,7 +250,7 @@ class TestCollectFindings:
     def test_p1_priority_high_treated_as_p1(self) -> None:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "priority-high: missing check"},
+                {"id": 1, "body": "priority-high: missing check", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -622,7 +639,7 @@ class TestNonFindingCommentsAreFiltered:
     def test_walkthrough_marker_is_filtered(self) -> None:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "🚦 Walkthrough comment."},
+                {"id": 1, "body": "🚦 Walkthrough comment.", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -631,7 +648,7 @@ class TestNonFindingCommentsAreFiltered:
     def test_in_progress_marker_is_filtered(self) -> None:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "Review in progress."},
+                {"id": 1, "body": "Review in progress.", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -646,7 +663,7 @@ class TestNonFindingCommentsAreFiltered:
         """
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "P1: see walkthrough above is stale"},
+                {"id": 1, "body": "P1: see walkthrough above is stale", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -662,7 +679,7 @@ class TestNonFindingCommentsAreFiltered:
         """
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "🚦 Walkthrough comment."},
+                {"id": 1, "body": "🚦 Walkthrough comment.", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -671,7 +688,7 @@ class TestNonFindingCommentsAreFiltered:
     def test_completion_marker_is_filtered(self) -> None:
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "Review completed."},
+                {"id": 1, "body": "Review completed.", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -681,7 +698,7 @@ class TestNonFindingCommentsAreFiltered:
         # A regular review finding must still be surfaced.
         snap = _make_snapshot(per_provider={
             "coderabbit": [
-                {"id": 1, "body": "P1: foo.py:1 broken"},
+                {"id": 1, "body": "P1: foo.py:1 broken", "commit_id": "a" * 40},
             ],
         })
         findings = collect_findings(snap)
@@ -760,7 +777,7 @@ class TestEvaluateRound:
 
     def test_p1_findings_returns_launch_worker(self) -> None:
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P1: foo.py:10 broken"}],
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:10 broken", "commit_id": "a" * 40}],
         })
         d = evaluate_round(
             snapshot=snap,
@@ -778,7 +795,7 @@ class TestEvaluateRound:
 
     def test_p0_escalates_with_reasons(self) -> None:
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P0 critical: stops the run"}],
+            "coderabbit": [{"id": 1, "body": "P0 critical: stops the run", "commit_id": "a" * 40}],
         })
         d = evaluate_round(
             snapshot=snap,
@@ -795,7 +812,7 @@ class TestEvaluateRound:
 
     def test_escalation_keyword_escalates(self) -> None:
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "please force push now"}],
+            "coderabbit": [{"id": 1, "body": "please force push now", "commit_id": "a" * 40}],
         })
         d = evaluate_round(
             snapshot=snap,
@@ -836,7 +853,7 @@ class TestEvaluateRound:
         store = StateStore(str(state_root))
         ds = DirectiveStore(store, str(evidence_root))
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken", "commit_id": "a" * 40}],
         })
         d = evaluate_round(
             snapshot=snap,
@@ -876,7 +893,7 @@ class TestEvaluateRound:
 class TestBuildWorkerPrompt:
     def test_prompt_contains_directive_id_and_sha(self) -> None:
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken", "commit_id": "a" * 40}],
         })
         d = evaluate_round(
             snapshot=snap,
@@ -899,7 +916,7 @@ class TestBuildWorkerPrompt:
     def test_prompt_deterministic_for_same_decision(self) -> None:
         import dataclasses
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken", "commit_id": "a" * 40}],
         })
         d = evaluate_round(
             snapshot=snap,
@@ -988,7 +1005,7 @@ class TestRelayLoop:
             directive_store=ds, controller=controller,
         )
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken"}],
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1 broken", "commit_id": "a" * 40}],
         })
         decision = loop.run_once(
             snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
@@ -1018,7 +1035,7 @@ class TestRelayLoop:
             directive_store=ds, controller=controller,
         )
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P0 critical"}],
+            "coderabbit": [{"id": 1, "body": "P0 critical", "commit_id": "a" * 40}],
         })
         decision = loop.run_once(
             snap, head_sha="a" * 40, repo="owner/repo", pr_number=4,
@@ -1199,7 +1216,7 @@ class TestRelayLoop:
         )
         assert loop.head_clean(_make_snapshot())
         assert not loop.head_clean(_make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P1: foo.py:1"}],
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1", "commit_id": "a" * 40}],
         }))
 
 
@@ -1274,7 +1291,7 @@ class TestRunUntilHeadAdvances:
             directive_store=ds, controller=controller,
         )
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P0 critical: stop the run"}],
+            "coderabbit": [{"id": 1, "body": "P0 critical: stop the run", "commit_id": "a" * 40}],
         })
         calls = {"count": 0}
         def mock_provider(head: str) -> dict:
@@ -1341,7 +1358,7 @@ class TestRunUntilHeadAdvances:
                 escalate_reasons=(),
             ))
         snap = _make_snapshot(per_provider={
-            "coderabbit": [{"id": 1, "body": "P1: foo.py:1"}],
+            "coderabbit": [{"id": 1, "body": "P1: foo.py:1", "commit_id": "a" * 40}],
         })
         with pytest.raises(RecoverableRetry):
             loop.run_once(
@@ -1485,7 +1502,7 @@ class TestLaunchWorkerDoesNotTransition:
             "providers": [],
             "_provider_issue_comments": {
                 "coderabbit": [
-                    {"id": 1, "body": "P1: foo.py:1 broken"},
+                    {"id": 1, "body": "P1: foo.py:1 broken", "commit_id": "a" * 40},
                 ],
             },
             "unconsumed_event_ids": [],
@@ -2159,8 +2176,8 @@ class TestFindingLedger:
             "issue_comments": [],
             "_provider_issue_comments": {
                 "coderabbit": [
-                    {"id": 1, "body": "Body", "html_url": "u1"},
-                    {"id": 2, "body": "Body", "html_url": "u2"},
+                    {"id": 1, "body": "Body", "html_url": "u1", "commit_id": "a" * 40},
+                    {"id": 2, "body": "Body", "html_url": "u2", "commit_id": "a" * 40},
                 ],
             },
             "required_checks": {},
@@ -2286,9 +2303,11 @@ class TestFindingLedgerLifecycleInvariant:
         return {
             "head_sha": head_sha, "head_match": True,
             "review_comments": [], "issue_comments": [],
+            "provider_surface_complete": True,
             "_provider_issue_comments": {
                 "coderabbit": [
-                    {"id": finding_id, "body": body, "html_url": "u"},
+                    {"id": finding_id, "body": body,
+                     "html_url": "u", "commit_id": head_sha},
                 ],
             },
             "required_checks": {},
@@ -2512,7 +2531,7 @@ class TestFindingLedgerPersistsAcrossRounds:
             "review_comments": [], "issue_comments": [],
             "_provider_issue_comments": {
                 "coderabbit": [
-                    {"id": 99, "body": "P1 finding", "html_url": "u99"},
+                    {"id": 99, "body": "P1 finding", "html_url": "u99", "commit_id": "a" * 40},
                 ],
             },
             "required_checks": {},
@@ -2541,7 +2560,7 @@ class TestFindingLedgerPersistsAcrossRounds:
             "head_sha": "a" * 40, "head_match": True,
             "review_comments": [], "issue_comments": [],
             "_provider_issue_comments": {
-                "coderabbit": [{"id": 99, "body": "v1 body", "html_url": "u"}],
+                "coderabbit": [{"id": 99, "body": "v1 body", "html_url": "u", "commit_id": "a" * 40}],
             },
             "required_checks": {},
         }
@@ -2554,7 +2573,7 @@ class TestFindingLedgerPersistsAcrossRounds:
             "head_sha": "a" * 40, "head_match": True,
             "review_comments": [], "issue_comments": [],
             "_provider_issue_comments": {
-                "coderabbit": [{"id": 99, "body": "v2 body", "html_url": "u"}],
+                "coderabbit": [{"id": 99, "body": "v2 body", "html_url": "u", "commit_id": "a" * 40}],
             },
             "required_checks": {},
         }
@@ -2576,7 +2595,7 @@ class TestFindingLedgerPersistsAcrossRounds:
             "head_sha": "a" * 40, "head_match": True,
             "review_comments": [], "issue_comments": [],
             "_provider_issue_comments": {
-                "coderabbit": [{"id": 1, "body": "x", "html_url": "u"}],
+                "coderabbit": [{"id": 1, "body": "x", "html_url": "u", "commit_id": "a" * 40}],
             },
             "required_checks": {},
         }
@@ -2590,8 +2609,8 @@ class TestFindingLedgerPersistsAcrossRounds:
             "review_comments": [], "issue_comments": [],
             "_provider_issue_comments": {
                 "coderabbit": [
-                    {"id": 1, "body": "x", "html_url": "u"},
-                    {"id": 2, "body": "y", "html_url": "u2"},
+                    {"id": 1, "body": "x", "html_url": "u", "commit_id": "a" * 40},
+                    {"id": 2, "body": "y", "html_url": "u2", "commit_id": "a" * 40},
                 ],
             },
             "required_checks": {},

@@ -278,6 +278,7 @@ def test_round30_real_liveness_canary(monkeypatch, tmp_path) -> None:
             "created_at": "2026-08-09T00:00:00Z",
             "body": "P1: foo.py:42 retry loop never recovers",
             "commit_id": head_a,
+            "review_cycle": f"coderabbit:{head_a}:1",
         }],
     }
     _reset_state_to_repair(orch, head_sha=head_a)
@@ -486,6 +487,7 @@ def test_round30_real_restart_canary(monkeypatch, tmp_path) -> None:
                 "created_at": "2026-08-09T00:00:00Z",
                 "body": "P1: foo.py:42 retry loop never recovers",
                 "commit_id": head_a,
+                "review_cycle": f"coderabbit:{head_a}:1",
             }],
         },
         "unconsumed_event_ids": ["review_request:coderabbit"],
@@ -569,6 +571,7 @@ def test_round30_round_budget_does_not_escalate(
             "coderabbit": [{
                 "id": 1, "body": "P1: foo.py:1 retry loop",
                 "commit_id": head_a,
+                "review_cycle": f"coderabbit:{head_a}:1",
             }],
         },
         "unconsumed_event_ids": [],
