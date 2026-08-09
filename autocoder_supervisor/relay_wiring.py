@@ -59,6 +59,11 @@ import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
+from autocoder_orchestration.review_repair_relay import (  # noqa: F401
+    InvalidSnapshot,
+    RecoverableRetry,
+)
+
 
 # The path to the relay CLI. The supervisor uses subprocess so
 # the supervisor and the relay stay in separate address
@@ -261,6 +266,7 @@ def should_invoke_relay(snapshot: dict) -> bool:
         return False
     per_provider = snapshot.get("_provider_issue_comments") or {}
     required_checks = snapshot.get("required_checks") or {}
+    inline_comments = snapshot.get("review_comments") or []
     has_actionable_provider_comment = False
     if per_provider:
         for provider, comments in per_provider.items():
@@ -287,6 +293,49 @@ def should_invoke_relay(snapshot: dict) -> bool:
                         break
             if has_actionable_provider_comment:
                 break
+    if has_actionable_provider_comment:
+        return True
+    # Round-30: inline review comments (CodeRabbit / Codex
+    # file/line suggestions) MUST also trigger the relay.
+    # The snapshot's ``review_comments`` list carries the
+    # inline comment bodies with file/line/path metadata.
+    # A current-head actionable inline comment triggers the
+    # structured relay; never fall back to the generic
+    # worker merely because the provider used the inline
+    # review surface. ``commit_id`` is the head-bound
+    # identity for the inline review; absent
+    # ``commit_id``, the supervisor's snapshot collector
+    # already filters by the current head's review API.
+    if isinstance(inline_comments, list) and inline_comments:
+        current_head = snapshot.get("head_sha")
+        for inline in inline_comments:
+            if not isinstance(inline, dict):
+                continue
+            body = str(inline.get("body") or "")
+            if not _is_actionable_provider_comment(body):
+                continue
+            # Inline reviews are intrinsically bound to
+            # the commit they reviewed; the snapshot's
+            # capture is the canonical current-head bound.
+            # If the inline carries an explicit commit
+            # identity that disagrees with the current
+            # head, skip it (the relay's collector handles
+            # the same filter, but the trigger is also
+            # strict so we don't bounce to a stale head).
+            cmt = (
+                inline.get("commit_id")
+                or inline.get("commit_oid")
+                or inline.get("commit_sha")
+            )
+            if (
+                isinstance(cmt, str)
+                and cmt
+                and current_head
+                and cmt != current_head
+            ):
+                continue
+            has_actionable_provider_comment = True
+            break
     if has_actionable_provider_comment:
         return True
     # CI failures — any required check concluded failure.

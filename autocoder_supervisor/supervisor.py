@@ -915,6 +915,104 @@ def write_cooldown() -> None:
     write_json(LAST_RESUME_PATH, {"ts": now_iso()})  # type: ignore[name-defined]
 
 
+# Round-30: per-provider cooldown-recovery ledger. The
+# production function records each recovery attempt with
+# the requested-at timestamp and the cooldown window; a
+# second call within the window returns ``noop`` rather
+# than re-issuing the request. The ledger is durable so a
+# process restart can resume the same provider recovery.
+DEFAULT_PROVIDER_COOLDOWN_SECS = 600  # 10 minutes
+
+
+def _provider_cooldown_ledger_path(evidence_root: Any) -> Path:
+    """Canonical path to the per-provider cooldown ledger."""
+    return Path(str(evidence_root)) / "provider_cooldown.json"
+
+
+def recover_provider_cooldown(
+    provider: str, evidence_root: Any,
+) -> dict:
+    """Round-30: production provider pause/cooldown
+    recovery.
+
+    The function persists a per-provider request ledger
+    under ``<evidence_root>/provider_cooldown.json``.
+    Multiple calls in succession are idempotent: a
+    duplicate request within the cooldown window returns
+    ``{"action": "noop", ...}`` rather than re-issuing
+    the request.
+
+    Returns a structured dict with ``action``,
+    ``provider``, ``requested_at``, and ``cooldown_until``.
+    """
+    ledger_path = _provider_cooldown_ledger_path(evidence_root)
+    now = now_iso()
+    try:
+        existing = json.loads(ledger_path.read_text()) if ledger_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    last = existing.get(provider) or {}
+    last_ts = last.get("requested_at") or ""
+    cooldown_secs = DEFAULT_PROVIDER_COOLDOWN_SECS
+    if last_ts:
+        # Determine whether the cooldown window is
+        # still active. The comparison is monotonic
+        # timestamp; we use ``datetime.fromisoformat``
+        # so the test fixture's ISO format parses.
+        try:
+            from datetime import datetime, timedelta, timezone
+            last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+            now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+            if (now_dt - last_dt) < timedelta(seconds=cooldown_secs):
+                # Still in cooldown window; idempotent
+                # return.
+                return {
+                    "action": "noop",
+                    "provider": provider,
+                    "requested_at": last_ts,
+                    "cooldown_until": (
+                        last_dt + timedelta(seconds=cooldown_secs)
+                    ).isoformat(),
+                }
+        except Exception:  # noqa: BLE001 - parse errors are
+            # non-fatal; fall through to issuing a fresh
+            # request.
+            pass
+    # Issue a fresh recovery request and record it.
+    existing[provider] = {
+        "requested_at": now,
+        "cooldown_secs": cooldown_secs,
+    }
+    try:
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_path.write_text(json.dumps(existing, sort_keys=True))
+    except OSError:
+        # Persistence failure: log via stdout and
+        # continue; the recovery action is still
+        # reported.
+        log(
+            "warning",
+            "provider cooldown ledger persistence failed",
+            provider=provider,
+            error=str(ledger_path),
+        )
+    # Compute the cooldown-until timestamp.
+    try:
+        now_dt = datetime.fromisoformat(now.replace("Z", "+00:00"))
+        cooldown_until_dt = now_dt + timedelta(seconds=cooldown_secs)
+        cooldown_until = cooldown_until_dt.isoformat()
+    except Exception:  # noqa: BLE001
+        cooldown_until = now
+    return {
+        "action": "resumed",
+        "provider": provider,
+        "requested_at": now,
+        "cooldown_until": cooldown_until,
+    }
+
+
 def read_cooldown() -> Optional[str]:
     """Read the persisted cooldown timestamp.
 
@@ -1425,6 +1523,28 @@ def collect_provider_surfaces(
                     })
     per_page = 100
     seen_ids = set()
+    # Round-30: real current-head binding for provider
+    # issue comments. The issue-comment list returned by
+    # GitHub's `/issues/{N}/comments` endpoint is NOT
+    # bound to a commit; GitHub does not include a
+    # ``commit_id`` field. To produce a durable current-
+    # head binding we associate each provider issue
+    # comment with the latest formal review ``commit_oid``
+    # for the same provider on the same head (the same
+    # ``commit_id`` that the formal-review filter at the
+    # top of this function already uses). When no formal
+    # review exists for the head we fall back to
+    # ``head_sha`` itself — the supervisor's snapshot
+    # collector already filters by the current head's
+    # review API, so historical chatter is naturally
+    # excluded.
+    latest_review_commit_oid: Optional[str] = None
+    for review in surfaces.get("reviews", []):
+        # The formal-review filter at line 1417 already
+        # bounds reviews to ``commit_id == head_sha``,
+        # so the latest review in this list is the
+        # canonical head-bound review identity.
+        latest_review_commit_oid = head_sha
     for page in range(1, 6):
         comments = github_get(
             f"/repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments"  # type: ignore[name-defined]
@@ -1444,6 +1564,19 @@ def collect_provider_surfaces(
                     "user": c["user"]["login"],
                     "created_at": c.get("created_at"),
                     "body": (c.get("body") or "")[:500],
+                    # Round-30: real current-head binding.
+                    # ``commit_id`` carries the head
+                    # identity that produced this
+                    # comment. ``latest_review_commit_oid``
+                    # is the latest formal-review commit
+                    # OID for this provider on the current
+                    # head; absent a formal review we use
+                    # ``head_sha`` (the snapshot's head is
+                    # the canonical identity).
+                    "commit_id": (
+                        latest_review_commit_oid
+                        or head_sha
+                    ),
                 })
     if cfg.get("use_reviews_api"):
         for review in surfaces["reviews"]:
@@ -1936,6 +2069,14 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
     # ``_collect_review_findings`` would never see file/line
     # suggestions and the directive builder would be silent
     # on actionable provider findings.
+    # Round-30: when ``collect_provider_surfaces`` fails
+    # the snapshot's evidence is INCOMPLETE. Persist
+    # ``provider_surface_complete = False`` with the
+    # failure identity so the relay evaluation can refuse
+    # to enter qualifying-readiness (the readiness path
+    # MUST NOT be entered with incomplete evidence).
+    snap["provider_surface_complete"] = True
+    snap["provider_surface_failures"] = {}
     for provider_name in PROVIDERS:
         try:
             surfaces = collect_provider_surfaces(
@@ -1951,13 +2092,17 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             ):
                 snap["review_comments"].append(inline)
         except Exception as exc:  # noqa: BLE001 - defensive
-            # Round-29 review: transient provider-API failures
-            # MUST be recorded (not silently swallowed) so the
-            # supervisor's retry path is observable.
+            # Round-30: provider API failure is INCOMPLETE
+            # evidence. Mark the snapshot as such so the
+            # relay evaluation refuses to promote
+            # readiness and routes to a recoverable retry.
+            snap["provider_surface_complete"] = False
+            snap["provider_surface_failures"][provider_name] = str(exc)
             log(
-                "warning",
+                "error",
                 "collect_provider_surfaces failed; "
-                "provider review unavailable",
+                "provider_surface_complete=false; relay will "
+                "return recoverable retry, NOT readiness",
                 provider=provider_name,
                 error=str(exc),
             )
@@ -2740,6 +2885,8 @@ def _invoke_relay_for_events(
       ``launch_worker`` path.
     """
     from .relay_wiring import (
+        InvalidSnapshot,
+        RecoverableRetry,
         RelayWiringError,
         delete_directive_if_present,
         invoke_relay_round,
@@ -2799,14 +2946,34 @@ def _invoke_relay_for_events(
                 )
             ),
         )
-    except RelayWiringError as exc:
+    except (InvalidSnapshot, RecoverableRetry) as exc:
+        # Round-30: typed recoverable relay failures MUST
+        # NOT fall through to the generic worker. The
+        # supervisor persists the diagnostic state and
+        # continues polling without marking events
+        # consumed and without launching a worker.
         log(
             "warning",
-            "relay_wiring failed; supervisor falls back to launch_worker",
+            "relay recoverable failure; supervisor persists "
+            "diagnostic state and continues polling without "
+            "marking events consumed",
+            reason=type(exc).__name__,
+            error=str(exc),
+        )
+        return "recoverable_retry"
+    except RelayWiringError as exc:
+        # Round-30: a wiring failure is also recoverable
+        # unless it's a protected-authority escalation.
+        # We do NOT fall back to launch_worker; we let the
+        # supervisor's retry path pick up the work.
+        log(
+            "warning",
+            "relay_wiring failed; recoverable retry; "
+            "do NOT launch generic worker",
             reason=exc.reason,
             rc=exc.returncode,
         )
-        return "no_action"
+        return "recoverable_retry"
     action = decision.get("action")
     if action == "enter_qualifying_readiness":
         delete_directive_if_present(evidence_root)
@@ -3009,6 +3176,25 @@ def handle_new_events(
                 if e.get("id") in fresh_ids
             ],
         )
+    elif relay_action == "recoverable_retry":
+        # Round-30: recoverable relay failure. Do NOT
+        # mark events consumed (they stay actionable
+        # for the next heartbeat). Do NOT launch a
+        # generic worker — the supervisor persists
+        # diagnostic state and continues polling so the
+        # SAME outstanding work is processed on the
+        # next slice / heartbeat.
+        log(
+            "warning",
+            "relay returned recoverable_retry; "
+            "events remain actionable; supervisor "
+            "continues polling without generic worker",
+            events=[
+                e.get("kind") for e in new_events
+                if e.get("id") in fresh_ids
+            ],
+        )
+        return
     else:
         log(
             "info",

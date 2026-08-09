@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "e886f35011a3a140dd384803931f9ab00e596954655b53d0989eb07d6e59759c",
-      "destination_size_bytes": 125624,
+      "destination_sha256": "e5d6964747c00e95e7ab3cb5726fb51905f75fd5db0128ed9af30363a1bd35e9",
+      "destination_size_bytes": 133473,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -451,8 +451,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/relay_wiring.py",
-      "destination_sha256": "27d1cbd7c8b87b8b3a11a6974ecb57c7204ab54d98f213410f633620c3d463d3",
-      "destination_size_bytes": 19440,
+      "destination_sha256": "8066e5f55f54d5d03aa8f61a01eed099e5d2899bb36ff26f50e63bb3b8f231dc",
+      "destination_size_bytes": 21520,
       "source_path": null,
       "source_sha256": null,
       "source_size_bytes": null,

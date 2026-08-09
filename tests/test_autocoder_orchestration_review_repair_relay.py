@@ -33,6 +33,7 @@ from autocoder_orchestration.review_repair_relay import (
     EscalateToHuman,
     Finding,
     InvalidSnapshot,
+    RecoverableRetry,
     RELAY_SCHEMA_VERSION,
     ReviewDirective,
     RelayLoop,
@@ -1133,7 +1134,11 @@ class TestRelayLoop:
             directive_store=ds, controller=controller,
             max_rounds=3,
         )
-        with pytest.raises(EscalateToHuman):
+        # Round-30: runtime budget is a scheduling boundary,
+        # not a protected-authority escalation. The relay
+        # MUST raise ``RecoverableRetry`` and the controller
+        # MUST NOT enter BLOCKED.
+        with pytest.raises(RecoverableRetry):
             loop.run_once(
                 _make_snapshot(),
                 head_sha="a" * 40,
@@ -1142,7 +1147,24 @@ class TestRelayLoop:
             )
         sm = controller.load_state_machine()
         assert sm is not None
-        assert sm.current_state == "BLOCKED"
+        # Round-30: the controller MUST remain in the current
+        # state (REPAIRING_REVIEW_FINDINGS); the slice ended
+        # without BLOCKED. The supervisor / scheduler resumes
+        # the SAME outstanding work on the next slice.
+        assert sm.current_state != "BLOCKED", (
+            f"runtime budget MUST NOT escalate to BLOCKED; "
+            f"got current_state={sm.current_state!r}"
+        )
+        # The retry record MUST be persisted.
+        retry_path = evidence_root / "round_budget_retry.json"
+        assert retry_path.is_file(), (
+            f"round-budget retry state MUST be persisted at "
+            f"{retry_path}; supervisor reads it on resume"
+        )
+        import json as _json
+        payload = _json.loads(retry_path.read_text())
+        assert payload["head_sha"] == "a" * 40
+        assert payload["max_rounds"] == 3
 
     def test_head_clean_helper(self, tmp_path: Path) -> None:
         from autocoder_orchestration.store import StateStore
@@ -1285,12 +1307,15 @@ class TestRunUntilHeadAdvances:
         assert decision.action == "enter_qualifying_readiness"
 
     def test_safety_net_blocks_after_consecutive_rounds(self, tmp_path: Path) -> None:
-        """The max_rounds safety net triggers when the same
-        head produces N consecutive rounds without
-        advancement.
+        """Round-30: the max_rounds runtime budget is a
+        scheduling boundary, NOT a protected-authority
+        escalation. The relay MUST raise ``RecoverableRetry``
+        (distinct from ``EscalateToHuman``) and persist the
+        retry state. The supervisor / scheduler resumes the
+        same outstanding work on the next slice.
         """
         from autocoder_orchestration.review_repair_relay import (
-            EscalateToHuman,
+            RecoverableRetry,
         )
         ctx, store, controller, ds = self._setup(tmp_path)
         loop = RelayLoop(
@@ -1318,11 +1343,19 @@ class TestRunUntilHeadAdvances:
         snap = _make_snapshot(per_provider={
             "coderabbit": [{"id": 1, "body": "P1: foo.py:1"}],
         })
-        with pytest.raises(EscalateToHuman):
+        with pytest.raises(RecoverableRetry):
             loop.run_once(
                 snap, head_sha="a" * 40,
                 repo="owner/repo", pr_number=4,
             )
+        # The retry state MUST be persisted; the controller
+        # MUST NOT be in BLOCKED.
+        sm = controller.load_state_machine()
+        assert sm is not None
+        assert sm.current_state != "BLOCKED", (
+            f"runtime budget MUST NOT escalate to BLOCKED; "
+            f"got current_state={sm.current_state!r}"
+        )
 
 
 

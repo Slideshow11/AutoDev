@@ -71,6 +71,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .state_machine import (
@@ -92,7 +93,20 @@ from .artifacts import write_artifact, read_artifact, ArtifactError
 # === Error hierarchy ===
 
 class RelayError(Exception):
-    """Base error for the relay."""
+    """Base class for relay-specific failures."""
+
+
+class RecoverableRetry(RelayError):
+    """Round-30: a recoverable retry signal.
+
+    Distinct from ``EscalateToHuman`` (protected authority).
+    A ``RecoverableRetry`` indicates the relay MUST end the
+    current execution slice without operator handoff; the
+    persistent supervisor / scheduler resumes the SAME
+    outstanding work on the next slice. The supervisor's
+    recovery path catches ``RecoverableRetry`` (NOT
+    ``EscalateToHuman``) and continues polling.
+    """
 
 
 class EscalateToHuman(RelayError):
@@ -1701,6 +1715,32 @@ def evaluate_round(
         required_check_names=required_check_names,
         ledger=finding_ledger,
     )
+    # Round-30: if the snapshot's provider-surface
+    # collection failed (``provider_surface_complete``
+    # is False) the evidence is INCOMPLETE — the relay
+    # MUST refuse to enter qualifying-readiness.
+    # ``enter_qualifying_readiness`` is the protected
+    # path that the readiness gate certifies; incomplete
+    # evidence cannot be certified. The relay returns
+    # ``await_head_change`` so the supervisor / scheduler
+    # continues polling / retrying rather than
+    # misclassifying incomplete evidence as a clean head.
+    if not snapshot.get("provider_surface_complete", True):
+        return RoundDecision(
+            action="await_head_change",
+            round_index=round_index,
+            head_sha=head_sha,
+            outcome="incomplete_evidence",
+            p1_count=0,
+            p2_count=0,
+            ci_failure_count=0,
+            escalate_reasons=(
+                "provider_surface_complete=false; "
+                "evidence incomplete; awaiting fresh surfaces",
+            ),
+            directive=None,
+            directive_digest=None,
+        )
     if not findings:
         return RoundDecision(
             action="enter_qualifying_readiness",
@@ -1892,13 +1932,63 @@ class RelayLoop:
         self.directive_store = directive_store
         self.controller = controller
         self.required_check_names = tuple(required_check_names)
-        # max_rounds is a SAFETY NET for a runaway loop where the
-        # head never advances. Default is disabled (None); the
-        # persistent supervisor does not need this bound.
+        # Round-30: ``max_rounds`` is an execution-scheduling
+        # boundary, NOT a protected-authority escalation. The
+        # default is disabled (``None``); the persistent
+        # supervisor / scheduler is the canonical retry owner
+        # and does not need this bound.
         self.max_rounds = (
             int(max_rounds) if max_rounds is not None else None
         )
         self.identity = identity or current_process_identity()
+
+    def _persist_round_budget(
+        self,
+        *,
+        head_sha: str,
+        rounds: int,
+        rounds_at_head: int,
+        max_rounds: int,
+    ) -> None:
+        """Round-30: persist the round-budget retry state.
+
+        The supervisor / scheduler reads this on the next
+        slice to resume the SAME outstanding work. The
+        relay MUST NOT call ``controller.block`` (that would
+        be a protected-authority escalation). The persistent
+        state is durable and idempotent; duplicate retries
+        are safe.
+        """
+        # Round-30: write the retry record under a
+        # canonical filename; the supervisor reads it on
+        # the next slice.
+        retry_path = (
+            Path(self.directive_store.evidence_root)
+            / "round_budget_retry.json"
+        )
+        payload = {
+            "head_sha": head_sha,
+            "rounds": rounds,
+            "rounds_at_head": rounds_at_head,
+            "max_rounds": max_rounds,
+            "recorded_at": _now_iso(),
+            "owner": "relay_recovery",
+            "recoverable": True,
+        }
+        try:
+            retry_path.parent.mkdir(parents=True, exist_ok=True)
+            retry_path.write_text(json.dumps(payload, sort_keys=True))
+        except OSError:
+            # Persistence failure: log via controller and
+            # continue; the recovery signal is still raised.
+            try:
+                self.controller.log_event(
+                    "error",
+                    "round-budget retry state persistence failed; "
+                    "slice ended, supervisor will retry on resume",
+                )
+            except Exception:  # noqa: BLE001 - defensive
+                pass
 
     def run_once(
         self,
@@ -1919,11 +2009,18 @@ class RelayLoop:
 
         The `started_at` timestamp is captured BEFORE
         ``evaluate_round`` runs so it reflects when the round
-        began, not when it ended. The ``max_rounds`` safety
-        net only triggers if the same head produces more
-        repair rounds than the configured maximum AND no new
-        findings appear across that span — the relay never
-        halts on a single reachable round.
+        began, not when it ended.
+
+        Round-30: the ``max_rounds`` parameter is an
+        EXECUTION SCHEDULING BOUNDARY, NOT a protected-authority
+        escalation. When the same head produces more than
+        ``max_rounds`` directive launches, the relay MUST
+        persist the outstanding work + retry state and end
+        the current slice. The persistent supervisor /
+        scheduler automatically resumes the SAME outstanding
+        work on the next slice. Ordinary unresolved bugs do
+        NOT become protected authority merely because they
+        survived N rounds.
         """
         round_index = self.directive_store.last_round_index() + 1
         if self.max_rounds is not None:
@@ -1933,22 +2030,28 @@ class RelayLoop:
                 if t.head_sha_before == head_sha and t.outcome == "completed"
             )
             if same_head_consecutive >= self.max_rounds:
-                # SAFETY NET: the head has not advanced and the
-                # worker has produced more than ``max_rounds``
-                # directive launches on the same head. The
-                # relay is stuck in a repair loop. Drive the
-                # controller into BLOCKED so the operator can
-                # diagnose.
-                self.controller.block(
-                    reason=(
-                        f"relay safety net: {same_head_consecutive} "
-                        f"consecutive rounds without head advancement "
-                        f"on {head_sha[:12]}..; operator must inspect"
-                    )
+                # Round-30: persist the outstanding work and
+                # signal a recoverable retry. The runtime
+                # budget is a scheduling boundary; the
+                # persistent supervisor / scheduler resumes
+                # the same outstanding work on the next
+                # slice. No ``EscalateToHuman``, no BLOCKED,
+                # no generic worker fallback.
+                self._persist_round_budget(
+                    head_sha=head_sha,
+                    rounds=round_index,
+                    rounds_at_head=same_head_consecutive,
+                    max_rounds=self.max_rounds,
                 )
-                raise EscalateToHuman(
-                    f"relay safety net: head {head_sha[:12]}.. has not "
-                    f"advanced after {same_head_consecutive} repair rounds"
+                # Round-30: a fresh, typed, recoverable retry
+                # signal. ``RECOVERABLE_RETRY`` is distinct
+                # from ``EscalateToHuman`` (protected
+                # authority); supervisors / schedulers can
+                # resume the slice without operator handoff.
+                raise RecoverableRetry(
+                    f"round budget reached ({same_head_consecutive}"
+                    f" rounds on {head_sha[:12]}..); "
+                    f"slice ended, retry resumed by supervisor"
                 )
         # The controller's state machine is the authority.
         # If the run is not in REPAIRING_REVIEW_FINDINGS, the
@@ -2273,6 +2376,7 @@ __all__ = [
     "RELAY_SCHEMA_VERSION",
     "RelayError",
     "RelayLoop",
+    "RecoverableRetry",
     "ReviewDirective",
     "RoundDecision",
     "RoundTranscript",
