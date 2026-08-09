@@ -46,6 +46,16 @@ from .directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the p
 )
 from .orchestration_state_root import OrchestrationRootError, OrchestrationRootMissing, OrchestrationRootUnverified, resolve_orchestration_state_root  # noqa: F401
 
+# NOTE: ``Controller``, ``RunContext``, ``StateStore``, and
+# ``StateStoreError`` are imported LAZILY inside the
+# qualifying-readiness controller-driver block so the
+# supervisor's module-level import does NOT require
+# ``autocoder_orchestration`` to be importable. Round-29
+# review P7: the imports MUST be bound before the
+# guarded execution path so a failed import cannot turn
+# into ``UnboundLocalError``; we import them at the top
+# of the function body (not inside the try/except).
+
 
 # ---------------------------------------------------------------------------
 # Module-level globals — populated from SupervisorConfig at import time.
@@ -1884,6 +1894,12 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         "unconsumed_event_ids": [
             e.get("id") for e in list_unconsumed_events()
         ],
+        # Round-29 review: ``provider_surfaces`` MUST be
+        # populated by the snapshot collector; downstream
+        # consumers (relay, directive classifier) need the
+        # current inline review comments per provider.
+        "provider_surfaces": {},
+        "review_comments": [],
     }
     pr = safe_github_get(
         f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
@@ -1914,6 +1930,37 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                 "provider": provider,
                 "login": login,
             })
+    # Round-29 review: actually call ``collect_provider_surfaces``
+    # so the snapshot carries the inline review comments per
+    # provider. Without this step the relay's
+    # ``_collect_review_findings`` would never see file/line
+    # suggestions and the directive builder would be silent
+    # on actionable provider findings.
+    for provider_name in PROVIDERS:
+        try:
+            surfaces = collect_provider_surfaces(
+                provider_name,
+                AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                token or "",
+            )
+            snap["provider_surfaces"][provider_name] = surfaces
+            for inline in (
+                surfaces.get("review_comments", []) if isinstance(
+                    surfaces, dict,
+                ) else []
+            ):
+                snap["review_comments"].append(inline)
+        except Exception as exc:  # noqa: BLE001 - defensive
+            # Round-29 review: transient provider-API failures
+            # MUST be recorded (not silently swallowed) so the
+            # supervisor's retry path is observable.
+            log(
+                "warning",
+                "collect_provider_surfaces failed; "
+                "provider review unavailable",
+                provider=provider_name,
+                error=str(exc),
+            )
     all_threads: list[tuple[str, bool, bool]] = []
     cursor = None
     pagination_failed: bool = False
@@ -2041,19 +2088,36 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             c for c in snap["issue_comments"]
             if c.get("login") in bot_logins
         ]
-    # Round-29 P1#11 / P1#25: include the provider-authored
-    # inline review comments (the bodies the relay needs
-    # to build repair directives for file / line / patch
-    # suggestions). ``collect_provider_surfaces`` already
-    # fetches them; here we attach the bodies to the
-    # snapshot so the relay's ``_collect_review_findings``
-    # sees them. Without this step the relay would only
-    # see issue comments and never build directives for
-    # the actual findings on file/line.
-    snap.setdefault("review_comments", [])  # type: ignore[arg-type]
-    for provider, surfaces in snap.get("provider_surfaces", {}).items():  # type: ignore[union-attr]
-        for comment in surfaces.get("review_comments", []):
-            snap["review_comments"].append(comment)
+    # Round-29 review: ``provider_surfaces`` + ``review_comments``
+    # are populated ABOVE (right after the formal-reviews loop)
+    # via the actual ``collect_provider_surfaces`` call. The
+    # previous round's loop here was a no-op (read-only against
+    # an empty ``provider_surfaces`` dict). We keep a sanity
+    # check here so a future refactor that drops the upper
+    # population fails loudly rather than silently emitting an
+    # empty snapshot.
+    if not snap.get("provider_surfaces"):
+        log(
+            "warning",
+            "capture_live_snapshot: provider_surfaces is empty; "
+            "review_comments will be empty too",
+        )
+    # Deduplicate review_comments by ``id`` so the relay
+    # doesn't double-count when a provider surfaces the same
+    # comment across multiple paths.
+    seen_ids = set()
+    deduped_review_comments = []
+    for inline in snap.get("review_comments", []) or []:
+        if isinstance(inline, dict):
+            cid = inline.get("id")
+        else:
+            cid = None
+        if cid is not None and cid in seen_ids:
+            continue
+        if cid is not None:
+            seen_ids.add(cid)
+        deduped_review_comments.append(inline)
+    snap["review_comments"] = deduped_review_comments
     cr = safe_github_get(
         f"/repos/{REPO_OWNER}/{REPO_NAME}/commits/{snap['head_sha'] or ''}/check-runs",  # type: ignore[name-defined]
         token,
@@ -2857,16 +2921,37 @@ def handle_new_events(
         # drives the second transition (AWAITING_CI ->
         # QUALIFYING_READINESS) here so the qualification
         # is durable.
+        # Round-29 review P7: bind the cross-package
+        # imports at the top of the function body (before
+        # the try/except) so a failed import cannot turn
+        # into ``UnboundLocalError`` in the except clause.
+        # The previous round's code imported these inside
+        # the try body, which is unsafe when one of the
+        # imports fails. We keep them LAZY (not at module
+        # scope) so the supervisor's package import does
+        # not require ``autocoder_orchestration`` to be
+        # installed in the supervisor's venv.
         try:
             from autocoder_orchestration.controller import Controller
             from autocoder_orchestration.context import RunContext
             from autocoder_orchestration.store import (
                 StateStore, StateStoreError,
             )
-            from .orchestration_state_root import (
-                OrchestrationRootError,
-                resolve_orchestration_state_root,
+        except ImportError as exc:
+            log(
+                "warning",
+                "supervisor cannot import autocoder_orchestration; "
+                "qualifying-readiness persistence disabled",
+                error=str(exc),
             )
+            return
+        try:
+            # that pattern is unsafe when one of the imports
+            # fails because Python's name-binding for the
+            # except clause happens at function-scope, not
+            # try-scope. The imports are bound above (before
+            # the guarded execution path); the try body
+            # references the already-bound names.
             orch_state_root = resolve_orchestration_state_root(
                 run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
                 expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
@@ -2896,7 +2981,7 @@ def handle_new_events(
                             "still be in AWAITING_CI",
                             error=str(exc),
                         )
-        except (OSError, ImportError, OrchestrationRootError,
+        except (OSError, OrchestrationRootError,
                 StateStoreError, ValueError, KeyError) as exc:
             log(
                 "warning",

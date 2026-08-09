@@ -1474,17 +1474,14 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
             snapshot, head_sha=head_sha,
             repo=repo, pr_number=int(ctx.pr_number or 0),
         )
-    except (EscalateToHuman, RelayError) as e:
-        # Round-29: the canonical escalation signal is
-        # carried by the ``EscalateToHuman`` exception; the
-        # CLI surfaces it as a structured decision (NOT a
-        # non-zero exit) so the supervisor's wiring can
-        # convert it to a real ``escalate_to_human`` action.
-        # Returning a non-zero exit would force every
-        # supervisor caller to wrap the subprocess in a
-        # try/except; emitting the structured JSON decision
-        # keeps the wire contract symmetric with the
-        # non-escalation path.
+    except EscalateToHuman as e:
+        # Round-29 review: only ``EscalateToHuman`` carries
+        # the protected-authority escalation signal
+        # (EXIT_OK + structured ``escalate_to_human``
+        # decision). Generic ``RelayError`` is an internal
+        # failure that MUST NOT be misclassified as a
+        # human-authority escalation; the supervisor needs
+        # the non-zero exit to retry / recover.
         return _emit(
             {
                 "action": "escalate_to_human",
@@ -1493,6 +1490,21 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
             },
             json_mode=args.json,
             exit_code=EXIT_OK,
+        )
+    except RelayError as e:
+        # Generic ``RelayError`` is an internal /
+        # recoverable relay failure. Surface it with
+        # EXIT_INTERNAL semantics so the supervisor's
+        # retry / recover path can pick it up; do NOT
+        # misclassify it as a protected-authority
+        # escalation.
+        return _emit(
+            {
+                "error": f"{type(e).__name__}: {e}",
+                "action": "internal_error",
+            },
+            json_mode=args.json,
+            exit_code=EXIT_INTERNAL,
         )
     payload = decision.to_dict()
     # When the action is "launch_worker", also render the worker

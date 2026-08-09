@@ -1033,9 +1033,7 @@ _NON_FINDING_COMMENT_RE = re.compile(
     r"started review|"
     r"approved these changes|"
     r"left a comment|"
-    r"requested changes|"
-    r"p1\b.*review|"
-    r"p2\b.*review"
+    r"requested changes"
     r")\b[^\n]*$"  # Status markers are short single-line.
     , re.IGNORECASE
 )
@@ -1660,23 +1658,20 @@ def evaluate_round(
             f"snapshot head {snapshot_head!r} != requested head {head_sha!r}; "
             "stale snapshot rejected"
         )
-    # Round-29 P1#4: ``head_match`` MUST be present and True.
-    # ``False`` is an explicit mismatch (already rejected below).
-    # Missing entirely = unknown provenance = fail closed.
-    # The same positive-observation rule that applies to
-    # required CI checks applies here: absent evidence is
+    # Round-29 review P6: ``head_match`` MUST be
+    # exactly the literal ``True`` value. ``None``, ``0``,
+    # empty strings, ``"True"`` (string), or any other
+    # non-True value MUST fail closed. The exact-head
+    # evidence is a strict positive observation; absent
+    # evidence is not a pass, and partial evidence is
     # not a pass.
-    if "head_match" not in snapshot:
+    head_match = snapshot.get("head_match")
+    if head_match is not True:
         raise InvalidSnapshot(
-            "snapshot is missing head_match; the exact-head "
-            "guard cannot verify the head binding without "
-            "an explicit True/False marker. Absent evidence "
-            "is not a pass — re-capture the snapshot."
-        )
-    if snapshot.get("head_match") is False:
-        raise InvalidSnapshot(
-            f"snapshot head_match is False for requested head {head_sha!r}; "
-            "stale snapshot rejected"
+            f"snapshot head_match={head_match!r} is not exactly True; "
+            "the exact-head evidence is a strict positive observation. "
+            "None / 0 / string / missing values MUST fail closed. "
+            f"requested head: {head_sha!r}"
         )
     findings = collect_findings(
         snapshot,

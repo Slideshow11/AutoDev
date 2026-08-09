@@ -219,18 +219,21 @@ class TestReviewRepairRoundCLI:
                 "--snapshot-file", str(snap_file),
             ])
         payload = json.loads(buf.getvalue())
-        # Round-29: the CLI surfaces RelayError-driven halts
-        # as a structured ``action=escalate_to_human``
-        # decision (exit 0) so the supervisor's wiring can
-        # convert it to the canonical escalation signal
-        # rather than wrapping every subprocess in a
-        # try/except for non-zero exit codes.
-        assert rc == 0
-        assert payload["action"] == "escalate_to_human"
-        assert any(
-            "REPAIRING_REVIEW_FINDINGS" in r or "PLANNED" in r
-            for r in payload["escalate_reasons"]
-        )
+        # Round-29 review: only ``EscalateToHuman`` is
+        # mapped to ``action=escalate_to_human`` + EXIT_OK
+        # (protected-authority escalation). Generic
+        # ``RelayError`` (controller in wrong state, etc.)
+        # is now an internal / recoverable failure surfaced
+        # as ``action=internal_error`` + EXIT_INTERNAL so
+        # the supervisor's retry / recover path picks it up
+        # rather than misclassifying it as a human-authority
+        # escalation.
+        assert rc != 0
+        assert payload.get("action") == "internal_error"
+        assert "RelayError" in payload.get("error", "")
+        assert "REPAIRING_REVIEW_FINDINGS" in payload.get(
+            "error", ""
+        ) or "PLANNED" in payload.get("error", "")
 
     def test_status_reports_no_directive(self, tmp_path: Path) -> None:
         from autocoder_orchestration.context import make_run_context

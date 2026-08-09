@@ -7463,8 +7463,8 @@
       },
       {
         "destination_path": "autocoder_supervisor/supervisor.py",
-        "destination_sha256": "95ed0f67ec1a464c7de27482503d7e5ef4407c529e085cb6d9450baf48fbb77a",
-        "destination_size_bytes": 121996,
+        "destination_sha256": "e886f35011a3a140dd384803931f9ab00e596954655b53d0989eb07d6e59759c",
+        "destination_size_bytes": 125624,
         "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
         "source_size_bytes": 86428,
@@ -7723,8 +7723,8 @@
       },
       {
         "destination_path": "autocoder_orchestration/cli.py",
-        "destination_sha256": "bf483dc5623ce2af0416b46600beb1accfb01900ee3acc9c87c3e236161d1521",
-        "destination_size_bytes": 67250,
+        "destination_sha256": "cbf8492327bcba6ed453b0d9d9307334cfcd808c6f7e5231c2d017b9d8d726f8",
+        "destination_size_bytes": 67617,
         "source_path": null,
         "source_sha256": null,
         "source_size_bytes": null,
@@ -7803,8 +7803,8 @@
       },
       {
         "destination_path": "autocoder_supervisor/relay_wiring.py",
-        "destination_sha256": "0164b46a697945933f8d1e4351ef9888993b4d491c2a97d50bb9d56347cad1a3",
-        "destination_size_bytes": 16653,
+        "destination_sha256": "27d1cbd7c8b87b8b3a11a6974ecb57c7204ab54d98f213410f633620c3d463d3",
+        "destination_size_bytes": 19440,
         "source_path": null,
         "source_sha256": null,
         "source_size_bytes": null,
@@ -7813,8 +7813,8 @@
       },
       {
         "destination_path": "tests/test_relay_wiring_production_path.py",
-        "destination_sha256": "dfec0922d54d63199eac83726e32262cf09c45b7d757c3470765dc8b7009994c",
-        "destination_size_bytes": 15779,
+        "destination_sha256": "939d2c03f9968e9d083272856a1048f7dd14036bf81b8e1de15c67c96f35b7b4",
+        "destination_size_bytes": 15727,
         "source_path": null,
         "source_sha256": null,
         "source_size_bytes": null,

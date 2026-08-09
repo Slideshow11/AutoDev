@@ -155,14 +155,33 @@ def test_supervisor_init_does_not_silently_substitute_state_dir(
 
 def test_evidence_root_helpers(monkeypatch, tmp_path) -> None:
     """The evidence-root helper pairs with the state-root
-    resolver: explicit ``AED_EVIDENCE_ROOT`` wins; otherwise it
-    reads ``RUN_STATE['orchestration_evidence_root']``; finally
-    it derives ``<state_root>/evidence``.
+    resolver: explicit ``AED_EVIDENCE_ROOT`` wins; otherwise the
+    orch state root is resolved positively and the evidence
+    root is read from ``run_state['orchestration_evidence_root']``
+    or derived from ``<orch_state_root>/evidence``.
     """
     from autocoder_supervisor import relay_wiring
     from autocoder_supervisor import supervisor
     run_state = tmp_path / "run_state.json"
-    run_state.write_text(json.dumps({}))
+    # Round-29 review: the evidence-root helper now resolves
+    # the orch state root FIRST (positively) before deriving
+    # the evidence root. The test fixture therefore provides a
+    # canonical orch state root + ``run_context.json`` so the
+    # resolution succeeds.
+    orch_root = tmp_path / "orch_state"
+    orch_root.mkdir()
+    (orch_root / "run_context.json").write_text(json.dumps({
+        "schema_version": "autocoder.run_context.v1",
+        "run_id": "isolated", "repo_owner": "owner/repo",
+        "pr_number": 4, "current_authorized_head": "a" * 40,
+    }))
+    (orch_root / "state.json").write_text(json.dumps({
+        "schema_version": "autocoder.state_machine.v1",
+        "current_state": "REPAIRING_REVIEW_FINDINGS",
+    }))
+    run_state.write_text(json.dumps({
+        "orchestration_state_root": str(orch_root),
+    }))
     monkeypatch.setattr(supervisor, "RUN_STATE", run_state, raising=False)
     monkeypatch.setattr(relay_wiring, "RUN_STATE", run_state, raising=False)
 
@@ -174,14 +193,18 @@ def test_evidence_root_helpers(monkeypatch, tmp_path) -> None:
 
     # Otherwise read RUN_STATE
     monkeypatch.delenv("AED_EVIDENCE_ROOT", raising=False)
-    run_state.write_text(
-        json.dumps({"orchestration_evidence_root": "/from/run/evidence"})
-    )
+    run_state.write_text(json.dumps({
+        "orchestration_state_root": str(orch_root),
+        "orchestration_evidence_root": "/from/run/evidence",
+    }))
     assert _resolve_orchestration_evidence_root("/any/state") == "/from/run/evidence"
 
-    # Otherwise derive from state_root
-    run_state.write_text(json.dumps({}))
-    assert _resolve_orchestration_evidence_root("/any/state") == "/any/state/evidence"
+    # Otherwise derive from orch_state_root/evidence.
+    run_state.write_text(json.dumps({
+        "orchestration_state_root": str(orch_root),
+    }))
+    expected = str(Path(orch_root) / "evidence")
+    assert _resolve_orchestration_evidence_root("/any/state") == expected
 
 
 def test_resolver_used_by_both_callers(monkeypatch, tmp_path) -> None:

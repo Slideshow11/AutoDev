@@ -297,28 +297,29 @@ class TestInvokeRelayRoundProductionPath:
         self, tmp_path: Path,
     ) -> None:
         """A snapshot whose head_sha differs from the
-        requested head is rejected; the CLI surfaces this as
-        a structured ``action == escalate_to_human``
-        decision with populated ``escalate_reasons``.
-        ``InvalidSnapshot`` is a failure that halts the run
-        (the controller cannot bind to an unknown head), so
-        the relay marks the round as ``escalate_to_human``.
+        requested head is rejected; the wiring re-raises
+        ``InvalidSnapshot`` so the supervisor's retry /
+        recover path surfaces the exact-head binding
+        failure rather than treating it as an internal
+        error.
         """
+        from autocoder_orchestration.review_repair_relay import (
+            InvalidSnapshot as _InvalidSnapshot,
+        )
         head_sha = "a" * 40
         stale_head = "b" * 40
         state_root, evidence_root = self._init(tmp_path, head_sha)
         snapshot = _snapshot_clean(stale_head)
-        decision = invoke_relay_round(
-            snapshot=snapshot,
-            head_sha=head_sha,
-            state_root=str(state_root),
-            run_id="r1",
-            pr_number=4,
-            evidence_root=str(evidence_root),
-            required_check_names=(),
-        )
-        assert decision["action"] == "escalate_to_human"
-        assert any("stale" in r.lower() for r in decision["escalate_reasons"])
+        with pytest.raises(_InvalidSnapshot):
+            invoke_relay_round(
+                snapshot=snapshot,
+                head_sha=head_sha,
+                state_root=str(state_root),
+                run_id="r1",
+                pr_number=4,
+                evidence_root=str(evidence_root),
+                required_check_names=(),
+            )
 
 
 class TestInvokeRelayRoundArgvShape:

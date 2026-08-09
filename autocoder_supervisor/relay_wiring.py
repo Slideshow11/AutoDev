@@ -178,9 +178,9 @@ def invoke_relay_round(
         ) from exc
     if proc.returncode != 0:
         # Round-29: the CLI exits non-zero when the relay
-        # raises ``RelayError``, ``InvalidSnapshot``, or
-        # ``DirectiveContractError``. The CLI emits a JSON
-        # payload with ``{"error": "<ClassName>: ..."}``.
+        # raises ``RelayError`` or ``InvalidSnapshot``.
+        # The CLI emits a JSON payload with
+        # ``{"error": "<ClassName>: ..."}``.
         # We MUST re-raise the original exception class so the
         # supervisor surfaces the failure rather than
         # silently treating it as a wiring error.
@@ -194,22 +194,30 @@ def invoke_relay_round(
             payload = None
         if isinstance(payload, dict):
             error_str = payload.get("error") or ""
-            for cls_name in (
-                "RelayError",
-                "InvalidSnapshot",
-                "DirectiveContractError",
-                "MergeAuthorizationError",
-            ):
-                if error_str.startswith(f"{cls_name}:"):
-                    mod = __import__(
-                        "autocoder_orchestration.review_repair_relay",
-                        fromlist=[cls_name],
-                    )
-                    cls = getattr(mod, cls_name, None)
-                    if cls is not None:
-                        raise cls(
-                            error_str.split(":", 1)[1].strip()
+            # Round-29 review P4: only ``EscalateToHuman``
+            # carries the protected-authority escalation
+            # signal (EXIT_OK + structured decision). Other
+            # ``RelayError`` subclasses are internal /
+            # recoverable failures; re-raise them as the
+            # actual class so the supervisor's retry path
+            # picks them up.
+            if not error_str.startswith("EscalateToHuman:"):
+                for cls_name in (
+                    "RelayError",
+                    "InvalidSnapshot",
+                    "DirectiveContractError",
+                    "MergeAuthorizationError",
+                ):
+                    if error_str.startswith(f"{cls_name}:"):
+                        mod = __import__(
+                            "autocoder_orchestration.review_repair_relay",
+                            fromlist=[cls_name],
                         )
+                        cls = getattr(mod, cls_name, None)
+                        if cls is not None:
+                            raise cls(
+                                error_str.split(":", 1)[1].strip()
+                            )
         raise RelayWiringError(
             "non_zero_exit", returncode=proc.returncode,
             stdout=proc.stdout, stderr=proc.stderr,
@@ -262,7 +270,19 @@ def should_invoke_relay(snapshot: dict) -> bool:
                 and comments
             ):
                 for comment in comments:
-                    if _is_actionable_provider_comment(comment):
+                    # Round-29 review: ``_is_actionable_provider_comment``
+                    # expects a body string, not a comment
+                    # dictionary. ``capture_live_snapshot``
+                    # builds comment dicts with ``login`` and
+                    # ``body`` keys; we MUST extract the
+                    # body string here so the actionability
+                    # check does not raise ``AttributeError``
+                    # on a real-world snapshot.
+                    if isinstance(comment, dict):
+                        body = str(comment.get("body") or "")
+                    else:
+                        body = str(comment or "")
+                    if _is_actionable_provider_comment(body):
                         has_actionable_provider_comment = True
                         break
             if has_actionable_provider_comment:
@@ -312,21 +332,60 @@ def _resolve_orchestration_state_root() -> Optional[str]:
 
 def _resolve_orchestration_evidence_root(state_root: Optional[str]) -> str:
     """Return the orchestration's evidence_root, paired with the
-    state-root resolver above. Falls back to ``<state_root>/evidence``
-    when no explicit ``orchestration_evidence_root`` is recorded.
+    state-root resolver above.
+
+    Round-29 review: positively resolve the orchestration
+    state root FIRST (via the canonical
+    ``resolve_orchestration_state_root`` resolver), then
+    derive the evidence root from that concrete root. A
+    default deployment with no ``AED_EVIDENCE_ROOT`` env
+    var MUST still locate the relay-written directive
+    file because the orch state root records the evidence
+    root at handoff time. Falling back to
+    ``<state_root>/evidence`` without orch-state-root
+    resolution would silently route to a stale / empty
+    directory for any deployment that did not set
+    ``AED_EVIDENCE_ROOT`` explicitly.
     """
     explicit = os.environ.get("AED_EVIDENCE_ROOT")
     if explicit:
         return explicit
+    # Round-29: positively resolve the orch state root
+    # before deriving the evidence root. The orch state
+    # root records the evidence root at handoff time, so
+    # this is the canonical path.
+    try:
+        from .supervisor import RUN_STATE
+        from .orchestration_state_root import (
+            OrchestrationRootError,
+            resolve_orchestration_state_root,
+        )
+        orch_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),
+        )
+        if orch_root:
+            orch_root_path = Path(orch_root)
+            # The orch state root layout puts evidence in
+            # ``<orch_state_root>/evidence`` by default;
+            # but a recorded ``orchestration_evidence_root``
+            # in run_state.json takes precedence.
+            try:
+                run_state = json.loads(RUN_STATE.read_text())
+                recorded = run_state.get(
+                    "orchestration_evidence_root",
+                )
+                if recorded:
+                    return str(recorded)
+            except (OSError, json.JSONDecodeError):
+                pass
+            return str(orch_root_path / "evidence")
+    except (ImportError, OrchestrationRootError):
+        # Orch state root cannot be resolved. Fall back
+        # to ``<state_root>/evidence`` for back-compat,
+        # but record a warning so the supervisor's retry
+        # path is observable.
+        pass
     if state_root:
-        try:
-            from .supervisor import RUN_STATE
-            run_state = json.loads(RUN_STATE.read_text())
-            recorded = run_state.get("orchestration_evidence_root")
-            if recorded:
-                return recorded
-        except (OSError, json.JSONDecodeError):
-            pass
         return os.path.join(state_root, "evidence")
     return ""
 
