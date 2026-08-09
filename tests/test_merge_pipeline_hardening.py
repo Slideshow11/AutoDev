@@ -1699,10 +1699,51 @@ class EndToEndFlowTests(unittest.TestCase):
         write_artifact(ver_path, verifier_payload)
         rec_path = self.evidence / "merge-record.json"
 
-        # Mock the subprocess to "succeed" and reconciliation to be a no-op.
+        # Mock the subprocess to "succeed". The first call is
+        # the gh pr merge command (empty stdout). The second
+        # is the gh pr view --json mergeCommit query (returns
+        # the OID). The third is the fetch_live_pr_payload
+        # re-query (returns merged=true).
+        call_count = {"count": 0}
+        def fake_safe_run(cmd, **kwargs):
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                return {
+                    "returncode": 0, "stdout": "",
+                    "stderr": "", "timed_out": False,
+                }
+            elif call_count["count"] == 2:
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps({
+                        "mergeCommit": {"oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+                    }),
+                    "stderr": "", "timed_out": False,
+                }
+            elif call_count["count"] == 3:
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps({
+                        "mergedAt": "2026-08-08T00:00:00Z",
+                        "state": "merged",
+                        "isDraft": False,
+                        "mergeable": "MERGEABLE",
+                        "mergeStateStatus": "CLEAN",
+                        "headRefOid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+                        "baseRefName": "main",
+                        "autoMergeRequest": None,
+                        "number": 3,
+                    }),
+                    "stderr": "", "timed_out": False,
+                }
+            else:
+                return {
+                    "returncode": 0, "stdout": "",
+                    "stderr": "", "timed_out": False,
+                }
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            return_value={"returncode": 0, "stdout": "", "stderr": "", "timed_out": False},
+            side_effect=fake_safe_run,
         ):
             with mock.patch(
                 "autocoder_orchestration.merge_authorization.reconcile_after_merge",
@@ -1954,13 +1995,58 @@ class HardeningRepairTests(unittest.TestCase):
         """C-28: a failed reconciliation still writes the merge record."""
         paths = self._build_artifacts()
         inputs = self._inputs(paths)
+        # Mock _safe_run to return rc=0 with a valid
+        # mergeCommit OID. The first call is the gh pr merge
+        # (empty stdout); the second is the gh pr view
+        # --json mergeCommit (returns the OID); the third is
+        # the fetch_live_pr_payload (returns merged=true).
+        call_count = {"count": 0}
+        def fake_safe_run(cmd, **kwargs):
+            call_count["count"] += 1
+            if call_count["count"] == 1:
+                # gh pr merge
+                return {
+                    "returncode": 0, "stdout": "",
+                    "stderr": "", "timed_out": False,
+                }
+            elif call_count["count"] == 2:
+                # gh pr view --json mergeCommit
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps({
+                        "mergeCommit": {"oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+                    }),
+                    "stderr": "", "timed_out": False,
+                }
+            elif call_count["count"] == 3:
+                # fetch_live_pr_payload
+                return {
+                    "returncode": 0,
+                    "stdout": json.dumps({
+                        "mergedAt": "2026-08-08T00:00:00Z",
+                        "state": "merged",
+                        "isDraft": False,
+                        "mergeable": "MERGEABLE",
+                        "mergeStateStatus": "CLEAN",
+                        "headRefOid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+                        "baseRefName": "main",
+                        "autoMergeRequest": None,
+                        "number": 3,
+                    }),
+                    "stderr": "", "timed_out": False,
+                }
+            else:
+                return {
+                    "returncode": 0, "stdout": "",
+                    "stderr": "", "timed_out": False,
+                }
         # Mock the merge subprocess to succeed, but make the
         # reconciliation fail by stubbing it to raise.
         def fake_reconcile(**kwargs):
             raise MergeError("simulated reconciliation failure")
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            return_value={"returncode": 0, "stdout": "", "stderr": "", "timed_out": False},
+            side_effect=fake_safe_run,
         ):
             with mock.patch(
                 "autocoder_orchestration.merge_authorization.reconcile_after_merge",

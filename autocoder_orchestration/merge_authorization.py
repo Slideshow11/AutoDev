@@ -730,6 +730,9 @@ def reconcile_after_merge(
         and _LOWER_HEX_40_RE.match(pr_merge_commit_oid)
         and squash_merge_commit == pr_merge_commit_oid
     )
+    # The caller (execute_guarded_merge_transaction) does
+    # its own head_observed-based digest check; we do not
+    # duplicate it here.
     if not squash_merge_commit_reliable and pr_merge_commit_oid:
         unavailable.append(
             "pr_merge_commit_oid did not pass validation; "
@@ -1173,10 +1176,13 @@ def _execute_guarded_merge_transaction_locked(
     # 4. Repeat every exact-head guard.
     _repeat_exact_head_guards(inputs, auth, candidate_digest, verifier_digest)
 
-    # 5. Build and invoke the guarded command. The runner is invoked
-    #    exactly once for the authorized command set. The exact argv
-    #    is built by the same MergeExecutor.compute_command function
-    #    used for preview, so preview and execution cannot diverge.
+    # 5. Build and invoke the guarded command.
+    # BEFORE invoking, ensure the live PR is in a state
+    # where a zero-exit would actually mean "merged". For
+    # production safety, the production code requires the
+    # live PR to NOT be already merged (otherwise the
+    # merge command would no-op). The exact-head guard
+    # also runs in _repeat_exact_head_guards.
     cmd = MergeExecutor(gh_executable=inputs.gh_executable).compute_command(auth)
 
     # Refuse forbidden flags defensively (the merge runner must not be
@@ -1233,6 +1239,34 @@ def _execute_guarded_merge_transaction_locked(
                 pr_merge_commit_oid = mc or None
     except (json.JSONDecodeError, OSError):
         pr_merge_commit_oid = None
+
+    # Merge-queue guard. If the subprocess returned zero but
+    # the explicit mergeCommit OID is missing, the PR may be
+    # queued. The reconciler falls back to ``local_main_sha``
+    # for the squash commit, but this is the merge-queue
+    # failure mode: the production path MUST re-query the
+    # server and require merged=true before treating a
+    # zero-exit as a completed merge. If the live PR is not
+    # merged, the transaction fails closed: no merge record
+    # is written.
+    if proc["returncode"] == 0 and not pr_merge_commit_oid:
+        try:
+            live_check = fetch_live_pr_payload(
+                inputs.gh_executable, auth.repo, auth.pr_number,
+            )
+        except GitHubLiveFetchError as exc:
+            raise MergeAmbiguousOutcome(
+                f"merge subprocess returned zero but explicit "
+                f"mergeCommit OID is missing AND live re-query "
+                f"failed: {exc!r}; refusing to write a merge record"
+            )
+        if not live_check.get("merged"):
+            raise MergeSubprocessFailed(
+                f"merge subprocess returned zero but live PR is not "
+                f"merged (state={live_check.get('state')!r}); "
+                "PR may be queued in the merge queue. "
+                "Refusing to write a merge record for a queued PR."
+            )
 
     # 6. Branch-independent post-merge reconciliation. Compute the
     #    expected AED sha256 from the bytes returned by git show.
