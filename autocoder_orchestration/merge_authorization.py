@@ -278,9 +278,15 @@ class MergeRecord:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "MergeRecord":
-        schema_version = str(
-            payload.get("schema_version", "autocoder.merge_record.v2")
-        )
+        # Require an explicit schema_version. Defaulting a missing
+        # schema_version to a supported value would let a legacy /
+        # malformed merge record appear as a valid v2 record.
+        if "schema_version" not in payload:
+            raise MergeAuthorizationMalformed(
+                "merge record is missing required key 'schema_version'; "
+                "explicit schema identification is required"
+            )
+        schema_version = str(payload["schema_version"])
         if schema_version not in SUPPORTED_MERGE_RECORD_SCHEMAS:
             # Reject unknown or legacy schema versions rather than
             # coercing them to v2 defaults. A consumer cannot otherwise
@@ -291,6 +297,24 @@ class MergeRecord:
                 f"unsupported merge record schema_version {schema_version!r}; "
                 f"supported: {list(SUPPORTED_MERGE_RECORD_SCHEMAS)}"
             )
+
+        # Each Boolean status field must be a real bool. Coercing
+        # through bool() silently accepts strings (e.g. "false" ->
+        # True), integers, and None -- a malformed merge record would
+        # then appear as a verified observation.
+        def _strict_bool(field_name: str) -> bool:
+            if field_name not in payload:
+                raise MergeAuthorizationMalformed(
+                    f"merge record is missing required key {field_name!r}"
+                )
+            value = payload[field_name]
+            if type(value) is not bool:
+                raise MergeAuthorizationMalformed(
+                    f"merge record key {field_name!r} must be a bool, "
+                    f"got {type(value).__name__}"
+                )
+            return value
+
         return cls(
             schema_version=schema_version,
             run_id=str(payload.get("run_id", "")),
@@ -303,13 +327,13 @@ class MergeRecord:
             squash_tree_sha256=str(payload.get("squash_tree_sha256", "")),
             final_local_main_sha=str(payload.get("final_local_main_sha", "")),
             final_origin_main_sha=str(payload.get("final_origin_main_sha", "")),
-            local_main_equals_origin_main=bool(payload.get("local_main_equals_origin_main", False)),
-            feature_branch_deleted_locally=bool(payload.get("feature_branch_deleted_locally", False)),
-            feature_branch_deleted_remotely=bool(payload.get("feature_branch_deleted_remotely", False)),
-            working_tree_clean=bool(payload.get("working_tree_clean", False)),
-            aed_clean_post_merge=bool(payload.get("aed_clean_post_merge", False)),
-            candidate_sha256_unchanged=bool(payload.get("candidate_sha256_unchanged", False)),
-            verifier_record_sha256_unchanged=bool(payload.get("verifier_record_sha256_unchanged", False)),
+            local_main_equals_origin_main=_strict_bool("local_main_equals_origin_main"),
+            feature_branch_deleted_locally=_strict_bool("feature_branch_deleted_locally"),
+            feature_branch_deleted_remotely=_strict_bool("feature_branch_deleted_remotely"),
+            working_tree_clean=_strict_bool("working_tree_clean"),
+            aed_clean_post_merge=_strict_bool("aed_clean_post_merge"),
+            candidate_sha256_unchanged=_strict_bool("candidate_sha256_unchanged"),
+            verifier_record_sha256_unchanged=_strict_bool("verifier_record_sha256_unchanged"),
             candidate_exact_file_digest=str(payload.get("candidate_exact_file_digest", "")),
             verifier_record_exact_file_digest=str(payload.get("verifier_record_exact_file_digest", "")),
             authorization_exact_file_digest=str(payload.get("authorization_exact_file_digest", "")),
@@ -1255,7 +1279,10 @@ def _execute_guarded_merge_transaction_locked(
     # server and require merged=true before treating a
     # zero-exit as a completed merge. If the live PR is not
     # merged, the transaction fails closed: no merge record
-    # is written.
+    # is written. If the live PR is merged but the explicit
+    # mergeCommit OID is still absent, the transaction is
+    # ambiguous: the reconciler MUST NOT proceed to a
+    # successful merge without exact merge identity.
     if proc["returncode"] == 0 and not pr_merge_commit_oid:
         try:
             live_check = fetch_live_pr_payload(
@@ -1273,6 +1300,26 @@ def _execute_guarded_merge_transaction_locked(
                 f"merged (state={live_check.get('state')!r}); "
                 "PR may be queued in the merge queue. "
                 "Refusing to write a merge record for a queued PR."
+            )
+        # Live PR IS merged but explicit mergeCommit OID is still
+        # missing. Reconciliation would otherwise fall back to
+        # local_main_sha and silently complete the transaction
+        # without server-reported merge identity. That is exactly
+        # the failure mode C-28 forbids: a successful merge without
+        # the durable server-reported mergeCommit OID. Persist the
+        # partial evidence and raise.
+        live_merge_commit = (
+            live_check.get("mergeCommit") or live_check.get("mergeCommit", {}).get("oid")
+            if isinstance(live_check.get("mergeCommit"), dict)
+            else live_check.get("mergeCommit")
+        )
+        if not live_merge_commit:
+            raise MergeAmbiguousOutcome(
+                "merge subprocess returned zero and live re-query shows "
+                "merged=true but the server-reported mergeCommit OID is "
+                "still unavailable; refusing to reconcile against "
+                "local_main_sha. The operator must re-fetch the mergeCommit "
+                "before retrying."
             )
 
     # 6. Branch-independent post-merge reconciliation. Compute the
