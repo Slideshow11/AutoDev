@@ -679,8 +679,11 @@ class TestSnapshotHeadBinding:
     """
 
     def test_snapshot_head_mismatch_raises(self) -> None:
+        # Isolate the head_sha mismatch failure mode.
+        # The snapshot's head_sha differs from the requested
+        # head; head_match is True. The relay MUST refuse.
         snap = _make_snapshot(
-            head_sha="a" * 40, head_match=False,
+            head_sha="a" * 40, head_match=True,
         )
         with pytest.raises(InvalidSnapshot):
             evaluate_round(
@@ -692,8 +695,9 @@ class TestSnapshotHeadBinding:
             )
 
     def test_snapshot_head_match_false_raises(self) -> None:
-        # Snapshot's head_sha matches but head_match is False;
-        # the relay must still refuse.
+        # Isolate the head_match=False failure mode.
+        # The snapshot's head_sha matches but head_match is
+        # False; the relay MUST also refuse.
         snap = _make_snapshot(
             head_sha="a" * 40, head_match=False,
         )
