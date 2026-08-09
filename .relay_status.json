@@ -1,10 +1,10 @@
 {
-  "current_head": "0d872b4f",
-  "head_short": "0d872b4",
-  "test_count": 781,
+  "current_head": "becd3a39",
+  "head_short": "becd3a3",
+  "test_count": 783,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
-  "review_decision_basis": "older commits; latest formal reviews are on 0d872b4 (CodeRabbit CHANGES_REQUESTED, round-19 at 2026-08-09T05:42:38Z) and 0d872b4 (Codex COMMENTED, round-22 at 2026-08-09T06:23:14Z); round-26 P1s addressed with executable proof; awaiting fresh CodeRabbit/Codex reviews on the new commits",
+  "review_decision_basis": "CodeRabbit's most recent review (2026-08-09T13:57:36Z) is on commit 8a5904b (pre-round-26) — the round-26 push (becd3a3) has NOT yet received fresh CodeRabbit/Codex evidence. Awaiting fresh reviews on becd3a3.",
   "rounds_pushed": 26,
   "round_4_critical_defects_addressed": [
     "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
@@ -107,7 +107,8 @@
     }
   ],
   "pending_round_27_candidates": [
-    "Continue refreshing Codex/CodeRabbit reviews after commit; await the next round of findings on the round-26 head.",
-    "Reconcile main into the feature branch AFTER round-26 is committed and fresh reviews are clean (governed non-force-push path)."
+    "Continue refreshing Codex/CodeRabbit reviews after commit; await the next round of findings on the round-26 head (becd3a3).",
+    "Reconcile main into the feature branch AFTER fresh reviews on becd3a3 are clean (governed non-force-push path). Conflicts expected in: autocoder_orchestration/merge_lock.py, provenance/AUTOCODER_SOURCE_COMPLETENESS.json, provenance/aed-pr417-source-manifest.json, tests/test_merge_pipeline_hardening.py, tests/test_pr4_round6_d0_fixture.py.",
+    "Provenance manifest hash for tests/test_merge_queued_pr_fails_closed.py was synced in this round (it had drifted after the round-25 refetch-stub changes)."
   ]
 }
