@@ -499,11 +499,17 @@ class TestSupervisorConsultsBridge:
         assert "owner/repo" in joined
         assert "REPAIR DIRECTIVE" in joined
 
-    def test_launch_worker_falls_back_on_directive_failure(
+    def test_launch_worker_refuses_on_directive_failure(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A malformed directive logs the failure and falls back
-        to the operator-supplied resume_prompt_template.
+        """A malformed directive is a CRITICAL integrity
+        failure. The supervisor MUST NOT silently fall
+        back to the operator-supplied resume_prompt_template
+        — a stale or corrupt directive could push a wrong
+        repair. The supervisor MUST refuse to launch the
+        worker (lease is None) and delete the corrupt
+        directive so the next round regenerates a clean
+        one.
         """
         from autocoder_supervisor import supervisor as sup
         monkeypatch.setattr(
@@ -535,16 +541,17 @@ class TestSupervisorConsultsBridge:
         lease = sup.launch_worker(
             {"current_head": "a" * 40}, {"snapshot": {}},
         )
-        assert lease is not None
-        # The fallback path was used; the directive content is not
-        # in the command.
-        joined = " ".join(captured_cmd)
-        assert "abc-123" not in joined
-        assert "REPAIR DIRECTIVE" not in joined
-        # The fallback is the operator-supplied resume prompt
-        # template. The default template mentions "AED-AUTOCODER"
-        # so the assertion below confirms the fallback path.
-        assert "AED-AUTOCODER" in joined or "RESUME" in joined
+        # The launch was REFUSED. No lease was created.
+        assert lease is None
+        # The corrupt directive was DELETED so the next round
+        # regenerates a clean one.
+        assert not target.exists(), (
+            f"corrupt directive at {target} MUST be deleted"
+        )
+        # No subprocess was spawned (Popen was not called).
+        assert captured_cmd == [], (
+            "no subprocess MUST be spawned for a corrupt directive"
+        )
 
 
 

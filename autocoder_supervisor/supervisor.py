@@ -957,17 +957,42 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         resolved_directive = resolve_directive(expected_head=expected_head)
     except DirectiveLoadFailure as exc:
         # The directive is malformed (digest mismatch,
-        # head_mismatch, schema-invalid, etc.). Log the
-        # structured failure mode and fall back to the
-        # operator-supplied resume prompt. The supervisor
-        # NEVER crashes on a bad directive; the operator can
-        # inspect the supervisor log.
+        # head_mismatch, schema-invalid, etc.). This is a
+        # CRITICAL integrity failure: the publish-side
+        # artifact does not match the consume-side
+        # contract. The supervisor MUST NOT silently fall
+        # back to the operator-supplied resume prompt —
+        # a stale or corrupt directive could push a wrong
+        # repair. Log an explicit integrity error,
+        # delete the corrupt directive, and return None
+        # so the launch is aborted. The operator MUST
+        # inspect the supervisor log and the directive
+        # artifact.
         log(
-            "warning",
-            "directive_bridge rejected directive; falling back to resume_prompt_template",
+            "error",
+            "directive_bridge rejected directive; refusing to launch worker",
             reason=exc.reason,
             path=str(exc.path) if exc.path else "",
+            severity="critical_integrity",
         )
+        # Delete the corrupt directive so the next round
+        # regenerates a clean one.
+        if exc.path:
+            try:
+                Path(str(exc.path)).unlink()
+                log(
+                    "warning",
+                    "deleted corrupt directive; relay will regenerate next round",
+                    path=str(exc.path),
+                )
+            except OSError as unlink_exc:
+                log(
+                    "warning",
+                    "could not delete corrupt directive",
+                    path=str(exc.path),
+                    error=str(unlink_exc),
+                )
+        return None
     if resolved_directive is not None:
         directive_prompt = resolved_directive.prompt
         log(
@@ -2323,6 +2348,14 @@ def active_repair_quiet_window(
     controller_blocked = False
     while True:
         _time.sleep(min(2, quiet_window))
+        # Touch the heartbeat so the liveness file is
+        # refreshed during the quiet-window polling. The
+        # polling is short (max 2s per iteration) so the
+        # heartbeat is never blocked.
+        try:
+            heartbeat_touch()
+        except (OSError, NameError):
+            pass
         # Controller BLOCKED check at every heartbeat so
         # an escalation mid-window halts the transition.
         if _time.monotonic() - last_blocked_check_at > 1.0:

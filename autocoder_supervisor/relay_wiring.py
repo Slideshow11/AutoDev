@@ -211,7 +211,6 @@ def should_invoke_relay(snapshot: dict) -> bool:
     # The supervisor's snapshot shape carries per-provider
     # issue comments and required checks. The relay's
     # ``collect_findings`` is the canonical classifier.
-    issue_comments = snapshot.get("issue_comments") or []
     per_provider = snapshot.get("_provider_issue_comments") or {}
     required_checks = snapshot.get("required_checks") or {}
     if per_provider:
@@ -222,19 +221,21 @@ def should_invoke_relay(snapshot: dict) -> bool:
                 and comments
             ):
                 return True
-    if issue_comments:
-        return True
     # CI failures — any required check concluded failure.
+    # The relay's CI filter is stricter than this trigger
+    # (it requires the conclusion to be on the current
+    # head); the supervisor's trigger is the existence of
+    # a failure on the current head.
     if isinstance(required_checks, dict):
         for info in required_checks.values():
             if isinstance(info, dict):
                 conclusion = str(info.get("conclusion") or "").lower()
                 if conclusion in ("failure", "failed"):
-                    # The relay's CI filter has a stricter
-                    # definition; the supervisor's trigger
-                    # is the existence of a failure on the
-                    # current head.
                     return True
+    # Human-authored issue_comments do NOT trigger the
+    # relay. The relay classifies provider-authored inline
+    # comments (coderabbit/codex); human comments must be
+    # routed to the existing review-request machinery.
     return False
 
 
@@ -258,9 +259,24 @@ def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
     from autocoder_orchestration.store import StateStore
     state_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
     if not state_root:
-        state_root = str(
-            os.environ.get("AED_STATE_DIR", "/tmp/aed-supervisor-state"),
-        )
+        # Do NOT default to a shared /tmp path. The shared
+        # path is unsafe (cross-tenant collisions). The
+        # operator MUST configure AED_ORCHESTRATION_STATE_ROOT
+        # explicitly, or the supervisor MUST wire the
+        # orchestration state_root into the supervisor's
+        # run_state.json (orchestration_state_root field).
+        try:
+            from .supervisor import RUN_STATE, supervisor_module_globals
+            supervisor_module_globals()
+            run_state = json.loads(RUN_STATE.read_text())
+            state_root = run_state.get("orchestration_state_root")
+        except (OSError, json.JSONDecodeError, KeyError):
+            state_root = None
+        if not state_root:
+            # No explicit configuration. Mark head_advanced
+            # as a no-op. The operator must configure the
+            # orchestration state root.
+            return
     evidence_root = os.environ.get("AED_EVIDENCE_ROOT")
     if not evidence_root:
         evidence_root = os.path.join(state_root, "evidence")
