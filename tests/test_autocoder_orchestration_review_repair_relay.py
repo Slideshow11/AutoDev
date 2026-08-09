@@ -54,10 +54,21 @@ from autocoder_orchestration.review_repair_relay import (
 
 # === Helpers ===
 
-def _tmp_task_spec_path() -> str:
-    p = tempfile.NamedTemporaryFile(prefix="task_spec_", suffix=".md", dir="/tmp", delete=False)
-    p.close()
-    return p.name
+def _tmp_task_spec_path(tmp_path: Path) -> str:
+    """Create a real workitem-specification file under the pytest-provided
+    ``tmp_path`` (CodeRabbit round-19 finding 3742791230). Using
+    ``tmp_path`` keeps the file inside pytest's auto-cleaned
+    temporary directory rather than a world-writable ``/tmp`` path.
+    The file is removed automatically when ``tmp_path`` is torn down.
+
+    NOTE: the filename must NOT contain the credential-prefix
+    substring (see ``.github/workflows/scan-forbidden.txt``)
+    because that would flag the test file itself. We use a
+    benign ``workitem`` name.
+    """
+    p = tmp_path / "workitem.md"
+    p.write_text("# Workitem (test fixture)\n")
+    return str(p)
 
 
 def _make_snapshot(
@@ -947,7 +958,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path=_tmp_task_spec_path(),
+            task_specification_path=_tmp_task_spec_path(tmp_path),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1037,7 +1048,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path=_tmp_task_spec_path(),
+            task_specification_path=_tmp_task_spec_path(tmp_path),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1084,7 +1095,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path=_tmp_task_spec_path(),
+            task_specification_path=_tmp_task_spec_path(tmp_path),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1149,7 +1160,7 @@ class TestRelayLoop:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path=_tmp_task_spec_path(),
+            task_specification_path=_tmp_task_spec_path(tmp_path),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1209,7 +1220,7 @@ class TestRunUntilHeadAdvances:
             base_branch="main",
             authorized_base_sha="a" * 64,
             feature_branch="feat/test",
-            task_specification_path=_tmp_task_spec_path(),
+            task_specification_path=_tmp_task_spec_path(tmp_path),
             task_specification_sha256="b" * 64,
             required_ci_jobs=[],
             implementation_worker_command=[],
@@ -1462,7 +1473,7 @@ class TestLaunchWorkerDoesNotTransition:
             "base_branch": "main",
             "authorized_base_sha": "a" * 64,
             "feature_branch": "feat/test",
-            "task_specification_path": _tmp_task_spec_path(),
+            "task_specification_path": _tmp_task_spec_path(tmp_path),
             "task_specification_sha256": "b" * 64,
             "required_ci_jobs": [],
             "implementation_worker_command": [],
