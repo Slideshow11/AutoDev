@@ -1,11 +1,11 @@
 {
-  "current_head": "0807dbf",
-  "head_short": "0807dbf",
+  "current_head": "7fb0b79",
+  "head_short": "7fb0b79",
   "test_count": 745,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
-  "review_decision_basis": "older commits; latest formal reviews are on 1b48e27 (CodeRabbit) and 1b48e27 (Codex)",
-  "rounds_pushed": 22,
+  "review_decision_basis": "older commits; latest formal reviews are on 1b48e27 (CodeRabbit) and 1b48e27 (Codex); new CodeRabbit round-19 at 2026-08-09T05:42:38Z and Codex round-22 at 2026-08-09T05:20:58Z posted on current head",
+  "rounds_pushed": 23,
   "round_4_critical_defects_addressed": [
     "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
     "P1: stale-auth rejection. _verify_auth_binds_to_current_run validates run_id, repository, PR number, authorized_head against current RunContext.",
@@ -26,16 +26,20 @@
     "test count: 745 (was 741) — +4 new ReviewDecisionGateTests covering CHANGES_REQUESTED blocks, APPROVED allows, missing fails closed, unrecognized value fails closed.",
     "Manifest hashes for tests/test_merge_queued_pr_fails_closed.py and tests/test_pr4_round6_d0_fixture.py synced."
   ],
+  "round_23_status": [
+    "Major (CodeRabbit 3742791224): PARTIAL recovery merge record now uses canonical 13-key unauthorized_actions_taken shape. The merge confirmation is recorded in notes instead of in the unauthorized_actions map. _persist_partial_merge_record accepts the OID; test_subprocess_nonzero_merged_no_oid_writes_partial_record asserts canonical shape + False values + notes mention.",
+    "Provenance hashes for tests/test_merge_queued_pr_fails_closed.py synced in both AUTOCODER_SOURCE_COMPLETENESS.json and aed-pr417-source-manifest.json."
+  ],
   "production_path_tests": [
     "tests/test_relay_wiring_production_path.py: 7 tests (CLI argv shape --json before subcommand)",
-    "tests/test_merge_queued_pr_fails_closed.py: 5 tests (queued-PR + server-confirmed merge identity gate + 3 stale-auth tests)",
+    "tests/test_merge_queued_pr_fails_closed.py: 5 tests (queued-PR + server-confirmed merge identity gate + 3 stale-auth tests + PARTIAL record canonical 13-key shape)",
     "tests/test_strict_quiet_window_canary.py: 5 tests (strict quiet-window polling + new-event preservation)",
     "tests/test_directive_bridge.py: TestBridgeProductionRoundTrip: 2 tests (DirectiveStore round-trip + tampered sidecar)",
     "tests/test_autocoder_orchestration_review_repair_relay.py: 25 tests including 3 TestLaunchWorkerDoesNotTransition",
     "tests/test_autocoder_supervisor.py: 2 tests (thread pagination fail-closed + complete pagination does not block)",
     "tests/test_merge_pipeline_hardening.py: ReviewDecisionGateTests: 4 tests (CHANGES_REQUESTED blocks, APPROVED allows, missing fails closed, unrecognized fails closed)"
   ],
-  "fresh_review_status": "Fresh Codex review requested on 0807dbf at 2026-08-09T05:35:00Z; awaiting response",
+  "fresh_review_status": "Fresh Codex/CodeRabbit reviews requested on 7fb0b79 at 2026-08-09T05:55:00Z; awaiting response",
   "remaining_unresolved_on_head": [
     {
       "id": "3742679438",
@@ -54,6 +58,56 @@
       "title": "Re-fetch mutable merge gates inside the guarded transaction",
       "severity": "P1",
       "status": "FALSE-POSITIVE — pre-collected snapshot is intentional (evidence-root lock prevents concurrent merges); Codex did not propose a concrete race reproducer."
+    },
+    {
+      "id": "3742791224",
+      "title": "The partial record breaks the unauthorized_actions_taken contract",
+      "severity": "Major",
+      "status": "ADDRESSED in 7fb0b79 — canonical 13-key shape; merge confirmation in notes; test asserts canonical shape"
+    }
+  ],
+  "pending_round_24_candidates": [
+    {
+      "id": "3742735665",
+      "title": "Rebind the run context before reporting the new head",
+      "severity": "P1",
+      "file": "autocoder_orchestration/review_repair_relay.py:1604",
+      "complexity": "Medium — requires Controller API surface to accept a new head before report_repair_pushed; may need careful state-machine integration."
+    },
+    {
+      "id": "3742735667",
+      "title": "Filter provider findings to the current review head",
+      "severity": "P1",
+      "file": "autocoder_orchestration/review_repair_relay.py:595",
+      "complexity": "Medium — requires per-comment head binding and durable consumed-finding store."
+    },
+    {
+      "id": "3742735668",
+      "title": "Persist or discover the orchestration state root",
+      "severity": "P1",
+      "file": "autocoder_supervisor/supervisor.py:2586",
+      "complexity": "Medium — requires cross-process state_root discovery via run_context.json; needs a wire-up layer."
+    },
+    {
+      "id": "3742791232",
+      "title": "Fix implicit Optional + remove unused current_head parameter",
+      "severity": "Minor",
+      "file": "tests/test_merge_queued_pr_fails_closed.py:207",
+      "complexity": "Low — type annotation + dead parameter removal."
+    },
+    {
+      "id": "3742791230",
+      "title": "Helper hardcodes /tmp and leaks a file on every call",
+      "severity": "Minor",
+      "file": "tests/test_autocoder_orchestration_review_repair_relay.py",
+      "complexity": "Low — pass tmp_path through to NamedTemporaryFile."
+    },
+    {
+      "id": "3742791240",
+      "title": "Stale-auth tests assert on error substrings that any MergeError can satisfy",
+      "severity": "Minor",
+      "file": "tests/test_merge_queued_pr_fails_closed.py:341",
+      "complexity": "Low — replace generic substring matches with value assertions."
     }
   ]
 }
