@@ -237,6 +237,30 @@ def test_launch_worker_identity_guard_present() -> None:
     )
 
 
+def test_expected_branch_uses_aed_branch_env() -> None:
+    """The round-37 expected_branch fix must use the
+    AED_BRANCH env var (the supervisor's actual canonical
+    branch configuration source), NOT a ``BRANCH`` global
+    (which is undefined in production).
+    """
+    text = SUPERVISOR_PATH.read_text(encoding="utf-8")
+    # The expected_branch fallback must read AED_BRANCH.
+    assert 'os.environ.get("AED_BRANCH")' in text, (
+        "expected_branch fallback MUST read AED_BRANCH env "
+        "var; ``BRANCH`` is undefined in production"
+    )
+    # And not the bare BRANCH global — except via
+    # ``# type: ignore[name-defined]`` comments, but the
+    # bare fallback in scope must not exist.
+    # Confirm: the substring "expected_branch = str(BRANCH "
+    # must not appear (the old broken form).
+    assert "expected_branch = str(BRANCH " not in text, (
+        "expected_branch MUST NOT use bare BRANCH global "
+        "(NameError in production); use os.environ.get("
+        "'AED_BRANCH')"
+    )
+
+
 # ---------------------------------------------------------------------------
 # TEST 6 — The launch_worker fd-leak fix closes parent stdout/stderr
 # ---------------------------------------------------------------------------

@@ -1709,8 +1709,10 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     )
     _expected_pr = int(PR_NUMBER)  # type: ignore[name-defined]
     try:
-        _expected_branch = str(BRANCH or "")  # type: ignore[name-defined]
-    except NameError:
+        _expected_branch = str(
+            os.environ.get("AED_BRANCH") or ""  # type: ignore[name-defined]
+        )
+    except Exception:
         _expected_branch = ""
     # Round-37 escape hatch: the identity guard is a SAFETY
     # device, not a gate. Tests that import the supervisor
@@ -2123,9 +2125,13 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
                     or ""
                 )
             if not expected_branch:
-                expected_branch = str(BRANCH or "")  # type: ignore[name-defined]
+                expected_branch = str(
+                    os.environ.get("AED_BRANCH") or ""  # type: ignore[name-defined]
+                )
         except Exception:
-            expected_branch = str(BRANCH or "")  # type: ignore[name-defined]
+            expected_branch = str(
+                os.environ.get("AED_BRANCH") or ""  # type: ignore[name-defined]
+            )
         attempt = WorkerAttemptRecord(
             schema_version="autocoder.worker_attempt.v1",
             attempt_id=attempt_id,
