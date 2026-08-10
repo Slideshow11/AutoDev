@@ -441,29 +441,148 @@ def _resolve_orchestration_evidence_root(state_root: Optional[str]) -> str:
     return ""
 
 
-def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
-    """Bind the worker push to the orchestration state machine.
+def mark_head_advanced_public(
+    old_head_sha: str,
+    new_head_sha: str,
+    *,
+    attempt_id: Optional[str] = None,
+) -> bool:
+    """Bind a verified worker push to the orchestration state machine.
+
+    Round-36 invariant: ``HEAD_ADVANCED != REPAIR_PUSHED``.
 
     The supervisor calls this when the live PR head
-    advances (the worker pushed a new commit). The
-    transition fires only on a real head advance, so a
-    launch failure leaves the repair state recoverable.
+    advances, BUT it must ONLY succeed when the head
+    advance has positive worker-attempt provenance. The
+    supervisor passes ``attempt_id`` (the canonical
+    WorkerAttemptRecord on disk) and this helper verifies:
 
-    A subprocess is avoided here because the supervisor
-    is already in the supervisor's event loop; spawning
-    a subprocess for a single state-machine transition
-    would add latency without isolation benefit. The
-    helper instantiates a RelayLoop with the supervisor's
-    state_root and calls ``mark_head_advanced`` directly.
+    1. A WorkerAttemptRecord with that attempt_id exists.
+    2. Its lifecycle is ``PUSH_VERIFIED`` or ``TERMINAL_REPAIRED``.
+    3. Its ``prelaunch_head`` equals ``old_head_sha``.
+    4. Its ``pushed_commit_sha`` equals ``new_head_sha``.
+    5. Its ``github_head_verified`` is True.
+
+    If any of these fail, the call is REJECTED: the helper
+    logs the rejection and returns False. The supervisor
+    MUST still rebind AUTHORITATIVE_HEAD (so the next round
+    operates on the new head), but the orchestrator does NOT
+    record the transition as ``repair_pushed``.
+
+    Returns True if the controller recorded
+    ``REPAIRING_REVIEW_FINDINGS -> AWAITING_CI`` via
+    ``report_repair_pushed``. Returns False otherwise
+    (including when the attempt is not verified, the
+    orchestrator was not in REPAIRING, or the head was
+    already advanced idempotently).
     """
     from autocoder_orchestration.controller import Controller
     from autocoder_orchestration.review_repair_relay import RelayLoop
     from autocoder_orchestration.store import StateStore
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_PUSH_VERIFIED,
+        LIFECYCLE_TERMINAL_REPAIRED,
+        default_store,
+    )
     from .orchestration_state_root import (
         OrchestrationRootError,
         resolve_orchestration_state_root,
     )
     from .supervisor import RUN_STATE  # type: ignore[name-defined]
+
+    # Round-36: validate positive worker-attempt provenance BEFORE
+    # touching the controller state machine. Without this check a
+    # generic head advance (Humphry infrastructure commit, operator
+    # commit, recovery commit, external actor) would falsely
+    # acknowledge a worker repair push.
+    if attempt_id is None:
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: missing attempt_id; "
+                "cannot acknowledge repair push without provenance",
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
+    store = default_store()
+    attempt = store.read(attempt_id)
+    if attempt is None:
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: attempt_id not found on disk",
+                attempt_id=attempt_id,
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
+    if attempt.lifecycle not in (
+        LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_TERMINAL_REPAIRED,
+    ):
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: attempt lifecycle not PUSH_VERIFIED",
+                attempt_id=attempt_id,
+                lifecycle=attempt.lifecycle,
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
+    if attempt.prelaunch_head != old_head_sha:
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: attempt prelaunch_head mismatch",
+                attempt_id=attempt_id,
+                attempt_prelaunch=attempt.prelaunch_head[:12],
+                expected_old=old_head_sha[:12],
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
+    if attempt.pushed_commit_sha != new_head_sha:
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: attempt pushed_commit_sha mismatch",
+                attempt_id=attempt_id,
+                attempt_pushed=(
+                    attempt.pushed_commit_sha[:12]
+                    if attempt.pushed_commit_sha else "(none)"
+                ),
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
+    if not attempt.github_head_verified:
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: attempt github_head_verified is False",
+                attempt_id=attempt_id,
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
+
+    # Provenance verified. Now drive the controller transition.
     try:
         state_root = resolve_orchestration_state_root(
             run_state_path=Path(RUN_STATE),
@@ -481,39 +600,90 @@ def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
                 error=str(exc),
                 old_head=old_head_sha[:12] if old_head_sha else "",
                 new_head=new_head_sha[:12],
+                attempt_id=attempt_id,
             )
         except ImportError:
             pass
-        return
+        return False
     evidence_root = _resolve_orchestration_evidence_root(state_root)
-    store = StateStore(state_root)
-    if not store.read_optional("state.json"):
+    orch_store = StateStore(state_root)
+    if not orch_store.read_optional("state.json"):
         # Controller state not initialized yet; nothing
         # to transition. The next round will pick up the
         # new head when the supervisor re-reads the state.
-        return
+        return False
     from autocoder_orchestration.context import RunContext
-    ctx_dict = store.read_optional("run_context.json")
+    ctx_dict = orch_store.read_optional("run_context.json")
     if not ctx_dict:
-        return
+        return False
     ctx = RunContext.from_dict(ctx_dict)
     controller = Controller(
         context=ctx,
-        store=store,
+        store=orch_store,
     )
     from autocoder_orchestration.review_repair_relay import DirectiveStore
     directive_store = DirectiveStore(
-        store=store,
+        store=orch_store,
         evidence_root=evidence_root,
     )
     loop = RelayLoop(
         context=ctx,
-        store=store,
+        store=orch_store,
         directive_store=directive_store,
         controller=controller,
         required_check_names=(),
     )
+    # Only invoke mark_head_advanced if the controller is in
+    # REPAIRING_REVIEW_FINDINGS. Any other state means the
+    # transition has already happened (idempotency) or the
+    # controller is not awaiting a repair push.
+    try:
+        state_now = orch_store.read_optional("state.json") or {}
+        current = state_now.get("current_state")
+    except Exception:
+        current = None
+    if current != "REPAIRING_REVIEW_FINDINGS":
+        try:
+            from .supervisor import log
+            log(
+                "info",
+                "mark_head_advanced_public: controller not in REPAIRING; "
+                "skipping report_repair_pushed",
+                attempt_id=attempt_id,
+                current_state=current,
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
     loop.mark_head_advanced(old_head_sha, new_head_sha)
+    # On success, mark the attempt TERMINAL_REPAIRED so it is
+    # never re-acknowledged (idempotent).
+    try:
+        attempt.assert_can_transition_to(LIFECYCLE_TERMINAL_REPAIRED)
+        attempt.lifecycle = LIFECYCLE_TERMINAL_REPAIRED
+        attempt.finished_at = (
+            attempt.finished_at or _now_iso()
+        )
+        store.write(attempt)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from .supervisor import log
+            log(
+                "warning",
+                "mark_head_advanced_public: could not finalize attempt to TERMINAL_REPAIRED",
+                attempt_id=attempt_id,
+                error=str(exc),
+            )
+        except ImportError:
+            pass
+    return True
+
+
+def _now_iso() -> str:
+    """ISO-8601 UTC timestamp with second precision."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def delete_directive_if_present(evidence_root: str) -> None:

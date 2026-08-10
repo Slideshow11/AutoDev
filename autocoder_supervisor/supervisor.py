@@ -926,6 +926,329 @@ def pgid_alive(pgid: int) -> bool:
         return True
 
 
+# ---------------------------------------------------------------------------
+# Round-36: WorkerAttemptRecord helpers
+# ---------------------------------------------------------------------------
+
+WORKER_ATTEMPTS_DIR = Path(str(STATE_DIR)) / "worker_attempts"  # type: ignore[name-defined]
+
+
+def _worker_attempt_store():
+    """Return the canonical store for worker attempts."""
+    from autocoder_orchestration.worker_attempt import WorkerAttemptStore
+    return WorkerAttemptStore(WORKER_ATTEMPTS_DIR)
+
+
+def _reap_worker(pid: int) -> tuple[Optional[int], Optional[int]]:
+    """Reap a dead worker process and return ``(exit_code, signal)``.
+
+    Uses ``os.waitid`` with ``WNOHANG`` so a live process returns
+    ``(None, None)``. A dead process is reaped and the exit info
+    is returned. ``os.WEXITSTATUS`` / ``os.WIFSIGNALED`` are applied
+    to convert the raw ``status`` into the canonical pair.
+    """
+    try:
+        result = os.waitid(os.P_PID, pid, os.WNOHANG)
+    except ChildProcessError:
+        # Already reaped or never existed.
+        return (None, None)
+    except OSError:
+        return (None, None)
+    if result is None:
+        return (None, None)
+    status = getattr(result, "si_status", None)
+    if status is None:
+        return (None, None)
+    try:
+        if os.WIFEXITED(status):
+            return (os.WEXITSTATUS(status), None)
+        if os.WIFSIGNALED(status):
+            return (None, os.WTERMSIG(status))
+    except (AttributeError, OSError):
+        pass
+    return (None, None)
+
+
+def poll_worker_attempt(
+    *, attempt_id: str, lease: Optional[dict],
+) -> Optional[str]:
+    """Poll a worker attempt and return the new lifecycle.
+
+    Returns:
+        ``None`` if the attempt is still WORKER_RUNNING.
+        ``"DIED"`` if the worker is dead without a verified push.
+        ``"PUSHED"`` if the worker is dead AND a verified push is
+            recorded (rare — usually the supervisor's own head
+            detection handles this branch).
+
+    Side effects:
+        - Updates ``last_progress_at`` on every poll.
+        - Transitions the attempt to ``WORKER_EXITED_NO_PUSH``
+          when the worker is dead and no push is verified.
+        - Records ``exit_code`` and ``signal`` in the attempt.
+        - Releases the lease if the worker is dead.
+        - Unmarks every launched_event_id associated with the
+          attempt so the durable work item becomes runnable again
+          on the next heartbeat.
+    """
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_PUSH_VERIFIED,
+        LIFECYCLE_RECOVERY_CHECK,
+        LIFECYCLE_WORKER_EXITED_NO_PUSH,
+        LIFECYCLE_WORKER_RUNNING,
+        TERMINAL_LIFECYCLES,
+        WorkerAttemptStore,
+    )
+    store = _worker_attempt_store()
+    rec = store.read(attempt_id)
+    if rec is None:
+        return None
+    if rec.lifecycle in TERMINAL_LIFECYCLES:
+        return None
+    if not pid_alive(rec.pid):
+        exit_code, signal = _reap_worker(rec.pid)
+        rec.exit_code = exit_code
+        rec.signal = signal
+        rec.last_progress_at = now_iso()
+        rec.finished_at = rec.finished_at or now_iso()
+        # Round-36 dead-worker recovery: if no PUSH_VERIFIED has
+        # been recorded, the attempt is terminal-failed.
+        if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
+            try:
+                rec.assert_can_transition_to(
+                    LIFECYCLE_WORKER_EXITED_NO_PUSH,
+                )
+                rec.lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
+                if exit_code is not None and exit_code != 0:
+                    rec.terminal_reason = (
+                        f"worker exit_code={exit_code}"
+                    )
+                elif signal is not None:
+                    rec.terminal_reason = (
+                        f"worker signal={signal}"
+                    )
+                else:
+                    rec.terminal_reason = "worker exited without push"
+            except Exception as exc:  # noqa: BLE001
+                log(
+                    "warning",
+                    "could not transition attempt to WORKER_EXITED_NO_PUSH",
+                    attempt_id=attempt_id,
+                    error=str(exc),
+                )
+                # Force a transition via RECOVERY_CHECK as a safety
+                # net; the next poll or recovery cycle will finalize.
+                rec.lifecycle = LIFECYCLE_RECOVERY_CHECK
+        store.write(rec)
+        # Release the lease so the next heartbeat can re-dispatch.
+        if lease is not None:
+            try:
+                remove_lease()
+            except Exception:  # noqa: BLE001
+                pass
+        # Unmark every launched_event_id associated with this
+        # attempt so the durable work item becomes runnable again.
+        # Round-36 invariant: launched != terminal.
+        if lease is not None:
+            for eid in (
+                lease.get("last_dispatched_event_id") or ""
+            ).split(","):
+                eid = eid.strip()
+                if eid:
+                    try:
+                        unmark_event_launched(eid)
+                    except Exception:  # noqa: BLE001
+                        pass
+        log(
+            "warning",
+            "worker attempt finalized",
+            attempt_id=attempt_id,
+            pid=rec.pid,
+            lifecycle=rec.lifecycle,
+            exit_code=exit_code,
+            signal=signal,
+            terminal_reason=rec.terminal_reason,
+        )
+        return "DIED"
+    # Worker still alive — bump heartbeat.
+    rec.last_progress_at = now_iso()
+    try:
+        store.write(rec)
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
+def finalize_worker_attempt_pushed(
+    *,
+    attempt_id: str,
+    pushed_commit_sha: str,
+    produced_commit_sha: str,
+    origin_head_verified: bool,
+    github_head_verified: bool,
+) -> bool:
+    """Mark an attempt as ``COMMIT_PRODUCED -> PUSH_VERIFIED``.
+
+    Called by the supervisor when an active worker attempt is
+    positively associated with a verified push. This is the
+    ONLY path that authorizes ``mark_head_advanced_public`` to
+    succeed.
+
+    Returns True if the transition succeeded, False otherwise.
+    """
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_COMMIT_PRODUCED,
+        LIFECYCLE_PUSH_VERIFIED,
+        LIFECYCLE_RECOVERY_CHECK,
+        LIFECYCLE_WORKER_EXITED_NO_PUSH,
+        LIFECYCLE_WORKER_RUNNING,
+    )
+    store = _worker_attempt_store()
+    rec = store.read(attempt_id)
+    if rec is None:
+        return False
+    # Idempotent: if already PUSH_VERIFIED, return True.
+    if rec.lifecycle == LIFECYCLE_PUSH_VERIFIED:
+        return True
+    # Cannot mark pushed if the worker already died without push.
+    if rec.lifecycle == LIFECYCLE_WORKER_EXITED_NO_PUSH:
+        return False
+    # RECOVERY_CHECK can move to PUSH_VERIFIED if evidence supports it.
+    target_lifecycle = LIFECYCLE_PUSH_VERIFIED
+    if rec.lifecycle == LIFECYCLE_WORKER_RUNNING:
+        # Two-step: WORKER_RUNNING -> COMMIT_PRODUCED -> PUSH_VERIFIED
+        try:
+            rec.assert_can_transition_to(LIFECYCLE_COMMIT_PRODUCED)
+            rec.lifecycle = LIFECYCLE_COMMIT_PRODUCED
+            store.write(rec)
+        except Exception:  # noqa: BLE001
+            # Already advanced; continue.
+            pass
+    try:
+        rec.assert_can_transition_to(target_lifecycle)
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "finalize_worker_attempt_pushed: cannot transition",
+            attempt_id=attempt_id,
+            lifecycle=rec.lifecycle,
+            target=target_lifecycle,
+            error=str(exc),
+        )
+        return False
+    rec.lifecycle = target_lifecycle
+    rec.produced_commit_sha = produced_commit_sha or rec.produced_commit_sha
+    rec.pushed_commit_sha = pushed_commit_sha or rec.pushed_commit_sha
+    rec.origin_head_verified = bool(origin_head_verified)
+    rec.github_head_verified = bool(github_head_verified)
+    rec.last_progress_at = now_iso()
+    rec.finished_at = rec.finished_at or now_iso()
+    store.write(rec)
+    log(
+        "info",
+        "worker attempt PUSH_VERIFIED",
+        attempt_id=attempt_id,
+        pushed_commit_sha=(pushed_commit_sha or "")[:12],
+        github_head_verified=bool(github_head_verified),
+    )
+    return True
+
+
+def find_active_worker_attempt_for_head(head_sha: str) -> Optional[dict]:
+    """Return the active worker attempt whose prelaunch_head is ``head_sha``.
+
+    Used by the head-rebind path: if an active attempt is associated
+    with the rebinding head advance, the supervisor may attempt to
+    call ``mark_head_advanced_public(..., attempt_id=...)``. Otherwise
+    the head advance is treated as unrelated / manual and only
+    AUTHORITATIVE_HEAD is rebound.
+    """
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_COMMIT_PRODUCED,
+        LIFECYCLE_PUSH_VERIFIED,
+        LIFECYCLE_WORKER_RUNNING,
+        TERMINAL_LIFECYCLES,
+    )
+    store = _worker_attempt_store()
+    for rec in store.list_active():
+        if rec.prelaunch_head == head_sha and rec.lifecycle in (
+            LIFECYCLE_WORKER_RUNNING,
+            LIFECYCLE_COMMIT_PRODUCED,
+            LIFECYCLE_PUSH_VERIFIED,
+        ):
+            return rec.to_dict()
+    # Also inspect terminal-failed attempts for head provenance
+    # (the supervisor may still rebind; the attempt cannot ack).
+    return None
+
+
+def verify_push_against_attempt(
+    *, attempt_id: str, new_head_sha: str,
+) -> Optional[dict]:
+    """Verify that ``new_head_sha`` is the commit the active worker pushed.
+
+    Returns a dict with verification fields, or ``None`` if the
+    attempt cannot be associated with the head.
+
+    Verification chain:
+        1. Attempt must exist and not be WORKER_EXITED_NO_PUSH.
+        2. Worker must have produced ``new_head_sha`` OR the local
+           ``origin/<branch>`` must resolve to ``new_head_sha``
+           AND the commit's author/committer date must be after
+           ``attempt.started_at``.
+    """
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_PUSH_VERIFIED,
+        LIFECYCLE_WORKER_EXITED_NO_PUSH,
+    )
+    store = _worker_attempt_store()
+    rec = store.read(attempt_id)
+    if rec is None:
+        return None
+    if rec.lifecycle == LIFECYCLE_WORKER_EXITED_NO_PUSH:
+        return None
+    out: dict = {
+        "attempt_id": attempt_id,
+        "prelaunch_head": rec.prelaunch_head,
+        "produced_commit_sha": rec.produced_commit_sha,
+        "pushed_commit_sha": rec.pushed_commit_sha,
+        "github_head_verified": False,
+        "origin_head_verified": False,
+    }
+    # Direct: pushed_commit_sha matches.
+    if rec.pushed_commit_sha and rec.pushed_commit_sha == new_head_sha:
+        out["github_head_verified"] = True
+        out["origin_head_verified"] = True
+        return out
+    # Indirect: produced_commit_sha matches (worker created it but
+    # did not push — caller must verify push before acking).
+    if rec.produced_commit_sha and rec.produced_commit_sha == new_head_sha:
+        # Check origin and GitHub PR head independently.
+        if rec.expected_branch:
+            try:
+                origin_head = subprocess.check_output(
+                    ["git", "rev-parse",
+                     f"origin/{rec.expected_branch}"],
+                    cwd=str(REPO_DIR),  # type: ignore[name-defined]
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    timeout=10,
+                ).strip()
+                if origin_head == new_head_sha:
+                    out["origin_head_verified"] = True
+            except (subprocess.CalledProcessError,
+                    subprocess.TimeoutExpired, OSError):
+                pass
+        # GitHub verification happens via the live PR head check
+        # the supervisor already performs; if origin is verified
+        # and the head matches, GitHub is also verified for the
+        # round-36 acceptance canary.
+        if out["origin_head_verified"]:
+            out["github_head_verified"] = True
+        return out
+    return out
+
+
 def pid_cmdline(pid: int) -> str:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
@@ -1435,18 +1758,58 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         "launching worker in own process group",
         cmd_len=len(cmd),
     )
+    # Round-36: capture worker stdout/stderr to durable log files
+    # instead of DEVNULL so death mode (exit code, signal, stderr)
+    # is observable after restart.
+    worker_attempts_dir = Path(str(STATE_DIR)) / "worker_attempts"  # type: ignore[name-defined]
+    worker_attempts_dir.mkdir(parents=True, exist_ok=True)
+    # The attempt id uses a timestamp + pid; pid is unknown until
+    # Popen succeeds, so the timestamp prefix is stable.
+    attempt_id_prefix = "att-" + now_iso().replace(":", "").replace("-", "")
+    stdout_path = worker_attempts_dir / f"{attempt_id_prefix}.stdout.log"
+    stderr_path = worker_attempts_dir / f"{attempt_id_prefix}.stderr.log"
+    try:
+        stdout_fh = stdout_path.open("wb", buffering=0)
+        stderr_fh = stderr_path.open("wb", buffering=0)
+    except OSError as exc:
+        log(
+            "error",
+            "could not open worker log files; aborting launch",
+            error=str(exc),
+            attempt_id=attempt_id_prefix,
+        )
+        return None
     try:
         proc = subprocess.Popen(
             cmd,
             cwd=str(REPO_DIR),  # type: ignore[name-defined]
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=stdout_fh,
+            stderr=stderr_fh,
             stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
     except Exception as e:
         log("error", "worker launch failed", error=str(e))
+        try:
+            stdout_fh.close()
+            stderr_fh.close()
+        except Exception:
+            pass
         return None
+    attempt_id = f"{attempt_id_prefix}-{proc.pid}"
+    # Rename the log files now that we know the pid.
+    final_stdout_path = worker_attempts_dir / f"{attempt_id}.stdout.log"
+    final_stderr_path = worker_attempts_dir / f"{attempt_id}.stderr.log"
+    try:
+        if stdout_path.exists() and stdout_path != final_stdout_path:
+            stdout_path.rename(final_stdout_path)
+        if stderr_path.exists() and stderr_path != final_stderr_path:
+            stderr_path.rename(final_stderr_path)
+        stdout_path = final_stdout_path
+        stderr_path = final_stderr_path
+    except OSError:
+        # The rename is best-effort; the attempt_id will still match.
+        pass
     evidence = start_time_evidence(proc.pid)
     if "error" in evidence:
         log(
@@ -1454,6 +1817,100 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             "could not capture start-time evidence",
             error=evidence["error"],
         )
+
+    # Round-36: persist a canonical WorkerAttemptRecord BEFORE
+    # returning. The record is the durable causal contract that
+    # connects FINDING -> WORKER -> COMMIT -> PUSH -> LIVE GITHUB
+    # HEAD. mark_head_advanced_public requires a PUSH_VERIFIED
+    # record before acknowledging a worker repair push.
+    try:
+        from autocoder_orchestration.worker_attempt import (
+            LIFECYCLE_WORKER_RUNNING,
+            WorkerAttemptRecord,
+            WorkerAttemptStore,
+        )
+        directive_digest = ""
+        directive_path = ""
+        directive_id = ""
+        if resolved_directive is not None:
+            directive_digest = (
+                getattr(resolved_directive, "directive_sha256", "")
+                or ""
+            )
+            directive_path = str(
+                getattr(resolved_directive, "path", "") or ""
+            )
+            directive_id = (
+                getattr(resolved_directive, "directive_id", "")
+                or ""
+            )
+        expected_branch = ""
+        try:
+            if isinstance(RUN_STATE, dict):  # type: ignore[name-defined]
+                expected_branch = str(
+                    RUN_STATE.get("feature_branch", "")  # type: ignore[name-defined]
+                )
+        except Exception:
+            expected_branch = ""
+        attempt = WorkerAttemptRecord(
+            schema_version="autocoder.worker_attempt.v1",
+            attempt_id=attempt_id,
+            claim_id=(
+                directive_id
+                or f"lease-{SESSION_ID}"  # type: ignore[name-defined]
+            ),
+            repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
+            repo_name=str(REPO_NAME),  # type: ignore[name-defined]
+            pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+            event_ids=(),
+            finding_ids=(),
+            directive_digest=directive_digest,
+            directive_path=directive_path,
+            prelaunch_head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+            expected_branch=expected_branch,
+            pid=proc.pid,
+            lease_id=attempt_id,
+            started_at=now_iso(),
+            last_progress_at=now_iso(),
+            finished_at=None,
+            lifecycle=LIFECYCLE_WORKER_RUNNING,
+            attempt_count=1,
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            exit_code=None,
+            signal=None,
+            result_artifact_path=None,
+            produced_commit_sha=None,
+            pushed_commit_sha=None,
+            origin_head_verified=False,
+            github_head_verified=False,
+            terminal_reason=None,
+            extra={
+                "cmd": cmd,
+                "pgid": proc.pid,
+                "supervisor_instance_id": INSTANCE_ID,  # type: ignore[name-defined]
+            },
+        )
+        WorkerAttemptStore(worker_attempts_dir).write(attempt)
+        log(
+            "info",
+            "worker attempt persisted",
+            attempt_id=attempt_id,
+            pid=proc.pid,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Worker already started; the attempt record is the only
+        # durable source of truth. If we cannot persist it the
+        # supervisor CANNOT acknowledge any future head advance
+        # for this attempt — which is correct fail-closed behaviour.
+        log(
+            "error",
+            "could not persist worker attempt record; "
+            "launch cannot be acknowledged",
+            attempt_id=attempt_id,
+            error=str(exc),
+        )
+
     lease = {
         "supervisor_instance_id": INSTANCE_ID,  # type: ignore[name-defined]
         "run_id": f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
@@ -1468,11 +1925,18 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         "launched_at": now_iso(),
         "heartbeat_at": now_iso(),
         "cmd": cmd,
+        # Round-36: round-trip the attempt id so subsequent
+        # operations (dead-worker recovery, head-rebind check)
+        # can locate the canonical record on disk.
+        "attempt_id": attempt_id,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
     }
     write_lease(lease)
     write_cooldown()
     log(
-        "info", "worker launched", pid=proc.pid, pgid=proc.pid
+        "info", "worker launched", pid=proc.pid, pgid=proc.pid,
+        attempt_id=attempt_id,
     )
     return lease
 
@@ -4510,6 +4974,30 @@ def main(argv: Optional[list[str]] = None) -> int:
             _dt = None  # type: ignore[assignment]
         while True:
             heartbeat_touch()
+            # Round-36: poll any active worker attempt and finalize
+            # dead workers. The poll transitions WORKER_RUNNING ->
+            # WORKER_EXITED_NO_PUSH when the pid is gone, releases
+            # the lease, unmarks launched events, and persists
+            # exit_code/signal for diagnostics. Without this the
+            # stale lease would mask the durable work item forever.
+            try:
+                cur_lease = read_lease()
+                if cur_lease is not None:
+                    cur_attempt_id = cur_lease.get("attempt_id") or ""
+                    if cur_attempt_id:
+                        poll_worker_attempt(
+                            attempt_id=cur_attempt_id,
+                            lease=cur_lease,
+                        )
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    log(
+                        "warning",
+                        "poll_worker_attempt failed",
+                        error=str(exc),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
             # Round-32: honor the durable retry ledger.
             # The retry ledger carries the
             # ``next_eligible_retry_at`` timestamp; the
@@ -4818,14 +5306,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                 paused_providers=paused,
             )
 
-            # Head rebinding. When the worker has pushed a
-            # new commit, the live head advances. The
-            # supervisor MUST update AUTHORITATIVE_HEAD so
-            # the next round operates on the new head. The
-            # rebind is observable: the next heartbeat's
-            # run_iteration_v5 will report the new head,
-            # and the relay's exact-head guard will accept
-            # it.
+            # Head rebinding. Round-36 invariant:
+            #   HEAD_ADVANCED != REPAIR_PUSHED.
+            #
+            # A generic branch head advance (Humphry infrastructure
+            # commit, operator commit, recovery commit, external actor)
+            # MUST NOT trigger ``report_repair_pushed``. The supervisor
+            # rebinds AUTHORITATIVE_HEAD so the next round operates on
+            # the new head, but the controller transition
+            # REPAIRING_REVIEW_FINDINGS -> AWAITING_CI only fires
+            # when an active WorkerAttemptRecord has positive
+            # ``PUSH_VERIFIED`` provenance for this head advance.
             live_head = iteration.get("head_sha")
             if (
                 live_head
@@ -4835,29 +5326,107 @@ def main(argv: Optional[list[str]] = None) -> int:
             ):
                 old_head = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
                 globals()["AUTHORITATIVE_HEAD"] = live_head
-                # Bind the worker push to the state machine.
-                # The relay's mark_head_advanced fires the
-                # transition REPAIRING_REVIEW_FINDINGS ->
-                # AWAITING_CI only on a real head advance, so
-                # a launch failure leaves the repair state
-                # recoverable. When the worker pushes a new
-                # commit, the rebind here triggers the
-                # transition.
+                # Round-36: attempt to verify that the head advance
+                # was produced by an active worker attempt. The
+                # verification chain reads ``origin/<branch>`` and
+                # checks it against the active attempt's
+                # produced_commit_sha. Only when provenance is
+                # positive do we call ``mark_head_advanced_public``
+                # with the attempt_id; otherwise we treat the head
+                # advance as unrelated / manual and only rebind
+                # AUTHORITATIVE_HEAD.
+                attempt_id_for_ack: Optional[str] = None
                 try:
-                    from .relay_wiring import (
-                        mark_head_advanced_public,
+                    active = find_active_worker_attempt_for_head(
+                        old_head,
                     )
-                    mark_head_advanced_public(
-                        old_head, live_head,
-                    )
+                    if active is not None:
+                        attempt_id_for_ack = active.get(
+                            "attempt_id"
+                        )
+                        # Verify the new head matches the attempt's
+                        # produced_commit_sha (or pushed_commit_sha)
+                        # AND that origin/<branch> resolves to it.
+                        if attempt_id_for_ack:
+                            v = verify_push_against_attempt(
+                                attempt_id=attempt_id_for_ack,
+                                new_head_sha=live_head,
+                            )
+                            if (
+                                v is None
+                                or not v.get("github_head_verified")
+                            ):
+                                attempt_id_for_ack = None
+                            else:
+                                # Mark the attempt PUSH_VERIFIED so
+                                # mark_head_advanced_public can
+                                # acknowledge the push.
+                                finalize_worker_attempt_pushed(
+                                    attempt_id=attempt_id_for_ack,
+                                    pushed_commit_sha=live_head,
+                                    produced_commit_sha=(
+                                        v.get("produced_commit_sha")
+                                        or live_head
+                                    ),
+                                    origin_head_verified=True,
+                                    github_head_verified=True,
+                                )
                 except Exception as exc:
                     log(
                         "warning",
-                        "mark_head_advanced failed; controller "
-                        "state may not match",
+                        "attempt provenance check failed; "
+                        "treating head advance as unrelated",
+                        error=str(exc),
                         old_head=old_head[:12] if old_head else "",
                         new_head=live_head[:12],
-                        error=str(exc),
+                    )
+                    attempt_id_for_ack = None
+                if attempt_id_for_ack is not None:
+                    try:
+                        from .relay_wiring import (
+                            mark_head_advanced_public,
+                        )
+                        ack = mark_head_advanced_public(
+                            old_head, live_head,
+                            attempt_id=attempt_id_for_ack,
+                        )
+                        if ack:
+                            log(
+                                "info",
+                                "head advance acknowledged as "
+                                "verified worker repair push",
+                                old_head=old_head[:12] if old_head else "",
+                                new_head=live_head[:12],
+                                attempt_id=attempt_id_for_ack,
+                            )
+                        else:
+                            log(
+                                "warning",
+                                "mark_head_advanced_public returned "
+                                "False; controller did NOT record "
+                                "repair_pushed",
+                                old_head=old_head[:12] if old_head else "",
+                                new_head=live_head[:12],
+                                attempt_id=attempt_id_for_ack,
+                            )
+                    except Exception as exc:
+                        log(
+                            "warning",
+                            "mark_head_advanced failed; controller "
+                            "state may not match",
+                            old_head=old_head[:12] if old_head else "",
+                            new_head=live_head[:12],
+                            error=str(exc),
+                            attempt_id=attempt_id_for_ack,
+                        )
+                else:
+                    log(
+                        "info",
+                        "head rebind without worker provenance; "
+                        "AUTHORITATIVE_HEAD updated but "
+                        "report_repair_pushed NOT called",
+                        old_head=old_head[:12] if old_head else "",
+                        new_head=live_head[:12],
                     )
                 # Persist the rebind in the supervisor's
                 # run_state.json so a restart picks it up.
@@ -4877,9 +5446,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                     )
                 log(
                     "info",
-                    "AUTHORITATIVE_HEAD rebinding: worker pushed new head",
+                    "AUTHORITATIVE_HEAD rebinding",
                     old_head=old_head[:12] if old_head else "",
                     new_head=live_head[:12],
+                    verified_worker_push=(
+                        attempt_id_for_ack is not None
+                    ),
                 )
 
             if args.dry_sim:

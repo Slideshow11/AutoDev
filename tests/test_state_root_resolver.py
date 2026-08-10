@@ -259,19 +259,72 @@ def test_mark_head_advanced_logs_error_when_unresolvable(
     warning) before returning when the resolver fails closed.
     The user's invariant is a fail-closed protected-authority
     blocker; the supervisor must NOT silently no-op.
+
+    Round-36: the helper now requires an ``attempt_id`` BEFORE
+    the state-root resolution runs (the new provenance guard
+    fires first to fail-closed on a missing attempt id). The
+    test seeds an attempt record so the helper reaches the
+    state-root resolver, where the fail-closed guard fires.
     """
     from autocoder_supervisor import relay_wiring
     from autocoder_supervisor import supervisor
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_PUSH_VERIFIED,
+        SCHEMA_VERSION,
+        WorkerAttemptRecord,
+        WorkerAttemptStore,
+    )
+    # Seed a PUSH_VERIFIED attempt so the provenance guard passes
+    # and the helper reaches the state-root resolver.
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rec = WorkerAttemptRecord(
+        schema_version=SCHEMA_VERSION,
+        attempt_id="att-resolver-test",
+        claim_id="claim-resolver-test",
+        repo_owner="Slideshow11",
+        repo_name="AutoDev",
+        pr_number=5,
+        event_ids=(),
+        finding_ids=(),
+        directive_digest="",
+        directive_path="",
+        prelaunch_head="a" * 40,
+        expected_branch="feat/x",
+        pid=999_999,
+        lease_id="att-resolver-test",
+        started_at="2026-08-10T14:00:00Z",
+        last_progress_at="2026-08-10T14:00:00Z",
+        finished_at=None,
+        lifecycle=LIFECYCLE_PUSH_VERIFIED,
+        attempt_count=1,
+        stdout_path=None,
+        stderr_path=None,
+        exit_code=None,
+        signal=None,
+        result_artifact_path=None,
+        produced_commit_sha="b" * 40,
+        pushed_commit_sha="b" * 40,
+        origin_head_verified=True,
+        github_head_verified=True,
+        terminal_reason=None,
+    )
+    WorkerAttemptStore(wa_dir).write(rec)
     # Make the resolver fail closed by pointing at a missing file.
     monkeypatch.setattr(relay_wiring, "RUN_STATE", tmp_path / "missing.json", raising=False)
     monkeypatch.setattr(supervisor, "RUN_STATE", tmp_path / "missing.json", raising=False)
+    # Patch default_attempt_root to use our seed dir.
+    from autocoder_orchestration import worker_attempt as wa_mod
+    monkeypatch.setattr(wa_mod, "default_attempt_root", lambda: wa_dir)
     calls = []
     monkeypatch.setattr(
         supervisor, "log",
         lambda level, msg, **kw: calls.append((level, msg, kw)),
         raising=False,
     )
-    relay_wiring.mark_head_advanced_public("a" * 40, "b" * 40)
+    relay_wiring.mark_head_advanced_public(
+        "a" * 40, "b" * 40, attempt_id="att-resolver-test",
+    )
     assert calls, (
         "mark_head_advanced_public MUST log an error when the "
         "resolver fails closed; the silent return is exactly the "
