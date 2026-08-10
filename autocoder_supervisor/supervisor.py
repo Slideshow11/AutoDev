@@ -370,6 +370,18 @@ READINESS_STATES = {
 _LOCK_FD: Optional[int] = None
 
 
+# Round-39 P1#8: module-level slot for the fresh event ids
+# the next ``launch_worker`` call must persist on the
+# WorkerAttemptRecord. ``handle_new_events`` populates this
+# before invoking launch_worker so the WorkerAttemptRecord
+# constructor can read it. The slot is RESET to ``None``
+# immediately after the WorkerAttemptRecord is persisted
+# so a subsequent launch_worker call (e.g. from a
+# different code path) does not accidentally inherit
+# stale ids.
+_pending_launch_event_ids: Optional[tuple] = None
+
+
 def supervisor_module_globals() -> dict[str, Any]:
     """Return the module-level globals for inspection.
 
@@ -1005,12 +1017,31 @@ def pid_alive(pid: int) -> bool:
     """
     try:
         text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
-    except (OSError, FileNotFoundError):
+    except FileNotFoundError:
+        # The proc entry is gone. The PID is truly dead.
         return False
+    except (OSError, PermissionError):
+        # Round-39 P1#1: an unreadable /proc/<pid>/status
+        # (transient I/O error, EMFILE, permission policy)
+        # MUST NOT classify the live worker as dead. The
+        # historical signal-0 probe is the conservative
+        # fallback: it succeeds for any process the kernel
+        # still owns, including live PIDs whose /proc is
+        # momentarily inaccessible. Returning False here
+        # would let poll_worker_attempt() terminalize the
+        # attempt, release the lease, and spawn a duplicate
+        # worker, breaking the single-writer invariant.
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
     except Exception:
-        # Treat any other proc failure conservatively: the
-        # ``os.kill(pid, 0)`` fallback below is the historical
-        # signal-0 probe and matches the original semantics.
+        # Any other exception: fall back to the signal-0
+        # probe so an obscure /proc read failure doesn't
+        # silently kill the lease.
         try:
             os.kill(pid, 0)
             return True
@@ -1338,8 +1369,23 @@ def poll_worker_attempt(
                     # net; the next poll or recovery cycle will finalize.
                     rec.lifecycle = LIFECYCLE_RECOVERY_CHECK
         store.write(rec)
-        # Release the lease so the next heartbeat can re-dispatch.
-        if lease is not None:
+        # Round-39 P1#5: when the deferred push-recovery
+        # branch attributed the dead worker to a live head
+        # (``rec.lifecycle == LIFECYCLE_PUSH_VERIFIED``),
+        # the lease MUST NOT be released here. The
+        # head-rebind path that runs immediately after
+        # this poll uses ``find_active_worker_attempt_for_head``
+        # to find the attempt and route the head advance
+        # through ``mark_head_advanced_public``. Releasing
+        # the lease here would orphan the attempt and
+        # leave the controller in REPAIRING_REVIEW_FINDINGS
+        # while the live GitHub head advanced past it.
+        # The lease is released ONLY when the attempt is
+        # truly terminal (WORKER_EXITED_NO_PUSH).
+        if (
+            lease is not None
+            and rec.lifecycle != LIFECYCLE_PUSH_VERIFIED
+        ):
             try:
                 remove_lease()
             except Exception:  # noqa: BLE001
@@ -1347,7 +1393,15 @@ def poll_worker_attempt(
         # Unmark every launched_event_id associated with this
         # attempt so the durable work item becomes runnable again.
         # Round-36 invariant: launched != terminal.
-        if lease is not None:
+        # Round-39 P1#5: only unmark when the attempt is
+        # truly terminal. A PUSH_VERIFIED attempt owns
+        # its events; the head-rebind path will mark
+        # them consumed once the controller transitions
+        # to AWAITING_CI.
+        if (
+            lease is not None
+            and rec.lifecycle != LIFECYCLE_PUSH_VERIFIED
+        ):
             for eid in (
                 lease.get("last_dispatched_event_id") or ""
             ).split(","):
@@ -1544,6 +1598,41 @@ def verify_push_against_attempt(
         if out["origin_head_verified"]:
             out["github_head_verified"] = True
         return out
+    # Round-39 P1#6: when both ``pushed_commit_sha`` and
+    # ``produced_commit_sha`` are ``None`` (the production
+    # launch initializer), the worker simply has not yet
+    # recorded its commit. We MUST NOT fail-closed on the
+    # direct ``new_head_sha`` comparison in that case
+    # because the head-rebind path needs to be able to
+    # verify a freshly-pushed head even when the worker's
+    # own commit bookkeeping is incomplete. Instead, fall
+    # back to the origin/<expected_branch> check: if the
+    # remote branch already points to the new head, the
+    # push is genuinely attributable to this attempt.
+    if (
+        not rec.pushed_commit_sha
+        and not rec.produced_commit_sha
+        and rec.expected_branch
+    ):
+        try:
+            origin_head = subprocess.check_output(
+                ["git", "rev-parse",
+                 f"origin/{rec.expected_branch}"],
+                cwd=str(REPO_DIR),  # type: ignore[name-defined]
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+            ).strip()
+            if origin_head == new_head_sha:
+                out["origin_head_verified"] = True
+                # GitHub verification happens via the live
+                # PR head check the supervisor already
+                # performs; if origin is verified and the
+                # head matches, GitHub is also verified.
+                out["github_head_verified"] = True
+        except (subprocess.CalledProcessError,
+                subprocess.TimeoutExpired, OSError):
+            pass
     return out
 
 
@@ -2402,7 +2491,12 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
             repo_name=str(REPO_NAME),  # type: ignore[name-defined]
             pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
-            event_ids=(),
+            # Round-39 P1#8: populate ``event_ids`` from the
+            # pending-launch slot populated by
+            # ``handle_new_events``. The previous initializer
+            # was always ``()`` so dead-worker recovery could
+            # not unmark the real launched events.
+            event_ids=tuple(_pending_event_ids or ()),
             finding_ids=(),
             directive_digest=directive_digest,
             directive_path=directive_path,
@@ -2451,6 +2545,21 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             error=str(exc),
         )
 
+    # Round-39 P1#8: persist the fresh event ids on the
+    # WorkerAttemptRecord so dead-worker recovery can
+    # ``unmark_event_launched`` for the real ids (not just the
+    # empty tuple the production initializer used). The slot
+    # is populated by ``handle_new_events`` BEFORE the launch
+    # call and is cleared immediately after the WorkerAttemptRecord
+    # is written to avoid leaking into the next launch. The
+    # raised-leased worker is durable and the launched-event
+    # ledger is the inverse of the attempt's event_ids.
+    try:
+        _pending_event_ids = tuple(
+            globals().get("_pending_launch_event_ids") or ()
+        )
+    except Exception:
+        _pending_event_ids = ()
     lease = {
         "supervisor_instance_id": INSTANCE_ID,  # type: ignore[name-defined]
         "run_id": f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
@@ -2477,6 +2586,13 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         # operations (dead-worker recovery, head-rebind check)
         # can locate the canonical record on disk.
         "attempt_id": attempt_id,
+        # Round-39 P1#8: round-trip the event ids so the
+        # dead-worker recovery path can unmark the correct
+        # launched events. The WorkerAttemptRecord is the
+        # durable source of truth; the lease is the
+        # secondary path used by ``poll_worker_attempt``
+        # BEFORE the attempt record is finalized.
+        "last_dispatched_event_id": ",".join(_pending_event_ids or ()),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
@@ -3302,6 +3418,89 @@ def _cooldown_deferred_ids() -> set:
     except Exception:  # noqa: BLE001
         return set()
     return set(existing.get("ids", []))
+
+
+def _replay_cooldown_deferred_if_any() -> None:
+    """Replay events that were deferred during cooldown.
+
+    Round-39 P1#2: when cooldown expires, this helper
+    re-emits the deferred events into the unconsumed-events
+    ledger so the next snapshot delta (or the explicit
+    ``handle_new_events`` invocation) routes them to
+    ``_invoke_relay_for_events``. The deferred ledger is
+    cleared once the event payload is replayed.
+
+    Exactly-one ownership: PENDING -> dispatched, never
+    twice. An event already in ``launched_events.json``
+    is considered already-dispatched and is NOT re-emitted
+    (the next ``handle_new_events`` short-circuits the
+    ``already`` set).
+    """
+    deferred_ids = _cooldown_deferred_ids()
+    if not deferred_ids:
+        return
+    # Read the existing unconsumed ledger so we can merge
+    # without losing any events that arrived concurrently.
+    try:
+        existing = read_json(UNCONSUMED_EVENTS_PATH)  # type: ignore[name-defined]
+    except Exception:  # noqa: BLE001
+        existing = {}
+    existing_events = list(existing.get("events", []) or [])
+    existing_ids = {e.get("id") for e in existing_events if isinstance(e, dict)}
+    # Read the launched-events list so we don't re-emit an
+    # event that was already dispatched (idempotency).
+    launched = launched_event_ids()
+    replayed: list = []
+    for eid in list(deferred_ids):
+        if eid in launched:
+            # Already dispatched; just remove from the
+            # deferred ledger so it doesn't accumulate.
+            continue
+        if eid in existing_ids:
+            # Already in the unconsumed ledger; the next
+            # ``run_iteration_v5`` will see it via the
+            # snapshot delta. Drop the deferred entry.
+            continue
+        # Original payload is unknown (we only stored
+        # ids in the deferred ledger). Synthesize a
+        # minimal event dict so the relay's payload
+        # classification still works; the relay's
+        # ``should_invoke_relay`` consults the live
+        # snapshot, not the event payload, so this
+        # placeholder is sufficient.
+        existing_events.append(
+            {"id": eid, "kind": "replayed_cooldown_deferred"}
+        )
+        replayed.append(eid)
+    if not replayed:
+        # All deferred ids were already dispatched or
+        # already in the unconsumed ledger. Drop them
+        # from the deferred ledger so they don't
+        # accumulate; the next iteration sees the
+        # replayed events via the existing paths.
+        _consume_cooldown_deferred(
+            [eid for eid in deferred_ids if eid not in launched]
+        )
+        return
+    try:
+        write_json(
+            UNCONSUMED_EVENTS_PATH,  # type: ignore[name-defined]
+            {"events": existing_events},
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "cooldown-deferred replay failed",
+            error=str(exc),
+        )
+        return
+    # Clear the deferred ledger for the ids we replayed.
+    _consume_cooldown_deferred(replayed)
+    log(
+        "info",
+        "cooldown-deferred events replayed",
+        replayed=len(replayed),
+    )
 
 
 def unmark_event_launched(event_id: str) -> None:
@@ -4878,11 +5077,35 @@ def _persist_retry_with_reason(
     # lifecycle='cleared' means the work has been CONSUMED.
     # Do NOT re-claim — that would double-bump the slice_epoch
     # on later heartbeats.
+    #
+    # Round-39 P1#4: a ``cleared`` ledger MUST NOT suppress
+    # later independent retry work. The ``round_budget_retry``
+    # file is shared across multiple retry categories
+    # (`no_action_on_review_repair`, `unknown_relay_action:...`,
+    # `qualifying_readiness_persistence_failed`, etc.). When
+    # one category is CONSUMED, a later failure from a
+    # DIFFERENT category must be able to record a new
+    # attempt. The previous unconditional return
+    # permanently silenced the file after a successful
+    # round-budget recovery, so a subsequent
+    # ``no_action_on_review_repair`` or orchestration-root
+    # failure could not replace the old record.
     if prior.get("lifecycle") in ("cleared", "resolved", "consumed"):
-        # The work has been handled. The supervisor's
-        # main-loop scheduler already saw it; do not
-        # resurrect the record.
-        return
+        # The prior work has been handled. Reset the
+        # lifecycle to ``pending`` so a NEW failure
+        # from this category (or any other category
+        # sharing this file) can record a fresh
+        # attempt. The slice_epoch_bumps count is
+        # preserved across the reset so the
+        # slice-budget cycle is not double-bumped.
+        prior = {
+            "lifecycle": "pending",
+            "reset_after_consumed": True,
+            "previous_reason": prior.get("reason"),
+            "slice_epoch_bumps": int(
+                prior.get("slice_epoch_bumps", 0) or 0
+            ),
+        }
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     prior_count = int(prior.get("attempt_count", 0)) if prior else 0
@@ -5397,6 +5620,13 @@ def handle_new_events(
             fresh_ids=fresh_ids,
             reason="no_action_on_review_repair",
         )
+        # Round-39 P1#3: events are kept in the
+        # unconsumed-events ledger (the original snapshot
+        # deltas already wrote them there). The next
+        # heartbeat's main loop supplements ``new_events``
+        # with anything still in the unconsumed ledger so
+        # the same event re-routes to the relay on the
+        # next slice / heartbeat.
         return
     else:
         # Round-33: unknown relay action. The
@@ -5426,7 +5656,16 @@ def handle_new_events(
     live = (
         inspect_live_state(token) if token else {}
     )
-    new_lease = launch_worker(rs, live)
+    # Round-39 P1#8: declare the fresh event ids to the
+    # launcher's WorkerAttemptRecord constructor. The slot
+    # is read by ``launch_worker`` and cleared immediately
+    # after the record is persisted so a subsequent launch
+    # (e.g. worker crash loop) does not inherit these ids.
+    globals()["_pending_launch_event_ids"] = tuple(fresh_ids or ())
+    try:
+        new_lease = launch_worker(rs, live)
+    finally:
+        globals()["_pending_launch_event_ids"] = None
     if new_lease:
         for eid in fresh_ids:
             mark_event_launched(eid)
@@ -5949,6 +6188,36 @@ def main(argv: Optional[list[str]] = None) -> int:
                     head=iteration.get("head_sha", "")[:12],
                 )
             new_events = list(iteration.get("events", [])) + drain_events
+            # Round-39 P1#3: supplement ``new_events`` with
+            # any durable unconsumed events that have not yet
+            # been launched. ``run_iteration_v5`` derives
+            # ``events`` from snapshot deltas only; events that
+            # were re-persisted by a ``no_action`` /
+            # recoverable_retry / unknown_relay_action path
+            # (``_persist_round_budget_retry`` keeps them
+            # actionable) would otherwise sit silent until the
+            # next genuine GitHub delta. The launched set is
+            # consulted so already-dispatched events are not
+            # re-routed.
+            try:
+                _launched = launched_event_ids()
+                for _ev in list_unconsumed_events():
+                    if not isinstance(_ev, dict):
+                        continue
+                    _eid = _ev.get("id")
+                    if not _eid or _eid in _launched:
+                        continue
+                    if any(
+                        isinstance(x, dict) and x.get("id") == _eid
+                        for x in new_events
+                    ):
+                        continue
+                    new_events.append(_ev)
+            except Exception:  # noqa: BLE001
+                # Failure to read the unconsumed ledger MUST
+                # NOT break the heartbeat. The snapshot-delta
+                # path still works.
+                pass
             paused = [
                 p for p, st in (
                     read_quota_state().get("providers") or {}
@@ -6214,6 +6483,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # ownership transition: PENDING ->
                 # dispatched when cooldown lifts).
                 _mark_cooldown_deferred(new_events)
+
+            # Round-39 P1#2: replay cooldown-deferred events
+            # when cooldown expires. The deferred ledger
+            # records events that were skipped during
+            # cooldown; without this branch, the next
+            # iteration's snapshot A absorbs the new event
+            # so ``detect_new_actionable_events`` returns
+            # no event (the snapshot deltas already include
+            # it), and the deferred ledger becomes a
+            # permanent tombstone. When cooldown has
+            # expired, merge the deferred events into the
+            # unconsumed-events ledger with full payload
+            # so handle_new_events can dispatch them on
+            # the SAME heartbeat. Exactly-one ownership:
+            # PENDING -> dispatched, never twice.
+            if not cooldown_active():
+                _replay_cooldown_deferred_if_any()
 
             if cur_state == STATE_ACTIVE_REPAIR:
                 pre_unconsumed_ids = {

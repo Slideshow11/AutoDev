@@ -508,7 +508,24 @@ def mark_head_advanced_public(
         except ImportError:
             pass
         return False
-    store = default_store()
+    # Round-39 P1#7: read the attempt from the supervisor's
+    # canonical WorkerAttemptStore. ``default_store()`` falls
+    # back to ``cwd/state/worker_attempts`` or
+    # ``AED_EVIDENCE_ROOT/state/worker_attempts`` which is NOT
+    # the supervisor's configured ``WORKER_ATTEMPTS_DIR``. In
+    # the default deployment those two paths differ; the
+    # verified attempt could not be found and the head advance
+    # was rejected. The supervisor's canonical store lives at
+    # ``STATE_DIR/worker_attempts`` (same as
+    # ``autocoder_supervisor.supervisor._worker_attempt_store()``).
+    # We import the helper from the supervisor module so the
+    # path is computed identically to the one the
+    # launch/poll/finalize paths use.
+    try:
+        from .supervisor import _worker_attempt_store
+        store = _worker_attempt_store()
+    except Exception:
+        store = default_store()
     attempt = store.read(attempt_id)
     if attempt is None:
         try:

@@ -313,7 +313,27 @@ def test_mark_head_advanced_logs_error_when_unresolvable(
     # Make the resolver fail closed by pointing at a missing file.
     monkeypatch.setattr(relay_wiring, "RUN_STATE", tmp_path / "missing.json", raising=False)
     monkeypatch.setattr(supervisor, "RUN_STATE", tmp_path / "missing.json", raising=False)
-    # Patch default_attempt_root to use our seed dir.
+    # Round-39 P1#7: relay_wiring now reads the attempt
+    # from the supervisor's canonical WorkerAttemptStore
+    # (via _worker_attempt_store) rather than from
+    # default_store(). Patch the supervisor helper to
+    # return the seed store so the existing attempt
+    # lookup still resolves.
+    if not hasattr(supervisor, "_worker_attempt_store"):
+        # Test was authored before the helper existed;
+        # bind the import-time attribute so the patch
+        # below can rebind it.
+        supervisor._worker_attempt_store = (
+            lambda: WorkerAttemptStore(wa_dir)
+        )
+    else:
+        monkeypatch.setattr(
+            supervisor,
+            "_worker_attempt_store",
+            lambda: WorkerAttemptStore(wa_dir),
+        )
+    # Patch default_attempt_root to use our seed dir
+    # so the fallback path also resolves.
     from autocoder_orchestration import worker_attempt as wa_mod
     monkeypatch.setattr(wa_mod, "default_attempt_root", lambda: wa_dir)
     calls = []

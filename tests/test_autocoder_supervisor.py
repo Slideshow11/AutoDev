@@ -2278,6 +2278,17 @@ def test_round33_retry_ledger_cleared_does_not_bump_slice_epoch(
     work has been CONSUMED; bumping the slice_epoch
     again would advance the epoch on every heartbeat
     forever and break the slice-budget cycle.
+
+    Round-39 P1#4 amendment: a ``cleared`` record that
+    is re-persisted by a NEW failure (different reason
+    or same reason re-appearing) MUST be allowed to
+    record a fresh attempt — the
+    ``round_budget_retry.json`` file is shared across
+    multiple retry categories and a consumed record
+    from one category must not suppress later
+    independent work. The slice_epoch_bumps count is
+    preserved across the reset so the slice-budget
+    cycle is not double-bumped.
     """
     from autocoder_supervisor import supervisor as sup
 
@@ -2295,19 +2306,31 @@ def test_round33_retry_ledger_cleared_does_not_bump_slice_epoch(
         "owner": "supervisor_recovery",
         "recoverable": True,
     }))
-    # Attempt to re-persist with the helper. It MUST
-    # refuse to resurrect a cleared record.
+    # Round-39 P1#4: a NEW failure from a different
+    # category (or the same category re-appearing) MUST
+    # be allowed to record a fresh attempt. The cleared
+    # lifecycle is reset to ``pending`` so the new
+    # failure is captured, but the slice_epoch_bumps
+    # count is preserved (no double-bump).
     sup._persist_retry_with_reason(
-        reason="orchestration_root_unresolved",
+        reason="no_action_on_review_repair",
         extra={"error": "transient"},
     )
     payload = json.loads(retry_path.read_text())
-    assert payload.get("lifecycle") == "cleared", (
-        "cleared retry record MUST NOT be resurrected by "
-        "_persist_retry_with_reason; lifecycle must remain 'cleared'."
+    assert payload.get("lifecycle") == "pending", (
+        "round-39 P1#4: a cleared record MUST be reset "
+        "to 'pending' when a NEW failure records a fresh "
+        "attempt, so a later retry can replace the old "
+        "record instead of being silently absorbed."
+    )
+    assert payload.get("reset_after_consumed") is True, (
+        "round-39 P1#4: the reset stamp must be present "
+        "so the audit trail records the lifecycle reset."
     )
     assert payload.get("slice_epoch_bumps") == 1, (
-        "cleared retry record MUST NOT bump the slice_epoch count."
+        "round-39 P1#4: the slice_epoch_bumps count is "
+        "preserved across the reset so the slice-budget "
+        "cycle is not double-bumped."
     )
 
 
