@@ -4844,8 +4844,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # commit, the rebind here triggers the
                 # transition.
                 try:
-                    from .relay_wiring import relay_wiring as _relay_wiring
-                    _relay_wiring.mark_head_advanced_public(
+                    from .relay_wiring import (
+                        mark_head_advanced_public,
+                    )
+                    mark_head_advanced_public(
                         old_head, live_head,
                     )
                 except Exception as exc:
