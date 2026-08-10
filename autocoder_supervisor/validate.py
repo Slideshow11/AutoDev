@@ -139,7 +139,7 @@ def _check_provider_policy(
     # configured providers exist in the registry so the
     # supervisor never reaches readiness with an unknown
     # name.
-    from .supervisor import supervisor as _supervisor
+    from . import supervisor as _supervisor
     known = set(_supervisor.PROVIDERS.keys())
     unknown_required = sorted(required - known)
     if unknown_required:
@@ -283,7 +283,7 @@ def _check_pr_head_match(
         return
 
     # Live PR head via GitHub.
-    from .supervisor import supervisor as _supervisor
+    from . import supervisor as _supervisor
     repo_owner = os.environ.get("AED_REPO_OWNER", "")
     repo_name = os.environ.get("AED_REPO_NAME", "")
     pr_number = os.environ.get("AED_PR_NUMBER", "")
