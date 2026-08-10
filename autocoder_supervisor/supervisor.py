@@ -526,6 +526,18 @@ def read_run_state() -> dict:
 
 
 def get_github_token() -> Optional[str]:
+    """Resolve the canonical GitHub bearer credential.
+
+    Sources, in priority order:
+        1. ``GITHUB_TOKEN_PR_AUTODEV`` env var — the operator's
+           explicit override for the AutoDev PR-5 supervisor.
+        2. The ``oauth_token: <token>`` line in ``TOKEN_FILE``
+           (default: ``~/.config/gh/hosts.yml``) — the standard
+           gh-CLI credential source.
+    """
+    env_token = os.environ.get("GITHUB_TOKEN_PR_AUTODEV") or ""
+    if env_token:
+        return env_token
     try:
         text = TOKEN_FILE.read_text()  # type: ignore[name-defined]
         m = re.search(r"oauth_token:\s+(\S+)", text)
@@ -534,15 +546,49 @@ def get_github_token() -> Optional[str]:
         return None
 
 
-def github_get(path: str, token: str) -> Optional[Any]:
+def github_token_source() -> str:
+    """Return a non-secret label for the credential source.
+
+    Used for diagnostic logging — NEVER include the value.
+    """
+    if os.environ.get("GITHUB_TOKEN_PR_AUTODEV"):
+        return "env"
+    try:
+        if Path(TOKEN_FILE).exists():  # type: ignore[name-defined]
+            return "hosts_yml"
+    except Exception:
+        pass
+    return "none"
+
+
+def github_get(
+    path: str,
+    token: str,
+    *,
+    _reload_token: bool = False,
+    _retry_on_401: bool = True,
+) -> Optional[Any]:
+    """Round-38 hardened HTTP GET.
+
+    Behaviour:
+        - When ``_reload_token`` is True the caller passes no
+          token and ``get_github_token()`` is invoked on every
+          call so a credential rotated by ``gh auth login`` is
+          picked up without a supervisor restart.
+        - When ``_retry_on_401`` is True (default) and the
+          first attempt returns 401, the canonical credential
+          source is re-read and the request retried exactly
+          once. This recovers from the ``gh auth refresh``
+          case where the cached hosts.yml has been rotated.
+        - All diagnostic logging is non-secret.
+    """
+    if _reload_token and not token:
+        token = get_github_token() or ""
     url = f"https://api.github.com{path}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.github+json",
-        },
-    )
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+    }
     # Round-37: log only whether a token is configured; never
     # expose token material (prefix, length, or contents).
     log(
@@ -550,11 +596,58 @@ def github_get(path: str, token: str) -> Optional[Any]:
         "github_get call",
         path=path[:80],
         token_configured=bool(token),
+        credential_source=github_token_source(),
     )
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
+        if _retry_on_401 and e.code == 401:
+            # Re-read the canonical credential and retry.
+            fresh_token = get_github_token() or ""
+            if fresh_token and fresh_token != token:
+                log(
+                    "info",
+                    "github_get retrying after credential reload",
+                    path=path[:80],
+                    previous_source=github_token_source(),
+                )
+                req_retry = urllib.request.Request(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {fresh_token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(
+                        req_retry, timeout=20
+                    ) as r:
+                        return json.loads(r.read())
+                except urllib.error.HTTPError as e2:
+                    log(
+                        "warning",
+                        "github_get http error after credential reload",
+                        path=path,
+                        code=e2.code,
+                    )
+                    return None
+                except Exception as e2:
+                    log(
+                        "warning",
+                        "github_get failed after credential reload",
+                        path=path,
+                        error=str(e2),
+                    )
+                    return None
+            log(
+                "warning",
+                "github_get http error; no refreshed credential available",
+                path=path,
+                code=401,
+            )
+            return None
         log("warning", "github_get http error", path=path, code=e.code)
         return None
     except Exception as e:
@@ -896,14 +989,43 @@ def remove_lease() -> None:
 
 
 def pid_alive(pid: int) -> bool:
-    """Return True iff the process exists and is liveness-probeable.
+    """Return True iff the process exists AND is alive.
 
-    os.kill(pid, 0) raises ProcessLookupError when the
-    PID does not exist and PermissionError when the PID
-    exists but is owned by another user. A single-writer
-    invariant depends on the distinction: a stray EPERM must
-    NOT be treated as "process dead".
+    The Round-37 implementation only used ``os.kill(pid, 0)``.
+    That signal-0 probe succeeds for zombie processes (the
+    kernel still owns the PID), which kept the worker lease
+    stuck for minutes after a worker died. Round-38 reads
+    ``/proc/<pid>/status`` and returns False for the ``Z``
+    (zombie) state so a dead child's exit is recognised on
+    the next poll even while the OS still owns the PID.
+
+    Returns False when the PID is gone, when it is a zombie,
+    and when ``/proc`` is unavailable. Returns True for any
+    other liveness state (``R``, ``S``, ``D``, ``T``, ``I``).
     """
+    try:
+        text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return False
+    except Exception:
+        # Treat any other proc failure conservatively: the
+        # ``os.kill(pid, 0)`` fallback below is the historical
+        # signal-0 probe and matches the original semantics.
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+    for line in text.splitlines():
+        if line.startswith("State:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                state = parts[1]
+                # Z = zombie, X = dead. Both mean "exited".
+                return state not in ("Z", "X", "")
+    # Couldn't parse /proc; fall back to the original probe.
     try:
         os.kill(pid, 0)
         return True
@@ -916,19 +1038,87 @@ def pid_alive(pid: int) -> bool:
         return True
 
 
+def _read_proc_state(pid: int) -> Optional[str]:
+    """Return the single-letter ``State:`` field from
+    ``/proc/<pid>/status``, or None if the proc is gone.
+    """
+    try:
+        text = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+    except (OSError, FileNotFoundError):
+        return None
+    for line in text.splitlines():
+        if line.startswith("State:"):
+            parts = line.split()
+            if len(parts) >= 2:
+                return parts[1]
+    return None
+
+
+def _reap_via_waitid(pid: int) -> Optional[tuple[Optional[int], Optional[int]]]:
+    """Best-effort nonblocking reap of a child PID.
+
+    Returns ``(exit_code, signal)`` if the child has exited,
+    ``None`` when the child is still running. Raises are
+    caught and converted to ``None`` (caller decides).
+    """
+    try:
+        result = os.waitid(os.P_PID, pid, os.WNOHANG)
+    except ChildProcessError:
+        return None
+    except OSError:
+        return None
+    status = getattr(result, "si_status", None) if result else None
+    if status is None:
+        return None
+    try:
+        if os.WIFEXITED(status):
+            return (os.WEXITSTATUS(status), None)
+        if os.WIFSIGNALED(status):
+            return (None, os.WTERMSIG(status))
+    except (AttributeError, OSError):
+        return None
+    return None
+
+
 def pgid_alive(pgid: int) -> bool:
     """Return True iff the process group exists.
 
-    Identical semantics to pid_alive for the same
-    single-writer safety reason.
+    Identical semantics to ``pid_alive`` for the same
+    single-writer safety reason. A zombie process group is
+    considered NOT alive so a stuck child cannot indefinitely
+    hold the lease.
     """
     try:
         os.kill(-pgid, 0)
-        return True
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
+    # The OS still answers signal-0 for a zombie pgid; check
+    # /proc for at least one live process in the group.
+    for entry in Path("/proc").iterdir():
+        try:
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        except (OSError, FileNotFoundError):
+            continue
+        for line in status.splitlines():
+            if line.startswith("Tgid:") and line.split()[1] == str(pid):
+                # Cheap PGID check via stat.
+                try:
+                    if (
+                        Path(f"/proc/{pid}/stat").read_text(
+                            encoding="utf-8"
+                        ).split()[4] == str(pgid)
+                        and _read_proc_state(pid) not in ("Z", "X", "")
+                    ):
+                        return True
+                except (OSError, IndexError):
+                    continue
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -947,30 +1137,29 @@ def _worker_attempt_store():
 def _reap_worker(pid: int) -> tuple[Optional[int], Optional[int]]:
     """Reap a dead worker process and return ``(exit_code, signal)``.
 
-    Uses ``os.waitid`` with ``WNOHANG`` so a live process returns
-    ``(None, None)``. A dead process is reaped and the exit info
-    is returned. ``os.WEXITSTATUS`` / ``os.WIFSIGNALED`` are applied
-    to convert the raw ``status`` into the canonical pair.
+    Round-38 robustness:
+        1. First tries the standard ``os.waitid(P_PID, pid, WNOHANG)``
+           (works when this supervisor is the parent).
+        2. If that fails (e.g. across a restart that lost the
+           parent link), falls back to ``/proc/<pid>/status``
+           and treats State ``Z``/``X`` as exited so the lease
+           can be released without a 15-minute heartbeat wait.
     """
-    try:
-        result = os.waitid(os.P_PID, pid, os.WNOHANG)
-    except ChildProcessError:
-        # Already reaped or never existed.
-        return (None, None)
-    except OSError:
-        return (None, None)
-    if result is None:
-        return (None, None)
-    status = getattr(result, "si_status", None)
-    if status is None:
-        return (None, None)
-    try:
-        if os.WIFEXITED(status):
-            return (os.WEXITSTATUS(status), None)
-        if os.WIFSIGNALED(status):
-            return (None, os.WTERMSIG(status))
-    except (AttributeError, OSError):
-        pass
+    info = _reap_via_waitid(pid)
+    if info is not None:
+        return info
+
+    state = _read_proc_state(pid)
+    if state in ("Z", "X"):
+        # The OS still owns the PID; one more waitid attempt.
+        try:
+            os.waitid(os.P_PID, pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
+        # ``-1`` is the round-38 sentinel meaning "zombie
+        # observed via /proc after waitid failed; exit code
+        # was not retrievable." Callers treat this as exited.
+        return (-1, None)
     return (None, None)
 
 
@@ -1038,9 +1227,13 @@ def poll_worker_attempt(
         if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
             push_attributable = False
             try:
-                _token_for_probe = (
-                    os.environ.get("GITHUB_TOKEN_PR_AUTODEV") or ""
-                )
+                # Round-38: use ``get_github_token`` which
+                # honours both the dedicated env override and
+                # the canonical ``~/.config/gh/hosts.yml``
+                # source. Re-reading on every call lets a
+                # credential rotated by ``gh auth login`` be
+                # picked up without a supervisor restart.
+                _token_for_probe = get_github_token() or ""
                 if (
                     rec.expected_branch
                     and _token_for_probe
@@ -1379,7 +1572,16 @@ def lease_alive(lease: dict) -> Optional[dict]:
     if not start_time_matches(pid, lease.get("start_time_evidence", {})):
         return None
     cmdline = pid_cmdline(pid)
-    if SESSION_ID not in cmdline:  # type: ignore[name-defined]
+    # Round-38: a worker may have been launched against a
+    # resolved session id that differs from the configured
+    # ``SESSION_ID`` env bootstrap (e.g. when the configured
+    # session was missing and a fresh isolated session was
+    # created). The lease carries the actual session id; use
+    # that as the authoritative match.
+    lease_session_id = str(
+        lease.get("session_id") or SESSION_ID or ""  # type: ignore[name-defined]
+    )
+    if lease_session_id not in cmdline:
         return None
     if "hermes chat" not in cmdline:
         return None
@@ -1929,6 +2131,65 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             "set AED_HERMES_BIN or configure worker_command[0]",
         )
         return None
+    # Round-38: the attempt_id_prefix is computed early so the
+    # session-resolution helper can use a stable persist path
+    # derived from the same prefix the worker-attempt record
+    # will use.
+    attempt_id_prefix = "att-" + now_iso().replace(":", "").replace("-", "")
+    # Round-38: resolve the actual worker session id BEFORE
+    # building the launch command. If the configured/persisted
+    # session no longer exists in the hermes state store, the
+    # resolution helper creates a fresh isolated session via
+    # the supported ``hermes chat -q "..."`` mechanism and
+    # persists it for restart resilience. The launch command
+    # below then uses the resolved session id, NOT the stale
+    # SESSION_ID env value. This prevents the recurring
+    # ``Session not found: 20260810_023800_pr5`` worker-death
+    # cycle observed in Round 37.
+    _resolved_session_id = str(SESSION_ID or "")  # type: ignore[name-defined]
+    _resolved_was_replaced = False
+    _resolved_persist_path = (
+        Path(str(STATE_DIR))  # type: ignore[name-defined]
+        / "worker_sessions"
+        / f"session-{attempt_id_prefix}.json"
+    )
+    try:
+        from .worker_session import resolve_worker_session
+        _session_resolution = resolve_worker_session(
+            hermes_bin=hermes_bin,
+            configured_session_id=_resolved_session_id,
+            persist_path=_resolved_persist_path,
+            attempt_id=attempt_id_prefix,
+            pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+            repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
+            repo_name=str(REPO_NAME),  # type: ignore[name-defined]
+            feature_branch=str(
+                os.environ.get("AED_BRANCH") or ""
+            ),
+            workspace_cwd=Path(str(REPO_DIR)),  # type: ignore[name-defined]
+        )
+        _resolved_session_id = _session_resolution.session_id
+        _resolved_was_replaced = _session_resolution.was_replaced
+        log(
+            "info",
+            "round-38 worker session resolved",
+            attempt_id=attempt_id_prefix,
+            session_id=_resolved_session_id[:12] + "...",
+            was_replaced=_resolved_was_replaced,
+            reason=_session_resolution.reason,
+        )
+    except Exception as exc:
+        # Round-38 invariant: a session resolution failure
+        # MUST NOT strand the loop. We persist the failure
+        # reason durably and fall back to the configured id;
+        # the launch will fail fast on the resume side, and
+        # the next dispatch cycle will retry resolution.
+        log(
+            "warning",
+            "round-38 session resolution failed; using configured id",
+            attempt_id=attempt_id_prefix,
+            error=str(exc)[:200],
+        )
     # Build the launch command by substituting {prompt} and
     # {session_id} into the configured template (if any) and
     # appending the standard flags. The configured template
@@ -1940,7 +2201,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             cmd = [
                 part.format(
                     prompt=prompt,
-                    session_id=SESSION_ID,  # type: ignore[name-defined]
+                    session_id=_resolved_session_id,
                 )
                 for part in configured_cmd
             ]
@@ -1976,7 +2237,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             "-q",
             prompt,
             "--resume",
-            SESSION_ID,  # type: ignore[name-defined]
+            _resolved_session_id,
             "--no-restore-cwd",
             "--accept-hooks",
             "--yolo",
@@ -1992,9 +2253,8 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # is observable after restart.
     worker_attempts_dir = Path(str(STATE_DIR)) / "worker_attempts"  # type: ignore[name-defined]
     worker_attempts_dir.mkdir(parents=True, exist_ok=True)
-    # The attempt id uses a timestamp + pid; pid is unknown until
-    # Popen succeeds, so the timestamp prefix is stable.
-    attempt_id_prefix = "att-" + now_iso().replace(":", "").replace("-", "")
+    # attempt_id_prefix was already computed earlier (round-38)
+    # so the session-resolution helper could share the prefix.
     stdout_path = worker_attempts_dir / f"{attempt_id_prefix}.stdout.log"
     stderr_path = worker_attempts_dir / f"{attempt_id_prefix}.stderr.log"
     try:
@@ -2137,7 +2397,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             attempt_id=attempt_id,
             claim_id=(
                 directive_id
-                or f"lease-{SESSION_ID}"  # type: ignore[name-defined]
+                or f"lease-{_resolved_session_id}"
             ),
             repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
             repo_name=str(REPO_NAME),  # type: ignore[name-defined]
@@ -2195,7 +2455,15 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         "supervisor_instance_id": INSTANCE_ID,  # type: ignore[name-defined]
         "run_id": f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
         "pr_number": PR_NUMBER,  # type: ignore[name-defined]
-        "session_id": SESSION_ID,  # type: ignore[name-defined]
+        # Round-38: record the actual session id used to launch
+        # this worker. ``SESSION_ID`` is only the configured
+        # bootstrap; the resolved session is what was actually
+        # passed to ``hermes chat --resume``. Persisting the
+        # resolved value here keeps the lease authoritative
+        # even after a fresh-session replacement.
+        "session_id": _resolved_session_id,
+        "session_id_configured": str(SESSION_ID or ""),  # type: ignore[name-defined]
+        "session_id_was_replaced": _resolved_was_replaced,
         "session_name": SESSION_NAME,  # type: ignore[name-defined]
         "authoritative_head_at_launch":
             AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
@@ -2735,6 +3003,16 @@ def resume_if_eligible(rs: dict, live: dict) -> str:
             return "worker_alive"
         log("info", "revoking stale lease", pid=lease.get("pid"))
         remove_lease()
+    # Round-38: derive the lease session id from the most
+    # recent durable record. The supervisor may have launched
+    # the worker with a resolved session id that differs from
+    # ``SESSION_ID`` (e.g. when the configured session was
+    # missing and a fresh isolated session was created).
+    lease_session_id = str(
+        (lease or {}).get("session_id")
+        or SESSION_ID
+        or ""  # type: ignore[name-defined]
+    )
     for pid_dir in os.listdir("/proc"):
         if not pid_dir.isdigit():
             continue
@@ -2743,7 +3021,7 @@ def resume_if_eligible(rs: dict, live: dict) -> str:
             cmdline = pid_cmdline(pid)
         except Exception:
             continue
-        if "hermes chat" in cmdline and SESSION_ID in cmdline:  # type: ignore[name-defined]
+        if "hermes chat" in cmdline and lease_session_id in cmdline:
             try:
                 my_pgid = os.getpgid(pid)
             except Exception:
@@ -2753,7 +3031,7 @@ def resume_if_eligible(rs: dict, live: dict) -> str:
                 "supervisor_instance_id": INSTANCE_ID,  # type: ignore[name-defined]
                 "run_id": f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
                 "pr_number": PR_NUMBER,  # type: ignore[name-defined]
-                "session_id": SESSION_ID,  # type: ignore[name-defined]
+                "session_id": lease_session_id,
                 "session_name": SESSION_NAME,  # type: ignore[name-defined]
                 "authoritative_head_at_launch":
                     AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
@@ -2766,7 +3044,7 @@ def resume_if_eligible(rs: dict, live: dict) -> str:
                     "hermes",
                     "chat",
                     "--resume",
-                    SESSION_ID,  # type: ignore[name-defined]
+                    lease_session_id,
                 ],
             }
             write_lease(new_lease)
