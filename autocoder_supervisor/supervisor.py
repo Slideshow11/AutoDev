@@ -2404,7 +2404,7 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                 provider=provider_name,
                 error=str(exc),
             )
-    all_threads: list[tuple[str, bool, bool]] = []
+    all_threads: list[tuple[str, bool, bool, dict]] = []
     cursor = None
     pagination_failed: bool = False
     pagination_complete: bool = False
@@ -2421,6 +2421,15 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         # is the GitHub-recommended pattern and prevents
         # accidental injection of operator-controlled values
         # into the GraphQL parser.
+        # Round-35: include the thread's path and comment
+        # body so the relay can classify actionable
+        # findings. The previous query omitted ``comments``
+        # and ``path`` so the thread inventory only carried
+        # resolved/outdated flags, not the actual finding
+        # content. That made every thread effectively
+        # blank to the relay and the head looked "clean"
+        # even when actionable review material existed on
+        # the current head.
         query = (
             "query($owner: String!, $name: String!, "
             "$number: Int!, $cursor: String) "
@@ -2428,7 +2437,10 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             "{ pullRequest(number: $number) "
             "{ reviewThreads(first: 100, after: $cursor) "
             "{ pageInfo { hasNextPage endCursor } "
-            "nodes { id isResolved isOutdated } } } } }"
+            "nodes { id isResolved isOutdated path "
+            "comments(first: 25) { nodes { "
+            "body author { login } databaseId "
+            "path line commit { oid } } } } } } } }"
         )
         payload = json.dumps({
             "query": query,
@@ -2477,10 +2489,50 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             node_id = tn.get("id")
             if not isinstance(node_id, str):
                 continue
+            # Round-35: capture the path and the first
+            # actionable comment body so downstream
+            # collectors can classify the thread as a real
+            # finding instead of treating it as a blank
+            # unresolved thread.
+            comments_obj = tn.get("comments")
+            comments_nodes = (
+                comments_obj.get("nodes", [])
+                if isinstance(comments_obj, dict) else []
+            )
+            first_comment: dict = {}
+            if comments_nodes and isinstance(comments_nodes[0], dict):
+                first_comment = comments_nodes[0]
+            thread_path = (
+                tn.get("path")
+                or first_comment.get("path")
+                or ""
+            )
+            thread_line = first_comment.get("line") if first_comment else None
+            commit_obj = first_comment.get("commit") if first_comment else None
+            thread_commit_oid = (
+                commit_obj.get("oid") if isinstance(commit_obj, dict) else None
+            )
+            thread_body = (
+                first_comment.get("body") if first_comment else ""
+            )
+            author_obj = (
+                first_comment.get("author") if first_comment else None
+            )
+            thread_author = (
+                author_obj.get("login") if isinstance(author_obj, dict) else None
+            )
             all_threads.append((
                 node_id,
                 bool(tn.get("isResolved")),
                 bool(tn.get("isOutdated")),
+                {
+                    "path": thread_path,
+                    "line": thread_line,
+                    "body": (thread_body or "")[:500],
+                    "commit_oid": thread_commit_oid,
+                    "author": thread_author,
+                    "comment_count": len(comments_nodes),
+                },
             ))
         page_info_obj = threads.get("pageInfo")
         pinfo = page_info_obj if isinstance(page_info_obj, dict) else {}
@@ -2494,8 +2546,16 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             break
         cursor = pinfo.get("endCursor")
     snap["review_threads"] = {
-        tid: {"resolved": r, "outdated": o}
-        for (tid, r, o) in all_threads
+        tid: {
+            "resolved": r,
+            "outdated": o,
+            # Round-35: thread evidence is part of the
+            # durable thread record. The drain logic uses
+            # path/line/body to confirm current-head
+            # actionable binding before dispatch.
+            **evidence,
+        }
+        for (tid, r, o, evidence) in all_threads
     }
     # Record the pagination status. When pagination failed,
     # the readiness gate MUST treat the inventory as
@@ -4619,19 +4679,55 @@ def main(argv: Optional[list[str]] = None) -> int:
                 tid for tid, td in threads.items()
                 if not td.get("resolved") and not td.get("outdated")
             )
+            # Round-35: only emit a drain event when the
+            # thread has REAL actionable evidence.
+            # Specifically: a non-empty body OR a path OR
+            # a commit_oid that matches the current head.
+            # Blank threads (no path, no body, no head
+            # binding) are not actionable findings and must
+            # NOT be synthesized into no-op repair cycles.
+            # They are also excluded from the synthetic
+            # drain queue.
+            current_head = (
+                iteration.get("head_sha")
+                or snap_for_drain.get("head_sha")
+            )
+            actionable_unresolved = []
             for tid in unresolved_ids:
+                td = threads[tid] or {}
+                body = (td.get("body") or "").strip()
+                path = (td.get("path") or "").strip()
+                commit_oid = td.get("commit_oid")
+                # Real evidence: the thread carries content.
+                if not body and not path:
+                    continue
+                # Or: the thread is bound to the current
+                # head even if its body is blank.
+                if (
+                    commit_oid
+                    and current_head
+                    and commit_oid == current_head
+                ):
+                    pass
+                elif not body and not path:
+                    continue
+                actionable_unresolved.append(tid)
+            for tid in actionable_unresolved:
                 eid = f"unresolved_thread_drain:{tid}"
                 if eid in already_launched:
                     continue
+                td = threads[tid] or {}
                 drain_events.append({
                     "id": eid,
                     "kind": "unresolved_thread_drain",
                     "thread_id": tid,
                     "source": "durable_drain",
-                    "head_sha": (
-                        iteration.get("head_sha")
-                        or snap_for_drain.get("head_sha")
-                    ),
+                    "head_sha": current_head,
+                    "path": td.get("path"),
+                    "line": td.get("line"),
+                    "body": td.get("body"),
+                    "commit_oid": td.get("commit_oid"),
+                    "author": td.get("author"),
                 })
                 break  # ONE per heartbeat (anti-burst)
             if drain_events:
