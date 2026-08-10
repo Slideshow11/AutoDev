@@ -4049,6 +4049,26 @@ def handle_new_events(
                             "event remains actionable for retry",
                             error=str(exc),
                         )
+                elif sm is not None and sm.current_state == "QUALIFYING_READINESS":
+                    # Round-34: the orchestrator has already
+                    # advanced to QUALIFYING_READINESS via the
+                    # relay's own transition. The supervisor
+                    # does not need to repeat it. The
+                    # persistence is successful by inspection:
+                    # the canonical state machine IS at
+                    # QUALIFYING_READINESS with the rebound
+                    # context. Mark persistence_ok so the
+                    # event is consumed and we do NOT schedule
+                    # an infinite retry loop on a transition
+                    # that already completed.
+                    persistence_ok = True
+                    log(
+                        "info",
+                        "supervisor observed QUALIFYING_READINESS "
+                        "(orchestrator advanced via relay; no "
+                        "additional report_ci_pass needed)",
+                        head=AUTHORITATIVE_HEAD[:12],  # type: ignore[name-defined]
+                    )
         except (OSError, OrchestrationRootError,
                 StateStoreError, ValueError, KeyError) as exc:
             log(
