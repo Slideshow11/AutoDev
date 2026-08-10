@@ -1,0 +1,52 @@
+{
+  "a019e63_review_count": 32,
+  "diagnostic_answers": {
+    "10_retry_ledger_consumed": "N/A \u2014 no ledger exists.",
+    "11_slice_epoch_advance": "N/A.",
+    "12_event_marked_consumed_prematurely": "N/A.",
+    "13_state_already_QUALIFYING_READINESS": "No PR #5 controller state exists. The orch state root for PR #5 was never initialized.",
+    "14_provider_comment_provenance": "N/A.",
+    "15_supervisor_terminate": "The PID 3250 supervisor is alive (heartbeat fresh) but is pointed at PR #416.",
+    "1_which_persistent_component_owned_transition_after_reviews_arrived": "NONE. The only running supervisor (PID 3250) is configured for PR #416, not PR #5. No persistent owner of PR #5 review\u2192classify\u2192repair\u2192push exists.",
+    "2_was_that_component_still_running": "A supervisor IS running, but for the wrong PR number.",
+    "3_did_it_observe_review_arrival": "No \u2014 the supervisor polls PR #416's review state via its hard-coded PR_NUMBER global.",
+    "4_if_not_why_not": "PR_NUMBER comes from the AED_PR_NUMBER env var (autocoder_supervisor/supervisor.py:80-82). The running process was launched with AED_PR_NUMBER=416 and has no awareness of PR #5.",
+    "5_if_observed_why_no_classification": "N/A \u2014 never observed.",
+    "6_if_classification_why_no_repair": "N/A.",
+    "7_if_retry_scheduled_why_no_wake": "N/A.",
+    "8_correct_evidence_root": "There is no orch state root for PR #5; the AED supervisor's state dir (/home/max/.hermes/aed-supervisor/state/) carries only PR #416 artifacts (worker_lease.json pr_number=416, etc.).",
+    "9_stale_retry_suppressing_work": "No retry ledger exists for PR #5. round_budget_retry.json, provider_cooldown.json NOT FOUND in any plausible path."
+  },
+  "earliest_a019e63_review_at": "2026-08-08T20:16:36Z",
+  "evidence": {
+    "aed_pr_number_env": "The running PID 3250 inherited AED_PR_NUMBER=416 at launch.",
+    "heartbeat_last": "2026-08-10T00:27:52Z",
+    "heartbeat_path": "/home/max/.hermes/aed-supervisor/heartbeat",
+    "last_resume_mtime": "2026-08-06T16:43:00Z",
+    "orch_state_root_reported": "null \u2014 run_state.json does not exist in the AutoDev checkout",
+    "ps_command_for_pid_3250": "python3 /home/max/.hermes/aed-supervisor/supervisor.py",
+    "ps_supervisor_for_pr5": "NONE \u2014 only PID 3250 (AED supervisor for PR #416) and PID 5502 (Hermes gateway) are running.",
+    "run_state_path_attempted": "/home/max/AutoDev/run_state.json (NOT FOUND)",
+    "supervisor_global_pr_number_source": "autocoder_supervisor/supervisor.py:80-82 reads os.environ.get('AED_PR_NUMBER', '0')",
+    "worker_lease_authoritative_head": "012156d4286893f6728da1026429166d26dfb155",
+    "worker_lease_pr_number": 416
+  },
+  "fix_path": [
+    "1. The supervisor's main loop MUST accept a list of PRs (AED_PR_NUMBERS=4,5) or auto-discover via the PR_NUMBER config.",
+    "2. The supervisor's main loop MUST iterate per PR, OR a separate per-PR supervisor instance MUST be started for PR #5.",
+    "3. A launchd/systemd unit (or a cron-equivalent supervisor-spawner) MUST auto-start a PR #5 supervisor when none is running.",
+    "4. PR #5's orch state root MUST be initialized (write run_context.json + state.json) so the supervisor has durable state to read.",
+    "5. The supervisor MUST persist the orchestration_state_root and use the canonical resolver (already in place at autocoder_supervisor/orchestration_state_root.py)."
+  ],
+  "fundamental_defect": "PR #5 has NO persistent control loop running for it. The supervisor is a singleton process bound to a single PR_NUMBER at launch time. There is no mechanism for a running supervisor to (a) discover new PR numbers, (b) own multiple PRs in parallel, or (c) start a PR #5 control loop automatically when a fix needs review/repair. The round-32 changes added internal state-machine wiring (slice_epoch, retry ledger, stale-comment filter) but the supervisor itself was never started against PR #5 \u2014 so all of that wiring is inert from the PR #5 perspective.",
+  "latest_a019e63_review_at": "2026-08-09T13:57:34Z",
+  "merge_state": "DIRTY",
+  "pr_head": "a019e6377be67c0c7664cf8ab0a8851e4481358a",
+  "pr_updated_at": "2026-08-09T22:39:47Z",
+  "review_decision": "CHANGES_REQUESTED",
+  "running_supervisor_heartbeat_last": "2026-08-10T00:27:52Z",
+  "running_supervisor_launched_at": "2026-08-06T16:43:00Z",
+  "running_supervisor_pid": 3250,
+  "running_supervisor_pr_number": 416,
+  "summary": "LIVE STALL FORENSICS \u2014 PR #5 head a019e63 \u2014 Root cause: NO persistent supervisor is running for PR #5."
+}

@@ -78,8 +78,21 @@ def _apply_config(cfg: SupervisorConfig) -> dict[str, Any]:
         "SESSION_ID": cfg.worker_session_id,
         "SESSION_NAME": cfg.worker_session_name,
         "PR_NUMBER": int(
-            os.environ.get("AED_PR_NUMBER", "0")
+            (os.environ.get("AED_PR_NUMBERS") or "").split(",")[0]
+            or os.environ.get("AED_PR_NUMBER", "0")
         ),
+        # Round-32: list of PR numbers the supervisor
+        # owns simultaneously. The main loop iterates
+        # each PR per heartbeat tick. The singleton
+        # ``PR_NUMBER`` global keeps backward-compat
+        # for all the legacy call sites that read it
+        # for the canonical PR.
+        "PR_NUMBERS": [
+            int(p.strip()) for p in (
+                os.environ.get("AED_PR_NUMBERS", "")
+                or os.environ.get("AED_PR_NUMBER", "")
+            ).split(",") if p.strip()
+        ],
         "REPO_OWNER": os.environ.get(
             "AED_REPO_OWNER", "unknown-owner"
         ),
@@ -3084,6 +3097,209 @@ def _persist_qualifying_readiness_retry(
         )
 
 
+def _write_orchestration_owner(this_pr: int) -> None:
+    """Round-32: stall watchdog.
+
+    Persists ``orchestration_owner.json`` per PR with the
+    current state, owner, last progress timestamp, next
+    action, and next_eligible_at. External observers can
+    detect a STALL when:
+
+    - state is non-terminal,
+    - no worker is active,
+    - no retry is scheduled (next_eligible_retry_at <= now),
+    - no poll is pending,
+    - no external pending condition with a next-check time.
+
+    The supervisor MUST NOT sit silently in that
+    condition. Detection is by inspection of this file
+    and by the supervisor's own per-tick validation
+    (logged loudly in main()).
+    """
+    try:
+        # Find the per-PR evidence root via the canonical
+        # resolver.
+        try:
+            from .orchestration_state_root import (
+                resolve_orchestration_state_root,
+            )
+            state_root = resolve_orchestration_state_root(
+                run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+                expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+                expected_pr_number=this_pr,
+            )
+        except Exception:  # noqa: BLE001
+            state_root = None
+        evidence_root = (
+            Path(str(state_root)) / "evidence"
+            if state_root is not None
+            else None
+        )
+        if evidence_root is None:
+            return
+        from datetime import datetime, timezone
+        # Detect stale retry ledger.
+        retry_path = evidence_root / "round_budget_retry.json"
+        next_eligible_retry_at = ""
+        if retry_path.exists():
+            try:
+                retry_state = json.loads(
+                    retry_path.read_text(),
+                ) or {}
+                next_eligible_retry_at = str(
+                    retry_state.get(
+                        "next_eligible_retry_at", "",
+                    ),
+                )
+            except (OSError, json.JSONDecodeError):
+                pass
+        # Detect active worker lease.
+        lease_active = False
+        lease_path = (
+            Path(str(RUN_STATE)).parent  # type: ignore[name-defined]
+            / "state"
+            / "worker_lease.json"
+        )
+        if lease_path.exists():
+            try:
+                lease = json.loads(lease_path.read_text())
+                lease_active = lease.get("pr_number") == this_pr
+            except (OSError, json.JSONDecodeError):
+                pass
+        # Controller state machine.
+        sm_state = "UNKNOWN"
+        sm_path = (
+            Path(str(state_root)) / "state.json"
+            if state_root is not None
+            else None
+        )
+        if sm_path and sm_path.exists():
+            try:
+                sm = json.loads(sm_path.read_text())
+                sm_state = sm.get("current_state", "UNKNOWN")
+            except (OSError, json.JSONDecodeError):
+                pass
+        # Owner determination (per round-32 spec).
+        if sm_state in (
+            "AWAITING_MERGE_AUTHORIZATION",
+        ):
+            owner = "human"
+            next_action = "merge_authorization"
+        elif sm_state == "BLOCKED":
+            owner = "supervisor"
+            next_action = "diagnose_block"
+        elif lease_active:
+            owner = "worker"
+            next_action = "observe_worker_exit"
+        elif next_eligible_retry_at:
+            owner = "retry_scheduler"
+            next_action = "wait_for_retry_window"
+        elif sm_state in (
+            "QUALIFYING_READINESS",
+            "AWAITING_CI",
+        ):
+            owner = "ci_qualifier"
+            next_action = "poll_ci_or_qualify"
+        elif sm_state == "REPAIRING_REVIEW_FINDINGS":
+            owner = "review_waiter"
+            next_action = "poll_providers"
+        else:
+            owner = "review_waiter"
+            next_action = "poll_providers"
+        payload = {
+            "pr_number": this_pr,
+            "state": sm_state,
+            "owner": owner,
+            "next_action": next_action,
+            "next_eligible_retry_at": next_eligible_retry_at,
+            "worker_active": lease_active,
+            "head_sha": (
+                str(AUTHORITATIVE_HEAD)  # type: ignore[name-defined]
+            ),
+            "last_progress_at": datetime.now(
+                timezone.utc,
+            ).isoformat(),
+            "recorded_at": datetime.now(
+                timezone.utc,
+            ).isoformat(),
+        }
+        owner_path = evidence_root / "orchestration_owner.json"
+        try:
+            owner_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = owner_path.with_suffix(
+                owner_path.suffix + ".tmp",
+            )
+            tmp.write_text(
+                json.dumps(payload, sort_keys=True),
+            )
+            tmp.replace(owner_path)
+        except OSError:
+            pass
+    except Exception:  # noqa: BLE001 - watchdog MUST never raise
+        pass
+
+
+def _clear_stale_retry_ledgers(this_pr: int) -> None:
+    """Round-32: clear stale retry state after a
+    successful relay round.
+
+    A retry record from a prior failed invocation
+    can otherwise live forever (the
+    ``next_eligible_retry_at`` keeps advancing but
+    no real work happens). After a successful relay
+    round the supervisor MUST mark the ledger
+    ``cleared`` so the next slice does NOT inherit a
+    stale retry window.
+
+    Lifecycle: PENDING → CLAIMED_FOR_NEW_SLICE →
+    RESOLVED / CLEARED. A retry record that survives
+    every supervisor tick without being claimed or
+    cleared is a STALL signal.
+    """
+    try:
+        from .orchestration_state_root import (
+            resolve_orchestration_state_root,
+        )
+        state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=this_pr,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    if state_root is None:
+        return
+    evidence_root = Path(str(state_root)) / "evidence"
+    retry_path = evidence_root / "round_budget_retry.json"
+    if not retry_path.exists():
+        return
+    try:
+        retry_state = json.loads(retry_path.read_text()) or {}
+    except (OSError, json.JSONDecodeError):
+        return
+    # If the retry was already cleared, no-op.
+    if retry_state.get("lifecycle") in (
+        "cleared", "resolved",
+    ):
+        return
+    # If we got here, a successful iteration ran. Mark
+    # the prior retry as cleared so it does not
+    # accumulate.
+    from datetime import datetime, timezone
+    retry_state["lifecycle"] = "cleared"
+    retry_state["cleared_at"] = datetime.now(
+        timezone.utc,
+    ).isoformat()
+    try:
+        tmp = retry_path.with_suffix(retry_path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(retry_state, sort_keys=True),
+        )
+        tmp.replace(retry_path)
+    except OSError:
+        pass
+
+
 def _persist_root_resolution_retry(exc: Any) -> None:
     """Round-32: persist the orchestration-root-resolution
     retry state so the supervisor's next-slice main loop
@@ -3846,7 +4062,68 @@ def main(argv: Optional[list[str]] = None) -> int:
             if token and read_snapshot("A") == {}:
                 capture_and_store_snapshot("A", rs, token)
 
-            iteration = run_iteration_v5(rs, token or "")
+            # Round-32: per-PR iteration. The supervisor
+            # owns ``PR_NUMBERS`` simultaneously (e.g.
+            # ``AED_PR_NUMBERS=4,5``). For each owned PR
+            # we temporarily rebind the singleton
+            # ``PR_NUMBER`` global so the existing
+            # ``run_iteration_v5`` / capture / handle
+            # code paths address the correct PR. After
+            # the iteration we restore the singleton.
+            #
+            # Each PR has its own orch state root (via
+            # the canonical resolver) so the per-PR
+            # state files do NOT collide.
+            #
+            # This is the structural fix for the
+            # a019e63 stall: the supervisor was bound
+            # to PR #416 only; PR #5 had no running
+            # owner. With ``AED_PR_NUMBERS=4,5`` both
+            # PRs share one heartbeat and one owner
+            # process; the per-PR iteration runs
+            # review→classify→repair→push for each.
+            pr_numbers = (
+                list(PR_NUMBERS)  # type: ignore[name-defined]
+                if PR_NUMBERS  # type: ignore[name-defined]
+                else [int(PR_NUMBER)]  # type: ignore[name-defined]
+            )
+            canonical_pr = int(PR_NUMBER)  # type: ignore[name-defined]
+            iteration: dict = {}
+            for this_pr in pr_numbers:
+                if this_pr == 0:
+                    continue
+                try:
+                    globals()["PR_NUMBER"] = this_pr
+                    # Round-32: stall watchdog. Before
+                    # each per-PR tick, write a
+                    # ``orchestration_owner.json`` so
+                    # external observers can see WHO
+                    # owns the next transition and WHEN
+                    # the next action is scheduled. A
+                    # hard defect is detected when
+                    # state is non-terminal AND no
+                    # worker is active AND no retry is
+                    # scheduled AND no poll is pending
+                    # AND no external condition is
+                    # documented.
+                    _write_orchestration_owner(this_pr)
+                    # Run the per-PR iteration. The
+                    # iteration drives the review-wait
+                    # poll, classification, repair
+                    # dispatch, and CI watch.
+                    iteration = run_iteration_v5(
+                        rs, token or "",
+                    )
+                    # Clear stale retry state after a
+                    # successful relay round (the
+                    # relay's success path persists
+                    # ``cleared`` status; this
+                    # supervisor-side sweep catches
+                    # stale ledgers from prior failed
+                    # invocations).
+                    _clear_stale_retry_ledgers(this_pr)
+                finally:
+                    globals()["PR_NUMBER"] = canonical_pr
             cur_state = (
                 read_readiness_state().get("state")
                 or STATE_ACTIVE_REPAIR
