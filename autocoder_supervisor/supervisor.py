@@ -4262,6 +4262,36 @@ def main(argv: Optional[list[str]] = None) -> int:
             # reflect this so the quiet-window logic does not
             # promote readiness in subsequent heartbeats.
             _sync_readiness_state_with_controller()
+            # Round-32: provider cooldown detection. The
+            # supervisor MUST process provider quota /
+            # pause / cooldown messages from the live
+            # snapshot on every iteration. The previous
+            # design defined ``process_provider_quotas`` +
+            # ``handle_paused_providers`` but never called
+            # them in the main loop, so CodeRabbit's
+            # "review limit reached" comment did not
+            # persist a cooldown ledger or schedule a
+            # recovery request. ``handle_paused_providers``
+            # itself issues the canonical provider-request
+            # via ``post_review_request`` (a real ``gh pr
+            # comment``) once the cooldown window elapses.
+            try:
+                _live_for_quota = capture_live_snapshot(
+                    rs, token or "",
+                )
+                quota_statuses = process_provider_quotas(
+                    _live_for_quota,
+                )
+                _any_paused, _paused = handle_paused_providers(
+                    _live_for_quota, quota_statuses,
+                )
+            except Exception as exc:
+                log(
+                    "warning",
+                    "process_provider_quotas/handle_paused_providers failed; "
+                    "supervisor continues",
+                    error=str(exc),
+                )
             if new_events and not cooldown_active():
                 handle_new_events(rs, new_events, token, iteration)
 
