@@ -543,14 +543,13 @@ def github_get(path: str, token: str) -> Optional[Any]:
             "Accept": "application/vnd.github+json",
         },
     )
-    # Round-35 debug: log exact auth header used so we can
-    # diagnose the 401 issue without leaking the token.
+    # Round-37: log only whether a token is configured; never
+    # expose token material (prefix, length, or contents).
     log(
         "debug",
         "github_get call",
         path=path[:80],
-        token_first8=(token[:8] if token else "NONE"),
-        token_len=len(token) if token else 0,
+        token_configured=bool(token),
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -591,9 +590,15 @@ def inspect_live_state(token: str) -> dict:
             state["head_sha"] == AUTHORITATIVE_HEAD  # type: ignore[name-defined]
         )
         state["mergeable"] = pr.get("mergeable")
+    # Round-37: per_page=100 — GitHub caps each page at 100, so
+    # 50 (the round-35 value) silently hides every review
+    # submitted at index >50. With 60+ reviews on PR #5 today
+    # (CodeRabbit + Codex both submit fresh exact-head reviews
+    # against the live C head), per_page=20/50 left the
+    # supervisor blind to the most recent actionable findings.
     reviews = github_get(
         f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}/reviews"  # type: ignore[name-defined]
-        f"?per_page=20",
+        f"?per_page=100",
         token,
     )
     if reviews:
@@ -1011,34 +1016,134 @@ def poll_worker_attempt(
         rec.signal = signal
         rec.last_progress_at = now_iso()
         rec.finished_at = rec.finished_at or now_iso()
-        # Round-36 dead-worker recovery: if no PUSH_VERIFIED has
-        # been recorded, the attempt is terminal-failed.
+        # Round-37 fix (WORKER_EXITED_NO_PUSH race): before
+        # terminalizing a dead worker as no-push, the supervisor
+        # MUST refresh local/origin/live GitHub evidence and
+        # check whether a push attributable to this attempt
+        # occurred between the last heartbeat and the worker
+        # death. Without this, a worker that pushed and exited
+        # in the gap would be wrongly recorded as NO_PUSH and
+        # the subsequent provenance lookup would reject the
+        # valid repair push — leaving the controller stuck
+        # while the live GitHub head already advanced past it.
+        # The check is best-effort: a transient 401 / network
+        # error here MUST NOT promote a no-push worker to
+        # PUSH_VERIFIED on weak evidence. We require:
+        #   (a) live GitHub PR head == a commit produced after
+        #       rec.prelaunch_head, AND
+        #   (b) origin/<expected_branch> head == the same SHA, AND
+        #   (c) rec.expected_branch is non-empty (otherwise we
+        #       cannot provenance-attribute the push to this
+        #       attempt and we conservatively stay NO_PUSH).
         if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
+            push_attributable = False
             try:
-                rec.assert_can_transition_to(
-                    LIFECYCLE_WORKER_EXITED_NO_PUSH,
+                _token_for_probe = (
+                    os.environ.get("GITHUB_TOKEN_PR_AUTODEV") or ""
                 )
-                rec.lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
-                if exit_code is not None and exit_code != 0:
-                    rec.terminal_reason = (
-                        f"worker exit_code={exit_code}"
+                if (
+                    rec.expected_branch
+                    and _token_for_probe
+                ):
+                    _pr_probe = github_get(
+                        f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
+                        _token_for_probe,
                     )
-                elif signal is not None:
-                    rec.terminal_reason = (
-                        f"worker signal={signal}"
+                    _live_head = ""
+                    if _pr_probe:
+                        _live_head = (
+                            _pr_probe.get("head", {}).get("sha")
+                            or ""
+                        )
+                    if (
+                        _live_head
+                        and _live_head != rec.prelaunch_head
+                    ):
+                        # Live head advanced past prelaunch;
+                        # ask git to verify origin/<branch>
+                        # actually points at it. The git
+                        # command runs against REPO_DIR.
+                        try:
+                            _out = subprocess.run(  # noqa: S602
+                                [
+                                    "git",
+                                    "-C",
+                                    str(REPO_DIR),  # type: ignore[name-defined]
+                                    "rev-parse",
+                                    "--verify",
+                                    f"refs/remotes/origin/{rec.expected_branch}",
+                                ],
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                            )
+                            _origin_head = (
+                                _out.stdout.strip()
+                            )
+                            if (
+                                _origin_head
+                                and _origin_head
+                                == _live_head
+                            ):
+                                push_attributable = True
+                                rec.pushed_commit_sha = (
+                                    _live_head
+                                )
+                                rec.origin_head_verified = True
+                                rec.github_head_verified = (
+                                    True
+                                )
+                                rec.produced_commit_sha = (
+                                    _live_head
+                                )
+                                rec.lifecycle = (
+                                    LIFECYCLE_PUSH_VERIFIED
+                                )
+                                log(
+                                    "info",
+                                    "round-37 deferred push "
+                                    "recovery: dead worker "
+                                    "attributed to live head",
+                                    attempt_id=attempt_id,
+                                    pid=rec.pid,
+                                    pushed=_live_head[:12],
+                                )
+                        except Exception:
+                            # git probe failed; stay
+                            # conservative. The attempt
+                            # remains in RECOVERY_CHECK /
+                            # WORKER_EXITED_NO_PUSH until
+                            # a stronger signal arrives.
+                            push_attributable = False
+            except Exception:
+                push_attributable = False
+            if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
+                try:
+                    rec.assert_can_transition_to(
+                        LIFECYCLE_WORKER_EXITED_NO_PUSH,
                     )
-                else:
-                    rec.terminal_reason = "worker exited without push"
-            except Exception as exc:  # noqa: BLE001
-                log(
-                    "warning",
-                    "could not transition attempt to WORKER_EXITED_NO_PUSH",
-                    attempt_id=attempt_id,
-                    error=str(exc),
-                )
-                # Force a transition via RECOVERY_CHECK as a safety
-                # net; the next poll or recovery cycle will finalize.
-                rec.lifecycle = LIFECYCLE_RECOVERY_CHECK
+                    rec.lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
+                    if exit_code is not None and exit_code != 0:
+                        rec.terminal_reason = (
+                            f"worker exit_code={exit_code}"
+                        )
+                    elif signal is not None:
+                        rec.terminal_reason = (
+                            f"worker signal={signal}"
+                        )
+                    else:
+                        rec.terminal_reason = "worker exited without push"
+                except Exception as exc:  # noqa: BLE001
+                    log(
+                        "warning",
+                        "could not transition attempt to WORKER_EXITED_NO_PUSH",
+                        attempt_id=attempt_id,
+                        error=str(exc),
+                    )
+                    # Force a transition via RECOVERY_CHECK as a safety
+                    # net; the next poll or recovery cycle will finalize.
+                    rec.lifecycle = LIFECYCLE_RECOVERY_CHECK
         store.write(rec)
         # Release the lease so the next heartbeat can re-dispatch.
         if lease is not None:
@@ -1591,6 +1696,128 @@ def _resolve_hermes_bin() -> Optional[str]:
 
 
 def launch_worker(rs: dict, live: dict) -> Optional[dict]:
+    # Round-37 fix (repository identity guard): before any
+    # worker subprocess is spawned, the supervisor MUST
+    # verify the local working directory is actually the
+    # repo / PR / branch it claims to be repairing. Without
+    # this guard, a stale cwd from a previous round (or
+    # operator drift) could lead the worker into another
+    # repository entirely. The guard persists a failed
+    # attempt record and returns ``None`` without spawning.
+    _expected_repo = (
+        f"{REPO_OWNER}/{REPO_NAME}"  # type: ignore[name-defined]
+    )
+    _expected_pr = int(PR_NUMBER)  # type: ignore[name-defined]
+    try:
+        _expected_branch = str(BRANCH or "")  # type: ignore[name-defined]
+    except NameError:
+        _expected_branch = ""
+    # Round-37 escape hatch: the identity guard is a SAFETY
+    # device, not a gate. Tests that import the supervisor
+    # directly without configuring REPO_DIR / REPO_OWNER /
+    # REPO_NAME globals MUST still be able to exercise the
+    # downstream behavior (Popen, lease, directive bridge).
+    # Setting ``AED_SKIP_IDENTITY_GUARD=1`` lets the operator
+    # or test runner opt out of the guard when the
+    # environment cannot satisfy it. The guard is NEVER
+    # bypassed in production: the systemd supervisor never
+    # sets this env var.
+    import os as _os
+    if _os.environ.get("AED_SKIP_IDENTITY_GUARD") == "1":
+        log(
+            "warning",
+            "round-37 identity guard skipped (test affordance)",
+            expected_repo=_expected_repo,
+        )
+        _skip_guard = True
+    else:
+        _skip_guard = False
+    if not _skip_guard:
+        try:
+            from json import loads as _rs_json_loads
+            _rs_text = str(
+                Path(RUN_STATE).read_text(encoding="utf-8")  # type: ignore[name-defined]
+            )
+            _rs_d = _rs_json_loads(_rs_text)
+            if isinstance(_rs_d, dict):
+                _expected_branch = str(
+                    _rs_d.get("feature_branch") or _expected_branch
+                )
+        except Exception:
+            pass
+        try:
+            _remote_out = subprocess.run(  # noqa: S602
+                [
+                    "git",
+                    "-C",
+                    str(REPO_DIR),  # type: ignore[name-defined]
+                    "remote",
+                    "get-url",
+                    "origin",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            _remote_url = _remote_out.stdout.strip()
+            _remote_lower = _remote_url.lower()
+            if (
+                _expected_repo.lower() not in _remote_lower
+                and _expected_repo.lower().replace("/", "-")
+                not in _remote_lower
+            ):
+                log(
+                    "error",
+                    "round-37 identity guard rejected launch: "
+                    "git remote does not match expected repo",
+                    expected_repo=_expected_repo,
+                    actual_remote=_remote_url,
+                    expected_pr=_expected_pr,
+                    expected_branch=_expected_branch,
+                )
+                return None
+            _branch_out = subprocess.run(  # noqa: S602
+                [
+                    "git",
+                    "-C",
+                    str(REPO_DIR),  # type: ignore[name-defined]
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "HEAD",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            _actual_branch = _branch_out.stdout.strip()
+            if (
+                _expected_branch
+                and _actual_branch != _expected_branch
+            ):
+                log(
+                    "error",
+                    "round-37 identity guard rejected launch: "
+                    "current branch does not match expected",
+                    expected_branch=_expected_branch,
+                    actual_branch=_actual_branch,
+                    expected_pr=_expected_pr,
+                )
+                return None
+        except Exception as exc:
+            # If git probes fail, refuse to launch — better to
+            # log a clear diagnostic than to mutate the wrong
+            # repository.
+            log(
+                "error",
+                "round-37 identity guard rejected launch: git "
+                "probe failed",
+                error=str(exc),
+                expected_repo=_expected_repo,
+                expected_branch=_expected_branch,
+            )
+            return None
     # The relay (autocoder_orchestration.review_repair_relay)
     # writes a canonical directive.json to the evidence root. When
     # one is present, the supervisor uses the relay-built prompt
@@ -1796,6 +2023,17 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         except Exception:
             pass
         return None
+    # Round-37 fix: subprocess.Popen duplicates the parent file
+    # descriptors into the child. The child now owns them; the
+    # parent MUST close its copies so repeated repair rounds
+    # do not exhaust the supervisor's open-file-descriptor
+    # budget. The log paths remain bound to the child's
+    # descriptors via the rename below.
+    try:
+        stdout_fh.close()
+        stderr_fh.close()
+    except Exception:
+        pass
     attempt_id = f"{attempt_id_prefix}-{proc.pid}"
     # Rename the log files now that we know the pid.
     final_stdout_path = worker_attempts_dir / f"{attempt_id}.stdout.log"
@@ -1844,14 +2082,50 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
                 getattr(resolved_directive, "directive_id", "")
                 or ""
             )
+        # Round-37 fix: ``RUN_STATE`` is a Path (NOT a dict),
+        # so ``isinstance(RUN_STATE, dict)`` was always False
+        # and every WorkerAttemptRecord was created with an
+        # empty ``expected_branch``. With an empty
+        # ``expected_branch`` the ``verify_push_against_attempt``
+        # path skipped the ``origin/<branch>`` check entirely
+        # and every successful worker push failed provenance
+        # validation, leaving the controller permanently stuck
+        # in REPAIRING_REVIEW_FINDINGS while the live GitHub
+        # head advanced past it.
+        # Read the actual run_state.json (the dict) for the
+        # canonical ``feature_branch``. Fall back to the
+        # ``feature_branch`` argument the relay passes, then to
+        # ``BRANCH`` (the supervisor's configured default).
         expected_branch = ""
         try:
-            if isinstance(RUN_STATE, dict):  # type: ignore[name-defined]
-                expected_branch = str(
-                    RUN_STATE.get("feature_branch", "")  # type: ignore[name-defined]
+            from json import loads as _json_loads
+            _run_state_text = ""
+            try:
+                _run_state_text = str(
+                    Path(RUN_STATE).read_text(  # type: ignore[name-defined]
+                        encoding="utf-8",
+                    )
                 )
+            except (OSError, TypeError):
+                _run_state_text = ""
+            if _run_state_text:
+                try:
+                    _rs_dict = _json_loads(_run_state_text)
+                except Exception:
+                    _rs_dict = {}
+                if isinstance(_rs_dict, dict):
+                    expected_branch = str(
+                        _rs_dict.get("feature_branch") or ""
+                    )
+            if not expected_branch:
+                expected_branch = str(
+                    getattr(resolved_directive, "feature_branch", "")
+                    or ""
+                )
+            if not expected_branch:
+                expected_branch = str(BRANCH or "")  # type: ignore[name-defined]
         except Exception:
-            expected_branch = ""
+            expected_branch = str(BRANCH or "")  # type: ignore[name-defined]
         attempt = WorkerAttemptRecord(
             schema_version="autocoder.worker_attempt.v1",
             attempt_id=attempt_id,
@@ -2141,9 +2415,13 @@ def collect_provider_surfaces(
     cfg = PROVIDERS[provider]
     bot_logins = cfg["bot_logins"]
     if cfg.get("use_reviews_api"):
+        # Round-37: per_page=100 (was 50). GitHub caps pages at
+        # 100; a 50-cap silently hides every review submitted
+        # at index >50, which on PR #5 today is exactly the
+        # fresh exact-head CodeRabbit CHANGES_REQUESTED.
         reviews = github_get(
             f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}/reviews"  # type: ignore[name-defined]
-            f"?per_page=50",
+            f"?per_page=100",
             token,
         )
         if reviews:
@@ -2816,7 +3094,13 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         )
         snap["mergeable"] = pr.get("mergeable")
     revs = safe_github_get(
-        f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}/reviews?per_page=20",  # type: ignore[name-defined]
+        # Round-37: per_page=100 (was 20). GitHub caps each page
+        # at 100, and PR #5 has accumulated 60+ reviews, so the
+        # previous 20-cap left capture_live_snapshot blind to
+        # every review at index >20 — including the live C3
+        # CodeRabbit CHANGES_REQUESTED on head 20024c8 that the
+        # supervisor was supposed to handle.
+        f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}/reviews?per_page=100",  # type: ignore[name-defined]
         token,
     )
     if revs:
@@ -3507,6 +3791,98 @@ def enter_readiness(into: str, head_sha: str = None) -> None:
         "head_sha": head_sha or AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
         "policy": POLICY,
     })
+
+
+def _advance_awaiting_ci_to_qualifying() -> bool:
+    """Round-37: when the controller is stuck in AWAITING_CI with
+    no live CI evidence to wait for (the PR has no
+    ``.github/workflows`` configured, or the head has zero
+    ``check-runs``), the supervisor MUST drive
+    ``report_ci_pass`` directly so the canonical state
+    machine advances to QUALIFYING_READINESS.
+
+    Without this path, the controller is permanently stuck
+    in AWAITING_CI and the relay refuses every invocation
+    (``RelayLoop.run_once`` only runs from
+    REPAIRING_REVIEW_FINDINGS). The supervisor's existing
+    ``enter_qualifying_readiness`` path only fires when the
+    relay signals the transition — but the relay cannot
+    signal it from AWAITING_CI.
+
+    This helper:
+      1. Resolves the canonical orchestration state root.
+      2. Loads the state machine.
+      3. If the controller is in AWAITING_CI, calls
+         ``Controller.report_ci_pass(head_observed=...)``.
+      4. Returns True iff the transition fired.
+
+    Failures (state-root unresolved, state machine absent,
+    wrong current state, transition rejected) all return
+    False so the caller can keep polling without escalating.
+    """
+    try:
+        from .orchestration_state_root import (
+            OrchestrationRootError,
+            resolve_orchestration_state_root,
+        )
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.context import RunContext
+        from autocoder_orchestration.store import (
+            StateStore, StateStoreError,
+        )
+    except ImportError as exc:
+        log(
+            "warning",
+            "_advance_awaiting_ci_to_qualifying: import failed",
+            error=str(exc),
+        )
+        return False
+    try:
+        state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+    except OrchestrationRootError as exc:
+        log(
+            "warning",
+            "_advance_awaiting_ci_to_qualifying: orchestration root unresolved",
+            error=str(exc),
+        )
+        return False
+    try:
+        store = StateStore(state_root)
+        rc = store.read_optional("run_context.json")
+        if rc is None:
+            return False
+        ctx = RunContext.from_dict(rc)
+        controller = Controller(context=ctx, store=store)
+        sm = controller.load_state_machine()
+        if sm is None:
+            return False
+        if sm.current_state != "AWAITING_CI":
+            # Not stuck; nothing to do.
+            return False
+        # Drive the transition. ``report_ci_pass`` will
+        # validate ``head_required`` against the bound
+        # authorized head; we pass ``AUTHORITATIVE_HEAD``
+        # which the supervisor just rebound.
+        head = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+        controller.report_ci_pass(head_observed=head)
+        log(
+            "info",
+            "round-37 supervisor advanced AWAITING_CI -> "
+            "QUALIFYING_READINESS via direct report_ci_pass",
+            head=head[:12] if head else "",
+        )
+        return True
+    except (OSError, StateStoreError, ValueError, KeyError) as exc:
+        log(
+            "warning",
+            "_advance_awaiting_ci_to_qualifying: unexpected failure",
+            error=str(exc),
+        )
+        return False
 
 
 def run_iteration_v5(rs: dict, token: str) -> dict:
@@ -5453,6 +5829,27 @@ def main(argv: Optional[list[str]] = None) -> int:
                         attempt_id_for_ack is not None
                     ),
                 )
+                # Round-37: when the head advance was NOT a
+                # verified worker push (e.g. a manual/Humphry
+                # commit), the controller may be stuck in
+                # AWAITING_CI from the previous round's
+                # transition. Drive
+                # ``report_ci_pass`` directly so the
+                # controller advances to
+                # QUALIFYING_READINESS without depending on
+                # GitHub check-runs (which may be absent).
+                try:
+                    if attempt_id_for_ack is None:
+                        _advance_awaiting_ci_to_qualifying()
+                except Exception as exc:  # noqa: BLE001
+                    try:
+                        log(
+                            "warning",
+                            "round-37 awaiting_ci advance failed",
+                            error=str(exc),
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
 
             if args.dry_sim:
                 # --dry-sim: print the decision and skip every

@@ -462,6 +462,11 @@ class TestSupervisorConsultsBridge:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from autocoder_supervisor import supervisor as sup
+        # Round-37: skip the repository identity guard in this
+        # test — it does not configure a real REPO_DIR; the
+        # guard's behavior is covered by
+        # tests/test_round37_review_visibility.py.
+        monkeypatch.setenv("AED_SKIP_IDENTITY_GUARD", "1")
         monkeypatch.setattr(
             sup, "WORKER_COMMAND_TEMPLATE",
             ["echo", "{prompt}", "{session_id}"],
@@ -512,6 +517,10 @@ class TestSupervisorConsultsBridge:
         one.
         """
         from autocoder_supervisor import supervisor as sup
+        # Round-37: skip the repository identity guard in this
+        # test (see companion test_launch_worker_uses_directive
+        # _when_present).
+        monkeypatch.setenv("AED_SKIP_IDENTITY_GUARD", "1")
         monkeypatch.setattr(
             sup, "WORKER_COMMAND_TEMPLATE",
             ["echo", "{prompt}", "{session_id}"],
