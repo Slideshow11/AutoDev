@@ -4584,11 +4584,14 @@ def main(argv: Optional[list[str]] = None) -> int:
             # most one durable unresolved thread; the
             # next heartbeat drains the next.
             #
-            # The snapshot data is NOT in `iteration` —
-            # run_iteration_v5 only returns events +
-            # decision metadata. Capture the live snapshot
-            # directly to read the canonical
-            # review_threads.
+            # Fall back to the cached snapshot when the
+            # live fetch is unavailable (GitHub 401,
+            # rate-limit, transient network). The cached
+            # snapshot is durable and reflects the last
+            # known thread state. This is the user's
+            # fail-closed invariant: corrupt/unreachable
+            # metadata MUST NOT lose pending work; the
+            # event MUST survive and eventually dispatch.
             try:
                 _drain_token = get_github_token() if "get_github_token" in dir() else ""
             except Exception:
@@ -4597,6 +4600,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                 rs if isinstance(rs, dict) else {},
                 _drain_token or "",
             )
+            if not snap_for_drain.get("review_threads"):
+                cached = read_snapshot("A") or {}
+                if cached.get("review_threads"):
+                    snap_for_drain = cached
+                    log(
+                        "info",
+                        "round-34 durable-thread drain: using "
+                        "cached snapshot (live fetch returned "
+                        "empty)",
+                        cached_head=(cached.get("head_sha") or "")[:12],
+                    )
             already_launched = launched_event_ids()
             drain_events: list = []
             threads = (snap_for_drain.get("review_threads") or {})
@@ -4614,7 +4628,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "kind": "unresolved_thread_drain",
                     "thread_id": tid,
                     "source": "durable_drain",
-                    "head_sha": iteration.get("head_sha"),
+                    "head_sha": (
+                        iteration.get("head_sha")
+                        or snap_for_drain.get("head_sha")
+                    ),
                 })
                 break  # ONE per heartbeat (anti-burst)
             if drain_events:
