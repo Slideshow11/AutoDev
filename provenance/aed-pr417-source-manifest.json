@@ -142,12 +142,12 @@
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
       "transformation_classification": "path_only",
-      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null). Round-32 P1#6 hardened poll_worker_attempt deferred push-recovery branch with the same committer-date worker-specific-proof contract that round-31 P1#6 added to verify_push_against_attempt; an external actor push (commit time BEFORE rec.started_at) is now conservatively treated as a non-worker head even when origin/<branch> equals the live PR head."
+      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
     },
     {
       "destination_path": "autocoder_supervisor/validate.py",
-      "destination_sha256": "1959f1e6bcb70669355c557f92ec10678a2807d3e2144c4d10b3861c053cb18f",
-      "destination_size_bytes": 16767,
+      "destination_sha256": "d76dd823b06850cbd1f3d12089beec6b0fa077986793f1cc7df06f4ee45e573e",
+      "destination_size_bytes": 16747,
       "source_path": "scripts/local/autocoder_supervisor/validate.py",
       "source_sha256": "82164445f7705df8d83d5282e94f8e4346dd2422038784c1f3787188f7a54224",
       "source_size_bytes": 14191,
@@ -156,8 +156,8 @@
     },
     {
       "destination_path": "tests/test_autocoder_supervisor.py",
-      "destination_sha256": "3b9c0913cedd9ec9fe8b7031c3ad9b2f8d7e18290022c2c98446b930ce1086fc",
-      "destination_size_bytes": 69999,
+      "destination_sha256": "12dc53e03101fa56144584b9e8216d253a9531370a4ccdde4f81dd92f63eeb85",
+      "destination_size_bytes": 94992,
       "source_path": "tests/test_autocoder_supervisor.py",
       "source_sha256": "3b65e142bb79ca060484b37ed28127979ccc004aa82ce78d65b3d704fe5895f3",
       "source_size_bytes": 39831,
