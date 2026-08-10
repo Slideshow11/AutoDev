@@ -133,6 +133,142 @@ def _write_persisted_session(
     tmp.replace(persist_path)
 
 
+# ---------------------------------------------------------------------
+# Round-40: session state machine.
+#
+# The supervisor must NEVER fall back to a session id that has
+# already been classified SESSION_MISSING. Once a session is
+# definitively classified missing (e.g. hermes returned
+# "Session not found: <id>"), the supervisor persists the
+# classification in a per-state-dir registry so subsequent
+# dispatch cycles do not silently attempt the same dead id.
+# ---------------------------------------------------------------------
+
+# Canonical session lifecycle states.
+SESSION_VALID = "SESSION_VALID"
+SESSION_MISSING = "SESSION_MISSING"
+SESSION_CREATION_PENDING = "SESSION_CREATION_PENDING"
+SESSION_CREATION_FAILED_RETRYABLE = "SESSION_CREATION_FAILED_RETRYABLE"
+SESSION_CREATION_FAILED_TERMINAL = "SESSION_CREATION_FAILED_TERMINAL"
+
+
+def _missing_sessions_path(state_dir: Optional[Path]) -> Optional[Path]:
+    """Return the path to the missing-session registry.
+
+    The registry lives alongside the worker-sessions persistence
+    directory so a single ``STATE_DIR`` carries both
+    successful and dead session identities.
+    """
+    if not state_dir:
+        return None
+    return Path(str(state_dir)) / "worker_sessions" / "_missing_sessions.json"
+
+
+def _read_missing_sessions(state_dir: Optional[Path]) -> dict:
+    path = _missing_sessions_path(state_dir)
+    if path is None or not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _write_missing_sessions(state_dir: Optional[Path], registry: dict) -> None:
+    path = _missing_sessions_path(state_dir)
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(registry, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+
+
+def _configured_session_is_missing(
+    configured_session_id: str,
+    persist_path: Path,
+) -> bool:
+    """Determine whether ``configured_session_id`` was
+    previously classified SESSION_MISSING. The path
+    argument is the attempt's persist_path; the registry
+    lives in the parent directory (``worker_sessions/``)
+    which is also the parent of the canonical run state.
+
+    Round-40 invariant: a previously-classified missing
+    session is NEVER the fallback target for the same claim.
+    """
+    if not configured_session_id:
+        return False
+    candidates: list = []
+    try:
+        candidates.append(persist_path.parent)
+    except Exception:
+        pass
+    try:
+        candidates.append(persist_path.parent.parent)
+    except Exception:
+        pass
+    for c in candidates:
+        if is_session_marked_missing(configured_session_id, state_dir=c):
+            return True
+    return False
+
+
+def is_session_marked_missing(
+    session_id: str,
+    state_dir: Optional[Path] = None,
+) -> bool:
+    """Return True iff ``session_id`` was previously classified
+    ``SESSION_MISSING`` and persisted to the missing-session
+    registry. The supervisor MUST consult this function
+    before any ``--resume`` invocation; a previously-classified
+    missing session is never the fallback target for the same
+    claim.
+    """
+    if not session_id:
+        return False
+    registry = _read_missing_sessions(state_dir)
+    entry = registry.get(session_id)
+    if not isinstance(entry, dict):
+        return False
+    return entry.get("status") == SESSION_MISSING
+
+
+def mark_session_missing(
+    session_id: str,
+    state_dir: Optional[Path] = None,
+    *,
+    reason: str = "",
+    attempt_id: str = "",
+) -> None:
+    """Classify ``session_id`` as ``SESSION_MISSING`` and
+    persist the classification. Idempotent: classifying the
+    same session twice updates the timestamp without
+    overwriting the original reason.
+    """
+    if not session_id:
+        return
+    registry = _read_missing_sessions(state_dir)
+    existing = registry.get(session_id) or {}
+    registry[session_id] = {
+        **existing,
+        "session_id": session_id,
+        "status": SESSION_MISSING,
+        "marked_at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        ),
+        "reason": reason or existing.get("reason", ""),
+        "attempt_id": attempt_id or existing.get("attempt_id", ""),
+    }
+    _write_missing_sessions(state_dir, registry)
+
+
 def _hermes_session_exists(
     hermes_bin: str,
     session_id: str,
@@ -195,6 +331,17 @@ def _create_fresh_session(
     load. The previous 90s ceiling caused spurious timeouts
     that left the supervisor stuck with the stale configured
     session id.
+
+    Round-40 root-cause analysis: the original hermes
+    command without --max-turns runs the FULL chat
+    conversation (model inference + response) before exiting
+    -- it is NOT a session-creation-only command. The
+    observed 90s/180s timeouts were the model running its
+    first-turn response, NOT session creation. The fix is
+    to add ``--max-turns 0`` so hermes prints the
+    ``session_id: <id>`` marker and exits immediately
+    without running any model turn. Empirical latency:
+    3-6 seconds end-to-end, vs minutes previously.
     """
     proc = subprocess.run(  # noqa: S602
         [
@@ -206,6 +353,12 @@ def _create_fresh_session(
             "--accept-hooks",
             "--yolo",
             "-Q",
+            # Round-40: skip the model turn. Without this
+            # flag, hermes runs the full chat response
+            # before exiting -- which is what was timing
+            # out at 90s and 180s in rounds 38/39.
+            "--max-turns",
+            "0",
         ],
         check=False,
         capture_output=True,
@@ -272,9 +425,21 @@ def resolve_worker_session(
         # Persisted identity is stale; we will replace it.
 
     # 2. Configured session is the operator's bootstrap truth.
-    if configured_session_id and _hermes_session_exists(
-        hermes_bin,
-        configured_session_id,
+    # Round-40 invariant: if the configured session id was
+    # previously classified SESSION_MISSING and persisted to
+    # the missing-session registry, we MUST NOT attempt to
+    # ``--resume`` it. We proceed directly to fresh-session
+    # creation so the supervisor cannot repeatedly reuse a
+    # known-dead id as a fallback.
+    if (
+        configured_session_id
+        and not _configured_session_is_missing(
+            configured_session_id, persist_path
+        )
+        and _hermes_session_exists(
+            hermes_bin,
+            configured_session_id,
+        )
     ):
         _write_persisted_session(
             persist_path,

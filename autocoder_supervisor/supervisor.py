@@ -194,6 +194,151 @@ def _apply_config(cfg: SupervisorConfig) -> dict[str, Any]:
     return mapping
 
 
+def _reconcile_authoritative_head_at_boot() -> str:
+    """Round-40: reconcile ``AUTHORITATIVE_HEAD`` against
+    authoritative durable + live evidence at supervisor boot.
+
+    Source-of-truth precedence (highest to lowest):
+        1. Live PR head from GitHub (the actual repository
+           state). This is what the operator sees when
+           they open the PR.
+        2. ``run_state.json`` ``current_head`` (the canonical
+           durable record written by the previous
+           supervisor lifetime).
+        3. ``origin/<feature_branch>`` head as observed by
+           ``git rev-parse``.
+        4. The bootstrap env var ``AED_AUTHORITATIVE_HEAD``
+           (which may be stale if a worker push advanced
+           the head between human edits and supervisor
+           restart).
+
+    The bootstrap env var is acceptable as a cold-start
+    guess but MUST be reconciled against the live PR head
+    at the first heartbeat. Without this, a long-running
+    autonomous supervisor requires a human/systemd edit
+    after every legitimate worker push.
+    """
+    import json as _json
+    import subprocess as _subprocess
+    log(
+        "info",
+        "round-40 reconciling authoritative head at boot",
+        bootstrap=globals().get("AUTHORITATIVE_HEAD"),
+    )
+    candidates: list[tuple[str, str]] = []
+
+    # 1. Live PR head.
+    try:
+        live = github_get(
+            f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",
+            get_github_token() or "",
+        )
+        if isinstance(live, dict):
+            live_head = str(live.get("head", {}).get("sha") or "").strip()
+            if live_head:
+                candidates.append(("live_pr", live_head))
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-40 head reconciliation: live PR fetch failed",
+            error=str(exc)[:200],
+        )
+
+    # 2. run_state.json current_head.
+    try:
+        rs_text = str(Path(RUN_STATE).read_text(encoding="utf-8"))
+        rs_d = _json.loads(rs_text)
+        rs_head = str(rs_d.get("current_head") or "").strip()
+        if rs_head:
+            candidates.append(("run_state", rs_head))
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-40 head reconciliation: run_state read failed",
+            error=str(exc)[:200],
+        )
+
+    # 3. origin/<branch> head.
+    try:
+        branch = str(
+            os.environ.get("AED_BRANCH")
+            or globals().get("FEATURE_BRANCH", "")
+            or ""
+        ).strip() or "feat/review-repair-relay-v1"
+        origin_head = _subprocess.check_output(
+            ["git", "rev-parse", f"origin/{branch}"],
+            cwd=str(REPO_DIR),
+            stderr=_subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        ).strip()
+        if origin_head:
+            candidates.append(("origin_branch", origin_head))
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-40 head reconciliation: origin head fetch failed",
+            error=str(exc)[:200],
+        )
+
+    # 4. bootstrap env var.
+    bootstrap = str(globals().get("AUTHORITATIVE_HEAD") or "").strip()
+    if bootstrap:
+        candidates.append(("bootstrap_env", bootstrap))
+
+    # The live PR head is the canonical truth. If we have it,
+    # use it. Otherwise, prefer the run_state value, then
+    # the origin branch, then the bootstrap env var.
+    chosen_source = ""
+    chosen_head = ""
+    for source in ("live_pr", "run_state", "origin_branch", "bootstrap_env"):
+        for s, h in candidates:
+            if s == source and h:
+                chosen_source = s
+                chosen_head = h
+                break
+        if chosen_head:
+            break
+    if chosen_head:
+        globals()["AUTHORITATIVE_HEAD"] = chosen_head
+        # Round-40: persist the reconciled head back to
+        # ``run_state.json`` so subsequent iterations see
+        # the same canonical value via ``read_run_state``.
+        # Without this, ``head`` in the iteration log keeps
+        # showing the stale run_state value even after the
+        # ``AUTHORITATIVE_HEAD`` rebind, masking the real
+        # state.
+        try:
+            import json as _json
+            try:
+                _rs_text = Path(RUN_STATE).read_text(encoding="utf-8")
+                _rs_d = _json.loads(_rs_text)
+            except Exception:
+                _rs_d = {}
+            if not isinstance(_rs_d, dict):
+                _rs_d = {}
+            if _rs_d.get("current_head") != chosen_head:
+                _rs_d["current_head"] = chosen_head
+                Path(RUN_STATE).write_text(
+                    _json.dumps(_rs_d, indent=2, sort_keys=True),
+                    encoding="utf-8",
+                )
+        except Exception as exc:  # noqa: BLE001
+            log(
+                "warning",
+                "round-40 run_state persistence failed; "
+                "continuing with in-memory AUTHORITATIVE_HEAD",
+                error=str(exc)[:200],
+            )
+        log(
+            "info",
+            "round-40 authoritative head reconciled at boot",
+            source=chosen_source,
+            head=chosen_head[:12],
+        )
+    return globals().get("AUTHORITATIVE_HEAD", "")
+
+
 def _default_policy(cfg: SupervisorConfig) -> dict[str, Any]:
     return {
         "human_boundary": cfg.human_boundary,
@@ -2466,6 +2611,22 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # derived from the same prefix the worker-attempt record
     # will use.
     attempt_id_prefix = "att-" + now_iso().replace(":", "").replace("-", "")
+    # Round-40: compute the canonical pending event ids ONCE,
+    # before any branch consumes them. The previous design
+    # referenced a local ``_pending_event_ids`` inside the
+    # WorkerAttemptRecord constructor (line ~2740) BEFORE
+    # assigning it (line ~2799), causing UnboundLocalError
+    # whenever the constructor path ran ahead of the
+    # assignment. The fix: compute the immutable value at
+    # the very top of ``launch_worker``, then reference it
+    # everywhere downstream. No branch may depend on
+    # accidental control-flow initialization.
+    try:
+        pending_event_ids = tuple(
+            globals().get("_pending_launch_event_ids") or ()
+        )
+    except Exception:
+        pending_event_ids = ()
     # Round-38: resolve the actual worker session id BEFORE
     # building the launch command. If the configured/persisted
     # session no longer exists in the hermes state store, the
@@ -2509,14 +2670,48 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             reason=_session_resolution.reason,
         )
     except Exception as exc:
-        # Round-38 invariant: a session resolution failure
-        # MUST NOT strand the loop. We persist the failure
-        # reason durably and fall back to the configured id;
-        # the launch will fail fast on the resume side, and
-        # the next dispatch cycle will retry resolution.
+        # Round-40 invariant: a session resolution failure
+        # MUST NOT strand the loop, BUT it MUST NOT fall back
+        # to a session that has already been classified
+        # SESSION_MISSING (the operator's configured bootstrap
+        # id is a recurring source of "Session not found"
+        # worker deaths).
+        #
+        # Behavior:
+        #   * If the configured session id is already
+        #     classified SESSION_MISSING in the durable
+        #     registry, return None so the work is released
+        #     back to the heartbeat for another dispatch cycle.
+        #   * Otherwise, log the failure and continue with the
+        #     configured id (the round-38 fallback path), so
+        #     transient resolution failures (e.g. hermes
+        #     subprocess timeout on a fresh-session create)
+        #     do not permanently strand the loop. The next
+        #     dispatch cycle will retry resolution.
+        from .worker_session import (
+            is_session_marked_missing as _is_session_marked_missing,
+        )
+        persist_dir = _resolved_persist_path.parent.parent
+        if (
+            _resolved_session_id
+            and _is_session_marked_missing(
+                _resolved_session_id, state_dir=persist_dir
+            )
+        ):
+            log(
+                "warning",
+                "round-40 session resolution failed; configured "
+                "session is in SESSION_MISSING registry; NOT "
+                "launching worker",
+                attempt_id=attempt_id_prefix,
+                error=str(exc)[:200],
+                action="release_to_retry",
+            )
+            return None
         log(
             "warning",
-            "round-38 session resolution failed; using configured id",
+            "round-40 session resolution failed; using configured "
+            "id (legacy fallback path)",
             attempt_id=attempt_id_prefix,
             error=str(exc)[:200],
         )
@@ -2737,7 +2932,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             # ``handle_new_events``. The previous initializer
             # was always ``()`` so dead-worker recovery could
             # not unmark the real launched events.
-            event_ids=tuple(_pending_event_ids or ()),
+            event_ids=tuple(pending_event_ids),
             finding_ids=(),
             directive_digest=directive_digest,
             directive_path=directive_path,
@@ -2774,17 +2969,32 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             pid=proc.pid,
         )
     except Exception as exc:  # noqa: BLE001
-        # Worker already started; the attempt record is the only
-        # durable source of truth. If we cannot persist it the
-        # supervisor CANNOT acknowledge any future head advance
-        # for this attempt — which is correct fail-closed behaviour.
+        # Round-40 invariant: if WorkerAttemptRecord
+        # persistence fails, the supervisor MUST NOT
+        # acknowledge ownership of the worker. The
+        # worker process is already running; we
+        # deliberately do NOT write the lease (so a
+        # subsequent heartbeat sees no phantom active
+        # worker) and we terminate the spawned process
+        # so it does not become a zombie that blocks
+        # future dispatches. The events remain
+        # actionable so the next heartbeat can retry
+        # the durable dispatch.
         log(
             "error",
             "could not persist worker attempt record; "
-            "launch cannot be acknowledged",
+            "launch cannot be acknowledged; terminating "
+            "orphan worker",
             attempt_id=attempt_id,
             error=str(exc),
         )
+        try:
+            import os as _os
+            _os.killpg(int(proc.pid), 15)  # SIGTERM
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
 
     # Round-39 P1#8: persist the fresh event ids on the
     # WorkerAttemptRecord so dead-worker recovery can
@@ -2795,12 +3005,11 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # is written to avoid leaking into the next launch. The
     # raised-leased worker is durable and the launched-event
     # ledger is the inverse of the attempt's event_ids.
-    try:
-        _pending_event_ids = tuple(
-            globals().get("_pending_launch_event_ids") or ()
-        )
-    except Exception:
-        _pending_event_ids = ()
+    # Round-40: ``pending_event_ids`` is the immutable value
+    # computed at the top of ``launch_worker``. The lease
+    # below uses the SAME canonical value, NOT a fresh
+    # assignment that could drift from the
+    # WorkerAttemptRecord above.
     lease = {
         "supervisor_instance_id": INSTANCE_ID,  # type: ignore[name-defined]
         "run_id": f"PR-{PR_NUMBER}",  # type: ignore[name-defined]
@@ -2833,7 +3042,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         # durable source of truth; the lease is the
         # secondary path used by ``poll_worker_attempt``
         # BEFORE the attempt record is finalized.
-        "last_dispatched_event_id": ",".join(_pending_event_ids or ()),
+        "last_dispatched_event_id": ",".join(pending_event_ids),
         "stdout_path": str(stdout_path),
         "stderr_path": str(stderr_path),
     }
@@ -6301,6 +6510,16 @@ def main(argv: Optional[list[str]] = None) -> int:
             "another supervisor already owns this PR; exiting",
         )
         return 0
+
+    # Round-40: reconcile AUTHORITATIVE_HEAD against
+    # canonical durable + live evidence at boot. The
+    # bootstrap env var ``AED_AUTHORITATIVE_HEAD`` may be
+    # stale (a worker push advanced the head after the
+    # systemd unit was written); the live PR head is the
+    # canonical truth. This runs ONCE per supervisor
+    # lifetime, BEFORE the heartbeat loop, so the rest of
+    # the supervisor sees a single, reconciled value.
+    _reconcile_authoritative_head_at_boot()
 
     log(
         "info",
