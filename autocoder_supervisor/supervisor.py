@@ -4583,7 +4583,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             # anti-burst guard: a heartbeat can drain at
             # most one durable unresolved thread; the
             # next heartbeat drains the next.
-            snap_for_drain = iteration
+            #
+            # The snapshot data is NOT in `iteration` —
+            # run_iteration_v5 only returns events +
+            # decision metadata. Capture the live snapshot
+            # directly to read the canonical
+            # review_threads.
+            try:
+                _drain_token = get_github_token() if "get_github_token" in dir() else ""
+            except Exception:
+                _drain_token = ""
+            snap_for_drain = capture_live_snapshot(
+                rs if isinstance(rs, dict) else {},
+                _drain_token or "",
+            )
             already_launched = launched_event_ids()
             drain_events: list = []
             threads = (snap_for_drain.get("review_threads") or {})
