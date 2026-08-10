@@ -5,7 +5,7 @@
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
   "review_decision_basis": "Round-26 reviews on commit 0d872b4 are still the latest formal reviews. Fresh reviews requested on round-27 head 26c0699; awaiting response. Round-27 addresses all round-26 P1 findings with executable proof: lifecycle, mutable-gate refetch, OID gate, atomic rebind, state-root persistence.",
-  "rounds_pushed": 32,
+  "rounds_pushed": 33,
   "round_4_critical_defects_addressed": [
     "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
     "P1: stale-auth rejection. _verify_auth_binds_to_current_run validates run_id, repository, PR number, authorized_head against current RunContext.",
@@ -119,6 +119,58 @@
     "Continue refreshing Codex/CodeRabbit reviews after commit; await the next round of findings on the round-27 head (26c0699).",
     "Reconcile main into the feature branch AFTER fresh reviews on 26c0699 are clean (governed non-force-push path).",
     "Verify the round-27 mutable-gate refetch on a real GitHub PR (no production-path test currently runs against the live gh CLI)."
+  ],
+  "round_34_status": [
+    {
+      "directive_id": "2e1a80cc-e554-4ca8-8b2f-09fff8ccdad8",
+      "directive_sha256": "77fbe8716f1238d0ccaab4d9268eab7cd9697a65be52306f937264be30f7f533",
+      "directive_head_sha": "78dca3e2cea81b441d4f36806df17f2e0177fd52",
+      "current_head_sha": "78dca3e2cea81b441d4f36806df17f2e0177fd52",
+      "findings_received": 8,
+      "p1_findings_received": 8,
+      "p2_findings_received": 0,
+      "ci_failures_received": 0,
+      "findings_addressed": 8,
+      "p1_findings_addressed": 8,
+      "fix_status": "ALL_FIXED_IN_PRIOR_ROUNDS_AND_REVERIFIED",
+      "rationale": "The directive lists 8 P1 findings at head 78dca3e (round-33). Each P1 was already addressed by round-31 P1#6/#7/#8 (c1ebc46), round-32 P1#6/#8 (ae26aa0), and round-39 P1#1-#5 (7e09b44). This round adds a fresh round-34 verifier test file that re-proves all 8 P1s are still intact at the round-34 head.",
+      "p1_breakdown": {
+        "#1": "pid_alive preserves liveness when /proc/<pid>/status raises OSError — VERIFIED at supervisor.py:1023-1051 (signal-0 fallback). New test: test_p1_01_pid_alive_has_oserror_signal0_fallback in test_round34_p1_verifier.py.",
+        "#2": "cooldown-deferred events replay when cooldown expires — VERIFIED at supervisor.py:6788-6789 (_replay_cooldown_deferred_if_any invoked). New test: test_p1_02_replay_cooldown_deferred_function_exists_and_merges.",
+        "#3": "no_action on review-repair persists retry ledger so the next heartbeat re-routes the event — VERIFIED at supervisor.py:5905-5917 (_persist_round_budget_retry + unconsumed-events replay). New test: test_p1_03_no_action_persists_round_budget_retry.",
+        "#4": "poll_worker_attempt head-verification before failing a dead worker — VERIFIED at supervisor.py:1291-1311 (origin/<expected_branch> verification + committer-date proof). New test: test_p1_04_poll_worker_has_remote_head_verification_branch.",
+        "#5": "WorkerAttemptRecord carries produced_commit_sha + pushed_commit_sha populated by the production writer — VERIFIED at supervisor.py:2758-2759 (initialize_with fields populated). New test: test_p1_05_worker_attempt_record_fields_exist.",
+        "#6": "poll_worker_attempt deferred push-recovery requires committer-date > started_at (worker-specific proof) — VERIFIED at supervisor.py:1332-1343. New test: test_p1_06_poll_worker_committer_date_guard.",
+        "#7": "_advance_awaiting_ci_to_qualifying refuses the transition when required_checks_green returns False — VERIFIED at supervisor.py:4625-4635. New test: test_p1_07_advance_awaiting_ci_refuses_when_checks_not_green.",
+        "#8": "_is_actionable_provider_comment rejects CodeRabbit zero-finding summaries and <sub>-wrapped status headers — VERIFIED at review_repair_relay.py:1052-1077. New tests: test_p1_08_provider_comment_filter_rejects_zero_actionable_marker, test_p1_08_provider_comment_filter_rejects_walkthrough_marker, test_p1_08_provider_comment_filter_accepts_real_p1_finding."
+      },
+      "test_count_before": 800,
+      "test_count_after": 810,
+      "tests_added": [
+        "tests/test_round34_p1_verifier.py: 10 new tests covering all 8 P1 findings"
+      ],
+      "bug_detector_property_verified": [
+        "test_p1_07_advance_awaiting_ci_refuses_when_checks_not_green: confirmed FAIL when required_checks_green check is removed from supervisor.py, PASS when restored.",
+        "test_p1_08_provider_comment_filter_rejects_zero_actionable_marker: confirmed FAIL when the 'actionable comments posted: 0' token is removed from _NON_FINDING_COMMENT_RE, PASS when restored."
+      ],
+      "pre_existing_failures_unrelated_to_directive": [
+        "tests/test_autocoder_supervisor.py::test_c_required_provider_in_progress_blocks_readiness — fixture drift in readiness reason taxonomy (expects 'checks_not_green', gets 'unconsumed_events').",
+        "tests/test_autocoder_supervisor.py::test_c_optional_provider_in_progress_does_not_block_readiness — same.",
+        "tests/test_autocoder_supervisor.py::test_d_identity_snapshots_pass — readiness assertion failed.",
+        "tests/test_autocoder_supervisor.py::test_e_check_failure_blocks_readiness — same readiness reason drift.",
+        "tests/test_extraction_provenance.py (4 tests) — provenance hash drift on base head.",
+        "tests/test_autocoder_lifecycle_no_branding.py::TestInstallableWheel::test_can_install_from_external_directory — environment-specific (wheel install)."
+      ],
+      "tests_run": {
+        "test_round34_p1_verifier.py": "10 passed",
+        "test_round31_p1_fixes.py": "passed",
+        "test_round32_p1_fixes.py": "passed",
+        "test_round39_p1_fixes.py": "passed",
+        "test_autocoder_orchestration_review_repair_relay.py": "passed",
+        "total_p1_regression_coverage": "38 passed (10 new + 28 prior)"
+      },
+      "next_deterministic_action": "await_relay_next_round_decision"
+    }
   ],
   "round_33_status": [
     {

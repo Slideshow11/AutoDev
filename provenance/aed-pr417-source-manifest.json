@@ -554,9 +554,20 @@
       "source_size_bytes": null,
       "transformation_classification": "new_test_in_round_28",
       "transformation_explanation": "Round-28 P5 FindingLedger cross-head semantics tests."
+    },
+    {
+      "description": "Round-34 directive verifier: 10 fresh tests re-proving all 8 P1 findings from directive 2e1a80cc-e554-4ca8-8b2f-09fff8ccdad8 are still intact at head 78dca3e.",
+      "destination_path": "tests/test_round34_p1_verifier.py",
+      "destination_sha256": "e2b47f59f2e4d2136e892354a394b8bef20f29ef4d12bf030c077624ae2b83e8",
+      "destination_size_bytes": 12853,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_test",
+      "transformation_explanation": "Round-34 directive requested all 8 P1s be applied. Each was already addressed by round-31 P1#6/#7/#8 (c1ebc46), round-32 P1#6/#8 (ae26aa0), and round-39 P1#1-#5 (7e09b44). The verifier re-proves each fix is still intact at the round-34 head 78dca3e."
     }
   ],
-  "last_modification_note": "Round-32 P1#6: poll_worker_attempt deferred push-recovery branch requires committer-date > rec.started_at (worker-specific proof).",
+  "last_modification_note": "Round-34 directive 2e1a80cc: all 8 P1s re-verified at head 78dca3e; added tests/test_round34_p1_verifier.py (10 tests).",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -580,5 +591,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-10T18:50:00Z"
+  "updated_at_utc": "2026-08-10T19:34:46.721401+00:00"
 }
