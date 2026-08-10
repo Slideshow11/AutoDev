@@ -4202,13 +4202,55 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
 
 
 def snapshot_differs(a: dict, b: dict, expected_head: str) -> list:
+    """Return the list of reasons two snapshots differ.
+
+    Round-39 semantic fix (Section 6):
+
+        A head_sha_drift reset MUST be edge-triggered by an
+        ACTUAL new head movement between snapshots A and B,
+        not by the perpetual condition that a stored snapshot
+        was taken before the supervisor rebounded to the
+        current authoritative head.
+
+        Concretely:
+          H0 -> verified worker pushes H1 -> AUTHORITATIVE_HEAD rebinds H1
+                -> snap A captured at H1, snap B captured at H1
+                -> a.head_sha == b.head_sha == H1 == expected_head
+                -> no drift; window stable.
+            vs
+          H0 -> snap A captured at H0, snap B captured at H1
+                -> a.head_sha != b.head_sha
+                -> real drift; window reset.
+
+        The old comparison ``a.head_sha != expected_head`` falsely
+        reported drift forever after every rebind until the next
+        snap_a capture at the new head. After hundreds of polls,
+        the quiet window never elapsed and AutoDev could not
+        qualify.
+
+    Returns:
+        list of reason strings; empty list means snapshots match.
+    """
     reasons: list[str] = []
     if not a or not b:
         return ["snapshot_empty"]
-    if (
-        a.get("head_sha") != expected_head
-        or b.get("head_sha") != expected_head
-    ):
+    a_head = a.get("head_sha")
+    b_head = b.get("head_sha")
+    # Round-39 edge-triggered head_sha_drift (Section 6):
+    # Report drift ONLY when an actual head movement is observed
+    # between snapshots A and B. The previous implementation
+    # compared each snapshot against ``expected_head`` and reported
+    # drift whenever either snapshot was taken before a supervisor
+    # rebind. After the rebind, both snapshots would carry the
+    # new head on subsequent polls, but until then the window
+    # reset forever. The new rule is:
+    #   drift = "the head moved between snapshots" (edge-triggered).
+    # The historical-state mismatch (snap_a taken before rebind,
+    # expected_head already on the new head) is captured by
+    # ``head_match`` in ``capture_live_snapshot`` and surfaced
+    # via ``revoke_readiness``; it is NOT a quiet-window reset
+    # cause.
+    if a_head and b_head and a_head != b_head:
         reasons.append("head_sha_drift")
     if a.get("formal_reviews") != b.get("formal_reviews"):
         reasons.append("formal_review_change")
@@ -4246,8 +4288,20 @@ def required_checks_green(snap: dict) -> bool:
     check whose status is queued/in_progress is also NOT
     green. The only green states are ``success``, ``skipped``,
     ``neutral``.
+
+    Round-39 invariant: this function returns ``True`` ONLY
+    when at least one required check exists AND every
+    required check is green. An empty required-check set
+    returns ``False`` here so callers must consult
+    ``ci_policy_status`` to distinguish the
+    ``NO_REQUIRED_CHECKS`` case from the
+    ``CHECKS_GREEN`` case. The legacy behavior of
+    interpreting zero required checks as "green" is a
+    silent CI-bypass regression; round-39 forbids it.
     """
     required = set(POLICY.get("required_check_names") or [])
+    if not required:
+        return False
     for name in required:
         info = snap.get("required_checks", {}).get(name)
         # An absent entry means the check has not yet been
@@ -4265,6 +4319,75 @@ def required_checks_green(snap: dict) -> bool:
         if c not in ("success", "skipped", "neutral"):
             return False
     return True
+
+
+# Round-39 CI policy outcomes. Distinguishes:
+#   NO_REQUIRED_CHECKS  — repo has zero required checks
+#                          configured; qualification can
+#                          proceed with explicit semantic
+#                          evidence.
+#   CHECKS_GREEN         — at least one required check
+#                          exists and all are green.
+#   CHECKS_PENDING       — at least one required check is
+#                          registered but not yet completed.
+#   CHECKS_FAILED        — at least one required check
+#                          completed with failure.
+#   POLICY_UNRESOLVED    — the supervisor cannot determine
+#                          the policy (orchestration root
+#                          unresolved, run_state.json corrupt,
+#                          etc.). Fail closed.
+CI_POLICY_NO_REQUIRED_CHECKS = "NO_REQUIRED_CHECKS"
+CI_POLICY_CHECKS_GREEN = "CHECKS_GREEN"
+CI_POLICY_CHECKS_PENDING = "CHECKS_PENDING"
+CI_POLICY_CHECKS_FAILED = "CHECKS_FAILED"
+CI_POLICY_POLICY_UNRESOLVED = "POLICY_UNRESOLVED"
+
+
+def ci_policy_status(snap: dict) -> str:
+    """Resolve the canonical CI policy outcome for the live head.
+
+    Round-39 (Section 8): distinguish the
+    ``NO_REQUIRED_CHECKS`` case from ``CHECKS_GREEN``. The
+    legacy behavior of treating an empty required-check
+    list as "green" was a silent CI-bypass regression;
+    callers must consult this function for the explicit
+    semantic outcome.
+    """
+    required = list(POLICY.get("required_check_names") or [])
+    if not required:
+        return CI_POLICY_NO_REQUIRED_CHECKS
+    # The check_run evidence must actually be present in
+    # the snapshot. An empty ``required_checks`` dict with
+    # a non-empty required list means "checks configured
+    # but none have run yet"; that's POLICY_UNRESOLVED
+    # until authoritative evidence arrives.
+    rc = snap.get("required_checks") or {}
+    if not rc:
+        return CI_POLICY_POLICY_UNRESOLVED
+    pending = False
+    missing = False
+    for name in required:
+        info = rc.get(name)
+        if info is None:
+            # Configured check hasn't been registered yet;
+            # we lack authoritative evidence about its
+            # conclusion. Mark the run POLICY_UNRESOLVED so
+            # the caller cannot fabricate ``CHECKS_GREEN``
+            # without seeing real evidence.
+            missing = True
+            continue
+        status = info.get("status")
+        if status != "completed":
+            pending = True
+            continue
+        c = info.get("conclusion")
+        if c in ("failure", "timed_out", "cancelled", "action_required"):
+            return CI_POLICY_CHECKS_FAILED
+    if missing:
+        return CI_POLICY_POLICY_UNRESOLVED
+    if pending:
+        return CI_POLICY_CHECKS_PENDING
+    return CI_POLICY_CHECKS_GREEN
 
 
 def any_required_provider_in_progress(snap: dict) -> bool:
@@ -4305,12 +4428,40 @@ def evaluate_readiness(
         }
     if list_unconsumed_events():
         return {"ready": False, "reason": "unconsumed_events"}
-    if not required_checks_green(snap):
-        return {"ready": False, "reason": "checks_not_green"}
+    # Round-39: distinguish CI policy outcomes so a repo
+    # with zero required checks does not silently fabricate
+    # "checks green" semantics. The empty-required-checks
+    # case is an explicit semantic state (``NO_REQUIRED_CHECKS``)
+    # that allows qualification.
+    ci_state = ci_policy_status(snap)
+    if ci_state == CI_POLICY_CHECKS_PENDING:
+        return {
+            "ready": False,
+            "reason": "ci_checks_pending",
+        }
+    if ci_state == CI_POLICY_CHECKS_FAILED:
+        return {
+            "ready": False,
+            "reason": "ci_checks_failed",
+        }
+    if ci_state == CI_POLICY_POLICY_UNRESOLVED:
+        return {
+            "ready": False,
+            "reason": "ci_policy_unresolved",
+        }
+    # CI_POLICY_CHECKS_GREEN and CI_POLICY_NO_REQUIRED_CHECKS
+    # both allow qualification to proceed (with explicit
+    # evidence for the NO_REQUIRED_CHECKS case).
     if any_required_provider_in_progress(snap):
         return {
             "ready": False,
             "reason": "required_provider_in_progress",
+        }
+    if ci_state == CI_POLICY_NO_REQUIRED_CHECKS:
+        return {
+            "ready": True,
+            "reason": "no_required_checks",
+            "ci_policy": ci_state,
         }
     return {"ready": True, "reason": "quiet_window_match"}
 
@@ -4622,10 +4773,22 @@ def _advance_awaiting_ci_to_qualifying() -> bool:
                 error=str(exc),
             )
             return False
-        if not required_checks_green(_snap):
+        # Round-39: distinguish CI policy outcomes. The
+        # legacy ``required_checks_green`` returned True for
+        # an empty required-check list, silently fabricating
+        # ``CI PASSED`` on repos with zero required checks.
+        # The round-39 contract requires explicit semantic
+        # evidence: ``NO_REQUIRED_CHECKS`` is the
+        # qualification-allowed outcome for empty
+        # required-check sets; ``CHECKS_GREEN`` requires
+        # at least one green check; ``CHECKS_PENDING`` /
+        # ``CHECKS_FAILED`` / ``POLICY_UNRESOLVED`` block
+        # the transition.
+        ci_state = ci_policy_status(_snap)
+        if ci_state == CI_POLICY_CHECKS_PENDING:
             log(
                 "warning",
-                "_advance_awaiting_ci_to_qualifying: required checks not green; "
+                "_advance_awaiting_ci_to_qualifying: required checks pending; "
                 "refusing transition (fail-closed)",
                 required_checks=_snap.get("required_checks", {}),
                 head=AUTHORITATIVE_HEAD[:12]  # type: ignore[name-defined]
@@ -4633,6 +4796,29 @@ def _advance_awaiting_ci_to_qualifying() -> bool:
                 else "",
             )
             return False
+        if ci_state == CI_POLICY_CHECKS_FAILED:
+            log(
+                "warning",
+                "_advance_awaiting_ci_to_qualifying: required checks failed; "
+                "refusing transition (fail-closed)",
+                required_checks=_snap.get("required_checks", {}),
+                head=AUTHORITATIVE_HEAD[:12]  # type: ignore[name-defined]
+                if AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+                else "",
+            )
+            return False
+        if ci_state == CI_POLICY_POLICY_UNRESOLVED:
+            log(
+                "warning",
+                "_advance_awaiting_ci_to_qualifying: ci policy unresolved; "
+                "refusing transition (fail-closed)",
+                head=AUTHORITATIVE_HEAD[:12]  # type: ignore[name-defined]
+                if AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+                else "",
+            )
+            return False
+        # ci_state is CHECKS_GREEN or NO_REQUIRED_CHECKS — both
+        # allow qualification to proceed.
         # Drive the transition. ``report_ci_pass`` will
         # validate ``head_required`` against the bound
         # authorized head; we pass ``AUTHORITATIVE_HEAD``
@@ -4644,6 +4830,10 @@ def _advance_awaiting_ci_to_qualifying() -> bool:
             "round-37 supervisor advanced AWAITING_CI -> "
             "QUALIFYING_READINESS via direct report_ci_pass",
             head=head[:12] if head else "",
+            ci_policy=ci_state,
+            required_checks=(
+                list(POLICY.get("required_check_names") or [])  # type: ignore[name-defined]
+            ),
         )
         return True
     except (OSError, StateStoreError, ValueError, KeyError) as exc:
