@@ -174,12 +174,12 @@ def _create_fresh_session(
     *,
     seed_prompt: str,
     cwd: Optional[Path] = None,
-    timeout: float = 90.0,
+    timeout: float = 180.0,
 ) -> str:
     """Start an isolated fresh hermes chat and return its id.
 
     Round-38 forensic note: hermes emits ``session_id: <id>``
-    to **stderr** (not stdout), as a separate ``session_id:``
+    on **stderr** (not stdout), as a separate ``session_id:``
     line that follows the session-init banner. The actual
     chat response goes to stdout. We must therefore scan
     stderr for the id, then surface it from stdout.
@@ -188,6 +188,13 @@ def _create_fresh_session(
     shell. The worker will receive the real repair directive
     via the lease and re-resume this session, so this call
     must NOT pre-consume prompt-cache budget on the real task.
+
+    Round-38 v3: the timeout is bumped to 180s (was 90s)
+    because hermes's session-creation handshake can take
+    30-60s when the state.db is busy or the host is under
+    load. The previous 90s ceiling caused spurious timeouts
+    that left the supervisor stuck with the stale configured
+    session id.
     """
     proc = subprocess.run(  # noqa: S602
         [
