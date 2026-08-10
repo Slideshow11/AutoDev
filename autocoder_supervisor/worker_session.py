@@ -178,6 +178,12 @@ def _create_fresh_session(
 ) -> str:
     """Start an isolated fresh hermes chat and return its id.
 
+    Round-38 forensic note: hermes emits ``session_id: <id>``
+    to **stderr** (not stdout), as a separate ``session_id:``
+    line that follows the session-init banner. The actual
+    chat response goes to stdout. We must therefore scan
+    stderr for the id, then surface it from stdout.
+
     The prompt is intentionally short: we just need a session
     shell. The worker will receive the real repair directive
     via the lease and re-resume this session, so this call
@@ -205,13 +211,19 @@ def _create_fresh_session(
             f"fresh hermes session creation failed: rc={proc.returncode} "
             f"stderr={proc.stderr.strip()[:200]}"
         )
-    match = _SESSION_ID_LINE_RE.search(proc.stdout)
-    if not match:
-        raise RuntimeError(
-            "fresh hermes session did not return session_id; "
-            f"stdout head={proc.stdout[:200]!r}"
-        )
-    return match.group(1)
+    # Round-38 hermes emits ``session_id: <id>`` on STDERR
+    # after the session-init banner. Search both streams so
+    # the contract survives a future hermes move of the
+    # marker to stdout.
+    for source in (proc.stderr, proc.stdout):
+        match = _SESSION_ID_LINE_RE.search(source or "")
+        if match:
+            return match.group(1)
+    raise RuntimeError(
+        "fresh hermes session did not return session_id; "
+        f"stdout head={(proc.stdout or '')[:200]!r} "
+        f"stderr head={(proc.stderr or '')[:200]!r}"
+    )
 
 
 def resolve_worker_session(
