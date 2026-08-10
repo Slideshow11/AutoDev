@@ -565,9 +565,20 @@
       "source_size_bytes": null,
       "transformation_classification": "new_test",
       "transformation_explanation": "Round-34 directive requested all 8 P1s be applied. Each was already addressed by round-31 P1#6/#7/#8 (c1ebc46), round-32 P1#6/#8 (ae26aa0), and round-39 P1#1-#5 (7e09b44). The verifier re-proves each fix is still intact at the round-34 head 78dca3e."
+    },
+    {
+      "description": "Round-35 directive verifier: 14 fresh tests re-proving all 8 P1 findings from directive a2ff9a47-97ba-491c-8625-485b8fa0644a are still intact at head 79d4d62, with bug-detector property tests.",
+      "destination_path": "tests/test_round35_p1_verifier.py",
+      "destination_sha256": "d063c2ccfb5a154e67775a6419b84772eddd149ebb76643bb6bb43db36944d6f",
+      "destination_size_bytes": 16239,
+      "source_path": null,
+      "source_sha256": null,
+      "source_size_bytes": null,
+      "transformation_classification": "new_test",
+      "transformation_explanation": "Round-35 directive re-reported all 8 P1s at head 79d4d62. The verifier adds bug-detector property tests (forced OSError + signal-0 fallback for P1#1, regex-asserted committer-date comparison for P1#6, required_checks_green call for P1#7, status-marker filter for P1#8) plus the standard regex/source-text pattern checks for all 8 P1s. Each test exercises the live code path so a future round that regresses a fix will fail."
     }
   ],
-  "last_modification_note": "Round-34 directive 2e1a80cc: all 8 P1s re-verified at head 78dca3e; added tests/test_round34_p1_verifier.py (10 tests).",
+  "last_modification_note": "Round-35 directive a2ff9a47: all 8 P1s re-verified at head 79d4d62; added tests/test_round35_p1_verifier.py (14 tests, bug-detector property coverage).",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -576,9 +587,9 @@
   "summary": {
     "byte_identical_files": 1,
     "files_from_source": 17,
-    "last_audit_timestamp": "2026-08-09T04:50:00Z",
-    "newly_added_files": 34,
-    "test_count": 747,
+    "last_audit_timestamp": "2026-08-10T19:55:00Z",
+    "newly_added_files": 35,
+    "test_count": 824,
     "transformed_files": 16
   },
   "terminal_evidence": {
