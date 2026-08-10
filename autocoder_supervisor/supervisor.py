@@ -4537,7 +4537,68 @@ def main(argv: Optional[list[str]] = None) -> int:
                 read_readiness_state().get("state")
                 or STATE_ACTIVE_REPAIR
             )
-            new_events = iteration.get("events", [])
+            # Round-34: drain a SINGLE durable unresolved
+            # thread even when the GitHub delta is empty.
+            # detect_new_actionable_events only surfaces
+            # threads that newly appear or re-open;
+            # pre-existing unresolved threads disappear
+            # from the delta and become invisible to the
+            # dispatcher. This drain picks ONE thread
+            # (sorted by id for determinism) per heartbeat
+            # so we never burst-launch multiple workers
+            # against the same branch/head/controller
+            # state. The synthetic event flows through
+            # the SAME lifecycle as a real GitHub event:
+            # persist -> dispatch -> relay -> directive
+            # -> worker. Only the event source differs
+            # (source="durable_drain"). Satisfies the
+            # user's invariant: "Every heartbeat must
+            # therefore do BOTH:
+            #   A. ingest newly discovered GitHub events
+            #      idempotently;
+            #   AND
+            #   B. drain all due durable nonterminal
+            #      events."
+            # The "ONE thread per heartbeat" cap is the
+            # anti-burst guard: a heartbeat can drain at
+            # most one durable unresolved thread; the
+            # next heartbeat drains the next.
+            snap_for_drain = iteration
+            already_launched = launched_event_ids()
+            drain_events: list = []
+            threads = (snap_for_drain.get("review_threads") or {})
+            # Sort by thread id for determinism.
+            unresolved_ids = sorted(
+                tid for tid, td in threads.items()
+                if not td.get("resolved") and not td.get("outdated")
+            )
+            for tid in unresolved_ids:
+                eid = f"unresolved_thread_drain:{tid}"
+                if eid in already_launched:
+                    continue
+                drain_events.append({
+                    "id": eid,
+                    "kind": "unresolved_thread_drain",
+                    "thread_id": tid,
+                    "source": "durable_drain",
+                    "head_sha": iteration.get("head_sha"),
+                })
+                break  # ONE per heartbeat (anti-burst)
+            if drain_events:
+                # Persist the synthetic drain event into
+                # the unconsumed ledger using the real
+                # writer. Idempotent: write_unconsumed_event
+                # dedups on event id.
+                for ev in drain_events:
+                    write_unconsumed_event(ev)
+                log(
+                    "info",
+                    "round-34 durable-thread drain",
+                    count=len(drain_events),
+                    thread_id=drain_events[0].get("thread_id"),
+                    head=iteration.get("head_sha", "")[:12],
+                )
+            new_events = list(iteration.get("events", [])) + drain_events
             paused = [
                 p for p, st in (
                     read_quota_state().get("providers") or {}
