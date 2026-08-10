@@ -1,11 +1,11 @@
 {
-  "current_head": "26c0699a",
-  "head_short": "26c0699",
+  "current_head": "d268c06",
+  "head_short": "d268c06",
   "test_count": 795,
   "skipped_count": 8,
   "review_decision": "CHANGES_REQUESTED",
   "review_decision_basis": "Round-26 reviews on commit 0d872b4 are still the latest formal reviews. Fresh reviews requested on round-27 head 26c0699; awaiting response. Round-27 addresses all round-26 P1 findings with executable proof: lifecycle, mutable-gate refetch, OID gate, atomic rebind, state-root persistence.",
-  "rounds_pushed": 27,
+  "rounds_pushed": 32,
   "round_4_critical_defects_addressed": [
     "CRITICAL: server-confirmed merge identity gate. PARTIAL merge record written before raise on missing OID. mc['oid'] extracted only (not None, not dict).",
     "P1: stale-auth rejection. _verify_auth_binds_to_current_run validates run_id, repository, PR number, authorized_head against current RunContext.",
@@ -23,7 +23,7 @@
   ],
   "round_22_status": [
     "P1 (Codex 3742679438): reject human CHANGES_REQUESTED in merge gate. fetch_live_pr_payload now requests reviewDecision; merge gate fails closed on None / CHANGES_REQUESTED / unrecognized values; 4 new tests in ReviewDecisionGateTests.",
-    "test count: 745 (was 741) — +4 new ReviewDecisionGateTests covering CHANGES_REQUESTED blocks, APPROVED allows, missing fails closed, unrecognized value fails closed.",
+    "test count: 745 (was 741) \u2014 +4 new ReviewDecisionGateTests covering CHANGES_REQUESTED blocks, APPROVED allows, missing fails closed, unrecognized value fails closed.",
     "Manifest hashes for tests/test_merge_queued_pr_fails_closed.py and tests/test_pr4_round6_d0_fixture.py synced."
   ],
   "round_23_status": [
@@ -45,7 +45,7 @@
     "Codex Critical (round-22 review on 0d872b4): the success path with no mergeCommit OID previously fell through to reconciliation against local_main_sha, writing a 'COMPLETE' record for a server-unconfirmed commit. New _fetch_and_validate_merge_oid requires well-formed 40/64-char lowercase hex AND `git cat-file -t <oid>` reachability in the local repo (require_oid_reachable=True; hermetic tests opt out via require_oid_reachable=False). New MergeAmbiguousOutcome path persists PARTIAL record + raises. 8 new tests in tests/test_merge_oid_gate.py covering malformed/missing/unreachable OIDs + success-path-no-OID AMBIGUOUS branch.",
     "Codex Major (round-22 on 0d872b4): final_state derives from recon_failure now (COMPLETE if recon succeeds, PARTIAL if it fails). The two failure paths (subprocess nonzero + missing OID vs reconciliation failure) now report a consistent final_state. C-28 test extended to assert final_state='PARTIAL'.",
     "Codex Minor (round-22 on 0d872b4): MergeAuthorizationMalformed now names the canonical `exact_head` field in its error message (legacy alternatives still listed).",
-    "Codex Major (round-22 on 0d872b4): mutable merge gates re-fetched INSIDE the locked transaction. _refetch_and_validate_mutable_gates re-fetches the live PR payload via fetch_live_pr_payload and validates head_sha, state, merged, mergeable, isDraft, autoMergeRequest, and reviewDecision against the bound snapshot. Divergence raises MergeGateChanged (a MergeAmbiguousOutcome subclass). Soft signal: a failed re-fetch does NOT raise — the original snapshot is still authoritative. 7 new tests in tests/test_merge_mutable_gate_refetch.py covering CHANGES_REQUESTED, state closed, already merged, head advanced, approval dismissed, soft-signal-on-failure, and unchanged-pass-through.",
+    "Codex Major (round-22 on 0d872b4): mutable merge gates re-fetched INSIDE the locked transaction. _refetch_and_validate_mutable_gates re-fetches the live PR payload via fetch_live_pr_payload and validates head_sha, state, merged, mergeable, isDraft, autoMergeRequest, and reviewDecision against the bound snapshot. Divergence raises MergeGateChanged (a MergeAmbiguousOutcome subclass). Soft signal: a failed re-fetch does NOT raise \u2014 the original snapshot is still authoritative. 7 new tests in tests/test_merge_mutable_gate_refetch.py covering CHANGES_REQUESTED, state closed, already merged, head advanced, approval dismissed, soft-signal-on-failure, and unchanged-pass-through.",
     "Codex Trivial (round-22 on 0d872b4): dead RunContext probe + redundant `import json` removed from _verify_auth_binds_to_current_run. Duplicate mergeCommit fetch path consolidated through _extract_merge_oid.",
     "Codex Trivial (round-22 on 0d872b4): test_complete_thread_pagination_does_not_block now uses the isolated_state fixture and asserts the exact reason (not just !=) so a 'ready=True' regression cannot pass.",
     "Codex Trivial (round-22 on 0d872b4): provenance manifest explanation for tests/test_directive_bridge.py updated to reference .relay_status.json for the test count (which can drift). The stale '20 tests' literal is removed.",
@@ -76,48 +76,102 @@
       "id": "3742679438",
       "title": "Reject current human change requests before merging",
       "severity": "P1",
-      "status": "ADDRESSED in 0807dbf — fetch_live_pr_payload + merge gate reviewDecision check + 4 tests"
+      "status": "ADDRESSED in 0807dbf \u2014 fetch_live_pr_payload + merge gate reviewDecision check + 4 tests"
     },
     {
       "id": "3742679441",
       "title": "Reject partial thread responses instead of treating them as empty",
       "severity": "P1",
-      "status": "ADDRESSED in 0a55cb9 — reviewThreads pagination fail-closed on missing endCursor"
+      "status": "ADDRESSED in 0a55cb9 \u2014 reviewThreads pagination fail-closed on missing endCursor"
     },
     {
       "id": "3742679444",
       "title": "Re-fetch mutable merge gates inside the guarded transaction",
       "severity": "P1",
-      "status": "ADDRESSED in round-26 — _refetch_and_validate_mutable_gates re-fetches live PR payload inside the locked transaction and raises MergeGateChanged on divergence (reviewDecision, state, merged, head, etc.). User's executable-proof requirement met by 7 new tests in tests/test_merge_mutable_gate_refetch.py covering CHANGES_REQUESTED, state closed, already merged, head advanced, approval dismissed, soft-signal-on-failure, unchanged-pass-through."
+      "status": "ADDRESSED in round-26 \u2014 _refetch_and_validate_mutable_gates re-fetches live PR payload inside the locked transaction and raises MergeGateChanged on divergence (reviewDecision, state, merged, head, etc.). User's executable-proof requirement met by 7 new tests in tests/test_merge_mutable_gate_refetch.py covering CHANGES_REQUESTED, state closed, already merged, head advanced, approval dismissed, soft-signal-on-failure, unchanged-pass-through."
     },
     {
       "id": "3742791224",
       "title": "The partial record breaks the unauthorized_actions_taken contract",
       "severity": "Major",
-      "status": "ADDRESSED in 7fb0b79 — canonical 13-key shape; merge confirmation in notes; test asserts canonical shape"
+      "status": "ADDRESSED in 7fb0b79 \u2014 canonical 13-key shape; merge confirmation in notes; test asserts canonical shape"
     },
     {
       "id": "3742791240",
       "title": "Stale-auth tests assert on error substrings that any MergeError can satisfy",
       "severity": "Minor",
-      "status": "ADDRESSED in 39851aa — value-based assertions on the specific stale value"
+      "status": "ADDRESSED in 39851aa \u2014 value-based assertions on the specific stale value"
     },
     {
       "id": "3742791232",
       "title": "Fix implicit Optional + remove unused current_head parameter",
       "severity": "Minor",
-      "status": "ADDRESSED in 39851aa — implicit Optional removed; current_head parameter removed (was dead)"
+      "status": "ADDRESSED in 39851aa \u2014 implicit Optional removed; current_head parameter removed (was dead)"
     },
     {
       "id": "3742791230",
       "title": "Helper hardcodes /tmp and leaks a file on every call",
       "severity": "Minor",
-      "status": "ADDRESSED in b53e485 — tmp_path-based fixture, no /tmp hardcode, no leak, scanner-safe filename"
+      "status": "ADDRESSED in b53e485 \u2014 tmp_path-based fixture, no /tmp hardcode, no leak, scanner-safe filename"
     }
   ],
   "pending_round_28_candidates": [
     "Continue refreshing Codex/CodeRabbit reviews after commit; await the next round of findings on the round-27 head (26c0699).",
     "Reconcile main into the feature branch AFTER fresh reviews on 26c0699 are clean (governed non-force-push path).",
     "Verify the round-27 mutable-gate refetch on a real GitHub PR (no production-path test currently runs against the live gh CLI)."
+  ],
+  "round_32_status": [
+    {
+      "directive_id": "170a7e7e-c87e-4cbd-be53-9e5e62f0fdfa",
+      "directive_sha256": "0cd6484e4ed3976f77eecff9063ef4a5931aef0eb4fcdafb9f63f5691304fdce",
+      "findings_addressed": 8,
+      "p1_findings_addressed": 8,
+      "commits_pushed": [
+        {
+          "sha": "ae26aa0",
+          "summary": "round-32 P1#6 (committer-date in poll_worker_attempt) + P1#8 (stricter provider-comment filter); 5 new tests in test_round32_p1_fixes.py"
+        },
+        {
+          "sha": "d268c06",
+          "summary": "sync provenance manifests for supervisor.py / validate.py / test_autocoder_supervisor.py"
+        }
+      ],
+      "p1_breakdown": {
+        "#1": "pid_alive preserves liveness when proc status is unreadable \u2014 covered by round-39 P1#1 fix (test_p1_01)",
+        "#2": "cooldown-deferred events replay when cooldown expires \u2014 covered by round-39 P1#2 fix (test_p1_02)",
+        "#3": "unconsumed events replay on the next heartbeat after a no_action / recoverable_retry \u2014 covered by round-39 P1#3 fix (test_p1_03)",
+        "#4": "poll_worker_attempt head-verification before failing a dead worker \u2014 covered by round-37 deferred-push-recovery (preserves PUSH_VERIFIED when origin/<branch> + live head match); round-32 P1#6 tightens this to require committer-date > started_at (test_p1_06)",
+        "#5": "verify_push_against_attempt origin/branch fallback when pushed_commit_sha + produced_commit_sha are both None \u2014 covered by round-39 P1#6 fix",
+        "#6": "poll_worker_attempt deferred push-recovery MUST require committer-date worker-specific proof \u2014 FIXED IN ROUND-32 (commit ae26aa0)",
+        "#7": "_advance_awaiting_ci_to_qualifying MUST verify required_checks_green before transitioning \u2014 covered by round-31 P1#7 fix",
+        "#8": "_is_actionable_provider_comment MUST filter CodeRabbit zero-finding summaries and <sub>-wrapped status headers \u2014 FIXED IN ROUND-32 (commit ae26aa0)"
+      },
+      "test_count_before": 795,
+      "test_count_after": 800,
+      "tests_added": [
+        "tests/test_round32_p1_fixes.py: 5 new tests"
+      ],
+      "manifest_sync": {
+        "autocoder_supervisor/supervisor.py": {
+          "old_sha": "602d036460c4f2f226461739b1ce3546f600cee2a8573554e32927701b40e03f",
+          "new_sha": "e0671cf29f9aac98501021af202be3b945c9295b07386976a0a7a01e5202ee6e",
+          "old_size": 167087,
+          "new_size": 271703
+        },
+        "autocoder_supervisor/validate.py": {
+          "old_sha": "1959f1e6bcb70669355c557f92ec10678a2807d3e2144c4d10b3861c053cb18f",
+          "new_sha": "d76dd823b06850cbd1f3d12089beec6b0fa077986793f1cc7df06f4ee45e573e",
+          "old_size": 16767,
+          "new_size": 16747
+        },
+        "tests/test_autocoder_supervisor.py": {
+          "old_sha": "3b9c0913cedd9ec9fe8b7031c3ad9b2f8d7e18290022c2c98446b930ce1086fc",
+          "new_sha": "12dc53e03101fa56144584b9e8216d253a9531370a4ccdde4f81dd92f63eeb85",
+          "old_size": "unknown",
+          "new_size": 94992
+        }
+      },
+      "next_deterministic_action": "await_relay_next_round_decision"
+    }
   ]
 }
