@@ -170,6 +170,25 @@ _FORWARD_TRANSITIONS: Tuple[Transition, ...] = (
         durable_event="control_plane.ready_for_candidate",
         invalidates=frozenset(),
     ),
+    # Round-33: a head that previously qualified (CI clean, reviews clean)
+    # can receive NEW actionable reviews on the SAME head. The relay must
+    # be able to re-enter REPAIRING_REVIEW_FINDINGS without an
+    # intermediate QUALIFYING_READINESS -> READY_FOR_CANDIDATE -> ...
+    # back-walk. The required evidence is the actionable-review
+    # inventory that was not present at the prior qualifying decision;
+    # ``invalidates`` clears the prior readiness certificate so the
+    # next QUALIFYING_READINESS->READY_FOR_CANDIDATE transition must
+    # be re-earned with a fresh certificate.
+    Transition(
+        source=STATE_QUALIFYING_READINESS,
+        target=STATE_REPAIRING_REVIEW_FINDINGS,
+        authorized_actors=frozenset({"controller"}),
+        required_evidence=frozenset({"new_actionable_review_inventory"}),
+        head_stability="live",
+        idempotency="first_wins",
+        durable_event="control_plane.reopened_for_new_actionable_review",
+        invalidates=frozenset({"readiness_certificate"}),
+    ),
     Transition(
         source=STATE_READY_FOR_CANDIDATE,
         target=STATE_CANDIDATE_FROZEN,

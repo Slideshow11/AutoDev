@@ -31,6 +31,7 @@ from .context import (
     ACTOR_VERIFIER,
     ACTOR_OBSERVER,
     ACTOR_CANDIDATE_BUILDER,
+    _now_iso,
 )
 from .state_machine import (
     StateMachine,
@@ -159,6 +160,75 @@ class Controller:
         """AWAITING_CI -> QUALIFYING_READINESS."""
         sm = self._require_state_for_event()
         return self._apply(sm, STATE_QUALIFYING_READINESS, ACTOR_CONTROLLER, head_observed=head_observed)
+
+    def report_new_actionable_review_on_qualified_head(
+        self,
+        *,
+        head_observed: str,
+        actionable_review_inventory: list,
+    ) -> StateMachine:
+        """QUALIFYING_READINESS -> REPAIRING_REVIEW_FINDINGS.
+
+        Round-33: a head that previously qualified (CI clean, reviews
+        clean) can receive NEW actionable reviews on the SAME head.
+        The relay must be able to re-enter REPAIRING_REVIEW_FINDINGS
+        to drive a repair cycle. Without this transition the relay
+        correctly fails closed (RelayError) and the actionable review
+        is stranded indefinitely.
+
+        Contract:
+        1. ``actionable_review_inventory`` is a non-empty list of
+           event-id strings. Empty -> ControllerError (cannot reopen
+           a qualified head with no actionable review evidence).
+        2. Current canonical state MUST be QUALIFYING_READINESS. Any
+           other state -> InvalidTransition. The caller (supervisor)
+           MUST gate this with the same canonical-state guard the
+           relay uses, so an already-running REPAIR cycle is not
+           double-entered.
+        3. The transition INVALIDATES the prior readiness_certificate
+           so the next QUALIFYING_READINESS->READY_FOR_CANDIDATE
+           transition must be re-earned with a fresh certificate.
+        4. The actionable_review_inventory is persisted as a new
+           evidence file ``new_actionable_review_inventory.json``
+           in the run's state root so the durable journal records
+           exactly which events drove the re-open.
+        """
+        if not isinstance(actionable_review_inventory, list) or not actionable_review_inventory:
+            raise ControllerError(
+                "actionable_review_inventory must be a non-empty list of event id strings"
+            )
+        for eid in actionable_review_inventory:
+            if not isinstance(eid, str) or not eid:
+                raise ControllerError(
+                    f"actionable_review_inventory entries must be non-empty strings; got {eid!r}"
+                )
+        # Persist the inventory BEFORE the transition so the durable
+        # journal always has the evidence file even if the transition
+        # write fails. The transition's required_evidence key is
+        # ``new_actionable_review_inventory``; the StateStore does
+        # not validate by file name, but the durable record must
+        # exist for any operator audit.
+        self.store.write_atomic(
+            "new_actionable_review_inventory.json",
+            {
+                "head_observed": head_observed,
+                "inventory": list(actionable_review_inventory),
+                "recorded_at": _now_iso(),
+                "actor": ACTOR_CONTROLLER,
+            },
+        )
+        sm = self._require_state_for_event()
+        if sm.current_state != STATE_QUALIFYING_READINESS:
+            raise InvalidTransition(
+                f"cannot reopen for new actionable review: current state is "
+                f"{sm.current_state!r}; only QUALIFYING_READINESS is reopenable"
+            )
+        return self._apply(
+            sm,
+            STATE_REPAIRING_REVIEW_FINDINGS,
+            ACTOR_CONTROLLER,
+            head_observed=head_observed,
+        )
 
     def report_repair_pushed(self, *, head_observed: str) -> StateMachine:
         """REPAIRING_REVIEW_FINDINGS -> AWAITING_CI.

@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 #: Strict lowercase hex SHA-1/256 pattern. Used to validate
 #: rebind targets and any other 40-or-64-char head SHA.
@@ -2187,6 +2187,88 @@ def mark_event_launched(event_id: str) -> None:
     )
 
 
+# Round-33 P1#1: cooldown-deferred event ledger.
+# Events that arrive while ``cooldown_active()`` is True are
+# persisted to ``unconsumed_events.json`` but the dispatch is
+# skipped (line 4575). The quiet-window post-loop clear wipes
+# pre-existing unconsumed events, which would silently lose
+# these cooldown-deferred events. Track them in a SEPARATE
+# cooldown-deferred ledger so the post-loop clear can preserve
+# them, and the same event dispatches automatically when
+# cooldown expires (exactly one ownership transition).
+_COOLDOWN_DEFERRED_PATH = STATE_DIR / "cooldown_deferred_events.json"  # type: ignore[name-defined]
+
+
+def _mark_cooldown_deferred(events: list) -> None:
+    """Record that ``events`` were deferred during cooldown.
+
+    Idempotent: events already marked are not re-added. The
+    record is removed when the event is actually dispatched
+    (see ``_consume_cooldown_deferred``).
+    """
+    if not events:
+        return
+    try:
+        existing = read_json(_COOLDOWN_DEFERRED_PATH)
+    except Exception:  # noqa: BLE001
+        existing = {}
+    deferred = list(existing.get("ids", []))
+    seen = set(deferred)
+    for e in events:
+        eid = e.get("id") if isinstance(e, dict) else None
+        if eid and eid not in seen:
+            deferred.append(eid)
+            seen.add(eid)
+    if not deferred:
+        return
+    write_json(
+        _COOLDOWN_DEFERRED_PATH,
+        {
+            "ids": deferred,
+            "last_deferred_at": now_iso(),
+        },
+    )
+
+
+def _consume_cooldown_deferred(event_ids: Iterable[str]) -> None:
+    """Remove ``event_ids`` from the cooldown-deferred ledger.
+
+    Called from ``handle_new_events`` after a successful
+    dispatch so the event does not appear as still-deferred
+    on later heartbeats. Exactly-one ownership: the event
+    transitions PENDING -> dispatched, never twice.
+    """
+    if not event_ids:
+        return
+    try:
+        existing = read_json(_COOLDOWN_DEFERRED_PATH)
+    except Exception:  # noqa: BLE001
+        return
+    deferred = list(existing.get("ids", []))
+    consume_set = set(event_ids)
+    remaining = [eid for eid in deferred if eid not in consume_set]
+    write_json(
+        _COOLDOWN_DEFERRED_PATH,
+        {
+            "ids": remaining,
+            "last_deferred_at": existing.get("last_deferred_at"),
+        },
+    )
+
+
+def _cooldown_deferred_ids() -> set:
+    """Return the set of event ids currently cooldown-deferred.
+
+    Used by the quiet-window post-loop clear to PRESERVE
+    cooldown-deferred events (they MUST NOT be wiped).
+    """
+    try:
+        existing = read_json(_COOLDOWN_DEFERRED_PATH)
+    except Exception:  # noqa: BLE001
+        return set()
+    return set(existing.get("ids", []))
+
+
 def unmark_event_launched(event_id: str) -> None:
     ids = launched_event_ids()
     if event_id in ids:
@@ -2786,6 +2868,105 @@ def revoke_readiness(reason: str, head_sha: str = None) -> None:
     })
 
 
+def _reopen_qualifying_head_if_needed(
+    fresh_event_ids: list,
+    head_sha: str,
+) -> bool:
+    """Round-33: drive the canonical state machine from
+    QUALIFYING_READINESS back to REPAIRING_REVIEW_FINDINGS when new
+    actionable reviews arrive on a previously-qualified head.
+
+    Without this re-open, the supervisor's ``revoke_readiness``
+    only flips the lightweight ``readiness_state.json`` and the
+    canonical state machine at ``state/<pr>/orch/state.json``
+    remains at QUALIFYING_READINESS. The relay correctly fails
+    closed (RelayError) on the QUALIFYING_READINESS guard and the
+    actionable review is stranded indefinitely.
+
+    The re-open is gated on the same canonical-state guard the
+    relay uses, so an already-running REPAIR cycle is not
+    double-entered. If the canonical state is anything OTHER than
+    QUALIFYING_READINESS, the function is a no-op and the caller
+    proceeds to the relay as before.
+
+    Returns True when a re-open transition was successfully
+    applied (canonical state machine moved to
+    REPAIRING_REVIEW_FINDINGS); False otherwise (no-op, error,
+    or the canonical state was already past QUALIFYING_READINESS).
+    """
+    if not fresh_event_ids:
+        return False
+    try:
+        from autocoder_orchestration.controller import Controller
+        from autocoder_orchestration.context import RunContext
+        from autocoder_orchestration.store import StateStore
+    except ImportError as exc:
+        log(
+            "warning",
+            "supervisor cannot import autocoder_orchestration; "
+            "qualifying-head reopen disabled",
+            error=str(exc),
+        )
+        return False
+    try:
+        from .orchestration_state_root import (
+            resolve_orchestration_state_root,
+        )
+        state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+    except Exception as exc:  # noqa: BLE001 — defensive
+        log(
+            "warning",
+            "qualifying-head reopen: orchestration state root unresolved",
+            error=str(exc),
+        )
+        return False
+    try:
+        store = StateStore(state_root)
+        rc = store.read_optional("run_context.json")
+        if rc is None:
+            return False
+        ctx = RunContext.from_dict(rc)
+        controller = Controller(context=ctx, store=store)
+        sm = controller.load_state_machine()
+        if sm is None:
+            return False
+        if sm.current_state != "QUALIFYING_READINESS":
+            # Already past QUALIFYING_READINESS — caller proceeds
+            # to the relay as before; no re-open needed.
+            return False
+        try:
+            controller.report_new_actionable_review_on_qualified_head(
+                head_observed=head_sha,
+                actionable_review_inventory=list(fresh_event_ids),
+            )
+            log(
+                "info",
+                "qualifying-head reopen: canonical state "
+                "QUALIFYING_READINESS -> REPAIRING_REVIEW_FINDINGS",
+                event_count=len(fresh_event_ids),
+                head=head_sha[:12] if head_sha else None,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — defensive
+            log(
+                "warning",
+                "qualifying-head reopen failed; relay will see stale state",
+                error=str(exc),
+            )
+            return False
+    except Exception as exc:  # noqa: BLE001 — defensive
+        log(
+            "warning",
+            "qualifying-head reopen: unexpected failure",
+            error=str(exc),
+        )
+        return False
+
+
 def enter_readiness(into: str, head_sha: str = None) -> None:
     write_readiness_state({
         "state": into,
@@ -3014,20 +3195,40 @@ def active_repair_quiet_window(
     # does not affect events that arrived during the
     # window, because the new_event_observed flag would
     # have triggered the early return above.
+    #
+    # Round-33 P1#1: PRESERVE cooldown-deferred events.
+    # These were skipped at the dispatch site because the
+    # provider cooldown was active; the quiet-window clear
+    # MUST NOT silently lose them. Only events that are
+    # NOT in the cooldown-deferred ledger are eligible
+    # for the post-loop clear.
+    cooldown_deferred = _cooldown_deferred_ids()
     pre_existing = [
         e for e in list_unconsumed_events()
         if e.get("id") in pre_unconsumed_ids
+        and e.get("id") not in cooldown_deferred
     ]
-    if pre_existing:
+    # Round-33 P1#1: rebuild the ledger so that ONLY
+    # cooldown-deferred events survive. Pre-existing events
+    # that were eligible for clearing are removed; cooldown-
+    # deferred events are preserved with their full payload
+    # so the next iteration's dispatch can act on them.
+    if pre_existing or cooldown_deferred:
+        preserved = [
+            e for e in list_unconsumed_events()
+            if e.get("id") in cooldown_deferred
+        ]
         log(
             "info",
             "snapshot stable across quiet window; "
-            "clearing pre-existing unconsumed events",
+            "clearing pre-existing unconsumed events "
+            "(preserving cooldown-deferred)",
             count=len(pre_existing),
+            cooldown_deferred_preserved=len(cooldown_deferred),
         )
         write_json(
             UNCONSUMED_EVENTS_PATH,  # type: ignore[name-defined]
-            {"events": []},
+            {"events": preserved},
         )
     try:
         # Round-29 P1#7: read from the canonical
@@ -3359,14 +3560,69 @@ def _persist_root_resolution_retry(exc: Any) -> None:
     handles root-resolution failures. The ``reason``
     field distinguishes the two.
     """
+    _persist_retry_with_reason(
+        reason="orchestration_root_unresolved",
+        extra={"error": str(exc)},
+    )
+
+
+def _persist_round_budget_retry(
+    *,
+    head_sha: Any,
+    fresh_ids: list,
+    reason: str,
+) -> None:
+    """Round-33: unified retry persistence for review-repair
+    paths that must NOT fall through to a generic worker.
+
+    Persists under ``round_budget_retry.json`` so the
+    supervisor's existing main-loop scheduler reads it on
+    the next heartbeat. The ``reason`` field distinguishes
+    the failure category (no_action_on_review_repair,
+    unknown_relay_action:<action>, etc.). The retry ledger
+    lifecycle is enforced by the persistence helper:
+    PENDING -> eligible -> atomically CLAIM -> bump epoch
+    ONCE -> CONSUMED/CLEARED. A retry record with
+    lifecycle='cleared' MUST NOT trigger slice_epoch bumps
+    on later heartbeats; the supervisor's bump_slice_epoch
+    helper reads ``lifecycle`` and skips cleared records.
+    """
+    _persist_retry_with_reason(
+        reason=reason,
+        extra={
+            "head_sha": head_sha,
+            "fresh_ids": list(fresh_ids),
+        },
+    )
+
+
+def _persist_retry_with_reason(
+    *,
+    reason: str,
+    extra: dict,
+) -> None:
+    """Shared persistence helper for review-repair retries.
+
+    Lifecycle invariant: this helper writes a ledger entry
+    that is ONLY eligible to be claimed once. The supervisor's
+    main-loop scheduler bumps the slice_epoch on CLAIM and
+    does NOT bump it again on a record that has
+    ``lifecycle='cleared'`` (Round-33 P1#2 — cleared retry
+    ledger must not trigger slice_epoch bumps).
+
+    Restart after claim: if the supervisor restarts between
+    CLAIM and CONSUMED/CLEARED, the next heartbeat re-claims
+    the SAME record (same reason, same fresh_ids) and bumps
+    the epoch exactly ONCE. The ``attempt_count`` is
+    monotonic; the ``slice_epoch_bumps`` field is the
+    authoritative bump count.
+    """
     try:
         from autocoder_orchestration.review_repair_relay import (
             read_round_budget_retry,
         )
     except Exception:  # noqa: BLE001
         read_round_budget_retry = None  # type: ignore[assignment]
-    # Use the supervisor's evidence root (mirrors the
-    # round-budget retry state).
     from pathlib import Path
     evidence_root = (
         Path(str(RUN_STATE)).parent / "evidence"  # type: ignore[name-defined]
@@ -3378,6 +3634,15 @@ def _persist_root_resolution_retry(exc: Any) -> None:
         if read_round_budget_retry is not None
         else None
     ) or {}
+    # Lifecycle enforcement: a prior record with
+    # lifecycle='cleared' means the work has been CONSUMED.
+    # Do NOT re-claim — that would double-bump the slice_epoch
+    # on later heartbeats.
+    if prior.get("lifecycle") in ("cleared", "resolved", "consumed"):
+        # The work has been handled. The supervisor's
+        # main-loop scheduler already saw it; do not
+        # resurrect the record.
+        return
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     prior_count = int(prior.get("attempt_count", 0)) if prior else 0
@@ -3391,7 +3656,9 @@ def _persist_root_resolution_retry(exc: Any) -> None:
         next_eligible_retry_at = now
     payload = {
         **prior,
-        "reason": "orchestration_root_unresolved",
+        **extra,
+        "reason": reason,
+        "lifecycle": "pending",
         "attempt_count": attempt_count,
         "first_failure_at": prior.get(
             "first_failure_at", now,
@@ -3399,8 +3666,16 @@ def _persist_root_resolution_retry(exc: Any) -> None:
         "last_attempt_at": now,
         "next_eligible_retry_at": next_eligible_retry_at,
         "recorded_at": now,
-        "owner": "relay_recovery",
+        "owner": "supervisor_recovery",
         "recoverable": True,
+        # Round-33 P1#2: explicit single-bump tracking.
+        # The first CLAIM bumps the slice_epoch once; later
+        # heartbeats that re-encounter this record MUST NOT
+        # bump again. The supervisor's bump_slice_epoch
+        # helper reads this field and skips when bumped>0.
+        "slice_epoch_bumps": int(
+            prior.get("slice_epoch_bumps", 0) if prior else 0
+        ),
     }
     try:
         tmp = retry_path.with_suffix(retry_path.suffix + ".tmp")
@@ -3410,7 +3685,8 @@ def _persist_root_resolution_retry(exc: Any) -> None:
     except OSError as e:
         log(
             "warning",
-            "orchestration-root retry state persistence failed",
+            "review-repair retry state persistence failed",
+            reason=reason,
             error=str(e),
         )
 
@@ -3653,6 +3929,18 @@ def handle_new_events(
         reason="new_actionable_event",
         head_sha=iteration.get("head_sha"),
     )
+    # Round-33: drive the canonical state machine from
+    # QUALIFYING_READINESS back to REPAIRING_REVIEW_FINDINGS BEFORE
+    # the relay invocation. Without this re-open, the relay
+    # correctly fails closed on the QUALIFYING_READINESS guard and
+    # the actionable review is stranded indefinitely. The helper is
+    # a no-op when canonical state is anything other than
+    # QUALIFYING_READINESS, so an already-running REPAIR cycle is
+    # not double-entered.
+    _reopen_qualifying_head_if_needed(
+        fresh_event_ids=fresh_ids,
+        head_sha=str(iteration.get("head_sha") or AUTHORITATIVE_HEAD),  # type: ignore[name-defined]
+    )
     # Persistent relay wiring. The relay replaces the
     # "copy-paste a giant prompt" loop with a structured
     # directive persisted to the canonical evidence root.
@@ -3828,16 +4116,53 @@ def handle_new_events(
             ],
         )
         return
-    else:
+    elif relay_action == "no_action":
+        # Round-33: relay returned no_action. The
+        # supervisor MUST NOT fall through to a
+        # generic worker on a review-repair event.
+        # The event stays actionable; the next
+        # slice retries with fresh surfaces.
         log(
-            "info",
-            "revoking readiness (new actionable "
-            "event); launching single worker (no relay directive)",
+            "warning",
+            "relay returned no_action on review-repair "
+            "event; supervisor persists and continues "
+            "polling without generic worker",
             events=[
                 e.get("kind") for e in new_events
                 if e.get("id") in fresh_ids
             ],
         )
+        _persist_round_budget_retry(
+            head_sha=iteration.get("head_sha"),
+            fresh_ids=fresh_ids,
+            reason="no_action_on_review_repair",
+        )
+        return
+    else:
+        # Round-33: unknown relay action. The
+        # supervisor MUST NOT fall through to a
+        # generic worker on a review-repair event.
+        # Treat as recoverable_retry: persist the
+        # diagnostic state, leave the event
+        # actionable, and let the next slice retry.
+        log(
+            "warning",
+            "relay returned unknown action; "
+            "supervisor persists and continues polling "
+            "without generic worker (no_action->generic "
+            "worker fallback removed)",
+            relay_action=relay_action,
+            events=[
+                e.get("kind") for e in new_events
+                if e.get("id") in fresh_ids
+            ],
+        )
+        _persist_round_budget_retry(
+            head_sha=iteration.get("head_sha"),
+            fresh_ids=fresh_ids,
+            reason=f"unknown_relay_action:{relay_action}",
+        )
+        return
     live = (
         inspect_live_state(token) if token else {}
     )
@@ -3845,6 +4170,12 @@ def handle_new_events(
     if new_lease:
         for eid in fresh_ids:
             mark_event_launched(eid)
+            # Round-33 P1#1: consume the cooldown-deferred
+            # ledger so the event does not appear as
+            # still-deferred on later heartbeats.
+            # Exactly-one ownership: PENDING ->
+            # dispatched, never twice.
+        _consume_cooldown_deferred(fresh_ids)
     else:
         log(
             "warning",
@@ -4105,10 +4436,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             # slice_epoch so the next iteration has a
             # fresh budget. ``bump_slice_epoch`` is
             # idempotent and durable.
+            #
+            # Round-33 P1#2: a retry record with
+            # lifecycle='cleared' must NOT trigger a
+            # slice_epoch bump. The work has been
+            # CONSUMED; bumping again would advance the
+            # epoch on every heartbeat forever. Only
+            # records that are still pending/active
+            # participate in the slice-budget cycle.
             if (
                 bump_slice_epoch is not None
                 and retry_state
                 and retry_state.get("last_attempt_at")
+                and retry_state.get("lifecycle")
+                not in ("cleared", "resolved", "consumed")
             ):
                 bump_slice_epoch(
                     str(RUN_STATE.parent / "evidence"),  # type: ignore[name-defined]
@@ -4341,6 +4682,20 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
             if new_events and not cooldown_active():
                 handle_new_events(rs, new_events, token, iteration)
+            elif new_events and cooldown_active():
+                # Round-33 P1#1 (cooldown-skipped event loss):
+                # events that arrive during cooldown are
+                # persisted (write_unconsumed_event in
+                # run_iteration_v5) but the dispatch is
+                # skipped. They MUST NOT be cleared by the
+                # quiet-window post-loop clear. Track them
+                # as cooldown-deferred so the next
+                # post-loop clear preserves them, and the
+                # SAME event dispatches automatically the
+                # moment cooldown expires (exactly one
+                # ownership transition: PENDING ->
+                # dispatched when cooldown lifts).
+                _mark_cooldown_deferred(new_events)
 
             if cur_state == STATE_ACTIVE_REPAIR:
                 pre_unconsumed_ids = {
