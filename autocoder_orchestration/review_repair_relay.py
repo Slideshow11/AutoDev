@@ -1291,6 +1291,91 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
                 comment_id=int(cid) if isinstance(cid, int) else None,
                 check_name=None,
             ))
+    # Round-35: also collect findings from the durable
+    # review_threads inventory. Each unresolved thread
+    # that has actionable content (non-empty body or
+    # path, OR bound to the current head via
+    # ``commit_oid``) IS a real current-head review
+    # finding. Without this block, the relay silently
+    # missed all 32 inline review comments anchored to
+    # bd781d5 because the inline-review pipeline was
+    # bound to formal review submissions (which were 0
+    # on the current head).
+    threads = (
+        snapshot.get("review_threads")
+        or {}
+    )
+    current_head = snapshot.get("head_sha")
+    if isinstance(threads, dict):
+        for thread_id, thread_data in threads.items():
+            if not isinstance(thread_data, dict):
+                continue
+            if thread_data.get("resolved"):
+                continue
+            if thread_data.get("outdated"):
+                continue
+            thread_body = str(thread_data.get("body") or "").strip()
+            thread_path = thread_data.get("path") or ""
+            thread_line = thread_data.get("line")
+            thread_commit_oid = thread_data.get("commit_oid")
+            # Only emit findings from threads that carry
+            # real actionable evidence.
+            if not thread_body and not thread_path:
+                continue
+            # Require current-head binding via commit_oid
+            # when no other anchor is present. If neither
+            # the body nor the path is present, the
+            # commit_oid binding is the only signal of
+            # current-head applicability.
+            if (
+                not thread_body
+                and not thread_path
+                and thread_commit_oid
+                and current_head
+                and thread_commit_oid != current_head
+            ):
+                continue
+            finding_id = f"thread:{thread_id}"
+            if finding_id in seen_ids:
+                continue
+            seen_ids.add(finding_id)
+            if not _is_actionable_provider_comment(thread_body):
+                # A thread on the current head is by
+                # definition actionable even if its
+                # body does not contain the standard
+                # walkthrough/status markers. Bypass the
+                # status-filter so the relay can see
+                # genuine inline review findings that
+                # were filtered by the prior path-only
+                # collection.
+                if not thread_path and not thread_commit_oid:
+                    continue
+            severity = _classify_severity(thread_body)
+            title = (
+                thread_body.splitlines()[0]
+                if thread_body else "(thread)"
+            )
+            findings.append(Finding(
+                finding_id=finding_id,
+                source="review_thread",
+                severity=severity,
+                title=title[:120],
+                body=thread_body,
+                file_path=(
+                    str(thread_path)
+                    if thread_path else None
+                ),
+                line=(
+                    int(thread_line)
+                    if isinstance(thread_line, int)
+                    else None
+                ),
+                url=None,
+                suggested_test=_extract_suggested_test(thread_body),
+                review_id=None,
+                comment_id=None,
+                check_name=None,
+            ))
     return findings
 
 
