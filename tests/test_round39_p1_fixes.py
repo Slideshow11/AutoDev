@@ -504,12 +504,29 @@ def test_p1_06_verify_push_against_attempt_accepts_origin_branch(
         def strip(self) -> str:
             return new_head
 
-    def _fake_git_rev_parse(*args, **kwargs):
+    # Round-31 P1#6: the verifier also requires the
+    # committer date to be strictly AFTER the worker's
+    # ``started_at``. The seeded attempt starts at
+    # ``2026-08-10T00:00:00Z``; mock ``git log`` so the
+    # committer date is 1 minute later, satisfying the
+    # worker-specific-proof contract.
+    class _R2:
+        def strip(self) -> str:
+            return "2026-08-10T00:01:00+00:00"
+
+    def _fake_check_output(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        # ``git rev-parse origin/<branch>``
+        if isinstance(cmd, list) and "rev-parse" in cmd:
+            return _R()
+        # ``git log -1 --format=%cI <sha>``
+        if isinstance(cmd, list) and "log" in cmd:
+            return _R2()
         return _R()
 
     monkeypatch.setattr(
         "autocoder_supervisor.supervisor.subprocess.check_output",
-        _fake_git_rev_parse,
+        _fake_check_output,
     )
 
     out = sup.verify_push_against_attempt(

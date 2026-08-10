@@ -1598,17 +1598,34 @@ def verify_push_against_attempt(
         if out["origin_head_verified"]:
             out["github_head_verified"] = True
         return out
-    # Round-39 P1#6: when both ``pushed_commit_sha`` and
-    # ``produced_commit_sha`` are ``None`` (the production
-    # launch initializer), the worker simply has not yet
-    # recorded its commit. We MUST NOT fail-closed on the
-    # direct ``new_head_sha`` comparison in that case
-    # because the head-rebind path needs to be able to
-    # verify a freshly-pushed head even when the worker's
-    # own commit bookkeeping is incomplete. Instead, fall
-    # back to the origin/<expected_branch> check: if the
-    # remote branch already points to the new head, the
-    # push is genuinely attributable to this attempt.
+    # Round-39 P1#6 + Round-31 P1#6: when both
+    # ``pushed_commit_sha`` and ``produced_commit_sha`` are
+    # ``None`` (the production launch initializer), the
+    # worker simply has not yet recorded its commit. We MUST
+    # NOT fail-closed on the direct ``new_head_sha`` comparison
+    # in that case because the head-rebind path needs to be
+    # able to verify a freshly-pushed head even when the
+    # worker's own commit bookkeeping is incomplete. Instead,
+    # fall back to the origin/<expected_branch> check: if the
+    # remote branch already points to the new head, the push
+    # is genuinely attributable to this attempt.
+    #
+    # Round-31 P1#6 fresh evidence: the round-39 fallback
+    # MANUFACTURED a verifiable claim from any external actor.
+    # If an operator / recovery job / other worker advanced
+    # the feature branch while this attempt was running, the
+    # ``origin/<branch> == new_head_sha`` equality alone proves
+    # only that SOMEONE pushed that commit. It does NOT
+    # attribute the commit to this attempt. To require
+    # worker-specific proof, the verifier MUST additionally
+    # confirm that the commit's committer date is strictly
+    # after ``rec.started_at`` — i.e. the commit could only
+    # have been authored AFTER the worker was launched. If
+    # the date is missing or precedes ``rec.started_at`` the
+    # verifier conservatively returns ``None`` for both
+    # ``origin_head_verified`` and ``github_head_verified``;
+    # the head-rebind path then treats the advance as
+    # external and skips ``mark_head_advanced_public``.
     if (
         not rec.pushed_commit_sha
         and not rec.produced_commit_sha
@@ -1624,16 +1641,64 @@ def verify_push_against_attempt(
                 timeout=10,
             ).strip()
             if origin_head == new_head_sha:
-                out["origin_head_verified"] = True
-                # GitHub verification happens via the live
-                # PR head check the supervisor already
-                # performs; if origin is verified and the
-                # head matches, GitHub is also verified.
-                out["github_head_verified"] = True
+                # Round-31 P1#6: the round-39 fallthrough
+                # stopped here. Require the committer date
+                # to be after the worker was launched.
+                _ok, _committed_at = (
+                    _git_committer_iso(new_head_sha)
+                )
+                _started_at = parse_iso(
+                    str(rec.started_at or "")
+                )
+                if (
+                    _ok
+                    and _committed_at is not None
+                    and _started_at is not None
+                    and _committed_at > _started_at
+                ):
+                    out["origin_head_verified"] = True
+                    # GitHub verification happens via the live
+                    # PR head check the supervisor already
+                    # performs; if origin is verified and the
+                    # head matches, GitHub is also verified.
+                    out["github_head_verified"] = True
         except (subprocess.CalledProcessError,
                 subprocess.TimeoutExpired, OSError):
             pass
     return out
+
+
+def _git_committer_iso(sha: str) -> tuple[bool, Optional[Any]]:
+    """Return ``(ok, parsed_datetime)`` for a commit SHA.
+
+    Round-31 P1#6: ``verify_push_against_attempt`` uses
+    this to require worker-specific proof before
+    attributing a remote head to the attempt. The check
+    uses ``git log -1 --format=%cI <sha>`` (committer
+    date, ISO 8601 strict) so the verifier can compare
+    against ``rec.started_at``.
+
+    Returns ``(False, None)`` on any subprocess error,
+    missing commit, or unparseable date so callers
+    conservatively treat the head as external.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "log", "-1", "--format=%cI", str(sha or "")],
+            cwd=str(REPO_DIR),  # type: ignore[name-defined]
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+        ).strip()
+    except (subprocess.CalledProcessError,
+            subprocess.TimeoutExpired, OSError, ValueError):
+        return (False, None)
+    if not out:
+        return (False, None)
+    parsed = parse_iso(out)
+    if parsed is None:
+        return (False, None)
+    return (True, parsed)
 
 
 def pid_cmdline(pid: int) -> str:
@@ -1986,6 +2051,95 @@ def _resolve_hermes_bin() -> Optional[str]:
         return None
 
 
+def _parse_github_remote_identity(remote_url: str) -> dict:
+    """Parse a GitHub ``origin`` URL into canonical segments.
+
+    Round-31 P1#8: the round-37 identity guard used a
+    case-insensitive substring match against the expected
+    ``{owner}/{repo}`` string. That match was unsafe — any URL
+    containing the substring ``slideshow11-autodev`` (e.g.
+    ``git@github.com:evil/Slideshow11-AutoDev.git``) was
+    accepted even though both the owner and the repository
+    name were different. A misspelled owner like
+    ``slideshow12/autoDev`` also slipped past the match.
+
+    This helper parses the URL and returns the canonical
+    ``{owner, repo}`` segments for EXACT comparison. It
+    handles the three common forms:
+
+        * SSH:   ``git@github.com:<owner>/<repo>.git``
+        * HTTPS: ``https://github.com/<owner>/<repo>.git``
+        * HTTPS (no .git): ``https://github.com/<owner>/<repo>``
+
+    Non-GitHub remotes (e.g. ``git@gitlab.com:foo/bar.git``)
+    are accepted ONLY if the host matches the expected
+    GitHub host exactly — otherwise the segments are
+    empty so the identity guard refuses the launch.
+
+    Returns a dict ``{"owner": str, "repo": str}`` with the
+    canonical (case-preserving) owner and repo. Either
+    field is ``""`` when the URL cannot be parsed into a
+    recognized GitHub form.
+    """
+    out = {"owner": "", "repo": ""}
+    if not isinstance(remote_url, str) or not remote_url.strip():
+        return out
+    raw = remote_url.strip()
+    host = ""
+    path = ""
+    if raw.startswith("git@"):
+        # ``git@github.com:owner/repo.git`` — note the colon,
+        # not a slash, separates host from path.
+        try:
+            _rest = raw.split("@", 1)[1]
+            _host, _path = _rest.split(":", 1)
+        except ValueError:
+            return out
+        host = _host.strip()
+        path = _path.strip()
+    elif "://" in raw:
+        # ``https://github.com/owner/repo.git``
+        try:
+            _scheme, _rest = raw.split("://", 1)
+        except ValueError:
+            return out
+        _rest = _rest.lstrip("/")
+        if "/" not in _rest:
+            return out
+        _host, _path = _rest.split("/", 1)
+        host = _host.strip()
+        path = _path.strip()
+    else:
+        # Unrecognised form (e.g. local file path or a
+        # relative ref). The identity guard rejects.
+        return out
+    # Accept only GitHub. ``github.com`` is the canonical
+    # host; enterprise deployments (``*.ghe.com``) are
+    # out of scope for this round.
+    if host.lower() != "github.com":
+        return out
+    # Strip the optional ``.git`` suffix and any trailing
+    # path segments (e.g. ``/issues``); the canonical repo
+    # is the first path segment after the host.
+    path = path.lstrip("/")
+    if not path:
+        return out
+    segments = [
+        seg for seg in path.split("/") if seg
+    ]
+    if len(segments) < 2:
+        return out
+    owner = segments[0].strip()
+    repo = segments[1].strip()
+    if repo.endswith(".git"):
+        repo = repo[: -len(".git")]
+    if not owner or not repo:
+        return out
+    out["owner"] = owner
+    out["repo"] = repo
+    return out
+
+
 def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # Round-37 fix (repository identity guard): before any
     # worker subprocess is spawned, the supervisor MUST
@@ -2054,18 +2208,47 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
                 timeout=5,
             )
             _remote_url = _remote_out.stdout.strip()
-            _remote_lower = _remote_url.lower()
+            # Round-31 P1#8: the previous substring match was
+            # unsafe — ``git@github.com:evil/Slideshow11-AutoDev.git``
+            # contains the substring ``slideshow11-autodev`` even
+            # though the owner and repository are BOTH different
+            # from the expected identity. A misspelled or
+            # hyphen-substituted owner like ``slideshow12/autodev``
+            # would also slip past ``Slideshow11/AutoDev.lower()``.
+            # Parse the GitHub remote URL into its canonical
+            # ``{owner}/{repo}`` segments and compare them
+            # EXACTLY (case-insensitive on owner, exact on repo).
+            _expected_owner = (
+                str(REPO_OWNER)  # type: ignore[name-defined]
+            ).strip()
+            _expected_repo_name = (
+                str(REPO_NAME)  # type: ignore[name-defined]
+            ).strip()
+            _remote_identity = (
+                _parse_github_remote_identity(_remote_url)
+            )
+            _remote_owner = (
+                str(_remote_identity.get("owner") or "").strip()
+            )
+            _remote_repo = (
+                str(_remote_identity.get("repo") or "").strip()
+            )
             if (
-                _expected_repo.lower() not in _remote_lower
-                and _expected_repo.lower().replace("/", "-")
-                not in _remote_lower
+                not _remote_owner
+                or not _remote_repo
+                or _remote_owner.lower() != _expected_owner.lower()
+                or _remote_repo != _expected_repo_name
             ):
                 log(
                     "error",
-                    "round-37 identity guard rejected launch: "
+                    "round-31 identity guard rejected launch: "
                     "git remote does not match expected repo",
                     expected_repo=_expected_repo,
+                    expected_owner=_expected_owner,
+                    expected_repo_name=_expected_repo_name,
                     actual_remote=_remote_url,
+                    parsed_remote_owner=_remote_owner,
+                    parsed_remote_repo=_remote_repo,
                     expected_pr=_expected_pr,
                     expected_branch=_expected_branch,
                 )
@@ -4345,6 +4528,52 @@ def _advance_awaiting_ci_to_qualifying() -> bool:
             return False
         if sm.current_state != "AWAITING_CI":
             # Not stuck; nothing to do.
+            return False
+        # Round-31 P1#7: a manual head advance while the
+        # controller happens to be in ``AWAITING_CI`` MUST NOT
+        # be promoted to ``QUALIFYING_READINESS`` without first
+        # verifying the live CI evidence. The previous
+        # implementation called ``Controller.report_ci_pass``
+        # unconditionally, which recorded the qualifying
+        # transition even when the underlying checks were
+        # pending or failing — a silent CI-bypass regression.
+        # The supervisor MUST:
+        #   1. Capture a fresh snapshot for ``AUTHORITATIVE_HEAD``.
+        #   2. Confirm ``required_checks_green(snap)`` is True.
+        #   3. If checks are not green (any check pending,
+        #      failed, or absent), refuse the transition and
+        #      log a diagnostic so the next heartbeat retries.
+        _token = get_github_token() or ""
+        try:
+            _rs_for_snapshot = read_run_state()
+        except Exception as exc:  # noqa: BLE001
+            log(
+                "warning",
+                "_advance_awaiting_ci_to_qualifying: read_run_state failed; "
+                "refusing transition (fail-closed)",
+                error=str(exc),
+            )
+            return False
+        try:
+            _snap = capture_live_snapshot(_rs_for_snapshot, _token)
+        except Exception as exc:  # noqa: BLE001
+            log(
+                "warning",
+                "_advance_awaiting_ci_to_qualifying: snapshot capture failed; "
+                "refusing transition (fail-closed)",
+                error=str(exc),
+            )
+            return False
+        if not required_checks_green(_snap):
+            log(
+                "warning",
+                "_advance_awaiting_ci_to_qualifying: required checks not green; "
+                "refusing transition (fail-closed)",
+                required_checks=_snap.get("required_checks", {}),
+                head=AUTHORITATIVE_HEAD[:12]  # type: ignore[name-defined]
+                if AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+                else "",
+            )
             return False
         # Drive the transition. ``report_ci_pass`` will
         # validate ``head_required`` against the bound
