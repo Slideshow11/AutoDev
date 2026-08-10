@@ -257,15 +257,28 @@ def _verify_orchestration_state_root(
         # the resolver import-clean of the orchestration
         # package; the JSON shape is the contract.
         if expected_repo is not None:
-            got = parsed.get("repo_owner") or ""
+            # Round-32: the run_context.json has multiple
+            # representations of the repo identity:
+            # ``repo_owner`` alone, ``repo_name`` alone, or
+            # ``repo`` combined. The resolver accepts ANY
+            # of these — combined, owner-only, or name-only.
+            got_raw = parsed.get("repo_owner") or ""
+            got_combined = parsed.get("repo") or ""
             exp_owner, _, exp_name = expected_repo.partition("/")
-            if not (
-                got == expected_repo
-                or (exp_owner and exp_name and got == f"{exp_owner}/{exp_name}")
-            ):
+            matches = (
+                got_raw == expected_repo
+                or got_raw == f"{exp_owner}/{exp_name}"
+                or got_combined == expected_repo
+                or (exp_owner and exp_name and (
+                    got_raw == exp_owner
+                    or got_raw == exp_name
+                ))
+            )
+            if not matches:
                 raise OrchestrationRootUnverified(
                     f"orchestration run_context.json at {rc_path} "
-                    f"identifies repo_owner={got!r}; expected "
+                    f"identifies repo_owner={got_raw!r}, "
+                    f"repo={got_combined!r}; expected "
                     f"repo={expected_repo!r}; source={source}. "
                     f"Refusing to bind to a stale run."
                 )
