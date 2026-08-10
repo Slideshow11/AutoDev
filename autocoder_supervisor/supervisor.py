@@ -543,6 +543,15 @@ def github_get(path: str, token: str) -> Optional[Any]:
             "Accept": "application/vnd.github+json",
         },
     )
+    # Round-35 debug: log exact auth header used so we can
+    # diagnose the 401 issue without leaking the token.
+    log(
+        "debug",
+        "github_get call",
+        path=path[:80],
+        token_first8=(token[:8] if token else "NONE"),
+        token_len=len(token) if token else 0,
+    )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read())
@@ -3463,6 +3472,7 @@ def _write_orchestration_owner(this_pr: int) -> None:
                 pass
         # Detect active worker lease.
         lease_active = False
+        lease_pid_alive = False
         lease_path = (
             Path(str(RUN_STATE)).parent  # type: ignore[name-defined]
             / "state"
@@ -3472,6 +3482,52 @@ def _write_orchestration_owner(this_pr: int) -> None:
             try:
                 lease = json.loads(lease_path.read_text())
                 lease_active = lease.get("pr_number") == this_pr
+                # Round-35: check whether the lease's pid is
+                # still alive. If the worker died (defunct,
+                # OSError on stat, missing) the lease is
+                # stale and MUST be cleared so the next
+                # iteration can re-dispatch the durable
+                # event instead of being masked by a
+                # perpetual lease_active.
+                if lease_active:
+                    try:
+                        worker_pid = int(lease.get("pid", 0))
+                        if worker_pid > 0:
+                            os.kill(worker_pid, 0)
+                            lease_pid_alive = True
+                    except (OSError, ProcessLookupError, ValueError):
+                        lease_pid_alive = False
+                        log(
+                            "warning",
+                            "stale worker lease: pid dead; "
+                            "clearing for re-dispatch",
+                            worker_pid=lease.get("pid"),
+                            head_at_launch=(
+                                lease.get(
+                                    "authoritative_head_at_launch",
+                                    "",
+                                )[:12]
+                            ),
+                            launched_at=lease.get("launched_at"),
+                        )
+                        try:
+                            lease_path.unlink()
+                        except OSError:
+                            pass
+                        lease_active = False
+                        # The launched_event_ids set still
+                        # holds the consumed event id from
+                        # the failed launch. Unmark it so
+                        # the durable event can be
+                        # re-dispatched on the next
+                        # iteration. This is the
+                        # crash-after-claim recovery path
+                        # the user required in TEST K.
+                        last_dispatched = lease.get(
+                            "last_dispatched_event_id", ""
+                        )
+                        if last_dispatched:
+                            unmark_event_launched(last_dispatched)
             except (OSError, json.JSONDecodeError):
                 pass
         # Controller state machine.
