@@ -37,14 +37,50 @@ from typing import Any, Optional
 #: rebind targets and any other 40-or-64-char head SHA.
 _HEX_SHA_RE = re.compile(r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 
-from config import default_config_from_env
-from contracts import SupervisorConfig
-from directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the public back-compat surface
+# Round-32 P0.5: package-safe import shim.
+# When loaded as part of the ``autocoder_supervisor``
+# package (``python -m autocoder_supervisor.supervisor``
+# or ``from autocoder_supervisor.supervisor import
+# main``) the relative imports below resolve normally.
+# When loaded standalone (``python3 supervisor.py`` or
+# ``python3 -m supervisor`` from a directory containing
+# ``supervisor.py`` + siblings but no ``__init__.py``)
+# the relative imports fail. Detect that and inject the
+# current directory's modules into ``sys.modules``
+# under the package-qualified name so the relative
+# imports can resolve. This avoids the prior
+# crash-loops and the duplicate-import finding.
+if __package__ in (None, ""):
+    # Standalone execution: re-register this module as
+    # part of a synthetic package so relative imports
+    # work. The systemd unit uses
+    # ``PYTHONPATH=/home/max/.hermes/aed-supervisor`` +
+    # ``python3 -m supervisor``; that requires either
+    # ``__init__.py`` OR this shim. We choose the shim
+    # to avoid package-init coupling.
+    import sys as _sys
+    _pkg_name = "_aed_supervisor_standalone"
+    if _pkg_name not in _sys.modules:
+        import types as _types
+        _pkg = _types.ModuleType(_pkg_name)
+        _pkg.__path__ = [str(Path(__file__).resolve().parent)]  # type: ignore[name-defined]
+        _sys.modules[_pkg_name] = _pkg
+    # Re-bind this module's ``__package__`` to the
+    # synthetic package so ``from .X import`` resolves.
+    import sys as _sys2
+    _mod_name = _pkg_name + ".supervisor"
+    _sys2.modules[_mod_name] = _sys2.modules.get(__name__, _sys2.modules[__name__])
+    __package__ = _pkg_name  # type: ignore[misc]
+    __name__ = _mod_name  # type: ignore[misc]
+
+from .config import default_config_from_env
+from .contracts import SupervisorConfig
+from .directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the public back-compat surface
     DirectiveLoadFailure,
     resolve_directive,
     resolve_worker_prompt,
 )
-from orchestration_state_root import OrchestrationRootError, OrchestrationRootMissing, OrchestrationRootUnverified, resolve_orchestration_state_root  # noqa: F401
+from .orchestration_state_root import OrchestrationRootError, OrchestrationRootMissing, OrchestrationRootUnverified, resolve_orchestration_state_root  # noqa: F401
 
 # NOTE: ``Controller``, ``RunContext``, ``StateStore``, and
 # ``StateStoreError`` are imported LAZILY inside the
@@ -1231,7 +1267,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # even when the operator did not set ``AED_EVIDENCE_ROOT``.
     evidence_root_override: Optional[str] = None
     try:
-        from relay_wiring import _resolve_orchestration_evidence_root
+        from .relay_wiring import _resolve_orchestration_evidence_root
         try:
             evidence_root_override = _resolve_orchestration_evidence_root(
                 None  # type: ignore[arg-type]
@@ -2859,10 +2895,48 @@ def active_repair_quiet_window(
         # orch state root cannot be positively identified,
         # the supervisor MUST NOT proceed with the quiet
         # window; it routes to BLOCKED / escalation.
+        snap_b = capture_live_snapshot(rs, token or "")
+        new_events_during_window = [
+            e
+            for e in detect_new_actionable_events(snap_a, snap_b)
+            if e.get("id") not in pre_unconsumed_ids
+        ]
+        # Round-32 P0: new traffic invalidates the
+        # quiet interval immediately. The window MUST
+        # yield to handle_new_events BEFORE the BLOCKED
+        # controller check runs. A new event arriving
+        # mid-window is proof that qualification is not
+        # yet stable; the BLOCKED controller check is a
+        # stale-state guard and MUST NOT preempt fresh
+        # input. The prior code ran the BLOCKED check
+        # first, which meant orch-root resolution
+        # failures (which happen routinely during
+        # partial GraphQL or transient GitHub errors)
+        # could preempt fresh review events.
+        elapsed = _time.monotonic() - qualifying_started_at
+        if new_events_during_window:
+            new_event_observed = True
+            log(
+                "info",
+                "quiet-window: new event arrived during polling; "
+                "yielding immediately to handle_new_events",
+                event_count=len(new_events_during_window),
+                elapsed=round(elapsed, 1),
+            )
+            for ev in new_events_during_window:
+                if isinstance(ev, dict) and ev.get("id"):
+                    write_unconsumed_event(ev)
+            return "new_event"
+        reasons = snapshot_differs(
+            snap_a, snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+        )
+        # Round-32 P0.4: BLOCKED check runs ONLY when no
+        # new traffic arrived. The check is bounded at
+        # once per second.
         if _time.monotonic() - last_blocked_check_at > 1.0:
             last_blocked_check_at = _time.monotonic()
             try:
-                from orchestration_state_root import (
+                from .orchestration_state_root import (
                     OrchestrationRootError,
                     resolve_orchestration_state_root,
                 )
@@ -2885,21 +2959,11 @@ def active_repair_quiet_window(
                         )
                         controller_blocked = True
                         break
-                # Round-29 P1#19: refresh the heartbeat
-                # INSIDE the polling loop so an external
-                # watchdog does not treat the supervisor as
-                # dead while the loop is waiting for a
-                # stable interval.
                 try:
                     heartbeat_touch()
                 except (OSError, NameError):
                     pass
             except (OSError, json.JSONDecodeError, OrchestrationRootError):
-                # Round-29 P1#7: orch-state-root resolution
-                # failure is a protected-authority blocker.
-                # The supervisor MUST NOT silently proceed;
-                # route to BLOCKED / escalation. The outer
-                # main iteration handles the BLOCKED signal.
                 log(
                     "error",
                     "quiet-window halted: orchestration state_root "
@@ -2908,41 +2972,14 @@ def active_repair_quiet_window(
                 )
                 controller_blocked = True
                 break
-        snap_b = capture_live_snapshot(rs, token or "")
-        new_events_during_window = [
-            e
-            for e in detect_new_actionable_events(snap_a, snap_b)
-            if e.get("id") not in pre_unconsumed_ids
-        ]
-        reasons = snapshot_differs(
-            snap_a, snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
-        )
-        elapsed = _time.monotonic() - qualifying_started_at
-        if new_events_during_window:
-            # A new event arrived during the window. It
-            # MUST NOT be cleared by the post-loop
-            # cleanup; the caller will route it to
-            # handle_new_events. The window resets.
-            new_event_observed = True
-            log(
-                "info",
-                "quiet-window: new event arrived during polling; "
-                "preserving for handle_new_events",
-                event_count=len(new_events_during_window),
-                elapsed=round(elapsed, 1),
-            )
-        if reasons or new_events_during_window:
+        if reasons:
             log(
                 "info",
                 "quiet-window: non-qualifying observation; "
                 "resetting interval",
                 reasons=reasons,
-                new_events=len(new_events_during_window),
                 elapsed=round(elapsed, 1),
             )
-            # Reset the interval. Re-capture snapshot A
-            # so the next interval starts from the
-            # current state.
             snap_a = capture_and_store_snapshot("A", rs, token)
             qualifying_started_at = _time.monotonic()
             pre_unconsumed_ids = {
@@ -3120,7 +3157,7 @@ def _write_orchestration_owner(this_pr: int) -> None:
         # Find the per-PR evidence root via the canonical
         # resolver.
         try:
-            from orchestration_state_root import (
+            from .orchestration_state_root import (
                 resolve_orchestration_state_root,
             )
             state_root = resolve_orchestration_state_root(
@@ -3257,7 +3294,7 @@ def _clear_stale_retry_ledgers(this_pr: int) -> None:
     cleared is a STALL signal.
     """
     try:
-        from orchestration_state_root import (
+        from .orchestration_state_root import (
             resolve_orchestration_state_root,
         )
         state_root = resolve_orchestration_state_root(
@@ -3388,7 +3425,7 @@ def _invoke_relay_for_events(
       The supervisor falls back to the existing
       ``launch_worker`` path.
     """
-    from relay_wiring import (
+    from .relay_wiring import (
         EscalateToHuman,
         InvalidSnapshot,
         RecoverableRetry,
@@ -3412,11 +3449,11 @@ def _invoke_relay_for_events(
     # surface a fail-closed error and the supervisor MUST NOT
     # launch a generic worker — it routes to the BLOCKED /
     # escalation path and stops autonomous progression.
-    from orchestration_state_root import (
+    from .orchestration_state_root import (
         OrchestrationRootError,
         resolve_orchestration_state_root,
     )
-    from relay_wiring import (
+    from .relay_wiring import (
         _resolve_orchestration_evidence_root,
     )
     try:
@@ -3888,7 +3925,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Allow the operator to point at a TOML configuration file.
     if args.config:
-        from config import load_config
+        from .config import load_config
         cfg = load_config(args.config)
         _apply_config(cfg)
         globals()["POLICY"] = _default_policy(cfg)
@@ -4193,7 +4230,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # commit, the rebind here triggers the
                 # transition.
                 try:
-                    from relay_wiring import relay_wiring as _relay_wiring
+                    from .relay_wiring import relay_wiring as _relay_wiring
                     _relay_wiring.mark_head_advanced_public(
                         old_head, live_head,
                     )

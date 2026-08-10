@@ -374,8 +374,8 @@ def _resolve_orchestration_state_root() -> Optional[str]:
     exception as a protected-authority blocker.
     """
     try:
-        from supervisor import RUN_STATE
-        from orchestration_state_root import resolve_orchestration_state_root
+        from .supervisor import RUN_STATE
+        from .orchestration_state_root import resolve_orchestration_state_root
         return resolve_orchestration_state_root(run_state_path=Path(RUN_STATE))
     except Exception:
         return None
@@ -406,8 +406,8 @@ def _resolve_orchestration_evidence_root(state_root: Optional[str]) -> str:
     # root records the evidence root at handoff time, so
     # this is the canonical path.
     try:
-        from supervisor import RUN_STATE
-        from orchestration_state_root import (
+        from .supervisor import RUN_STATE
+        from .orchestration_state_root import (
             OrchestrationRootError,
             resolve_orchestration_state_root,
         )
@@ -459,11 +459,11 @@ def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
     from autocoder_orchestration.controller import Controller
     from autocoder_orchestration.review_repair_relay import RelayLoop
     from autocoder_orchestration.store import StateStore
-    from orchestration_state_root import (
+    from .orchestration_state_root import (
         OrchestrationRootError,
         resolve_orchestration_state_root,
     )
-    from supervisor import RUN_STATE  # type: ignore[name-defined]
+    from .supervisor import RUN_STATE  # type: ignore[name-defined]
     try:
         state_root = resolve_orchestration_state_root(
             run_state_path=Path(RUN_STATE),
@@ -474,7 +474,7 @@ def mark_head_advanced_public(old_head_sha: str, new_head_sha: str) -> None:
         # cannot be positively identified, route to BLOCKED /
         # escalation and stop autonomous progression.
         try:
-            from supervisor import log
+            from .supervisor import log
             log(
                 "error",
                 "mark_head_advanced failed: orchestration state_root not positively identified",

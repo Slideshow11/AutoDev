@@ -7463,8 +7463,8 @@
       },
       {
         "destination_path": "autocoder_supervisor/supervisor.py",
-        "destination_sha256": "8388388dd05331415e8d31d94bd62f970a98a273f028e8fb3f832c5938dd7404",
-        "destination_size_bytes": 163273,
+        "destination_sha256": "602d036460c4f2f226461739b1ce3546f600cee2a8573554e32927701b40e03f",
+        "destination_size_bytes": 167087,
         "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
         "source_size_bytes": 86428,
@@ -7473,8 +7473,8 @@
       },
       {
         "destination_path": "autocoder_supervisor/validate.py",
-        "destination_sha256": "d76dd823b06850cbd1f3d12089beec6b0fa077986793f1cc7df06f4ee45e573e",
-        "destination_size_bytes": 16747,
+        "destination_sha256": "1959f1e6bcb70669355c557f92ec10678a2807d3e2144c4d10b3861c053cb18f",
+        "destination_size_bytes": 16767,
         "source_path": "scripts/local/autocoder_supervisor/validate.py",
         "source_sha256": "82164445f7705df8d83d5282e94f8e4346dd2422038784c1f3787188f7a54224",
         "source_size_bytes": 14191,
@@ -7843,8 +7843,8 @@
       },
       {
         "destination_path": "autocoder_supervisor/orchestration_state_root.py",
-        "destination_sha256": "7dc388c7e0c4d47125a6bab749f3b803474d5f833c64471b01269be224e6ffc1",
-        "destination_size_bytes": 19323,
+        "destination_sha256": "3ba6521919b6810835ec9f18aeda1ef3245d1a867dcebb3c1e5917ffad8988b3",
+        "destination_size_bytes": 19929,
         "source_path": null,
         "source_sha256": null,
         "source_size_bytes": null,
@@ -7917,7 +7917,7 @@
       "manifest_source_files_count": 17,
       "manifest_standalone_additions_count": 40
     },
-    "manifest_standalone_additions": 34,
+    "manifest_standalone_additions": 40,
     "total_source_paths_in_manifest": 17
   },
   "no_unclassified_candidates": true,
