@@ -1563,6 +1563,7 @@ def build_directive(
     pr_number: int,
     findings: List[Finding],
     coordinator_actor: str,
+    max_findings: Optional[int] = None,
 ) -> ReviewDirective:
     """Build a structured repair directive from a list of findings.
 
@@ -1577,9 +1578,36 @@ def build_directive(
     prevents the autonomous path from issuing destructive
     instructions that an experienced reviewer would never sign
     off on.
+
+    Round-35: ``max_findings`` caps the per-directive
+    payload so a worker is not overwhelmed by 76+
+    historical threads. The relay emits ONE finding per
+    round; the remainder persist on the durable thread
+    inventory and surface on subsequent rounds after the
+    current head advances.
     """
     if not findings:
         raise DirectiveContractError("build_directive requires at least one finding")
+    # Round-35: cap findings per directive. When the
+    # durable thread inventory has 76+ actionable
+    # threads, sending all of them to a single worker
+    # prompt produces an unworkable payload. Pick the
+    # first N (P1 first, then P2) and let subsequent
+    # rounds handle the remainder. The durable ledger
+    # already tracks which findings have been emitted on
+    # which head, so the un-emitted findings will surface
+    # after the worker pushes the next head.
+    if max_findings is not None and len(findings) > max_findings:
+        p1 = [
+            f for f in findings
+            if f.severity == SEVERITY_P1
+        ]
+        p2 = [
+            f for f in findings
+            if f.severity != SEVERITY_P1
+        ]
+        capped = (p1 + p2)[:max_findings]
+        findings = capped
     p0 = [f for f in findings if f.severity == SEVERITY_P0_ESCALATE]
     if p0:
         raise EscalateToHuman(
@@ -1890,6 +1918,12 @@ def evaluate_round(
             pr_number=pr_number,
             findings=findings,
             coordinator_actor=coordinator_actor,
+            # Round-35: cap findings per directive so a
+            # worker is not overwhelmed by 76+ historical
+            # threads in a single prompt. Subsequent
+            # rounds handle the remainder after the
+            # current head advances.
+            max_findings=8,
         )
     except EscalateToHuman as exc:
         return RoundDecision(
