@@ -3960,6 +3960,16 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     quiet_window = POLICY["quiet_window_seconds"]
     heartbeat_seconds = POLICY["heartbeat_seconds"]
+    # Round-32: env override for heartbeat interval
+    # (used to tune the supervisor's responsiveness in
+    # tests and emergency reactivation). Production uses
+    # the cfg default (~120s).
+    try:
+        env_hb = int(os.environ.get("AED_HEARTBEAT_SECONDS", "0"))
+        if env_hb > 0:
+            heartbeat_seconds = env_hb
+    except (ValueError, TypeError):
+        pass
 
     try:
         # Round-32: the production main loop honors the
@@ -4089,11 +4099,22 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             canonical_pr = int(PR_NUMBER)  # type: ignore[name-defined]
             iteration: dict = {}
+            log(
+                "info",
+                "per_pr_iteration_start",
+                pr_numbers=pr_numbers,
+                canonical_pr=canonical_pr,
+            )
             for this_pr in pr_numbers:
                 if this_pr == 0:
                     continue
                 try:
                     globals()["PR_NUMBER"] = this_pr
+                    log(
+                        "info",
+                        "per_pr_iteration_tick",
+                        this_pr=this_pr,
+                    )
                     # Round-32: stall watchdog. Before
                     # each per-PR tick, write a
                     # ``orchestration_owner.json`` so
