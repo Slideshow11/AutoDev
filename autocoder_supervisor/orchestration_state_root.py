@@ -409,7 +409,7 @@ def persist_orchestration_state_root(
         merged["last_bound_pr_number"] = int(pr_number)
     # Persist atomically.
     if writer is None:
-        from .supervisor import write_json
+        from supervisor import write_json
         writer_impl = write_json
     else:
         writer_impl = writer
@@ -467,7 +467,7 @@ def init_run_state_safely(
         "first_initialized_at_utc": _utc_now_iso(),
     }
     if writer is None:
-        from .supervisor import write_json
+        from supervisor import write_json
         writer_impl = write_json
     else:
         writer_impl = writer

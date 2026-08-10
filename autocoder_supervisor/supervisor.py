@@ -37,14 +37,14 @@ from typing import Any, Optional
 #: rebind targets and any other 40-or-64-char head SHA.
 _HEX_SHA_RE = re.compile(r"\A[0-9a-f]{40}(?:[0-9a-f]{24})?\Z")
 
-from .config import default_config_from_env
-from .contracts import SupervisorConfig
-from .directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the public back-compat surface
+from config import default_config_from_env
+from contracts import SupervisorConfig
+from directive_bridge import (  # noqa: F401  -- resolve_worker_prompt is the public back-compat surface
     DirectiveLoadFailure,
     resolve_directive,
     resolve_worker_prompt,
 )
-from .orchestration_state_root import OrchestrationRootError, OrchestrationRootMissing, OrchestrationRootUnverified, resolve_orchestration_state_root  # noqa: F401
+from orchestration_state_root import OrchestrationRootError, OrchestrationRootMissing, OrchestrationRootUnverified, resolve_orchestration_state_root  # noqa: F401
 
 # NOTE: ``Controller``, ``RunContext``, ``StateStore``, and
 # ``StateStoreError`` are imported LAZILY inside the
@@ -1231,7 +1231,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # even when the operator did not set ``AED_EVIDENCE_ROOT``.
     evidence_root_override: Optional[str] = None
     try:
-        from .relay_wiring import _resolve_orchestration_evidence_root
+        from relay_wiring import _resolve_orchestration_evidence_root
         try:
             evidence_root_override = _resolve_orchestration_evidence_root(
                 None  # type: ignore[arg-type]
@@ -2862,7 +2862,7 @@ def active_repair_quiet_window(
         if _time.monotonic() - last_blocked_check_at > 1.0:
             last_blocked_check_at = _time.monotonic()
             try:
-                from .orchestration_state_root import (
+                from orchestration_state_root import (
                     OrchestrationRootError,
                     resolve_orchestration_state_root,
                 )
@@ -3120,7 +3120,7 @@ def _write_orchestration_owner(this_pr: int) -> None:
         # Find the per-PR evidence root via the canonical
         # resolver.
         try:
-            from .orchestration_state_root import (
+            from orchestration_state_root import (
                 resolve_orchestration_state_root,
             )
             state_root = resolve_orchestration_state_root(
@@ -3257,7 +3257,7 @@ def _clear_stale_retry_ledgers(this_pr: int) -> None:
     cleared is a STALL signal.
     """
     try:
-        from .orchestration_state_root import (
+        from orchestration_state_root import (
             resolve_orchestration_state_root,
         )
         state_root = resolve_orchestration_state_root(
@@ -3388,7 +3388,7 @@ def _invoke_relay_for_events(
       The supervisor falls back to the existing
       ``launch_worker`` path.
     """
-    from .relay_wiring import (
+    from relay_wiring import (
         EscalateToHuman,
         InvalidSnapshot,
         RecoverableRetry,
@@ -3412,11 +3412,11 @@ def _invoke_relay_for_events(
     # surface a fail-closed error and the supervisor MUST NOT
     # launch a generic worker — it routes to the BLOCKED /
     # escalation path and stops autonomous progression.
-    from .orchestration_state_root import (
+    from orchestration_state_root import (
         OrchestrationRootError,
         resolve_orchestration_state_root,
     )
-    from .relay_wiring import (
+    from relay_wiring import (
         _resolve_orchestration_evidence_root,
     )
     try:
@@ -3888,7 +3888,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Allow the operator to point at a TOML configuration file.
     if args.config:
-        from .config import load_config
+        from config import load_config
         cfg = load_config(args.config)
         _apply_config(cfg)
         globals()["POLICY"] = _default_policy(cfg)
@@ -4193,7 +4193,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # commit, the rebind here triggers the
                 # transition.
                 try:
-                    from . import relay_wiring as _relay_wiring
+                    from relay_wiring import relay_wiring as _relay_wiring
                     _relay_wiring.mark_head_advanced_public(
                         old_head, live_head,
                     )

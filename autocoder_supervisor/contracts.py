@@ -141,7 +141,7 @@ class SupervisorConfig:
         absolute user-specific paths so an accidentally
         committed secret cannot land in the source tree.
         """
-        from .config import validate_config_dict
+        from config import validate_config_dict
 
         validate_config_dict(data, reject_user_paths=reject_user_paths)
         return cls(

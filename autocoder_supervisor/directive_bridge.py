@@ -72,7 +72,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from ._directive_prompt import render_directive_prompt
+from _directive_prompt import render_directive_prompt
 
 
 # The relay's schema version. The bridge refuses any other

@@ -40,12 +40,12 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from .config import (
+from config import (
     default_config_from_env,
     load_config,
     validate_config_dict,
 )
-from .contracts import SupervisorConfigDict, SupervisorConfig
+from contracts import SupervisorConfigDict, SupervisorConfig
 
 
 def _check_state_dir(
@@ -139,7 +139,7 @@ def _check_provider_policy(
     # configured providers exist in the registry so the
     # supervisor never reaches readiness with an unknown
     # name.
-    from . import supervisor as _supervisor
+    from supervisor import supervisor as _supervisor
     known = set(_supervisor.PROVIDERS.keys())
     unknown_required = sorted(required - known)
     if unknown_required:
@@ -283,7 +283,7 @@ def _check_pr_head_match(
         return
 
     # Live PR head via GitHub.
-    from . import supervisor as _supervisor
+    from supervisor import supervisor as _supervisor
     repo_owner = os.environ.get("AED_REPO_OWNER", "")
     repo_name = os.environ.get("AED_REPO_NAME", "")
     pr_number = os.environ.get("AED_PR_NUMBER", "")

@@ -31,7 +31,7 @@ try:  # Python 3.11+
 except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[import,no-redef]
 
-from .contracts import SupervisorConfig, SupervisorConfigDict
+from contracts import SupervisorConfig, SupervisorConfigDict
 
 
 # Required keys.
