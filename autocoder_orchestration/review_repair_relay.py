@@ -1040,24 +1040,39 @@ def _extract_suggested_test(body: str) -> Optional[str]:
 # actionable findings, and must be filtered out so the
 # relay does not repeatedly launch workers for a clean
 # head.
+#
+# Round-32 P1#8: extended the marker set with three extra
+# status-marker tokens that appear on real CodeRabbit /
+# Codex snapshots. Without them, a clean head's
+# "**Actionable comments posted: 0**" summary was turned
+# into a persistent P2 finding; the relay then dispatched
+# a worker for a non-existent finding, parked the head in
+# ACTIVE_REPAIR, and lost the snapshot deltas that would
+# have surfaced the real next event.
 _NON_FINDING_COMMENT_RE = re.compile(
     r"^\s*(?:"  # Anchor to start of body (first line).
-    r"walkthrough|"
-    r"in progress|"
-    r"review in progress|"
-    r"in-review|"
-    r"review complete|"
-    r"review completed|"
-    r"review approved|"
-    r"review request|"
-    r"finished review|"
-    r"commented on your changes|"
-    r"finished|"
-    r"started review|"
-    r"approved these changes|"
-    r"left a comment|"
-    r"requested changes"
-    r")\b[^\n]*$"  # Status markers are short single-line.
+    r"walkthrough\b|"
+    r"in progress\b|"
+    r"review in progress\b|"
+    r"in-review\b|"
+    r"review complete\b|"
+    r"review completed\b|"
+    r"review approved\b|"
+    r"review request\b|"
+    r"finished review\b|"
+    r"commented on your changes\b|"
+    r"finished\b|"
+    r"started review\b|"
+    r"approved these changes\b|"
+    r"left a comment\b|"
+    r"requested changes\b|"
+    # Round-32 P1#8: CodeRabbit's zero-finding summary.
+    r"\*+\s*actionable comments posted:\s*0\s*\*+|"
+    # Round-32 P1#8: codex zero-finding summary variant.
+    r"\*+\s*no actionable issues?\s*(were|found)?\s*\*+|"
+    # Round-32 P1#8: codex "no issues found" summary.
+    r"\*+\s*no issues (found|to (report|fix))\s*\*+"
+    r")[^\n]*$"  # Status markers are short single-line.
     , re.IGNORECASE
 )
 
@@ -1079,6 +1094,14 @@ def _is_actionable_provider_comment(body: str) -> bool:
     in passing (e.g. "P1: the walkthrough above is stale")
     is NOT a status marker and is treated as actionable.
     This prevents the filter from dropping real findings.
+
+    Round-32 P1#8: the alphanumeric-strip path also
+    covers provider headers wrapped in ``<sub>...</sub>``
+    tags (CodeRabbit's standard decoration). We strip
+    the tag syntax before the alphanumeric pass so a
+    body like ``<sub>📝 Walkthrough (commented)</sub>``
+    collapses to ``sub Walkthrough commentedsub`` and the
+    status-marker match proceeds on the visible text.
     """
     if not body:
         return False
@@ -1087,18 +1110,24 @@ def _is_actionable_provider_comment(body: str) -> bool:
         return False
     # The first non-empty line sets the comment's intent.
     first_line = stripped.split("\n", 1)[0].strip().rstrip(".,;:!?")
+    # Strip ``<sub>...</sub>`` / ``<sup>...</sup>`` tags
+    # that providers use to wrap status headers.
+    first_line_no_tags = re.sub(
+        r"</?(?:sub|sup)>", "", first_line, flags=re.IGNORECASE,
+    ).strip()
     # Strip leading emoji / decorative characters. A
     # status marker may be prefixed with a traffic-light
     # emoji (🚦), a bell (🔔), etc. The alpha-stripped
     # first line is the canonical form.
     alphanumeric_first_line = "".join(
-        c for c in first_line if c.isalnum() or c.isspace()
+        c for c in first_line_no_tags if c.isalnum() or c.isspace()
     ).strip()
     # If the first line is a status marker (with optional
     # emoji / whitespace prefix), the entire comment is a
     # status marker.
     if (
         _NON_FINDING_COMMENT_RE.match(first_line)
+        or _NON_FINDING_COMMENT_RE.match(first_line_no_tags)
         or _NON_FINDING_COMMENT_RE.match(alphanumeric_first_line)
     ):
         # And the body is short (single-line status marker).

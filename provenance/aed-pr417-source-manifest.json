@@ -136,13 +136,13 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "602d036460c4f2f226461739b1ce3546f600cee2a8573554e32927701b40e03f",
-      "destination_size_bytes": 167087,
+      "destination_sha256": "e0671cf29f9aac98501021af202be3b945c9295b07386976a0a7a01e5202ee6e",
+      "destination_size_bytes": 271703,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
       "transformation_classification": "path_only",
-      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
+      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null). Round-32 P1#6 hardened poll_worker_attempt deferred push-recovery branch with the same committer-date worker-specific-proof contract that round-31 P1#6 added to verify_push_against_attempt; an external actor push (commit time BEFORE rec.started_at) is now conservatively treated as a non-worker head even when origin/<branch> equals the live PR head."
     },
     {
       "destination_path": "autocoder_supervisor/validate.py",
@@ -556,7 +556,7 @@
       "transformation_explanation": "Round-28 P5 FindingLedger cross-head semantics tests."
     }
   ],
-  "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",
+  "last_modification_note": "Round-32 P1#6: poll_worker_attempt deferred push-recovery branch requires committer-date > rec.started_at (worker-specific proof).",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -580,5 +580,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-07T03:28:00Z"
+  "updated_at_utc": "2026-08-10T18:50:00Z"
 }

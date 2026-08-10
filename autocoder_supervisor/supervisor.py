@@ -1310,29 +1310,87 @@ def poll_worker_attempt(
                                 and _origin_head
                                 == _live_head
                             ):
-                                push_attributable = True
-                                rec.pushed_commit_sha = (
-                                    _live_head
+                                # Round-32 P1#6: origin equality
+                                # alone proves SOMEONE pushed the
+                                # commit. We MUST additionally
+                                # require the commit's committer
+                                # date to be strictly AFTER
+                                # ``rec.started_at`` so the
+                                # promotion is worker-specific
+                                # (matching the round-31 P1#6
+                                # contract enforced inside
+                                # ``verify_push_against_attempt``).
+                                # Without this guard, an external
+                                # actor's push (commit time before
+                                # the worker launched, but
+                                # matching ``origin/<branch>``) is
+                                # wrongly attributed to this
+                                # attempt and the worker is
+                                # promoted to PUSH_VERIFIED,
+                                # leaving the controller stuck on
+                                # a fraudulent repair.
+                                _committer_ok, _committed_at = (
+                                    _git_committer_iso(_live_head)
                                 )
-                                rec.origin_head_verified = True
-                                rec.github_head_verified = (
-                                    True
+                                _started_at_dt = parse_iso(
+                                    str(rec.started_at or "")
                                 )
-                                rec.produced_commit_sha = (
-                                    _live_head
+                                _worker_specific = (
+                                    _committer_ok
+                                    and _committed_at is not None
+                                    and _started_at_dt is not None
+                                    and _committed_at > _started_at_dt
                                 )
-                                rec.lifecycle = (
-                                    LIFECYCLE_PUSH_VERIFIED
-                                )
-                                log(
-                                    "info",
-                                    "round-37 deferred push "
-                                    "recovery: dead worker "
-                                    "attributed to live head",
-                                    attempt_id=attempt_id,
-                                    pid=rec.pid,
-                                    pushed=_live_head[:12],
-                                )
+                                if _worker_specific:
+                                    push_attributable = True
+                                    rec.pushed_commit_sha = (
+                                        _live_head
+                                    )
+                                    rec.origin_head_verified = True
+                                    rec.github_head_verified = (
+                                        True
+                                    )
+                                    rec.produced_commit_sha = (
+                                        _live_head
+                                    )
+                                    rec.lifecycle = (
+                                        LIFECYCLE_PUSH_VERIFIED
+                                    )
+                                    log(
+                                        "info",
+                                        "round-37 deferred push "
+                                        "recovery: dead worker "
+                                        "attributed to live head",
+                                        attempt_id=attempt_id,
+                                        pid=rec.pid,
+                                        pushed=_live_head[:12],
+                                    )
+                                else:
+                                    # Committer-date proof failed
+                                    # — treat the head as an
+                                    # external push and stay
+                                    # NO_PUSH. The head-rebind
+                                    # path that runs immediately
+                                    # after this poll will see
+                                    # the attempt already terminal
+                                    # and route the head advance
+                                    # via the bound active
+                                    # attempt, not this one.
+                                    log(
+                                        "warning",
+                                        "round-32 deferred push "
+                                        "recovery: candidate head "
+                                        "committer date fails "
+                                        "worker-specific proof; "
+                                        "treating as external push",
+                                        attempt_id=attempt_id,
+                                        pid=rec.pid,
+                                        candidate_head=_live_head[:12],
+                                        started_at=str(
+                                            rec.started_at or ""
+                                        ),
+                                        committer_ok=_committer_ok,
+                                    )
                         except Exception:
                             # git probe failed; stay
                             # conservative. The attempt
