@@ -67,11 +67,21 @@ if __package__ in (None, ""):
         _sys.modules[_pkg_name] = _pkg
     # Re-bind this module's ``__package__`` to the
     # synthetic package so ``from .X import`` resolves.
+    # CRITICAL: do NOT rebind ``__name__`` to the
+    # synthetic-package-qualified name. The module's
+    # ``if __name__ == \"__main__\": sys.exit(main())``
+    # block only fires when ``__name__`` is exactly
+    # ``\"__main__\"``. When the supervisor is launched
+    # via ``python3 -m supervisor`` Python sets
+    # ``__name__`` to ``\"__main__\"`` for the top-level
+    # module of the package, and rebinding it to
+    # ``\"_aed_supervisor_standalone.supervisor\"`` would
+    # cause main() to never run. The synthetic-package
+    # bind only needs ``__package__``.
     import sys as _sys2
     _mod_name = _pkg_name + ".supervisor"
     _sys2.modules[_mod_name] = _sys2.modules.get(__name__, _sys2.modules[__name__])
     __package__ = _pkg_name  # type: ignore[misc]
-    __name__ = _mod_name  # type: ignore[misc]
 
 from .config import default_config_from_env
 from .contracts import SupervisorConfig
