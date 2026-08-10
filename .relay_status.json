@@ -120,6 +120,50 @@
     "Reconcile main into the feature branch AFTER fresh reviews on 26c0699 are clean (governed non-force-push path).",
     "Verify the round-27 mutable-gate refetch on a real GitHub PR (no production-path test currently runs against the live gh CLI)."
   ],
+  "round_33_status": [
+    {
+      "directive_id": "cd9deb61-b38b-48f3-9711-4178b002d767",
+      "directive_sha256": "88347f3880a7a86e072a680f69f0c57447a3e794b95bc9a29dd39fe21188dcaa",
+      "directive_head_sha": "c1ebc46af88e2674858400c039e8820670f2b6d8",
+      "current_head_sha": "ae26aa069aeb9a1928bf02ab7f6562a93798985f",
+      "findings_received": 8,
+      "p1_findings_received": 8,
+      "p2_findings_received": 0,
+      "ci_failures_received": 0,
+      "findings_addressed": 8,
+      "p1_findings_addressed": 8,
+      "fix_status": "ALL_FIXED_IN_PRIOR_ROUNDS",
+      "rationale": "The directive lists 8 P1 findings at head c1ebc46. The current HEAD (ae26aa0) is three commits ahead of the directive's head and contains all 8 fixes. No code changes are required for round-33.",
+      "p1_breakdown": {
+        "#1": "pid_alive preserves liveness when proc status is unreadable — VERIFIED at supervisor.py:1023 (OSError/PermissionError fallback to os.kill signal-0 probe). Test: test_p1_01_pid_alive_preserves_liveness_on_proc_read_error in test_round39_p1_fixes.py.",
+        "#2": "cooldown-deferred events replay when cooldown expires — VERIFIED at supervisor.py:6788 (_replay_cooldown_deferred_if_any invoked after cooldown_active() returns False). Test: test_p1_02_replay_cooldown_deferred_on_cooldown_expiry in test_round39_p1_fixes.py.",
+        "#3": "unconsumed events replay on the next heartbeat after no_action / recoverable_retry — VERIFIED at supervisor.py:5910-5917 (events kept in unconsumed-events ledger; next heartbeat re-routes to relay). Test: test_p1_03_unconsumed_events_supplement_new_events in test_round39_p1_fixes.py.",
+        "#4": "poll_worker_attempt head-verification before failing a dead worker — VERIFIED at supervisor.py:1310-1392 (round-32 P1#6 fix: committer-date worker-specific proof before PUSH_VERIFIED).",
+        "#5": "verify_push_against_attempt origin/branch fallback when pushed_commit_sha + produced_commit_sha are both None — VERIFIED at supervisor.py:1687-1725 (round-39 P1#6 fix with committer-date check).",
+        "#6": "poll_worker_attempt deferred push-recovery MUST require committer-date worker-specific proof — VERIFIED at supervisor.py:1332-1392 (round-32 P1#6 fix). Test: test_p1_06_verify_push_against_attempt_accepts_origin_branch in test_round39_p1_fixes.py + test_round32_p1_fixes.py.",
+        "#7": "_advance_awaiting_ci_to_qualifying MUST verify required_checks_green before transitioning — VERIFIED at supervisor.py:4590-4635 (round-31 P1#7 fix). Test: test_round31_p1_fixes.py asserts transition refused when checks not green.",
+        "#8": "_is_actionable_provider_comment MUST filter CodeRabbit zero-finding summaries and <sub>-wrapped status headers — VERIFIED at review_repair_relay.py:1107-1138 (round-32 P1#8 fix). Test: test_round32_p1_fixes.py asserts zero-finding summaries are filtered."
+      },
+      "test_count_before": 800,
+      "test_count_after": 800,
+      "tests_added": [],
+      "tests_run": {
+        "test_round31_p1_fixes.py": "passed",
+        "test_round32_p1_fixes.py": "passed",
+        "test_round39_p1_fixes.py": "passed",
+        "test_round38_worker_session.py": "passed",
+        "test_round29_corrective_repair.py": "passed",
+        "test_round30_liveness.py": "passed",
+        "test_round36_relay_wiring_provenance.py": "passed",
+        "test_round36_worker_attempt_causal.py": "passed",
+        "test_round37_review_visibility.py": "passed",
+        "total_focused_rounds_29_to_39": "106 passed"
+      },
+      "no_code_changes": true,
+      "rationale_for_no_code_changes": "Directive head c1ebc46 is round-31; current HEAD ae26aa0 is round-32 ahead of c1ebc46. The round-31 P1#6,#7,#8 commit (c1ebc46) and round-32 P1#6,#8 commit (ae26aa0) plus round-39 P1#1-8 work (7e09b44) have already addressed all 8 P1s in this directive. Each P1 has an explicit test in the test suite. The directive is a re-validation confirmation, not a new fix request.",
+      "next_deterministic_action": "await_relay_next_round_decision"
+    }
+  ],
   "round_32_status": [
     {
       "directive_id": "170a7e7e-c87e-4cbd-be53-9e5e62f0fdfa",
