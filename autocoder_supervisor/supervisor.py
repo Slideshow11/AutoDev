@@ -2465,10 +2465,28 @@ def poll_worker_attempt(
                             )[:200000]
                             _extracted = []
                             import re as _re
-                            for _m in _re.finditer(
-                                r"Finding\s+(thread:\S+|[A-Za-z0-9_\-:]+)\s+[—-]+\s*\**([A-Z_]+)\**",
-                                _text,
-                            ):
+                            # Match legacy outputs ("Finding thread:<tid>
+                            # — **DISPOSITION**") AND the round-46+
+                            # preferred form ("finding_id:
+                            # thread:<tid>\n... disposition: B —
+                            # DISPOSITION"). One pass collects both
+                            # patterns and yields group(1)=finding_id,
+                            # group(2)=disposition.
+                            # Legacy worker format:
+                            #   Finding `thread:<tid>` — "Title" — **DISP**
+                            # OR Finding thread:<tid> ... **DISP**
+                            _p1 = _re.compile(
+                                r"Finding\s+[`'\"]?(thread:\S+)[`'\"]?\s+[-\u2013\u2014]+\s+[`'\"]?\*?\*?([A-Z_]+)\*?\*?"
+                            )
+                            # round-46+ preferred format:
+                            #   finding_id: thread:<tid>
+                            # ... disposition: B - DISP
+                            _p2 = _re.compile(
+                                r"finding_id:\s*(thread:\S+)"
+                                r"[\s\S]{0,400}?disposition:"
+                                r"\s*[A-Z]?\s*[-\u2013\u2014]?\s*\**([A-Z_]+)\**"
+                            )
+                            for _m in list(_p1.finditer(_text)) + list(_p2.finditer(_text)):
                                 _fid = _m.group(1).strip()
                                 _disp = _m.group(2).strip()
                                 if not _fid.startswith("thread:"):
@@ -2633,10 +2651,22 @@ def poll_worker_attempt(
                 )[:200000]
                 _extracted = []
                 import re as _re
-                for _m in _re.finditer(
-                    r"Finding\s+(thread:\S+)\s+[—-]+\s*\**([A-Z_]+)\**",
-                    _text,
-                ):
+                _pat_choices = [
+                    # Legacy: Finding `thread:<tid>` — "Title" — **DISP**
+                    _re.compile(
+                        r"Finding\s+[`'\"]?(thread:\S+)[`'\"]?\s+"
+                        r"[-\u2013\u2014]+\s+[`'\"]?\*?\*?([A-Z_]+)\*?\*?"
+                    ),
+                    # round-46+: finding_id: thread:<tid> ... disposition: ...
+                    _re.compile(
+                        r"finding_id:\s*(thread:\S+)[\s\S]{0,400}?"
+                        r"disposition:\s*[A-Z]?\s*[—–-]?\s*\**([A-Z_]+)\**"
+                    ),
+                ]
+                _all_matches = []
+                for _pat in _pat_choices:
+                    _all_matches.extend(list(_pat.finditer(_text)))
+                for _m in _all_matches:
                     _fid = _m.group(1).strip()
                     _disp = _m.group(2).strip()
                     if not _fid.startswith("thread:"):

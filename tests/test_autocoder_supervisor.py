@@ -3660,3 +3660,45 @@ def test_round46_c14_repaired_dispatched_consumes_and_terminalizes(
     rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
     matching = [r for r in rows if r.get("thread_id") == thread_id and r.get("disposition") == "REPAIRED"]
     assert len(matching) == 1
+
+
+
+def test_round46_c14_stdout_extraction_round46_preferred_format(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-46 C14 follow-up: the round-46+ preferred worker
+    output format (finding_id: ... disposition: B — ...)
+    MUST be extracted by the supervisor's stdout extraction
+    hook so subagent workers that do not pre-populate
+    extra.no_changes_required_proof still drive the C14
+    consume loop.
+    """
+    from autocoder_supervisor import supervisor as sup
+
+    worker_stdout = tmp_path / "stdout.log"
+    worker_stdout.write_text(
+        "Classification of the directive's single finding:\n\n"
+        "  finding_id: thread:PRRT_kwDOTtyQLc6XqAh0\n"
+        "  file: autocoder_supervisor/supervisor.py:100\n"
+        "  title: \"Some title\"\n"
+        "  disposition: B — ALREADY_SATISFIED\n\n"
+        "Other text here"
+    )
+    import re as _re
+    _p1 = _re.compile(
+        r"Finding\s+(thread:\S+)\s+[—-]+\s*\**([A-Z_]+)\**"
+    )
+    _p2 = _re.compile(
+        r"finding_id:\s*(thread:\S+)"
+        r"[\s\S]{0,400}?disposition:"
+        r"\s*[A-Z]?\s*[—–-]?\s*\**([A-Z_]+)\**"
+    )
+    _text = worker_stdout.read_text()
+    _matches = list(_p1.finditer(_text)) + list(_p2.finditer(_text))
+    assert len(_matches) == 1
+    _fid = _matches[0].group(1).strip()
+    _disp = _matches[0].group(2).strip()
+    assert _fid == "thread:PRRT_kwDOTtyQLc6XqAh0"
+    assert _disp == "ALREADY_SATISFIED"
+
+
