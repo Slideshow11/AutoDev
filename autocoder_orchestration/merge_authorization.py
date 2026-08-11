@@ -1903,20 +1903,32 @@ def _repeat_exact_head_guards(
             "expected 'APPROVED'"
         )
 
-    # 3b. PR-level reviewDecision (human review gate). Round-47
-    # compat: main's hardened control plane treats only the
-    # protected-authority CHANGES_REQUESTED value as a blocker.
-    # The verifier (round-41+) already enforces the strict
-    # ``reviewDecision in {APPROVED, REVIEW_REQUIRED}`` contract
-    # upstream of this gate; the merge gate does not duplicate
-    # that check. Missing or unrecognized values are tolerated
-    # here to preserve main's contract.
+    # 3b. PR-level reviewDecision (human review gate). Round-48
+    # C15: RESTORE fail-closed semantics. The verifier enforces
+    # the contract upstream, but the merge gate MUST repeat the
+    # check on the live payload so a same-head ``CHANGES_REQUESTED``
+    # posted AFTER the verifier ran still blocks the merge. A
+    # missing or ``None`` value fails closed: absent evidence
+    # is not a pass.
     review_decision = pr.get("reviewDecision")
+    if review_decision is None:
+        raise MergeError(
+            "live_pr_payload['reviewDecision'] is missing; "
+            "the production merge gate requires a live PR-level review decision"
+        )
     if review_decision == "CHANGES_REQUESTED":
         raise MergeError(
             "live PR-level reviewDecision is 'CHANGES_REQUESTED'; "
             "the merge gate must reject human change requests even when "
             "the latest CodeRabbit review is APPROVED"
+        )
+    if review_decision not in ("APPROVED", "REVIEW_REQUIRED"):
+        # Anything else (e.g. an unexpected enum value, an empty string)
+        # is treated as fail-closed rather than silently approved.
+        raise MergeError(
+            f"live PR-level reviewDecision is {review_decision!r}; "
+            "expected one of 'APPROVED' | 'REVIEW_REQUIRED' | 'CHANGES_REQUESTED' "
+            "(the production merge gate fails closed on unrecognized values)"
         )
 
     # 4. Thread inventory.
@@ -2096,17 +2108,19 @@ def _execute_guarded_merge_transaction_locked(
     # change) MUST halt the transaction with
     # ``MergeGateChanged``.
     #
-    # Round-47 C14 compat: skip the live refetch-and-validate
-    # path. The bound snapshot was bound by the verifier
-    # upstream; the merge gate's existing exact-head guards
-    # (in ``_repeat_exact_head_guards``) already verify the
-    # authorized head against the bound snapshot. Re-fetching
-    # is a stricter gate that breaks main's hardened contract
-    # (the test suite expects the merge command to be issued
-    # exactly once and the live re-query to be the only retry
-    # channel). Preserve main's contract here; the verifier
-    # remains the authoritative gate.
-    pass
+    # Round-48 C15: RESTORE the in-lock mutable-gate revalidation.
+    # Round-47 had removed this call; the removal was a REGRESSION
+    # per Section 7 — the in-transaction revalidation is the only
+    # mechanism that catches mutable GitHub state (head advance,
+    # merged flag, reviewDecision flip, approval dismissed) between
+    # the verifier binding and the locked ``gh pr merge`` call.
+    #
+    # The refetch is tolerant of transient fetch failures: a
+    # timeout/network error falls back to the bound snapshot via
+    # ``_safe_live_refetch`` so the merge is not blocked by
+    # GitHub-side flakiness. A bound-snapshot divergence from
+    # the live state STILL raises ``MergeGateChanged``.
+    _refetch_and_validate_mutable_gates(inputs, auth)
 
     # 5. Build and invoke the guarded command.
     # BEFORE invoking, ensure the live PR is in a state
@@ -2562,25 +2576,48 @@ def _refetch_and_validate_mutable_gates(
     against the bound snapshot and against the authorized
     head. Divergence raises ``MergeGateChanged``.
 
-    Round-47 C14 compat: fetch failures (timeout / network /
-    5xx) are tolerated by falling back to the bound snapshot.
-    This matches main's hardened contract where transient
+    Round-48 C15: fetch failures (timeout / network / 5xx)
+    are tolerated by falling back to the bound snapshot.
+    This preserves main's hardened contract where transient
     GitHub-side issues do not block the merge; the snapshot
     was bound by the verifier upstream. Head-divergence
-    guards are still fail-closed (MergeError).
+    guards are still fail-closed (MergeError). The fallback
+    is bounded: a ``MergeGateFetchError`` is logged via the
+    standard log facility for observability.
+
+    The function is the SAFETY-NET for the race window
+    between authorization and the merge subprocess:
+    anything that changes in the live payload between the
+    verifier and the subprocess is caught here.
     """
     fetchers = inputs._live_fetchers or _build_mutable_gate_fetchers(
         inputs, auth,
     )
 
-    # Round-47: try the live fetch; on failure use the bound
-    # snapshot for each gate. The bound snapshot is the
-    # verifier-approved state.
     def _safe_call(name, fetcher):
+        # Round-48 C15: GitHubLiveFetchError (network /
+        # subprocess) is tolerated with a bound-snapshot
+        # fallback. MergeGateFetchError (which the
+        # caller-injected fetcher explicitly raises) is NOT
+        # swallowed — the test injects that error to
+        # exercise the fail-closed contract and the error
+        # MUST surface. Other low-level errors fall back to
+        # the bound snapshot for the same reason as
+        # GitHubLiveFetchError.
         try:
             return fetcher()
-        except (GitHubLiveFetchError, KeyError, TypeError, OSError) as exc:
-            # Fall back to the bound snapshot for this gate.
+        except GitHubLiveFetchError:
+            if name == "pr_payload":
+                return inputs.live_pr_payload
+            if name == "required_ci":
+                return inputs.live_ci_state
+            if name == "review_state":
+                return inputs.live_review_state
+            if name == "thread_inventory":
+                return inputs.live_thread_inventory
+            raise
+        except (KeyError, TypeError, OSError, ValueError,
+                json.JSONDecodeError):
             if name == "pr_payload":
                 return inputs.live_pr_payload
             if name == "required_ci":

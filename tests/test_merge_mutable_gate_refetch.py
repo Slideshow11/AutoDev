@@ -116,7 +116,7 @@ def _make_inputs(paths, repo, state, evidence, authorized_head: str):
             "repo": "owner/repo",
         },
         live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-        live_review_state={"latest_coderabbit_state": "APPROVED"},
+        live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "a" * 40},
         live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
         working_tree_clean=True,
         required_ci_names=(),

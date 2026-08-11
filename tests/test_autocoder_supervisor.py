@@ -3726,3 +3726,247 @@ def test_round47_c14_github_resolve_mutation_uses_correct_name(
         "round-47 C14: the legacy mutation name MUST NOT remain "
         "in the supervisor source."
     )
+
+
+
+def test_round48_c15_in_lock_refetch_is_called_when_no_fetchers(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-48 C15 bug-detector: the in-lock mutable-gate
+    refetch MUST be invoked inside the locked merge
+    transaction when no _live_fetchers are injected. The
+    R47 regression had skipped this call; this test fails
+    against the pre-fix code.
+    """
+    import sys
+    sys.path.insert(0, "/home/max/AutoDev")
+    from unittest.mock import patch, MagicMock
+    from autocoder_orchestration.merge_authorization import (
+        execute_guarded_merge_transaction, MergeTransactionInputs,
+        MergeError,
+    )
+    from autocoder_orchestration import merge_authorization as ma
+    from autocoder_orchestration.artifacts import write_artifact
+    import json, hashlib
+
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    evidence = tmp_path / "evidence"
+    for d in (repo, state, evidence):
+        d.mkdir(exist_ok=True)
+
+    cand_payload = {"head": {"head_sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"}, "files": []}
+    cand_blob = json.dumps(cand_payload, sort_keys=True, separators=(",", ":"))
+    cand_digest = hashlib.sha256(cand_blob.encode()).hexdigest()
+    v_payload = {"verdict": "VERIFIED", "defects": [], "candidate_sha256": cand_digest}
+    v_blob = json.dumps(v_payload, sort_keys=True, separators=(",", ":"))
+    v_digest = hashlib.sha256(v_blob.encode()).hexdigest()
+    auth = {
+        "schema_version": "autocoder.merge_authorization.v1",
+        "run_id": "t", "repo": "Slideshow11/AutoDev", "pr_number": 5,
+        "authorized_head": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+        "candidate_sha256": cand_digest, "verifier_record_sha256": v_digest,
+        "base_branch": "main", "feature_branch": "feat/t",
+        "merge_method": "squash", "delete_branch": True,
+        "require_match_head_commit": True, "author": "HUMAN_OPERATOR",
+    }
+    write_artifact(evidence / "authorization.json", auth)
+    write_artifact(evidence / "candidate.json", cand_payload)
+    write_artifact(evidence / "verifier.json", v_payload)
+
+    inputs = MergeTransactionInputs(
+        authorization_artifact_path=evidence / "authorization.json",
+        candidate_artifact_path=evidence / "candidate.json",
+        verifier_artifact_path=evidence / "verifier.json",
+        merge_record_artifact_path=evidence / "merge-record.json",
+        repository_checkout=repo,
+        run_state_root=state,
+        evidence_root=evidence,
+        live_pr_payload={
+            "state": "open", "merged": False,
+            "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+            "baseRefName": "main", "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "autoMergeRequest": None,
+            "reviewDecision": "APPROVED",
+            "repo": "Slideshow11/AutoDev"
+        },
+        live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
+        live_review_state={
+            "latest_coderabbit_state": "APPROVED",
+            "latest_coderabbit_login": "coderabbitai",
+            "canonical_reviewer_login": "coderabbitai",
+            "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+        },
+        live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
+        working_tree_clean=True,
+    )
+
+    safe_run_calls = []
+    def fake_safe_run(*args, **kw):
+        safe_run_calls.append(list(args[0]) if args else [])
+        return {"returncode": 0, "stdout": "{}", "stderr": "", "timed_out": False}
+
+    with patch.object(ma, "_safe_run", side_effect=fake_safe_run), \
+         patch.object(ma, "reconcile_after_merge",
+                      return_value=MagicMock(
+                          local_main_sha="m" * 40,
+                          origin_main_sha="m" * 40,
+                          local_main_equals_origin_main=True,
+                          squash_merge_commit="m" * 40,
+                          squash_parent_count=1, squash_parent="b" * 40,
+                          squash_tree_sha256="t" * 40,
+                          feature_branch_local_deleted=True,
+                          feature_branch_remote_deleted=True,
+                          working_tree_clean=True,
+                          unavailable_observations=[],
+                          aed_clean=True, aed_checked=True,
+                          initial_branch="feat/t", target_branch="main",
+                          switched_to_base=True, fast_forwarded=True,
+                      )):
+        try:
+            execute_guarded_merge_transaction(inputs)
+        except Exception:
+            pass
+
+    # The refetch must have been called. We expect at least
+    # the 4 refetch attempts (pr_payload, required_ci,
+    # review_state, thread_inventory). Some may raise
+    # GitHubLiveFetchError on parse failure and fall back
+    # to the bound snapshot; the count of ATTEMPTED calls
+    # is what proves the refetch was invoked.
+    refetch_attempts = [
+        c for c in safe_run_calls
+        if "merge" not in c and (
+            ("pr" in c and ("view" in c or "checks" in c))
+            or "graphql" in c
+        )
+    ]
+    assert len(refetch_attempts) >= 4, (
+        "round-48 C15: in-lock refetch must attempt at least "
+        "4 live gates; got "
+        f"{len(refetch_attempts)} from {len(safe_run_calls)} "
+        "total calls. The R47 regression removed the "
+        "refetch call and this test fails against the "
+        "pre-fix code."
+    )
+
+
+def test_round48_c15_missing_review_decision_fails_closed(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-48 C15 bug-detector: a missing ``reviewDecision``
+    on the live_pr_payload MUST fail-closed per the
+    previously-accepted contract. The R47 regression had
+    weakened this check; this test fails against the
+    pre-fix code.
+    """
+    import sys
+    sys.path.insert(0, "/home/max/AutoDev")
+    from unittest.mock import patch, MagicMock
+    from autocoder_orchestration.merge_authorization import (
+        execute_guarded_merge_transaction, MergeTransactionInputs,
+    )
+    from autocoder_orchestration import merge_authorization as ma
+    from autocoder_orchestration.artifacts import write_artifact
+    import json, hashlib
+
+    repo = tmp_path / "repo"
+    state = tmp_path / "state"
+    evidence = tmp_path / "evidence"
+    for d in (repo, state, evidence):
+        d.mkdir(exist_ok=True)
+
+    cand_payload = {"head": {"head_sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"}, "files": []}
+    cand_blob = json.dumps(cand_payload, sort_keys=True, separators=(",", ":"))
+    cand_digest = hashlib.sha256(cand_blob.encode()).hexdigest()
+    v_payload = {"verdict": "VERIFIED", "defects": [], "candidate_sha256": cand_digest}
+    v_blob = json.dumps(v_payload, sort_keys=True, separators=(",", ":"))
+    v_digest = hashlib.sha256(v_blob.encode()).hexdigest()
+    auth = {
+        "schema_version": "autocoder.merge_authorization.v1",
+        "run_id": "t", "repo": "Slideshow11/AutoDev", "pr_number": 5,
+        "authorized_head": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+        "candidate_sha256": cand_digest, "verifier_record_sha256": v_digest,
+        "base_branch": "main", "feature_branch": "feat/t",
+        "merge_method": "squash", "delete_branch": True,
+        "require_match_head_commit": True, "author": "HUMAN_OPERATOR",
+    }
+    write_artifact(evidence / "authorization.json", auth)
+    write_artifact(evidence / "candidate.json", cand_payload)
+    write_artifact(evidence / "verifier.json", v_payload)
+
+    inputs = MergeTransactionInputs(
+        authorization_artifact_path=evidence / "authorization.json",
+        candidate_artifact_path=evidence / "candidate.json",
+        verifier_artifact_path=evidence / "verifier.json",
+        merge_record_artifact_path=evidence / "merge-record.json",
+        repository_checkout=repo,
+        run_state_root=state,
+        evidence_root=evidence,
+        # NOTE: reviewDecision is intentionally missing.
+        live_pr_payload={
+            "state": "open", "merged": False,
+            "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+            "baseRefName": "main", "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "autoMergeRequest": None,
+            "repo": "Slideshow11/AutoDev"
+        },
+        live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
+        live_review_state={
+            "latest_coderabbit_state": "APPROVED",
+            "latest_coderabbit_login": "coderabbitai",
+            "canonical_reviewer_login": "coderabbitai",
+            "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+        },
+        live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
+        working_tree_clean=True,
+    )
+
+    # Inject live fetchers so refetch falls back to bound
+    from autocoder_orchestration.merge_authorization import (
+        _build_default_live_fetchers,
+    )
+    inputs._set_bypass_oid_reachability(True)
+    inputs._set_live_fetchers(_build_default_live_fetchers(inputs,
+        review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"))
+
+    oid_json = json.dumps({
+        "mergeCommit": {"oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+    })
+
+    with patch.object(ma, "_safe_run",
+                      return_value={"returncode": 0, "stdout": oid_json,
+                                    "stderr": "", "timed_out": False}), \
+         patch.object(ma, "reconcile_after_merge",
+                      return_value=MagicMock(
+                          local_main_sha="m" * 40,
+                          origin_main_sha="m" * 40,
+                          local_main_equals_origin_main=True,
+                          squash_merge_commit="m" * 40,
+                          squash_parent_count=1, squash_parent="b" * 40,
+                          squash_tree_sha256="t" * 40,
+                          feature_branch_local_deleted=True,
+                          feature_branch_remote_deleted=True,
+                          working_tree_clean=True,
+                          unavailable_observations=[],
+                          aed_clean=True, aed_checked=True,
+                          initial_branch="feat/t", target_branch="main",
+                          switched_to_base=True, fast_forwarded=True,
+                      )):
+        try:
+            execute_guarded_merge_transaction(inputs)
+        except Exception as exc:
+            err = str(exc)
+            # Must mention reviewDecision missing.
+            assert "reviewDecision" in err, (
+                "round-48 C15: missing reviewDecision must fail "
+                "closed per the previously accepted contract; "
+                f"got: {err}"
+            )
+            return
+    raise AssertionError(
+        "round-48 C15: missing reviewDecision must fail closed "
+        "but the merge transaction returned without raising."
+    )

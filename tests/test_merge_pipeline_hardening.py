@@ -276,10 +276,12 @@ class ExactFileDigestTests(unittest.TestCase):
             live_pr_payload={
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
@@ -290,6 +292,21 @@ class ExactFileDigestTests(unittest.TestCase):
             runner_calls.append((args, kwargs))
             return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
 
+
+        # Round-48 C15: inject live fetchers so the
+        # in-lock refetch sees a complete bound snapshot
+        # compatible with the live state; the _safe_run mock
+        # then only intercepts the merge command.
+        from autocoder_orchestration.merge_authorization import (
+            _build_default_live_fetchers,
+        )
+        try:
+            AH = inputs.live_pr_payload["head"]["sha"]
+        except Exception:
+            AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+        inputs._set_live_fetchers(
+            _build_default_live_fetchers(inputs, review_commit_oid=AH)
+        )
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
             side_effect=fake_runner,
@@ -332,10 +349,12 @@ class ExactFileDigestTests(unittest.TestCase):
             live_pr_payload={
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
@@ -402,10 +421,12 @@ class ExactFileDigestTests(unittest.TestCase):
                 "state": "open", "merged": False,
                 "head": {"sha": AH},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
@@ -413,6 +434,19 @@ class ExactFileDigestTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
         ) as safe_run:
             with self.assertRaises(MergeError) as ctx:
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         safe_run.assert_not_called()
         # The exception MUST mention the authorization-specific
@@ -462,10 +496,12 @@ class ExactFileDigestTests(unittest.TestCase):
             live_pr_payload={
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
@@ -473,6 +509,19 @@ class ExactFileDigestTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
         ) as safe_run:
             with self.assertRaises(MergeError) as ctx:
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         safe_run.assert_not_called()
         # Exception specifically names verifier candidate digest.
@@ -564,16 +613,26 @@ class DistinctRootsTests(unittest.TestCase):
             repository_checkout=repo,
             run_state_root=state,
             evidence_root=evidence,
-            live_pr_payload={},
+            # Round-48 C15: live_pr_payload MUST be non-empty per the
+            # production gate contract. The test verifies that
+            # distinct roots pass the validator and reach the
+            # artifact-read path. The artifacts don't exist, so
+            # the next check raises ArtifactMissing wrapped as
+            # MergeAuthorizationMissing — it does NOT raise
+            # MergeInputsCollide.
+            live_pr_payload={
+                "state": "open",
+                "merged": False,
+                "head": {"sha": "0" * 40},
+                "baseRefName": "main",
+                "mergeable": "MERGEABLE",
+                "repo": "owner/repo",
+            },
             live_ci_state={},
             live_review_state={},
             live_thread_inventory={},
             working_tree_clean=True,
         )
-        # Distinct roots pass the validator and reach the next check
-        # (which is reading the artifacts). The artifacts don't exist,
-        # so the next check raises ArtifactMissing — but it does NOT
-        # raise MergeInputsCollide.
         with self.assertRaises(MergeAuthorizationMissing):
             execute_guarded_merge_transaction(inputs)
 
@@ -643,10 +702,13 @@ class OneShotMergeTransactionTests(unittest.TestCase):
         live_pr_payload = overrides.pop("live_pr_payload", {
             "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             "baseRefName": "main", "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
             "autoMergeRequest": None,
+            "reviewDecision": "APPROVED",
+            "repo": "Slideshow11/AutoDev",
         })
         live_ci_state = overrides.pop("live_ci_state", {"all_required_passing": True, "coderabbit_passing": True})
-        live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
+        live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"})
         live_thread_inventory = overrides.pop("live_thread_inventory", {"unresolved_current": 0, "unresolved_outdated": 0})
         working_tree_clean = overrides.pop("working_tree_clean", True)
         return MergeTransactionInputs(
@@ -676,6 +738,19 @@ class OneShotMergeTransactionTests(unittest.TestCase):
             side_effect=fake_runner,
         ):
             with self.assertRaises((MergeSubprocessFailed, MergeAmbiguousOutcome)):
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         # Exactly one runner invocation for the gh pr merge command
         # itself. The transaction MAY issue a follow-up live re-query
@@ -718,6 +793,19 @@ class OneShotMergeTransactionTests(unittest.TestCase):
             side_effect=fake_runner,
         ):
             with self.assertRaises(MergeError):
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         self.assertEqual(runner_calls, [])
 
@@ -817,10 +905,12 @@ class TimeoutAmbiguityTests(unittest.TestCase):
             live_pr_payload={
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
@@ -869,6 +959,20 @@ class TimeoutAmbiguityTests(unittest.TestCase):
                 "timed_out": False,
             }
 
+        # Round-48 C15: the in-lock refetch-and-validate gate now
+        # expects a complete bound snapshot AND live fetchers that
+        # return compatible live state. Inject explicit live
+        # fetchers so the refetch sees the same bound state; the
+        # _safe_run mock then only intercepts the merge command
+        # and the live re-query.
+        from autocoder_orchestration.merge_authorization import (
+            _build_default_live_fetchers,
+        )
+        inputs._set_live_fetchers(
+            _build_default_live_fetchers(
+                inputs, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+            )
+        )
         # The local git ops will fail (the repo doesn't exist), so we expect
         # the reconciliation to fail with a Git error. That's OK; we just
         # need to confirm we got past the timeout-or-ambiguity branch.
@@ -923,6 +1027,19 @@ class TimeoutAmbiguityTests(unittest.TestCase):
             side_effect=fake_safe_run,
         ):
             with self.assertRaises(MergeSubprocessFailed):
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         self.assertEqual(call_count[0], 2)
 
@@ -942,6 +1059,19 @@ class TimeoutAmbiguityTests(unittest.TestCase):
             side_effect=fake_safe_run,
         ):
             with self.assertRaises(MergeAmbiguousOutcome):
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         self.assertEqual(call_count[0], 2)
 
@@ -1144,10 +1274,12 @@ class ConcurrencyTests(unittest.TestCase):
             live_pr_payload={
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
@@ -1165,6 +1297,19 @@ class ConcurrencyTests(unittest.TestCase):
                         "autocoder_orchestration.merge_authorization.reconcile_after_merge",
                         side_effect=no_recon,
                     ):
+
+                        # Round-48 C15: inject live fetchers so the
+                        # in-lock refetch sees a complete bound snapshot.
+                        from autocoder_orchestration.merge_authorization import (
+                            _build_default_live_fetchers,
+                        )
+                        try:
+                            _AH = inputs.live_pr_payload["head"]["sha"]
+                        except Exception:
+                            _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                        inputs._set_live_fetchers(
+                            _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                        )
                         record, _ = execute_guarded_merge_transaction(inputs)
                         results.append(record)
             except Exception as e:
@@ -1254,10 +1399,12 @@ class LegacyFooterTests(unittest.TestCase):
             live_pr_payload={
                 "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                 "baseRefName": "main", "mergeable": "MERGEABLE",
+                "mergeStateStatus": "CLEAN",
                 "autoMergeRequest": None,
+                "reviewDecision": "APPROVED",
                 "repo": "Slideshow11/AutoDev"},
             live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-            live_review_state={"latest_coderabbit_state": "APPROVED"},
+            live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
             working_tree_clean=True,
         )
@@ -1700,9 +1847,42 @@ class EndToEndFlowTests(unittest.TestCase):
         rec_path = self.evidence / "merge-record.json"
 
         # Mock the subprocess to "succeed" and reconciliation to be a no-op.
+        # Round-48 C15: the in-lock refetch fetches live_pr_payload,
+        # required_ci, review_state, thread_inventory. The mock must
+        # return compatible data for each. For the EndToEnd test the
+        # simplest contract is to return a valid mergeCommit OID for
+        # the merge command call AND a valid live_pr_payload response
+        # for the live re-query call.
+        # Round-48 C15: the in-lock refetch + OID validation
+        # requires the mock to return mergeCommit for OID fetches
+        # and a live view for pr view. Both share the same
+        # shape; the parser reads different keys.
+        _oid_json = json.dumps({
+            "mergeCommit": {"oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+            "state": "MERGED",
+            "mergedAt": "2026-08-06T12:00:00Z",
+            "headRefOid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d",
+            "baseRefName": "main",
+            "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
+            "autoMergeRequest": None,
+            "isDraft": False,
+        })
+        _e2e_call_count = [0]
+        def _e2e_safe_run(*args, **kw):
+            _e2e_call_count[0] += 1
+            cmd = args[0] if args else ()
+            cmd_list = list(cmd) if cmd else []
+            # Distinguish merge command from pr view (which
+            # also contains "merge" via the mergeCommit field).
+            if "merge" in cmd_list and "view" not in cmd_list:
+                # merge command call
+                return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
+            # live re-query / OID fetch returns the merged view
+            return {"returncode": 0, "stdout": _oid_json, "stderr": "", "timed_out": False}
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            return_value={"returncode": 0, "stdout": "", "stderr": "", "timed_out": False},
+            side_effect=_e2e_safe_run,
         ):
             with mock.patch(
                 "autocoder_orchestration.merge_authorization.reconcile_after_merge",
@@ -1737,12 +1917,36 @@ class EndToEndFlowTests(unittest.TestCase):
                     live_pr_payload={
                         "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                         "baseRefName": "main", "mergeable": "MERGEABLE",
+                        "mergeStateStatus": "CLEAN",
                         "autoMergeRequest": None,
+                        "reviewDecision": "APPROVED",
                         "repo": "Slideshow11/AutoDev"},
                     live_ci_state={"all_required_passing": True, "coderabbit_passing": True},
-                    live_review_state={"latest_coderabbit_state": "APPROVED"},
+                    live_review_state={"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
                     live_thread_inventory={"unresolved_current": 0, "unresolved_outdated": 0},
                     working_tree_clean=True,
+                )
+                # Round-48 C15: hermetic mode bypasses the
+                # OID-reachability check since this test does
+                # not initialize a real local repo.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                inputs._set_bypass_oid_reachability(True)
+                inputs._set_live_fetchers(_build_default_live_fetchers(inputs, review_commit_oid="2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"))
+                inputs._set_bypass_oid_reachability(True)
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
                 )
                 record, rec_digest = execute_guarded_merge_transaction(inputs)
                 self.assertEqual(record.final_state, "COMPLETE")
@@ -1830,10 +2034,13 @@ class HardeningRepairTests(unittest.TestCase):
         live_pr_payload = overrides.pop("live_pr_payload", {
             "state": "open", "merged": False, "head": {"sha": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
             "baseRefName": "main", "mergeable": "MERGEABLE",
+            "mergeStateStatus": "CLEAN",
             "autoMergeRequest": None,
+            "reviewDecision": "APPROVED",
+            "repo": "Slideshow11/AutoDev",
         })
         live_ci_state = overrides.pop("live_ci_state", {"all_required_passing": True, "coderabbit_passing": True})
-        live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED"})
+        live_review_state = overrides.pop("live_review_state", {"latest_coderabbit_state": "APPROVED", "latest_coderabbit_login": "coderabbitai", "canonical_reviewer_login": "coderabbitai", "latest_coderabbit_commit_oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"})
         live_thread_inventory = overrides.pop("live_thread_inventory", {"unresolved_current": 0, "unresolved_outdated": 0})
         working_tree_clean = overrides.pop("working_tree_clean", True)
         return MergeTransactionInputs(
@@ -1879,6 +2086,19 @@ class HardeningRepairTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
         ) as safe_run:
             with self.assertRaises(MergeInputsCollide):
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         safe_run.assert_not_called()
 
@@ -1892,6 +2112,19 @@ class HardeningRepairTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
         ) as safe_run:
             with self.assertRaises(MergeInputsCollide):
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         safe_run.assert_not_called()
 
@@ -1919,6 +2152,19 @@ class HardeningRepairTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
         ) as safe_run:
             with self.assertRaises(MergeAuthorizationMalformed) as ctx:
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         # Mandatory: the merge runner must NOT have been invoked when the
         # integrity check fails (C-25: guarded transaction).
@@ -1946,6 +2192,19 @@ class HardeningRepairTests(unittest.TestCase):
             "autocoder_orchestration.merge_authorization._safe_run",
         ) as safe_run:
             with self.assertRaises(MergeAuthorizationMalformed) as ctx:
+
+                # Round-48 C15: inject live fetchers so the
+                # in-lock refetch sees a complete bound snapshot.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 execute_guarded_merge_transaction(inputs)
         safe_run.assert_not_called()
         self.assertIn("candidate_sha256", str(ctx.exception).lower())
@@ -1956,16 +2215,48 @@ class HardeningRepairTests(unittest.TestCase):
         inputs = self._inputs(paths)
         # Mock the merge subprocess to succeed, but make the
         # reconciliation fail by stubbing it to raise.
+        # Round-48 C15: the in-lock refetch + OID validation
+        # requires the mock to return a valid mergeCommit OID
+        # so the transaction reaches the reconciliation step.
+        _c28_oid_json = json.dumps({
+            "mergeCommit": {"oid": "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"},
+            "state": "MERGED",
+            "mergedAt": "2026-08-06T12:00:00Z",
+        })
+        _c28_call_count = [0]
+        def _c28_safe_run(*args, **kw):
+            _c28_call_count[0] += 1
+            cmd = args[0] if args else ()
+            cmd_list = list(cmd) if cmd else []
+            if "merge" in cmd_list and "view" not in cmd_list:
+                # gh pr merge command call
+                return {"returncode": 0, "stdout": "", "stderr": "", "timed_out": False}
+            # live re-query / OID fetch returns the merged view
+            return {"returncode": 0, "stdout": _c28_oid_json, "stderr": "", "timed_out": False}
         def fake_reconcile(**kwargs):
             raise MergeError("simulated reconciliation failure")
         with mock.patch(
             "autocoder_orchestration.merge_authorization._safe_run",
-            return_value={"returncode": 0, "stdout": "", "stderr": "", "timed_out": False},
+            side_effect=_c28_safe_run,
         ):
             with mock.patch(
                 "autocoder_orchestration.merge_authorization.reconcile_after_merge",
                 side_effect=fake_reconcile,
             ):
+                # Round-48 C15: hermetic mode bypasses the
+                # OID-reachability check since this test does
+                # not initialize a real local repo.
+                from autocoder_orchestration.merge_authorization import (
+                    _build_default_live_fetchers,
+                )
+                try:
+                    _AH = inputs.live_pr_payload["head"]["sha"]
+                except Exception:
+                    _AH = "2a8e4e9c1f3a4b5d6e7f8091a2b3c4d5e40ffe0d"
+                inputs._set_bypass_oid_reachability(True)
+                inputs._set_live_fetchers(
+                    _build_default_live_fetchers(inputs, review_commit_oid=_AH)
+                )
                 with self.assertRaises(MergeError):
                     execute_guarded_merge_transaction(inputs)
         # The merge record MUST exist on disk despite the failure.
