@@ -6885,34 +6885,54 @@ def main(argv: Optional[list[str]] = None) -> int:
                 read_readiness_state().get("state")
                 or STATE_ACTIVE_REPAIR
             )
-            # Round-41: if the controller is in AWAITING_CI
-            # and the live head is stable at the authoritative
-            # head, drive the CI-advance transition so the
-            # controller can reach QUALIFYING_READINESS.
-            # Without this, the supervisor can be stuck in
-            # AWAITING_CI after a verified worker push
-            # because the head-rebind path fires once per
-            # head advance and is silent on subsequent
+            # Round-41: if the orchestration CONTROLLER is in
+            # AWAITING_CI and the live head is stable at the
+            # authoritative head, drive the CI-advance
+            # transition so the controller can reach
+            # QUALIFYING_READINESS. Without this, the supervisor
+            # can be stuck in AWAITING_CI after a verified
+            # worker push because the head-rebind path fires
+            # once per head advance and is silent on subsequent
             # heartbeats. The CI policy is evaluated via
             # ``_advance_awaiting_ci_to_qualifying`` which
             # already uses ``ci_policy_status`` (round-39).
             try:
-                from .relay_wiring import _AWAITING_CI  # type: ignore
-            except Exception:  # noqa: BLE001
-                _AWAITING_CI = "AWAITING_CI"
-            if cur_state == _AWAITING_CI:
+                _ctrl_state = "AWAITING_CI"
                 try:
-                    if iteration.get("head_match"):
-                        _advance_awaiting_ci_to_qualifying()
-                except Exception as exc:  # noqa: BLE001
+                    from .orchestration_state_root import (
+                        resolve_orchestration_state_root,
+                    )
+                    _state_root = resolve_orchestration_state_root(
+                        run_state_path=Path(RUN_STATE),
+                        expected_repo=(
+                            f"{REPO_OWNER}/{REPO_NAME}"
+                        ),
+                        expected_pr_number=int(PR_NUMBER),
+                    )
+                    _state_path = (
+                        Path(_state_root) / "state.json"
+                    )
+                    if _state_path.is_file():
+                        _ctrl_state = json.loads(
+                            _state_path.read_text(),
+                        ).get("current_state", _ctrl_state)
+                except Exception:  # noqa: BLE001
+                    pass
+                if _ctrl_state == "AWAITING_CI":
                     try:
-                        log(
-                            "warning",
-                            "round-41 awaiting_ci idle advance failed",
-                            error=str(exc)[:200],
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
+                        if iteration.get("head_match"):
+                            _advance_awaiting_ci_to_qualifying()
+                    except Exception as exc:  # noqa: BLE001
+                        try:
+                            log(
+                                "warning",
+                                "round-41 awaiting_ci idle advance failed",
+                                error=str(exc)[:200],
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+            except Exception:  # noqa: BLE001
+                pass
             # Round-34: drain a SINGLE durable unresolved
             # thread even when the GitHub delta is empty.
             # detect_new_actionable_events only surfaces
