@@ -2635,3 +2635,306 @@ def test_round33_dispatch_to_current_window_events_zero_heartbeat(
         f"dispatch MUST be zero in production. Test "
         f"measured {elapsed:.3f}s."
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-44 C12: exact-head request verification
+# ---------------------------------------------------------------------------
+#
+# These tests reproduce the round-44 defect where
+# ``post_review_request`` posted ``(current head
+# 686c76756014)`` while live PR head was C11. The root
+# cause was that the supervisor used the cached
+# ``AUTHORITATIVE_HEAD`` global, which had been polluted
+# by a test run inside the supervisor process. C12
+# requires ``post_review_request`` to re-fetch live PR
+# head AT SEND TIME and refuse any request bound to a
+# stale head. Prior requests are marked ``SUPERSEDED``
+# for current qualification purposes but preserved as
+# audit evidence.
+
+
+class _Round44FakeGithub:
+    """Minimal stub for ``github_get`` that returns a
+    configurable live PR head. Tests set
+    ``self.live_head`` and the supervisor's
+    ``fetch_live_pr_head_now`` will read it.
+    """
+
+    def __init__(self, live_head: str) -> None:
+        self.live_head = live_head
+
+    def __call__(self, path: str, token: str) -> dict:
+        return {
+            "head": {"sha": self.live_head},
+            "mergeable": True,
+        }
+
+
+def _round44_capture_subprocess(monkeypatch, capture: dict):
+    """Stub ``subprocess.run`` so the supervisor's
+    ``gh pr comment`` invocation is captured instead of
+    executed.
+    """
+
+    def _fake_run(cmd, *args, **kwargs):
+        capture["cmd"] = list(cmd)
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            returncode=0, stdout="", stderr=""
+        )
+
+    monkeypatch.setattr("subprocess.run", _fake_run)
+
+
+def test_round44_c12_post_review_request_refuses_stale_head(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-44 C12: a request bound to a stale head
+    MUST NOT be sent. The supervisor MUST re-fetch the
+    live PR head at send time and refuse if the
+    requested head disagrees.
+
+    Bug-detector property: stashing the
+    ``fetch_live_pr_head_now`` guard in
+    ``post_review_request`` causes the test to fail
+    (request is sent with stale head). Restoring the
+    guard makes it pass (request refused, ``.superseded``
+    ledger written).
+    """
+    from autocoder_supervisor import supervisor as sup
+
+    live_head = "dd708b8b7f95d7bd44745d38515aa3c34fe1768c"
+    stale_head = "686c76756014bb293eb5a19c976600e9ca3df172"
+    sup.REPO_OWNER = "Slideshow11"
+    sup.REPO_NAME = "AutoDev"
+    sup.PR_NUMBER = 5
+
+    # Live PR head re-fetch returns C11.
+    fake_gh = _Round44FakeGithub(live_head)
+    monkeypatch.setattr(sup, "github_get", fake_gh)
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+
+    # Capture subprocess.run so we can prove NO
+    # ``gh pr comment`` subprocess fires.
+    capture: dict = {}
+    _round44_capture_subprocess(monkeypatch, capture)
+
+    # Use a tmp review-requests dir so the test does not
+    # pollute the production state directory.
+    monkeypatch.setattr(sup, "REVIEW_REQUESTS_DIR", tmp_path)
+
+    result = sup.post_review_request("coderabbit", stale_head)
+    assert result is False, (
+        "round-44 C12: post_review_request MUST refuse to "
+        "send when requested head != live PR head."
+    )
+    assert "cmd" not in capture, (
+        "round-44 C12: refusing stale head MUST NOT spawn "
+        "any ``gh pr comment`` subprocess."
+    )
+    superseded_path = (
+        tmp_path
+        / f"coderabbit__{stale_head}.superseded.json"
+    )
+    assert superseded_path.exists(), (
+        "round-44 C12: refusing a stale request MUST "
+        "write a sibling ``.superseded.json`` ledger "
+        "so downstream qualification rejects the stale "
+        "evidence."
+    )
+    payload = json.loads(superseded_path.read_text())
+    assert payload["stale_head"] == stale_head
+    assert payload["superseded_by_head"] == live_head
+    assert payload["lifecycle"] == "SUPERSEDED", (
+        "round-44 C12: superseded ledger MUST carry "
+        "lifecycle=SUPERSEDED so downstream qualification "
+        "rejects the stale evidence."
+    )
+
+
+def test_round44_c12_post_review_request_sends_live_head(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-44 C12: when the requested head equals the
+    live PR head, the request MUST be sent AND the
+    request body MUST reference the live head (not a
+    stale cached value).
+    """
+    from autocoder_supervisor import supervisor as sup
+
+    live_head = "dd708b8b7f95d7bd44745d38515aa3c34fe1768c"
+    sup.REPO_OWNER = "Slideshow11"
+    sup.REPO_NAME = "AutoDev"
+    sup.PR_NUMBER = 5
+
+    monkeypatch.setattr(sup, "github_get", _Round44FakeGithub(live_head))
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+    capture: dict = {}
+    _round44_capture_subprocess(monkeypatch, capture)
+    monkeypatch.setattr(sup, "REVIEW_REQUESTS_DIR", tmp_path)
+
+    result = sup.post_review_request("coderabbit", live_head)
+    assert result is True, (
+        "round-44 C12: matching head MUST send."
+    )
+    cmd = capture["cmd"]
+    body_idx = next(
+        i for i, t in enumerate(cmd) if t == "--body"
+    )
+    body = cmd[body_idx + 1]
+    assert live_head[:12] in body, (
+        "round-44 C12: the comment body MUST reference the "
+        "live PR head, not a stale cached value."
+    )
+
+    # The request file MUST be written for the live head
+    # with ``lifecycle: REQUEST_INTENT``.
+    req_path = (
+        tmp_path / f"coderabbit__{live_head}.json"
+    )
+    assert req_path.exists()
+    payload = json.loads(req_path.read_text())
+    assert payload["lifecycle"] == "REQUEST_INTENT"
+    assert payload["request_head"] == live_head
+
+
+def test_round44_c12_post_review_request_refuses_when_live_unavailable(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-44 C12: if the live PR head cannot be
+    fetched (network, auth, rate-limit), the supervisor
+    MUST fail closed rather than guessing from cached
+    state. A request bound to a stale head is never
+    acceptable as a fallback.
+    """
+
+    def _fail(path, token):
+        raise RuntimeError("network down")
+
+    from autocoder_supervisor import supervisor as sup
+    monkeypatch.setattr(sup, "github_get", _fail)
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+    capture: dict = {}
+    _round44_capture_subprocess(monkeypatch, capture)
+    monkeypatch.setattr(sup, "REVIEW_REQUESTS_DIR", tmp_path)
+
+    result = sup.post_review_request(
+        "coderabbit", "dd708b8b7f95d7bd44745d38515aa3c34fe1768c"
+    )
+    assert result is False
+    assert "cmd" not in capture
+
+
+def test_round44_c12_superseded_ledger_preserves_audit_history(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-44 C12: marking a request ``SUPERSEDED``
+    MUST NOT delete the original audit file. Both the
+    original ``provider__head.json`` and the new
+    ``provider__head.superseded.json`` MUST coexist so
+    the historical evidence is preserved.
+    """
+    from autocoder_supervisor import supervisor as sup
+    monkeypatch.setattr(sup, "REVIEW_REQUESTS_DIR", tmp_path)
+
+    stale = "686c76756014bb293eb5a19c976600e9ca3df172"
+    live = "dd708b8b7f95d7bd44745d38515aa3c34fe1768c"
+    # Seed a historical request file as if it were
+    # written in a prior round.
+    historical_path = tmp_path / f"coderabbit__{stale}.json"
+    historical_path.write_text(json.dumps({
+        "actor": "round-43",
+        "requested_at": "2026-08-11T13:01:50Z",
+    }))
+
+    sup.mark_review_request_superseded(
+        "coderabbit", stale, live,
+        reason="round-44_C12_live_head_mismatch",
+    )
+    # Historical file MUST still exist.
+    assert historical_path.exists(), (
+        "round-44 C12: SUPERSEDED ledger MUST preserve "
+        "the original audit file."
+    )
+    # Superseded ledger MUST exist alongside.
+    superseded_path = (
+        tmp_path / f"coderabbit__{stale}.superseded.json"
+    )
+    assert superseded_path.exists()
+    payload = json.loads(superseded_path.read_text())
+    assert payload["stale_head"] == stale
+    assert payload["superseded_by_head"] == live
+    assert payload["lifecycle"] == "SUPERSEDED", (
+        "round-44 C12: superseded ledger MUST carry "
+        "lifecycle=SUPERSEDED so downstream qualification "
+        "rejects the stale evidence."
+    )
+
+
+def test_round44_c12_replay_with_stale_then_live_head(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-44 C12: full replay of the round-44 incident.
+    Live head is C11 (``dd708b8...``); a stale request
+    was previously persisted for ``686c76756014``. The
+    recovery path MUST refuse the stale head and write a
+    ``.superseded`` ledger; a follow-up recovery on the
+    live head MUST succeed and write a fresh
+    ``REQUEST_INTENT`` marker.
+
+    Stash/unstash the live-head re-fetch in
+    ``recover_provider_cooldown``: stash causes the
+    stale head to be honored (request sent with stale
+    head); restore causes the live-head contract to win.
+    """
+    from autocoder_supervisor import supervisor as sup
+    monkeypatch.setattr(sup, "REPO_OWNER", "Slideshow11")
+    monkeypatch.setattr(sup, "REPO_NAME", "AutoDev")
+    monkeypatch.setattr(sup, "PR_NUMBER", 5)
+    monkeypatch.setattr(sup, "REVIEW_REQUESTS_DIR", tmp_path)
+
+    live_head = "dd708b8b7f95d7bd44745d38515aa3c34fe1768c"
+    # Seed ``AUTHORITATIVE_HEAD`` to a STALE value
+    # exactly as the round-43 supervisor was after the
+    # test-run pollution.
+    monkeypatch.setattr(sup, "AUTHORITATIVE_HEAD", "686c76756014bb293eb5a19c976600e9ca3df172")
+    monkeypatch.setattr(sup, "github_get", _Round44FakeGithub(live_head))
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+    capture: dict = {}
+    _round44_capture_subprocess(monkeypatch, capture)
+
+    # The historical round-43 request marker
+    # (``recovery-coderabbit-20260811T130150``) at 13:01:50Z
+    # was bound to the stale head. Seed it.
+    stale = "686c76756014bb293eb5a19c976600e9ca3df172"
+    historical_path = tmp_path / f"coderabbit__{stale}.json"
+    historical_path.write_text(json.dumps({
+        "actor": "recovery",
+        "recovery_request_id": "recovery-coderabbit-20260811T130150",
+        "requested_at": "2026-08-11T13:01:50Z",
+    }))
+
+    # Simulate the round-43 supervisor posting the stale
+    # head. ``post_review_request`` MUST refuse because
+    # the requested head (``AUTHORITATIVE_HEAD`` =
+    # 686c767) does NOT equal the live PR head
+    # (``dd708b8``).
+    result = sup.post_review_request("coderabbit", sup.AUTHORITATIVE_HEAD)
+    assert result is False, (
+        "round-44 C12: post_review_request MUST refuse "
+        "the stale ``AUTHORITATIVE_HEAD`` even when the "
+        "in-memory global is polluted."
+    )
+    assert (tmp_path / f"coderabbit__{stale}.superseded.json").exists()
+
+    # Now a follow-up recovery on the LIVE head must
+    # succeed and write a fresh ``REQUEST_INTENT`` marker.
+    result = sup.post_review_request("coderabbit", live_head)
+    assert result is True
+    assert (tmp_path / f"coderabbit__{live_head}.json").exists()
+    payload = json.loads(
+        (tmp_path / f"coderabbit__{live_head}.json").read_text()
+    )
+    assert payload["lifecycle"] == "REQUEST_INTENT"
+    assert payload["request_head"] == live_head

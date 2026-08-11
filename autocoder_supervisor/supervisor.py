@@ -2490,11 +2490,35 @@ def recover_provider_cooldown(
         # performs the actual ``gh pr comment`` call.
         # Either may fail (network / auth) — the ledger
         # records the attempt either way.
-        head_sha_now = (
-            str(AUTHORITATIVE_HEAD)  # type: ignore[name-defined]
-            if "AUTHORITATIVE_HEAD" in globals()
-            else ""
-        )
+        # Round-44 C12: the recovery path MUST bind the
+        # request head to the live PR head, NOT to the
+        # cached ``AUTHORITATIVE_HEAD`` global. The
+        # in-memory ``AUTHORITATIVE_HEAD`` may be polluted
+        # by test runs (the supervisor process also hosts
+        # the test suite); using it here is exactly the
+        # path that posted ``(current head 686c76756014)``
+        # while live PR head was C11. Re-fetch live PR
+        # head NOW so the recovery request honors the
+        # exact-head invariant at send time. If the live
+        # head cannot be fetched, refuse the recovery send
+        # rather than guessing from cached state.
+        head_sha_now = fetch_live_pr_head_now()
+        if not head_sha_now:
+            head_sha_now = (
+                str(AUTHORITATIVE_HEAD)  # type: ignore[name-defined]
+                if "AUTHORITATIVE_HEAD" in globals()
+                else ""
+            )
+            log(
+                "warning",
+                "recover_provider_cooldown: live PR head "
+                "unavailable; falling back to cached "
+                "AUTHORITATIVE_HEAD. The recovery send "
+                "may fail closed in post_review_request "
+                "if the cached head is also stale.",
+                provider=provider,
+                cached_head=head_sha_now[:12],
+            )
         try:
             write_review_request(  # type: ignore[name-defined]
                 provider=provider,
@@ -2503,6 +2527,8 @@ def recover_provider_cooldown(
                     "actor": "recovery",
                     "requested_at": now,
                     "recovery_request_id": recovery_request_id,
+                    "lifecycle": "REQUEST_INTENT",
+                    "request_head": head_sha_now or "unknown",
                 },
             )
         except Exception as e:  # noqa: BLE001 - defensive
@@ -3457,7 +3483,111 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     return lease
 
 
+def fetch_live_pr_head_now() -> str:
+    """Round-44 C12: fetch the live PR head immediately
+    before any provider-request send. This is the ONLY
+    authoritative source for ``head_sha`` at send time.
+
+    The in-memory ``AUTHORITATIVE_HEAD`` global may be
+    polluted by tests (test runs share the supervisor
+    process), by stale ``bootstrap_env`` values, or by
+    a failed head reconciliation. Re-fetching live PR
+    head here establishes the canonical current head
+    and prevents sending requests bound to stale
+    historical SHAs.
+
+    Returns the empty string on any failure (network,
+    auth, rate-limit). Callers MUST treat an empty
+    return as ``unknown`` and fail closed rather than
+    guessing from cached state.
+    """
+    try:
+        token = get_github_token() or ""
+        if not token:
+            return ""
+        live = github_get(
+            f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
+            token,
+        )
+        if isinstance(live, dict):
+            head = str(live.get("head", {}).get("sha") or "").strip()
+            if head:
+                return head
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "fetch_live_pr_head_now: live PR fetch failed; "
+            "refusing to send provider request without verified head",
+            error=str(exc)[:200],
+        )
+    return ""
+
+
+def mark_review_request_superseded(
+    provider: str,
+    stale_head: str,
+    superseded_by_head: str,
+    *,
+    reason: str,
+) -> None:
+    """Round-44 C12: mark a stale ``provider__head`` request
+    marker as ``SUPERSEDED`` for current qualification
+    purposes. Preserves the historical file as audit
+    evidence (does NOT delete it) but adds a sibling
+    ``provider__head.superseded.json`` ledger entry so
+    downstream qualification paths can prove the
+    exact-head invariant was honored.
+    """
+    if not stale_head:
+        return
+    p = REVIEW_REQUESTS_DIR / f"{provider}__{stale_head}.superseded.json"  # type: ignore[name-defined]
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "actor": "round44_c12",
+            "lifecycle": "SUPERSEDED",
+            "provider": provider,
+            "stale_head": stale_head,
+            "superseded_by_head": superseded_by_head,
+            "reason": reason,
+            "superseded_at": now_iso(),
+        }
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True))
+        tmp.replace(p)
+        log(
+            "warning",
+            "round-44 C12: marked stale review request SUPERSEDED",
+            provider=provider,
+            stale_head=stale_head[:12],
+            superseded_by_head=superseded_by_head[:12],
+            reason=reason,
+        )
+    except OSError as exc:
+        log(
+            "warning",
+            "round-44 C12: superseded ledger write failed",
+            provider=provider,
+            error=str(exc)[:200],
+        )
+
+
 def post_review_request(provider: str, head_sha: str) -> bool:
+    """Round-44 C12: send the provider review request
+    ONLY after re-verifying the live PR head matches
+    the requested exact head. If they disagree, refuse
+    to send and mark any prior request for the stale
+    head as ``SUPERSEDED`` so it cannot satisfy
+    qualification for the current head.
+
+    Lifecycle: ``REQUEST_INTENT`` (caller wrote the
+    request file) → ``post_review_request`` re-checks
+    live head → on match, ``REQUEST_SENT`` → caller
+    transitions to ``ACKNOWLEDGED`` → ``REVIEW_COMPLETE``.
+    On head mismatch the request is NOT sent and any
+    prior request for the stale head is marked
+    ``SUPERSEDED``.
+    """
     cfg = PROVIDERS.get(provider)
     if not cfg:
         log(
@@ -3467,6 +3597,66 @@ def post_review_request(provider: str, head_sha: str) -> bool:
         )
         return False
     handle = cfg["trigger_handle"]
+    # Round-44 C12: exact-head invariant. The request
+    # head must equal the live PR head AT SEND TIME.
+    # Cached ``AUTHORITATIVE_HEAD`` or any historical
+    # value MUST NOT independently determine the
+    # request head. Re-fetch live PR head now; if the
+    # requested head disagrees, refuse to send and mark
+    # the prior request file as SUPERSEDED.
+    live_head = fetch_live_pr_head_now()
+    if not live_head:
+        log(
+            "warning",
+            "post_review_request: refusing to send; live PR "
+            "head unavailable for exact-head verification",
+            provider=provider,
+            requested_head=head_sha[:12],
+        )
+        return False
+    if head_sha != live_head:
+        log(
+            "warning",
+            "post_review_request: refusing to send; requested "
+            "head is NOT the live PR head",
+            provider=provider,
+            requested_head=head_sha[:12],
+            live_head=live_head[:12],
+        )
+        # Mark any prior request for the requested head as
+        # SUPERSEDED. Preserve the original file as audit
+        # evidence; write a sibling ``.superseded.json``
+        # so downstream qualification can recognize it.
+        mark_review_request_superseded(
+            provider,
+            head_sha,
+            live_head,
+            reason=(
+                "live_head_mismatch_at_send_time; "
+                "qualification rebinds to live_head"
+            ),
+        )
+        return False
+    # Persist request intent bound to the EXACT live head.
+    try:
+        write_review_request(  # type: ignore[name-defined]
+            provider=provider,
+            head_sha=live_head,
+            record={
+                "actor": "post_review_request",
+                "requested_at": now_iso(),
+                "lifecycle": "REQUEST_INTENT",
+                "request_head": live_head,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "post_review_request: write_review_request failed",
+            provider=provider,
+            error=str(exc)[:200],
+        )
+        return False
     cmd = [
         "gh",
         "pr",
@@ -3475,7 +3665,7 @@ def post_review_request(provider: str, head_sha: str) -> bool:
         "--repo",
         f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
         "--body",
-        f"{handle}\n\n(current head {head_sha[:12]})",
+        f"{handle}\n\n(current head {live_head[:12]})",
     ]
     try:
         proc = subprocess.run(
@@ -3492,7 +3682,11 @@ def post_review_request(provider: str, head_sha: str) -> bool:
         )
         return False
     log(
-        "info", f"posted {handle}", head=head_sha[:12]
+        "info",
+        "round-44 C12 posted",
+        provider=provider,
+        head=live_head[:12],
+        handle=handle,
     )
     return True
 
@@ -3557,9 +3751,32 @@ def process_provider_quotas(live: dict) -> dict:
 def handle_paused_providers(
     live: dict, statuses: dict
 ) -> tuple[bool, list]:
+    """Round-44 C12: post a single review-request retry
+    per paused provider per heartbeat, but ONLY for the
+    live PR head. Any prior request bound to a stale
+    head is marked ``SUPERSEDED`` before the live-head
+    request is sent.
+
+    Lifecycle: ``REQUEST_INTENT`` (via
+    ``post_review_request``) → ``REQUEST_SENT`` (the
+    ``gh pr comment`` subprocess succeeded) →
+    ``ACKNOWLEDGED`` (CodeRabbit ack observed on next
+    snapshot) → ``REVIEW_COMPLETE``. A request bound to
+    H0 becomes ``SUPERSEDED`` the moment live PR head
+    advances to H1; downstream qualification paths read
+    the ``.superseded.json`` ledger to reject stale
+    evidence.
+    """
     any_paused = False
     paused = []
     now = datetime.now(timezone.utc)
+    # Round-44 C12: re-fetch the live PR head NOW so the
+    # paused-handler cannot use a stale snapshot's
+    # ``head_sha`` field. The exact-head invariant
+    # requires the request head to equal the live PR head
+    # at send time; ``live.get("head_sha")`` may be
+    # several minutes stale if the snapshot is cached.
+    live_pr_head = fetch_live_pr_head_now() or live.get("head_sha") or ""
     for provider in PROVIDERS:
         if statuses.get(provider) != "paused":
             continue
@@ -3568,8 +3785,25 @@ def handle_paused_providers(
         full_state = read_quota_state()
         sub = quota_state_for_provider(full_state, provider)
         pending = sub.get("pending_review_head")
-        if pending != AUTHORITATIVE_HEAD:  # type: ignore[name-defined]
-            sub["pending_review_head"] = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+        # Round-44 C12: rebind ``pending_review_head`` to
+        # the live PR head, NOT to ``AUTHORITATIVE_HEAD``.
+        # ``AUTHORITATIVE_HEAD`` may be polluted by test
+        # runs (the supervisor process also hosts the
+        # test suite) or by stale bootstrap values; only
+        # the live PR head is canonical at send time.
+        target_head = live_pr_head or AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+        if pending != target_head:
+            # Mark any prior request file for ``pending``
+            # as SUPERSEDED so it cannot satisfy
+            # qualification for the current head.
+            if pending and pending != live_pr_head:
+                mark_review_request_superseded(
+                    provider,
+                    pending,
+                    target_head,
+                    reason="pending_review_head_stale_at_paused_handler",
+                )
+            sub["pending_review_head"] = target_head
             new_state = set_quota_state_for_provider(
                 full_state, provider, sub
             )
@@ -3579,7 +3813,7 @@ def handle_paused_providers(
                 f"{provider}: head changed during pause; "
                 "updated pending_review_head",
                 old_head=(pending or "")[:12],
-                new_head=AUTHORITATIVE_HEAD[:12],  # type: ignore[name-defined]
+                new_head=target_head[:12],
             )
             continue
         next_retry = parse_iso(sub.get("next_retry_timestamp"))
@@ -3603,10 +3837,25 @@ def handle_paused_providers(
                     reset_at=cfg["quota_reset_at"],
                 )
                 continue
-            head_for_request = (
-                sub.get("pending_review_head")
-                or AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+            head_for_request = sub.get("pending_review_head") or target_head
+            # Round-44 C12: dedupe by ``provider + head``. A
+            # pending request file for the same provider +
+            # head means the request was already persisted;
+            # do not send a duplicate ``@coderabbitai
+            # review`` for the same head.
+            existing_req = read_review_request(  # type: ignore[name-defined]
+                provider, head_for_request
             )
+            if existing_req and existing_req.get("lifecycle") not in (
+                "SUPERSEDED",
+            ):
+                log(
+                    "info",
+                    f"{provider}: review request for head already "
+                    "persisted; skipping duplicate send",
+                    head=head_for_request[:12],
+                )
+                continue
             live_head = live.get("head_sha")
             if (
                 live_head == head_for_request
@@ -3632,6 +3881,7 @@ def handle_paused_providers(
                         f"{provider}: retry posted single review "
                         "request after backoff",
                         retry_count=sub.get("retry_count", 0),
+                        head=head_for_request[:12],
                     )
             else:
                 log(
