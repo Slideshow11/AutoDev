@@ -1721,7 +1721,7 @@ def _try_resolve_github_thread(*, thread_id, provider, disposition,
         # Fallback: GraphQL mutation.
         gql = """
         mutation ResolveThread($id: ID!) {
-          resolvePullRequestReviewThread(input: {pullRequestReviewThreadId: $id}) {
+          resolveReviewThread(input: {threadId: $id}) {
             clientMutationId
           }
         }

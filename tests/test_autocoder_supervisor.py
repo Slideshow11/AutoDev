@@ -3702,3 +3702,27 @@ def test_round46_c14_stdout_extraction_round46_preferred_format(
     assert _disp == "ALREADY_SATISFIED"
 
 
+
+
+
+def test_round47_c14_github_resolve_mutation_uses_correct_name(
+    isolated_state,
+):
+    """Round-47 C14 follow-up: the supervisor's GitHub
+    resolution code path uses the correct mutation name
+    ``resolveReviewThread`` (singular). The historical
+    ``resolvePullRequestReviewThread`` does not exist on
+    GitHub's GraphQL API. Verify the code string.
+    """
+    from autocoder_supervisor import supervisor as sup
+    src = open(sup.__file__).read()
+    assert 'resolveReviewThread(input: {threadId: $id})' in src, (
+        "round-47 C14: GitHub resolution must use the correct "
+        "mutation name 'resolveReviewThread' (singular). The "
+        "legacy 'resolvePullRequestReviewThread' does not "
+        "exist on GitHub's GraphQL API and would 400."
+    )
+    assert 'resolvePullRequestReviewThread' not in src, (
+        "round-47 C14: the legacy mutation name MUST NOT remain "
+        "in the supervisor source."
+    )
