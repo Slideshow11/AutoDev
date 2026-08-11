@@ -7173,6 +7173,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                             error=str(exc),
                             attempt_id=attempt_id_for_ack,
                         )
+                    # Round-41: after a verified worker push,
+                    # the controller is in AWAITING_CI. Drive
+                    # ``_advance_awaiting_ci_to_qualifying`` so
+                    # the controller advances to
+                    # QUALIFYING_READINESS. The new CI policy
+                    # evaluation (NO_REQUIRED_CHECKS for the
+                    # empty-policy case) allows qualification
+                    # without GitHub check-runs.
+                    try:
+                        _advance_awaiting_ci_to_qualifying()
+                    except Exception as exc:  # noqa: BLE001
+                        try:
+                            log(
+                                "warning",
+                                "round-41 awaiting_ci advance failed; "
+                                "controller may be stuck in AWAITING_CI",
+                                old_head=old_head[:12] if old_head else "",
+                                new_head=live_head[:12],
+                                error=str(exc)[:200],
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
                 else:
                     log(
                         "info",
