@@ -505,7 +505,12 @@ def test_e_check_failure_blocks_readiness(monkeypatch):
     snap["required_checks"]["test (3.11)"]["conclusion"] = "failure"
     res = supervisor.evaluate_readiness(snap, AUTH)
     assert res["ready"] is False
-    assert res["reason"] == "checks_not_green"
+    # Round-39: a failed required check is reported as
+    # ``ci_checks_failed`` so the supervisor can distinguish
+    # the failure case from the pending case
+    # (``ci_checks_pending``) and the empty-required-checks
+    # case (``no_required_checks``).
+    assert res["reason"] == "ci_checks_failed"
 
 
 def test_e_revocation_round_trip(isolated_state):

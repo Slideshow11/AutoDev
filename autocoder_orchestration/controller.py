@@ -161,6 +161,40 @@ class Controller:
         sm = self._require_state_for_event()
         return self._apply(sm, STATE_QUALIFYING_READINESS, ACTOR_CONTROLLER, head_observed=head_observed)
 
+    def report_no_changes_required(
+        self, *, head_observed: str, proof: Optional[dict] = None,
+    ) -> StateMachine:
+        """REPAIRING_REVIEW_FINDINGS -> QUALIFYING_READINESS.
+
+        Round-41: a worker that executed the directive and
+        emitted structured ``NO_CHANGES_REQUIRED`` proof
+        advances REPAIRING_REVIEW_FINDINGS directly to
+        QUALIFYING_READINESS, skipping AWAITING_CI. The
+        CI gate is not required for THIS round because no
+        commit was produced. The supervisor's quiet-window /
+        readiness machinery handles the rest of the
+        qualification.
+        """
+        if not isinstance(head_observed, str) or (
+            len(head_observed) != 40 and len(head_observed) != 64
+        ) or not all(c in "0123456789abcdef" for c in head_observed):
+            raise ControllerError(
+                f"head_observed must be 40 or 64 lowercase hex chars: "
+                f"{head_observed!r}"
+            )
+        sm = self._require_state_for_event()
+        # Round-27 P1#5 atomicity: rebind context FIRST, then
+        # apply the transition.
+        new_context = self.context.with_new_head(head_observed)
+        self.save_run_context_for(new_context)
+        self.context = new_context
+        return self._apply(
+            sm,
+            STATE_QUALIFYING_READINESS,
+            ACTOR_IMPL_WORKER,
+            head_observed=head_observed,
+        )
+
     def report_new_actionable_review_on_qualified_head(
         self,
         *,

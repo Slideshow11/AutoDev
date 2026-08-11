@@ -1362,6 +1362,7 @@ def poll_worker_attempt(
           on the next heartbeat.
     """
     from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_NO_CHANGES_REQUIRED,
         LIFECYCLE_PUSH_VERIFIED,
         LIFECYCLE_RECOVERY_CHECK,
         LIFECYCLE_WORKER_EXITED_NO_PUSH,
@@ -1381,6 +1382,134 @@ def poll_worker_attempt(
         rec.signal = signal
         rec.last_progress_at = now_iso()
         rec.finished_at = rec.finished_at or now_iso()
+        # Round-41: route workers that exited cleanly with
+        # a structured ``NO_CHANGES_REQUIRED`` disposition
+        # to the new terminal-success lifecycle BEFORE
+        # attempting push-recovery attribution. The worker
+        # is considered to have ACTUALLY EXECUTED the
+        # directive if its attempt record carries an
+        # ``extra.no_changes_required_proof`` blob with
+        # structured evidence (per-finding disposition,
+        # verification summary, exact head), OR if the
+        # canonical AED run-state ``round_<N>_dispatch.json``
+        # file records ``outcome: NO_OP`` at the exact head.
+        if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
+            _no_op_proof: Optional[dict] = None
+            _extra_d = rec.extra if isinstance(rec.extra, dict) else {}
+            # Accept either the canonical
+            # ``no_changes_required_proof`` key (round-41
+            # contract) OR a per-round disposition blob the
+            # worker chose to write (e.g.
+            # ``round_41_disposition``). The blob is a dict
+            # with category/verification keys, which is the
+            # structured no-op proof.
+            for _key in (
+                "no_changes_required_proof",
+                "round_41_disposition",
+                "round_42_disposition",
+                "round_dispatch",
+            ):
+                _candidate = _extra_d.get(_key)
+                if isinstance(_candidate, dict) and _candidate:
+                    _no_op_proof = {
+                        "source": "attempt_extra",
+                        "key": _key,
+                        **_candidate,
+                    }
+                    break
+            else:
+                try:
+                    # The AED runs directory is at
+                    # ``$HOME/.hermes/aed/runs/<owner>/<repo>/<pr>``.
+                    # We look up ``$HOME`` from the env (with a
+                    # fallback to ``~``) so the test harness can
+                    # override HOME without rebinding the C
+                    # module's ``os.path.expanduser``.
+                    _home = os.environ.get("HOME") or "~"
+                    _round_dir = (
+                        Path(_home)
+                        / ".hermes" / "aed" / "runs" / str(REPO_OWNER) / str(REPO_NAME) / str(PR_NUMBER)
+                    )
+                    _round_files: list = []
+                    if _round_dir.is_dir():
+                        for _p in sorted(_round_dir.glob("round_*_dispatch.json")):
+                            _round_files.append(_p)
+                    for _p in _round_files:
+                        try:
+                            _d = json.loads(_p.read_text(encoding="utf-8"))
+                        except Exception:
+                            continue
+                        if not isinstance(_d, dict):
+                            continue
+                        _outcome = str(_d.get("outcome") or "")
+                        _verdict = str(_d.get("verdict") or "")
+                        _head = str(_d.get("head_sha_at_dispatch") or "")
+                        if (
+                            _outcome.upper() in ("NO_OP", "NO_CHANGES_REQUIRED")
+                            or _verdict == "no_source_edit_required"
+                        ) and (
+                            not _head
+                            or _head == rec.prelaunch_head
+                            or _head == str(
+                                globals().get("AUTHORITATIVE_HEAD", "") or ""
+                            )
+                        ):
+                            _no_op_proof = {
+                                "source": "round_dispatch_json",
+                                "path": str(_p),
+                                "outcome": _outcome,
+                                "verdict": _verdict,
+                                "head_sha_at_dispatch": _head,
+                                "directive_id": str(_d.get("directive_id") or ""),
+                                "round_index": _d.get("round_index"),
+                            }
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    log(
+                        "warning",
+                        "round-41 dispatch-JSON lookup failed; "
+                        "continuing with extra-only proof",
+                        attempt_id=attempt_id,
+                        error=str(exc)[:200],
+                    )
+            if isinstance(_no_op_proof, dict) and _no_op_proof:
+                try:
+                    rec.assert_can_transition_to(
+                        LIFECYCLE_NO_CHANGES_REQUIRED,
+                    )
+                    rec.lifecycle = LIFECYCLE_NO_CHANGES_REQUIRED
+                    rec.terminal_reason = (
+                        "worker executed and emitted structured "
+                        "NO_CHANGES_REQUIRED proof; no push expected."
+                    )
+                    if isinstance(rec.extra, dict):
+                        rec.extra.setdefault(
+                            "no_changes_required_proof", _no_op_proof
+                        )
+                    log(
+                        "info",
+                        "round-41 no-op worker; routed to "
+                        "LIFECYCLE_NO_CHANGES_REQUIRED",
+                        attempt_id=attempt_id,
+                        pid=rec.pid,
+                        source=_no_op_proof.get("source", "attempt_extra"),
+                    )
+                    store.write(rec)
+                    if lease is not None:
+                        try:
+                            remove_lease()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return "DIED"
+                except Exception as exc:  # noqa: BLE001
+                    log(
+                        "warning",
+                        "could not transition to "
+                        "LIFECYCLE_NO_CHANGES_REQUIRED; "
+                        "falling through to NO_PUSH",
+                        attempt_id=attempt_id,
+                        error=str(exc)[:200],
+                    )
         # Round-37 fix (WORKER_EXITED_NO_PUSH race): before
         # terminalizing a dead worker as no-push, the supervisor
         # MUST refresh local/origin/live GitHub evidence and

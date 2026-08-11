@@ -160,6 +160,26 @@ _FORWARD_TRANSITIONS: Tuple[Transition, ...] = (
         durable_event="control_plane.repair_pushed",
         invalidates=frozenset({"ci_inventory", "review_inventory"}),
     ),
+    # Round-41: a worker that executed the directive and
+    # emitted structured ``NO_CHANGES_REQUIRED`` proof can
+    # advance REPAIRING_REVIEW_FINDINGS directly to
+    # QUALIFYING_READINESS, skipping AWAITING_CI because
+    # no commit was produced (so no CI gate is required for
+    # THIS round's commit). The supervisor's CI policy /
+    # quiet-window machinery handles the rest of the
+    # qualification. The required evidence is the
+    # ``no_changes_required_proof`` blob carrying
+    # per-finding disposition and verification summary.
+    Transition(
+        source=STATE_REPAIRING_REVIEW_FINDINGS,
+        target=STATE_QUALIFYING_READINESS,
+        authorized_actors=frozenset({"implementation_worker", "controller"}),
+        required_evidence=frozenset({"no_changes_required_proof"}),
+        head_stability="exact_head",
+        idempotency="first_wins",
+        durable_event="control_plane.no_changes_required",
+        invalidates=frozenset({"ci_inventory", "review_inventory"}),
+    ),
     Transition(
         source=STATE_QUALIFYING_READINESS,
         target=STATE_READY_FOR_CANDIDATE,

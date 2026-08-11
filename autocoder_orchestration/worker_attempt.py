@@ -57,15 +57,25 @@ LIFECYCLE_TERMINAL_REPAIRED = "TERMINAL_REPAIRED"
 LIFECYCLE_WORKER_EXITED_NO_PUSH = "WORKER_EXITED_NO_PUSH"
 LIFECYCLE_RECOVERY_CHECK = "RECOVERY_CHECK"
 
-# Terminal failure lifecycle values — the attempt is finished but the work
-# item is RETRY_PENDING.
+# Round-41: terminal lifecycles that distinguish structured
+# worker outcomes from generic failures.
+LIFECYCLE_NO_CHANGES_REQUIRED = "NO_CHANGES_REQUIRED"
+LIFECYCLE_WORKER_STARTUP_FAILED = "WORKER_STARTUP_FAILED"
+LIFECYCLE_WORKER_EXECUTION_FAILED = "WORKER_EXECUTION_FAILED"
+
+# Terminal failure lifecycle values — the attempt is finished
+# but the work item is RETRY_PENDING.
 TERMINAL_FAILURE_LIFECYCLES = frozenset({
     LIFECYCLE_WORKER_EXITED_NO_PUSH,
+    LIFECYCLE_WORKER_STARTUP_FAILED,
+    LIFECYCLE_WORKER_EXECUTION_FAILED,
 })
 
-# All lifecycle values that mark the attempt as finished (success OR failure).
+# All lifecycle values that mark the attempt as finished
+# (success OR failure).
 TERMINAL_LIFECYCLES = frozenset({
     LIFECYCLE_TERMINAL_REPAIRED,
+    LIFECYCLE_NO_CHANGES_REQUIRED,
     LIFECYCLE_WORKER_EXITED_NO_PUSH,
 })
 
@@ -89,6 +99,20 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
         LIFECYCLE_COMMIT_PRODUCED,
         LIFECYCLE_WORKER_EXITED_NO_PUSH,
         LIFECYCLE_RECOVERY_CHECK,
+        # Round-41: a worker that ran successfully and emitted
+        # structured ``NO_CHANGES_REQUIRED`` proof transitions
+        # directly to the new terminal-success lifecycle.
+        LIFECYCLE_NO_CHANGES_REQUIRED,
+        # A worker that started but did not reach
+        # ``DIRECTIVE_ACCEPTED`` (e.g. session resume failed
+        # after process spawn) is classified
+        # ``WORKER_STARTUP_FAILED`` and remains RETRY_PENDING.
+        LIFECYCLE_WORKER_STARTUP_FAILED,
+        # A worker that ran but errored mid-execution (model
+        # failure, exception, malformed directive) is
+        # classified ``WORKER_EXECUTION_FAILED`` and remains
+        # RETRY_PENDING.
+        LIFECYCLE_WORKER_EXECUTION_FAILED,
     }),
     LIFECYCLE_COMMIT_PRODUCED: frozenset({
         LIFECYCLE_PUSH_VERIFIED,
@@ -159,9 +183,11 @@ class WorkerAttemptRecord:
         kwargs = dict(data)
         kwargs["event_ids"] = tuple(data.get("event_ids", ()))
         kwargs["finding_ids"] = tuple(data.get("finding_ids", ()))
-        # Strip unknown fields rather than failing — schema_version is
-        # the only authoritative check.
-        kwargs.pop("extra", None)
+        # Round-41: ``extra`` is a known field on the dataclass.
+        # Preserve it through the round-trip so structured
+        # no-op proof written by the worker survives to the
+        # supervisor's poll_worker_attempt.
+        kwargs["extra"] = dict(data.get("extra", {}) or {})
         return cls(**kwargs)
 
     def assert_can_transition_to(self, next_lifecycle: str) -> None:
