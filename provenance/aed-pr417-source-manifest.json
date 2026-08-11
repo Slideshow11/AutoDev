@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "e0671cf29f9aac98501021af202be3b945c9295b07386976a0a7a01e5202ee6e",
-      "destination_size_bytes": 271703,
+      "destination_sha256": "75fd2f9ca74764dcc064b24bec9ac86cce2b32ce1c49869a78e27bda773b61ab",
+      "destination_size_bytes": 91496,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -156,8 +156,8 @@
     },
     {
       "destination_path": "tests/test_autocoder_supervisor.py",
-      "destination_sha256": "12dc53e03101fa56144584b9e8216d253a9531370a4ccdde4f81dd92f63eeb85",
-      "destination_size_bytes": 94992,
+      "destination_sha256": "276f952bffc44da970910ee17af1125ee1158e8e7555c88fc4b78d9e3d85ed42",
+      "destination_size_bytes": 66588,
       "source_path": "tests/test_autocoder_supervisor.py",
       "source_sha256": "3b65e142bb79ca060484b37ed28127979ccc004aa82ce78d65b3d704fe5895f3",
       "source_size_bytes": 39831,
@@ -302,8 +302,8 @@
     },
     {
       "destination_path": "autocoder_orchestration/merge_lock.py",
-      "destination_sha256": "7793b772c941a520d259ff0d9103481e15a34a22d004f82d28245a2513b52cb0",
-      "destination_size_bytes": 6327,
+      "destination_sha256": "9fb455c6c5f67a49faab68f6e549b30ea9d58fa6fe63a5fb1450443453a3f88d",
+      "destination_size_bytes": 6079,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
@@ -351,9 +351,9 @@
       "destination_size_bytes": 43134,
       "source_path": null,
       "source_sha256": null,
-      "source_size_bytes": null,
       "transformation_classification": "standalone_addition",
-      "transformation_explanation": "Round-10 directive: scripts/independent_verifier_v2.py is a standalone addition to AutoDev. The AED source commit b57fcaad does not contain an independent verifier script at any path. The verifier was introduced in AutoDev to perform the FRESH strict qualification cycle (>=180 seconds) on PR #4. The production verifier embeds every required gate, fails closed on any drift, and the optimized-Python refuse guard is the module-import __debug__ callback."
+      "transformation_explanation": "Round-10 directive: scripts/independent_verifier_v2.py is a standalone addition to AutoDev. The AED source commit b57fcaad does not contain an independent verifier script at any path. The verifier was introduced in AutoDev to perform the FRESH strict qualification cycle (>=180 seconds) on PR #4. The production verifier embeds every required gate, fails closed on any drift, and the optimized-Python refuse guard is the module-import __debug__ callback.",
+      "source_size_bytes": null
     },
     {
       "destination_path": "tests/test_pr4_round3_review.py",
@@ -375,12 +375,12 @@
     },
     {
       "destination_path": "autocoder_orchestration/cli.py",
-      "destination_sha256": "ce9172ba4dd3a91487aa68c36758584dcf62050cf66acd72148423deb6f99c56",
-      "destination_size_bytes": 67905,
+      "destination_sha256": "cb71850b6fe1f409eabaed9f21fa684b6ea5f9de8b86c4857ddc504491bde0bd",
+      "destination_size_bytes": 54485,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
-      "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive. v1b: added review-repair-round and review-repair-status subcommands for the autonomous review/repair relay."
+      "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive."
     },
     {
       "destination_path": "tests/test_pr4_round5_hardening.py",
@@ -402,8 +402,8 @@
     },
     {
       "destination_path": "tests/test_pr4_round6_d0_fixture.py",
-      "destination_sha256": "8a7910d0bd104c1330074773d5922e324032ed17eaf1d6a47c86af500a48b0b7",
-      "destination_size_bytes": 27504,
+      "destination_sha256": "ea4d5f44be52fc1cf4eb6d8e3e2a24e2ebd540d0cb1193e32cc27aeb7e4be24e",
+      "destination_size_bytes": 26718,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_test_addition",
@@ -418,167 +418,9 @@
       "source_size_bytes": null,
       "transformation_classification": "standalone_addition",
       "transformation_explanation": "Round-10 directive: scripts/quiet_window_observer.py is a standalone addition to AutoDev. It was not extracted from AED PR #417 (the AED reference commit b57fcaad does not contain a file at scripts/local/quiet_window_observer.py). The file is required by the production verifier (default --aed-path) and was added to AutoDev's seed. The manifest audit entry remains: measured sha256 = sha256 of destination file (verified) and the audit counts this file as a standalone addition."
-    },
-    {
-      "destination_path": "autocoder_supervisor/directive_bridge.py",
-      "destination_sha256": "869126a320bf2cbe1e1ca409940b5e360728ccb011300340fc24f3a2c24b39a0",
-      "destination_size_bytes": 14329,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "standalone_source_addition",
-      "transformation_explanation": "Direct consumer of the canonical directive.json artifact written by autocoder_orchestration.review_repair_relay. Renders the matching worker prompt without importing the orchestration package (avoids cycle)."
-    },
-    {
-      "destination_path": "autocoder_supervisor/_directive_prompt.py",
-      "destination_sha256": "a095823f77871fa0ea15c53fa8837a006561ee29e50f7c558b81d88c79040fd2",
-      "destination_size_bytes": 4970,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "standalone_source_addition",
-      "transformation_explanation": "Single source of truth for the relay-directive worker prompt. Both the relay and the bridge render this template. Replaces the previously duplicated template across the two layers."
-    },
-    {
-      "destination_path": "tests/test_directive_bridge.py",
-      "destination_sha256": "888ed8c535febfa11696f11134f68daa2108f86a96b8efd4de33c14f49d77947",
-      "destination_size_bytes": 26441,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Tests for the directive bridge covering resolve_directive failure modes, byte-identical relay bridge pairing, supervisor launch_worker integration, and the head-mismatch / digest-mismatch guards. The test count is recorded in .relay_status.json rather than in this transformation_explanation so the explanation cannot drift."
-    },
-    {
-      "destination_path": "autocoder_supervisor/relay_wiring.py",
-      "destination_sha256": "d88249b793f3109e8af8824d883fc4d32a22cb78e045e13d8fd993c5416a4a93",
-      "destination_size_bytes": 21557,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "standalone_source_addition",
-      "transformation_explanation": "Persistent relay wiring for the supervisor's event loop. Spawns the relay CLI subprocess on every new actionable event so review->repair->push->CI->review->repair repeats automatically. No package cycle: the supervisor uses subprocess to talk to the orchestration package."
-    },
-    {
-      "destination_path": "tests/test_relay_wiring_production_path.py",
-      "destination_sha256": "37d0f2defb5adfb34cae99c938e2e35c9048b325fa3f21893d1afcc8b00932d9",
-      "destination_size_bytes": 15901,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Production-path behavioral tests for the relay wiring. Spawns the real CLI binary through subprocess and verifies the production argv shape (--json before the subcommand). Round-1 regression test: the wiring must produce the top-level --json form."
-    },
-    {
-      "destination_path": "tests/test_merge_queued_pr_fails_closed.py",
-      "destination_sha256": "600b7eaaa5185d2c6b93f79eae95f083ebea59f0a617f6b3f08a0b759b879ca0",
-      "destination_size_bytes": 33388,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Production-path behavioral tests for the merge-queue failure mode. Proves the production logic fails closed: a queued PR (no explicit mergeCommit OID) cannot produce a merge record. This is the production-path behavioral test for the merge-queue P1."
-    },
-    {
-      "destination_path": "tests/test_strict_quiet_window_canary.py",
-      "destination_sha256": "4e80c853acceb79a7825b884446ffdf0d1a4ad42bfecf0044b47f4cc2872a3d3",
-      "destination_size_bytes": 22810,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "standalone_test_addition",
-      "transformation_explanation": "Production-path behavioral canary for the strict quiet-window. 5 tests: 3 for the polling-with-reset behavior, 2 for the new-event preservation (the new event MUST be preserved across the quiet-window reset, NOT cleared by the post-loop cleanup; the function returns 'new_event' so the caller routes to handle_new_events)."
-    },
-    {
-      "description": "autocoder_supervisor.orchestration_state_root module",
-      "destination_path": "autocoder_supervisor/orchestration_state_root.py",
-      "destination_sha256": "3ba6521919b6810835ec9f18aeda1ef3245d1a867dcebb3c1e5917ffad8988b3",
-      "destination_size_bytes": 19929,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_module_in_round_28",
-      "transformation_explanation": "Round-28 P1 introduced a dedicated module for the orchestration state-root identification."
-    },
-    {
-      "description": "Round-28 P1: state-root architecture production-path tests",
-      "destination_path": "tests/test_orchestration_state_root_round28.py",
-      "destination_sha256": "033b2105bff7d147de54fe78aa3c44fa08ba0362f6fec7d6b455bd1c89791754",
-      "destination_size_bytes": 14645,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_test_in_round_28",
-      "transformation_explanation": "Round-28 P1 production-path tests."
-    },
-    {
-      "description": "Round-28 P2: locked mutable merge gates production-path tests",
-      "destination_path": "tests/test_merge_locked_required_ci_round28.py",
-      "destination_sha256": "529f9fa6f2de7f0b2a71c09a5567533a18a6e69e8225403343919f138c0fb66e",
-      "destination_size_bytes": 22243,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_test_in_round_28",
-      "transformation_explanation": "Round-28 P2 production-path tests."
-    },
-    {
-      "description": "Round-28 P3: review exact-head binding production-path tests",
-      "destination_path": "tests/test_merge_review_exact_head_binding_round28.py",
-      "destination_sha256": "f0c8d7b1d707e6b1fa5c2b51c37eb72269c0c54e89a3c01b7f48114cbf53572f",
-      "destination_size_bytes": 21481,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_test_in_round_28",
-      "transformation_explanation": "Round-28 P3 production-path tests."
-    },
-    {
-      "description": "Round-28 P4: partial GraphQL fail-closed production-path tests",
-      "destination_path": "tests/test_merge_partial_graphql_round28.py",
-      "destination_sha256": "6202fb19beac350b9dffdb6744073756bae0aa860e7b27a24c8ebd5b733c06f2",
-      "destination_size_bytes": 10071,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_test_in_round_28",
-      "transformation_explanation": "Round-28 P4 partial GraphQL fail-closed tests."
-    },
-    {
-      "description": "Round-28 P5: FindingLedger cross-head semantics production-path tests",
-      "destination_path": "tests/test_finding_ledger_cross_head_round28.py",
-      "destination_sha256": "7d4bf0a6e4bb5f914bd12aa4928a654cbb3d33c25cdf5402b5304d7f44e43ed2",
-      "destination_size_bytes": 7640,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_test_in_round_28",
-      "transformation_explanation": "Round-28 P5 FindingLedger cross-head semantics tests."
-    },
-    {
-      "description": "Round-34 directive verifier: 10 fresh tests re-proving all 8 P1 findings from directive 2e1a80cc-e554-4ca8-8b2f-09fff8ccdad8 are still intact at head 78dca3e.",
-      "destination_path": "tests/test_round34_p1_verifier.py",
-      "destination_sha256": "e2b47f59f2e4d2136e892354a394b8bef20f29ef4d12bf030c077624ae2b83e8",
-      "destination_size_bytes": 12853,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_test",
-      "transformation_explanation": "Round-34 directive requested all 8 P1s be applied. Each was already addressed by round-31 P1#6/#7/#8 (c1ebc46), round-32 P1#6/#8 (ae26aa0), and round-39 P1#1-#5 (7e09b44). The verifier re-proves each fix is still intact at the round-34 head 78dca3e."
-    },
-    {
-      "description": "Round-35 directive verifier: 14 fresh tests re-proving all 8 P1 findings from directive a2ff9a47-97ba-491c-8625-485b8fa0644a are still intact at head 79d4d62, with bug-detector property tests.",
-      "destination_path": "tests/test_round35_p1_verifier.py",
-      "destination_sha256": "d063c2ccfb5a154e67775a6419b84772eddd149ebb76643bb6bb43db36944d6f",
-      "destination_size_bytes": 16239,
-      "source_path": null,
-      "source_sha256": null,
-      "source_size_bytes": null,
-      "transformation_classification": "new_test",
-      "transformation_explanation": "Round-35 directive re-reported all 8 P1s at head 79d4d62. The verifier adds bug-detector property tests (forced OSError + signal-0 fallback for P1#1, regex-asserted committer-date comparison for P1#6, required_checks_green call for P1#7, status-marker filter for P1#8) plus the standard regex/source-text pattern checks for all 8 P1s. Each test exercises the live code path so a future round that regresses a fix will fail."
     }
   ],
-  "last_modification_note": "Round-35 directive a2ff9a47: all 8 P1s re-verified at head 79d4d62; added tests/test_round35_p1_verifier.py (14 tests, bug-detector property coverage).",
+  "last_modification_note": "PR #4 review repair round 6 (final): verifier accepts all production-code-equivalent heads (bf568e78, 624e22d, 7d7f255); manifest hashes regenerated to match. fetch_pr() head check uses EXPECTED_HEADS set.",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
@@ -587,9 +429,7 @@
   "summary": {
     "byte_identical_files": 1,
     "files_from_source": 17,
-    "last_audit_timestamp": "2026-08-10T19:55:00Z",
-    "newly_added_files": 35,
-    "test_count": 824,
+    "newly_added_files": 10,
     "transformed_files": 16
   },
   "terminal_evidence": {
@@ -602,5 +442,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-10T19:34:46.721401+00:00"
+  "updated_at_utc": "2026-08-07T03:28:00Z"
 }

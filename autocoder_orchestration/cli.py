@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import json
+import os
 import subprocess
 import sys
 import time
@@ -28,11 +29,30 @@ from .canonical_paths import canonical_paths as _canonical_artifact_paths
 from .state_machine import (
     StateMachine,
     StateError,
+    STATE_PLANNED,
+    STATE_IMPLEMENTING,
+    STATE_AWAITING_CI,
+    STATE_REPAIRING_REVIEW_FINDINGS,
+    STATE_QUALIFYING_READINESS,
+    STATE_READY_FOR_CANDIDATE,
+    STATE_CANDIDATE_FROZEN,
+    STATE_AWAITING_INDEPENDENT_VERIFICATION,
+    STATE_VERIFYING,
+    STATE_VERIFICATION_FAILED,
+    STATE_VERIFICATION_REPAIR,
+    STATE_AWAITING_MERGE_AUTHORIZATION,
+    STATE_MERGE_AUTHORIZED,
+    STATE_POST_MERGE_VERIFYING,
+    STATE_COMPLETE,
+    STATE_BLOCKED,
 )
 from .store import StateStore, StateStoreError
 from .controller import Controller, ControllerError
 from .readiness import ReadinessCertificate
 from .artifacts import ArtifactError, read_artifact, write_artifact  # noqa: F401
+from .readiness import ReadinessEngine, ReadinessDecision, ReadinessCertificate
+from .observer import ObservationLog, Observation
+from .artifacts import ArtifactError, write_artifact, read_artifact
 from .candidate import (
     Candidate,
     CandidateBuilder,
@@ -959,6 +979,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     paths = _canonical_artifact_paths(evidence_root)
 
     # Read the canonical authorization artifact from the evidence root.
+    from .artifacts import read_artifact
     try:
         auth_result = read_artifact(paths["authorization"])
     except FileNotFoundError:
@@ -1307,6 +1328,7 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     # path as the merge transaction.
     evidence_root = _resolve_evidence_root(args, store)
     paths = _canonical_artifact_paths(evidence_root)
+    from .artifacts import read_artifact
     try:
         record_result = read_artifact(paths["merge_record"])
     except FileNotFoundError:
