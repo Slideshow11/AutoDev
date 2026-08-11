@@ -67,6 +67,27 @@ from autocoder_orchestration.review_repair_relay import (  # noqa: F401
 )
 
 
+# Round-47: bind the orchestration-root exception class at module
+# scope so the guarded ``except (ImportError, OrchestrationRootError)``
+# clauses below can always resolve the exception name even when
+# the inner ``from .orchestration_state_root import ...`` raises
+# ImportError. Without this binding Python evaluates the handler
+# before ``OrchestrationRootError`` is necessarily bound, which
+# raises ``UnboundLocalError`` instead of taking the documented
+# fallback. Fall back to a private ``Exception`` sentinel if the
+# orchestration_state_root module itself fails to import.
+try:
+    from .orchestration_state_root import OrchestrationRootError  # noqa: F401
+except ImportError:
+    class _OrchestrationRootErrorFallback(Exception):  # noqa: F401
+        """Sentinel used only when ``orchestration_state_root``
+        cannot be imported. The guarded import below will raise
+        the real exception when state-root resolution fails; this
+        class exists solely so the ``except`` clause names resolve.
+        """
+    OrchestrationRootError = _OrchestrationRootErrorFallback
+
+
 # The path to the relay CLI. The supervisor uses subprocess so
 # the supervisor and the relay stay in separate address
 # spaces (no Python package cycle). The CLI is the documented
@@ -417,7 +438,6 @@ def _resolve_orchestration_evidence_root(state_root: Optional[str]) -> str:
     try:
         from .supervisor import RUN_STATE
         from .orchestration_state_root import (
-            OrchestrationRootError,
             resolve_orchestration_state_root,
         )
         orch_root = resolve_orchestration_state_root(
@@ -494,7 +514,6 @@ def mark_head_advanced_public(
         default_store,
     )
     from .orchestration_state_root import (
-        OrchestrationRootError,
         resolve_orchestration_state_root,
     )
     from .supervisor import RUN_STATE  # type: ignore[name-defined]
