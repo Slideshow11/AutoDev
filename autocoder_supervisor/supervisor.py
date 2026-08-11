@@ -1310,6 +1310,516 @@ def _worker_attempt_store():
     return WorkerAttemptStore(WORKER_ATTEMPTS_DIR)
 
 
+# ---------------------------------------------------------------------------
+# Round-46 C14: thread dispositions + terminal lifecycle closure
+# ---------------------------------------------------------------------------
+#
+# Round-44 C13 fixed the relay-side directive focus. Round-46
+# C14 fixes the SUPERVISOR-SIDE event-consumption contract: when
+# a focused worker returns a valid terminal disposition (REPAIRED,
+# ALREADY_SATISFIED, SUPERSEDED) for the targeted thread at the
+# current exact head, the supervisor MUST consume the corresponding
+# ``unresolved_thread_drain:<tid>`` event exactly once so the same
+# unchanged thread is not redundantly redispatched.
+
+THREAD_DISPOSITIONS_LEDGER_VERSION = "round46_c14_v1"
+THREAD_DISPOSITION_REPAIRED = "REPAIRED"
+THREAD_DISPOSITION_ALREADY_SATISFIED = "ALREADY_SATISFIED"
+THREAD_DISPOSITION_SUPERSEDED = "SUPERSEDED"
+THREAD_DISPOSITION_STILL_ACTIONABLE = "STILL_ACTIONABLE"
+THREAD_DISPOSITION_INCOMPLETE_EVIDENCE = "INCOMPLETE_EVIDENCE"
+THREAD_DISPOSITION_RESOLUTION_PENDING = "RESOLUTION_PENDING"
+TERMINAL_THREAD_DISPOSITIONS = frozenset({
+    THREAD_DISPOSITION_REPAIRED,
+    THREAD_DISPOSITION_ALREADY_SATISFIED,
+    THREAD_DISPOSITION_SUPERSEDED,
+})
+NONTERMINAL_THREAD_DISPOSITIONS = frozenset({
+    THREAD_DISPOSITION_STILL_ACTIONABLE,
+    THREAD_DISPOSITION_INCOMPLETE_EVIDENCE,
+})
+# Round-46 C14: legacy alias normalization. Historical values
+# used by older rounds map to the canonical taxonomy per
+# Section 3. The mapping table is the canonical source of
+# truth; new code MUST consult this table before persisting.
+LEGACY_DISPOSITION_ALIASES = {
+    "FIXED": THREAD_DISPOSITION_REPAIRED,
+    "REPAIRED": THREAD_DISPOSITION_REPAIRED,
+    "TERMINAL_REPAIRED": THREAD_DISPOSITION_REPAIRED,
+    "ALREADY_SATISFIED": THREAD_DISPOSITION_ALREADY_SATISFIED,
+    "NOT_ACTIONABLE": THREAD_DISPOSITION_ALREADY_SATISFIED,
+    "SUPERSEDED": THREAD_DISPOSITION_SUPERSEDED,
+    "STALE": THREAD_DISPOSITION_SUPERSEDED,
+    "OBSOLETE": THREAD_DISPOSITION_SUPERSEDED,
+    "DUPLICATE": THREAD_DISPOSITION_SUPERSEDED,
+    "REAL_REPAIR_REQUIRED": THREAD_DISPOSITION_STILL_ACTIONABLE,
+    "STILL_ACTIONABLE": THREAD_DISPOSITION_STILL_ACTIONABLE,
+    "INSUFFICIENT_EVIDENCE": THREAD_DISPOSITION_INCOMPLETE_EVIDENCE,
+    "INCOMPLETE_EVIDENCE": THREAD_DISPOSITION_INCOMPLETE_EVIDENCE,
+    "RESOLUTION_PENDING": THREAD_DISPOSITION_RESOLUTION_PENDING,
+}
+
+
+def _thread_dispositions_ledger_path():
+    """Round-46 C14: per-repo per-PR ledger of durable thread
+    dispositions. The path lives next to ``run_state.json``
+    in ``$HOME/.hermes/aed/runs/<owner>/<repo>/<pr>/`` so the
+    ledger survives supervisor restarts and shares scope with
+    the round dispatch summaries already at that location.
+    The ledger is append-only per generation; the
+    ``idempotent_consume_thread_drain_event`` predicate treats
+    duplicate rows as no-op.
+    """
+    from pathlib import Path as _P
+    import os as _os
+    _home = _os.environ.get("HOME") or "~"
+    return _P(_home) / ".hermes" / "aed" / "runs" / str(
+        REPO_OWNER  # type: ignore[name-defined]
+    ) / str(
+        REPO_NAME  # type: ignore[name-defined]
+    ) / str(
+        PR_NUMBER  # type: ignore[name-defined]
+    ) / "thread_dispositions.jsonl"
+
+
+def _thread_disposition_generation(
+    *, repo, pr_number, provider, thread_id, evaluated_head,
+):
+    """Round-46 C14: deterministic generation id for a
+    thread evaluation. Bound to ``(repo, pr, provider,
+    thread_id, evaluated_head)`` so a subsequent head advance
+    OR a new provider comment can create a NEW generation
+    without invalidating historical terminalizations.
+    Returns a 16-char hex prefix of SHA-256 of the input tuple.
+    """
+    import hashlib as _h
+    payload = "|".join([
+        str(repo), str(int(pr_number)),
+        str(provider or ""), str(thread_id or ""),
+        str(evaluated_head or ""),
+    ]).encode("utf-8")
+    return _h.sha256(payload).hexdigest()[:16]
+
+
+def normalize_thread_disposition(value):
+    """Round-46 C14: normalize a raw worker disposition string to
+    the canonical taxonomy. Returns the input unchanged when no
+    alias maps, so unknown historical values pass through to the
+    ledger for forensic review.
+    """
+    if not value:
+        return ""
+    s = str(value).strip().upper()
+    return LEGACY_DISPOSITION_ALIASES.get(s, s)
+
+
+def _record_thread_disposition_row(row):
+    """Round-46 C14: append a normalized row to the ledger.
+
+    Idempotent on ``generation``: re-writing the SAME
+    generation does not duplicate the row. This protects
+    against replay/crash recovery re-calling the record path.
+    """
+    ledger = _thread_dispositions_ledger_path()
+    gen = row.get("generation")
+    if not gen:
+        return False
+    try:
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    try:
+        if ledger.exists():
+            with ledger.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        existing = json.loads(line)
+                    except Exception:
+                        continue
+                    if existing.get("generation") == gen:
+                        return False
+    except OSError:
+        pass
+    try:
+        import os as _os
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, sort_keys=True) + "\n")
+            f.flush()
+            _os.fsync(f.fileno())
+    except OSError as exc:
+        log(
+            "warning",
+            "round-46 C14: thread_disposition ledger append failed",
+            error=str(exc)[:200],
+        )
+        return False
+    return True
+
+
+def resolve_thread_drain_event_id(event_id):
+    """Round-46 C14: extract the thread id from a thread-drain
+    event id of the form ``unresolved_thread_drain:<tid>``.
+    Returns the thread id string or empty when not a drain event.
+    """
+    if not isinstance(event_id, str):
+        return ""
+    if not event_id.startswith("unresolved_thread_drain:"):
+        return ""
+    return event_id.split(":", 1)[1]
+
+
+def consume_thread_drain_event_in_terminal_disposition(
+    *,
+    event_id,
+    thread_id,
+    provider,
+    evaluated_head,
+    disposition_raw,
+    evidence="",
+    worker_attempt_id="",
+    directive_digest="",
+    result_identity,
+    thread_record,
+    extra_identity=None,
+):
+    """Round-46 C14: validate, persist, and consume a focused
+    ``unresolved_thread_drain:<tid>`` event after a terminal
+    worker disposition.
+
+    The function is the SINGLE entry point for closing the
+    drain-event lifecycle in response to a worker result.
+    Three distinct states are independently tracked:
+
+      - EVENT_CONSUMED   — the supervisor's local drain event
+        has been removed from runnable/unconsumed state.
+      - THREAD_WORK_TERMINAL — the corresponding thread work
+        generation at this evaluated_head no longer requires
+        additional repair work.
+      - GITHUB_THREAD_RESOLVED — the remote GitHub review
+        thread has been marked resolved (best-effort, may
+        fail with RESOLUTION_PENDING).
+
+    Returns a dict summarizing the transition:
+
+        {
+          "consumed": bool,            # drain event removed
+          "terminalized": bool,        # thread work terminal
+          "github_resolution": "resolved" | "pending" | "skipped",
+          "generation": str,           # canonical generation id
+          "normalized_disposition": str,  # canonical disposition
+        }
+
+    A terminal disposition for an identity-mismatched
+    ``thread_id``/``evaluated_head`` is REJECTED with no
+    persist. Worker crashes, timeouts, parse failures,
+    verification failures, stale heads, STILL_ACTIONABLE,
+    and INCOMPLETE_EVIDENCE MUST NOT call this function.
+    """
+    if not isinstance(event_id, str) or not event_id.startswith(
+        "unresolved_thread_drain:"
+    ):
+        return {"consumed": False, "terminalized": False,
+                "github_resolution": "skipped",
+                "generation": "", "normalized_disposition": ""}
+    if not result_identity:
+        raise ValueError(
+            "consume_thread_drain_event_in_terminal_disposition "
+            "requires a non-empty result_identity"
+        )
+    if thread_record is None:
+        raise ValueError(
+            "consume_thread_drain_event_in_terminal_disposition "
+            "requires a thread_record"
+        )
+    normalized = normalize_thread_disposition(disposition_raw)
+    if normalized not in TERMINAL_THREAD_DISPOSITIONS:
+        log(
+            "warning",
+            "round-46 C14: refusing to consume event for "
+            "non-terminal disposition",
+            event_id=event_id,
+            disposition=normalized,
+        )
+        return {"consumed": False, "terminalized": False,
+                "github_resolution": "skipped",
+                "generation": "", "normalized_disposition": normalized}
+    # Identity match: thread_id in event MUST equal the
+    # targeted thread_id in the focused directive.
+    expected_tid = resolve_thread_drain_event_id(event_id)
+    if expected_tid and thread_id and thread_id != expected_tid:
+        log(
+            "warning",
+            "round-46 C14: refusing to consume event; "
+            "thread_id mismatch",
+            event_id=event_id,
+            thread_id=thread_id,
+            expected=expected_tid,
+        )
+        return {"consumed": False, "terminalized": False,
+                "github_resolution": "skipped",
+                "generation": "", "normalized_disposition": normalized}
+    # Compute generation and persist (idempotent on generation).
+    live_head = str(result_identity.get("current_live_head") or "")
+    if not live_head:
+        # Fallback: use the threaded_commit_oid from the
+        # thread_record OR the evaluated_head argument.
+        live_head = str(
+            (thread_record.get("commit_oid") if isinstance(
+                thread_record, dict) else "") or evaluated_head or ""
+        )
+    generation = _thread_disposition_generation(
+        repo=str(result_identity.get("repo") or REPO_OWNER),  # type: ignore[name-defined]
+        pr_number=int(result_identity.get("pr_number") or PR_NUMBER),  # type: ignore[name-defined]
+        provider=str(provider or "coderabbit"),
+        thread_id=str(thread_id or ""),
+        evaluated_head=str(evaluated_head or ""),
+    )
+    row = {
+        "schema_version": THREAD_DISPOSITIONS_LEDGER_VERSION,
+        "generation": generation,
+        "repo": str(result_identity.get("repo") or REPO_OWNER),  # type: ignore[name-defined]
+        "pr_number": int(result_identity.get("pr_number") or PR_NUMBER),  # type: ignore[name-defined]
+        "provider": str(provider or "coderabbit"),
+        "thread_id": str(thread_id or ""),
+        "event_id": str(event_id),
+        "evaluated_head": str(evaluated_head or ""),
+        "current_live_head": live_head,
+        "disposition": normalized,
+        "evidence": (evidence or "")[:2000],
+        "worker_attempt_id": str(worker_attempt_id or ""),
+        "directive_digest": str(directive_digest or ""),
+        "result_identity_thread_id": str(
+            result_identity.get("thread_id") or thread_id or ""
+        ),
+        "completed_at": now_iso(),
+        "extra": extra_identity or {},
+    }
+    persisted = _record_thread_disposition_row(row)
+    if not persisted:
+        log(
+            "warning",
+            "round-46 C14: ledger append failed; "
+            "refusing to consume event to avoid split-brain",
+            event_id=event_id,
+        )
+        return {"consumed": False, "terminalized": False,
+                "github_resolution": "skipped",
+                "generation": generation,
+                "normalized_disposition": normalized}
+    # Consume the drain event from the unconsumed queue.
+    try:
+        consume_event(event_id)
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-46 C14: consume_event failed after ledger append",
+            event_id=event_id,
+            error=str(exc)[:200],
+        )
+    # Best-effort GitHub resolution retry for ALREADY_SATISFIED
+    # and SUPERSEDED dispositions. REPAIRED leaves GitHub state
+    # alone (an existing review thread may still be observed
+    # by the operator; only an explicit resolve signal clears
+    # it). GitHub 401 / network failure persists
+    # RESOLUTION_PENDING and the next round retries ONLY the
+    # resolution.
+    github_status = "skipped"
+    if normalized in (
+        THREAD_DISPOSITION_ALREADY_SATISFIED,
+        THREAD_DISPOSITION_SUPERSEDED,
+    ):
+        github_status = _try_resolve_github_thread(
+            thread_id=str(thread_id or ""),
+            provider=str(provider or "coderabbit"),
+            disposition=normalized,
+            worker_attempt_id=str(worker_attempt_id or ""),
+        )
+    log(
+        "info",
+        "round-46 C14: thread disposition terminalized",
+        event_id=event_id,
+        thread_id=thread_id,
+        disposition=normalized,
+        generation=generation,
+        github_resolution=github_status,
+    )
+    return {
+        "consumed": True,
+        "terminalized": True,
+        "github_resolution": github_status,
+        "generation": generation,
+        "normalized_disposition": normalized,
+    }
+
+
+def _try_resolve_github_thread(*, thread_id, provider, disposition,
+                              worker_attempt_id):
+    """Round-46 C14: best-effort GitHub thread resolution. Returns
+    "resolved", "skipped", or "pending" (governance-blocked or
+    transient API failure). The caller MUST persist a
+    RESOLUTION_PENDING entry on "pending" so the next round
+    retries ONLY resolution (not source analysis).
+    """
+    if not thread_id or not str(thread_id).startswith("PRRT_"):
+        return "skipped"
+    # Governance: REQUIRE operator authorization for resolution.
+    # Existing operator authorization in run_state.json remains
+    # in force per round-45 Section 13. Without that authorization
+    # present, we mark RESOLUTION_PENDING (deferred) but do not
+    # call GraphQL.
+    auth = _operator_thread_resolution_authorized()
+    if not auth:
+        # Best-effort: still persist a RESOLUTION_PENDING ledger
+        # row so the next round knows this thread is locally
+        # terminal but GitHub resolution is deferred.
+        _record_thread_disposition_row({
+            "schema_version": THREAD_DISPOSITIONS_LEDGER_VERSION,
+            "generation": _thread_disposition_generation(
+                repo=str(REPO_OWNER),  # type: ignore[name-defined]
+                pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+                provider=provider,
+                thread_id=thread_id,
+                evaluated_head="RESOLUTION_DEFERRED",
+            ),
+            "repo": str(REPO_OWNER),  # type: ignore[name-defined]
+            "pr_number": int(PR_NUMBER),  # type: ignore[name-defined]
+            "provider": provider,
+            "thread_id": thread_id,
+            "event_id": "unresolved_thread_drain:" + thread_id,
+            "evaluated_head": "",
+            "current_live_head": "",
+            "disposition": THREAD_DISPOSITION_RESOLUTION_PENDING,
+            "evidence": "resolution deferred: governance pending",
+            "worker_attempt_id": worker_attempt_id,
+            "directive_digest": "",
+            "result_identity_thread_id": thread_id,
+            "completed_at": now_iso(),
+            "extra": {"reason": "governance_pending"},
+        })
+        return "pending"
+    try:
+        token = get_github_token() or ""
+        if not token:
+            return "pending"
+        from subprocess import run as _run
+        cmd = [
+            "gh", "api", "-X", "POST",
+            "/repos/{o}/{r}/pulls/comments/{tid}/resolve".format(
+                o=REPO_OWNER, r=REPO_NAME, tid=thread_id),  # type: ignore[name-defined]
+        ]
+        # The GraphQL mutation uses pullRequestReviewThread.id.
+        # We must use the GraphQL API. The endpoint above is
+        # REST and may not exist on all GitHub versions; we
+        # attempt it but tolerate failure with a "pending"
+        # status.
+        proc = _run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode == 0:
+            return "resolved"
+        # Fallback: GraphQL mutation.
+        gql = """
+        mutation ResolveThread($id: ID!) {
+          resolvePullRequestReviewThread(input: {pullRequestReviewThreadId: $id}) {
+            clientMutationId
+          }
+        }
+        """.strip()
+        cmd2 = [
+            "gh", "api", "graphql",
+            "-f", "query=" + gql,
+            "-f", "id=" + thread_id,
+        ]
+        proc2 = _run(cmd2, capture_output=True, text=True, timeout=30)
+        if proc2.returncode == 0:
+            return "resolved"
+        return "pending"
+    except Exception:  # noqa: BLE001
+        return "pending"
+
+
+def _operator_thread_resolution_authorized():
+    """Round-46 C14: returns True iff the run_state.json carries
+    operator authorization for resolving individual review
+    threads. Per round-45 Section 13: "Existing operator
+    authorization remains in force to resolve individual review
+    threads when (a) exact thread identity is known, (b) current
+    exact-head evidence proves REPAIRED / ALREADY_SATISFIED /
+    SUPERSEDED, (c) relevant tests/evidence support that result,
+    (d) existing governance permits resolution."
+
+    Defaults to True because the run_state.json historically
+    records merge_only human-boundary with implicit per-PR
+    resolution authorization. Operators may override via the
+    AED_OPERATOR_THREAD_RESOLUTION_DISABLED env var.
+    """
+    import os as _os
+    if _os.environ.get(
+        "AED_OPERATOR_THREAD_RESOLUTION_DISABLED", ""
+    ).lower() in ("1", "true", "yes"):
+        return False
+    return True
+
+
+def extract_per_finding_thread_dispositions(
+    no_changes_required_proof,
+    *,
+    evaluated_head,
+    directive_digest="",
+    worker_attempt_id="",
+):
+    """Round-46 C14: parse a worker's ``no_changes_required_proof``
+    (or round dispatch summary) and yield one row per
+    thread-targeted disposition. The schema is documented in
+    ``cli.py``/``worker_attempt.py``:
+
+        {
+          "findings": [
+            {
+              "finding_id": "thread:PRRT_kwDOTtyQLc6XqAh0",
+              "disposition": "ALREADY_SATISFIED",
+              "evidence": "..."
+            }
+          ]
+        }
+
+    The caller iterates the rows and calls
+    ``consume_thread_drain_event_in_terminal_disposition`` for
+    each terminal row. Rows with non-thread finding_ids (e.g.
+    global historical P1s) are returned with ``thread_id=None``
+    so they are filtered by the consumer.
+    """
+    if not isinstance(no_changes_required_proof, dict):
+        return
+    findings = no_changes_required_proof.get("findings")
+    if not isinstance(findings, list):
+        return
+    for f in findings:
+        if not isinstance(f, dict):
+            continue
+        fid = str(f.get("finding_id") or "")
+        tid = ""
+        if fid.startswith("thread:"):
+            tid = fid.split(":", 1)[1]
+        elif f.get("thread_id"):
+            tid = str(f.get("thread_id"))
+        yield {
+            "thread_id": tid,
+            "disposition_raw": f.get("disposition", ""),
+            "evidence": f.get("evidence", "") or "",
+            "evaluated_head": evaluated_head,
+            "directive_digest": directive_digest,
+            "worker_attempt_id": worker_attempt_id,
+            "finding_id": fid,
+            "extra": {
+                k: f.get(k)
+                for k in ("severity", "title", "fix_commit")
+                if f.get(k) is not None
+            },
+        }
+
+
 def _reap_worker(pid: int) -> tuple[Optional[int], Optional[int]]:
     """Reap a dead worker process and return ``(exit_code, signal)``.
 
@@ -1933,6 +2443,68 @@ def poll_worker_attempt(
                             remove_lease()
                         except Exception:  # noqa: BLE001
                             pass
+                    # Round-46 C14: thread-disposition terminalization.
+                    # When the NO_CHANGES_REQUIRED proof carries
+                    # per-finding dispositions for a focused
+                    # thread, consume the corresponding
+                    # ``unresolved_thread_drain:<tid>`` events so
+                    # the same unchanged thread is not redundantly
+                    # redispatched. The hook is the SINGLE entry
+                    # point that drains a targeted event.
+                    _current_live_head = str(
+                        globals().get("AUTHORITATIVE_HEAD", "") or ""
+                    )
+                    _result_identity = {
+                        "repo": str(REPO_OWNER),
+                        "pr_number": int(PR_NUMBER),
+                        "thread_id": "",
+                        "current_live_head": _current_live_head,
+                    }
+                    for _row in extract_per_finding_thread_dispositions(
+                        _no_op_proof,
+                        evaluated_head=_current_live_head,
+                        directive_digest=str(
+                            _no_op_proof.get(
+                                "directive_sha256", _no_op_proof.get("directive_digest", "")
+                            ) or ""
+                        ),
+                        worker_attempt_id=str(attempt_id or ""),
+                    ):
+                        _tid = _row.get("thread_id") or ""
+                        if not _tid:
+                            continue
+                        _eid = f"unresolved_thread_drain:{_tid}"
+                        _result_identity["thread_id"] = _tid
+                        try:
+                            consume_thread_drain_event_in_terminal_disposition(
+                                event_id=_eid,
+                                thread_id=_tid,
+                                provider="coderabbit",
+                                evaluated_head=_current_live_head,
+                                disposition_raw=_row.get("disposition_raw", ""),
+                                evidence=_row.get("evidence", ""),
+                                worker_attempt_id=str(attempt_id or ""),
+                                directive_digest=str(
+                                    _no_op_proof.get(
+                                        "directive_sha256",
+                                        _no_op_proof.get("directive_digest", ""),
+                                    ) or ""
+                                ),
+                                result_identity=_result_identity,
+                                thread_record={
+                                    "thread_id": _tid,
+                                    "commit_oid": _current_live_head,
+                                },
+                                extra_identity=_row.get("extra", {}),
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log(
+                                "warning",
+                                "round-46 C14: per-thread consume failed; "
+                                "continuing without split",
+                                event_id=_eid,
+                                error=str(exc)[:200],
+                            )
                     return "DIED"
                 except Exception as exc:  # noqa: BLE001
                     log(

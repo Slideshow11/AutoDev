@@ -3103,3 +3103,560 @@ def test_round45_c13_supervisor_no_focused_thread_when_no_drain(
     assert captured["focused_thread_id"] is None, (
         "round-45 C13: no drain event => focused_thread_id is None"
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-46 C14: thread-drain terminalization lifecycle
+# ---------------------------------------------------------------------------
+
+
+def _round46_setup_thread_drain_event(
+    sup, monkeypatch, tmp_path, thread_id, evaluated_head,
+):
+    """Round-46 C14: install a deterministic
+    unresolved_thread_drain:<tid> event in the supervisor's
+    unconsumed ledger, point AUTHORITATIVE_HEAD at the
+    evaluated head, and return the canonical event id.
+    """
+    monkeypatch.setattr(sup, "AUTHORITATIVE_HEAD", evaluated_head)
+    monkeypatch.setattr(sup, "REPO_OWNER", "Slideshow11", raising=False)
+    monkeypatch.setattr(sup, "REPO_NAME", "AutoDev", raising=False)
+    monkeypatch.setattr(sup, "PR_NUMBER", 5, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    eid = f"unresolved_thread_drain:{thread_id}"
+    sup.write_unconsumed_event({
+        "id": eid,
+        "kind": "unresolved_thread_drain",
+        "thread_id": thread_id,
+        "head_sha": evaluated_head,
+        "source": "round46_test",
+    })
+    return eid
+
+
+def test_round46_c14_normalize_thread_disposition_alias_table(
+    isolated_state,
+):
+    from autocoder_supervisor import supervisor as sup
+    f = sup.normalize_thread_disposition
+    assert f("FIXED") == "REPAIRED"
+    assert f("REPAIRED") == "REPAIRED"
+    assert f("terminal_repaired") == "REPAIRED"
+    assert f("ALREADY_SATISFIED") == "ALREADY_SATISFIED"
+    assert f("not_actionable") == "ALREADY_SATISFIED"
+    assert f("SUPERSEDED") == "SUPERSEDED"
+    assert f("STALE") == "SUPERSEDED"
+    assert f("OBSOLETE") == "SUPERSEDED"
+    assert f("DUPLICATE") == "SUPERSEDED"
+    assert f("REAL_REPAIR_REQUIRED") == "STILL_ACTIONABLE"
+    assert f("STILL_ACTIONABLE") == "STILL_ACTIONABLE"
+    assert f("INSUFFICIENT_EVIDENCE") == "INCOMPLETE_EVIDENCE"
+    assert f("UNRECOGNIZED_VALUE") == "UNRECOGNIZED_VALUE"
+    assert f("") == ""
+
+
+def test_round46_c14_generation_identity_deterministic(isolated_state):
+    from autocoder_supervisor import supervisor as sup
+    g1 = sup._thread_disposition_generation(
+        repo="Slideshow11/AutoDev", pr_number=5,
+        provider="coderabbit", thread_id="T1",
+        evaluated_head="a" * 40,
+    )
+    g2 = sup._thread_disposition_generation(
+        repo="Slideshow11/AutoDev", pr_number=5,
+        provider="coderabbit", thread_id="T1",
+        evaluated_head="a" * 40,
+    )
+    g3 = sup._thread_disposition_generation(
+        repo="Slideshow11/AutoDev", pr_number=5,
+        provider="coderabbit", thread_id="T1",
+        evaluated_head="b" * 40,
+    )
+    g4 = sup._thread_disposition_generation(
+        repo="Slideshow11/AutoDev", pr_number=5,
+        provider="codex", thread_id="T1",
+        evaluated_head="a" * 40,
+    )
+    g5 = sup._thread_disposition_generation(
+        repo="Slideshow11/AutoDev", pr_number=5,
+        provider="coderabbit", thread_id="T2",
+        evaluated_head="a" * 40,
+    )
+    assert g1 == g2
+    assert g1 != g3
+    assert g1 != g4
+    assert g1 != g5
+    assert len(g1) == 16
+
+
+def test_round46_c14_resolve_drain_event_id_extracts_thread(isolated_state):
+    from autocoder_supervisor import supervisor as sup
+    assert (sup.resolve_thread_drain_event_id(
+        "unresolved_thread_drain:PRRT_kwDOTtyQLc6XqAh0")
+        == "PRRT_kwDOTtyQLc6XqAh0")
+    assert sup.resolve_thread_drain_event_id("head_change") == ""
+    assert sup.resolve_thread_drain_event_id("") == ""
+    assert sup.resolve_thread_drain_event_id(None) == ""
+
+
+def test_round46_c14_terminalization_persists_and_consumes(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from pathlib import Path
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head = "f" * 40
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    monkeypatch.setattr(sup, "_try_resolve_github_thread",
+                        lambda **_: "skipped")
+    result = sup.consume_thread_drain_event_in_terminal_disposition(
+        event_id=eid,
+        thread_id=thread_id,
+        provider="coderabbit",
+        evaluated_head=head,
+        disposition_raw="ALREADY_SATISFIED",
+        evidence="already fixed",
+        worker_attempt_id="att-round46-fixture-1",
+        directive_digest="deadbeef" * 8,
+        result_identity={
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 5,
+            "thread_id": thread_id,
+            "current_live_head": head,
+        },
+        thread_record={"thread_id": thread_id, "commit_oid": head},
+        extra_identity={"severity": "P2", "title": "XpixA"},
+    )
+    assert result["consumed"] is True
+    assert result["terminalized"] is True
+    assert result["github_resolution"] == "skipped"
+    assert result["normalized_disposition"] == "ALREADY_SATISFIED"
+    remaining = sup.list_unconsumed_events()
+    assert all(e.get("id") != eid for e in remaining)
+    ledger = Path(str(tmp_path)) / ".hermes" / "aed" / "runs" / (
+        "Slideshow11/AutoDev") / "5" / "thread_dispositions.jsonl"
+    assert ledger.exists()
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    matching = [r for r in rows if r.get("thread_id") == thread_id]
+    assert len(matching) == 1
+    row = matching[0]
+    assert row["disposition"] == "ALREADY_SATISFIED"
+    assert row["evaluated_head"] == head
+    assert row["generation"]
+
+
+def test_round46_c14_generic_no_op_does_not_consume(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head = "f" * 40
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    no_op_proof = {
+        "findings": [
+            {
+                "finding_id": "thread:PRRT_kwDOTtyQLc6X-HAw",
+                "disposition": "ALREADY_SATISFIED",
+                "evidence": "historical P1 already satisfied",
+            },
+        ],
+    }
+    thread_rows = list(
+        sup.extract_per_finding_thread_dispositions(
+            no_op_proof, evaluated_head=head,
+            directive_digest="x", worker_attempt_id="y",
+        )
+    )
+    rows_for_event = [
+        r for r in thread_rows
+        if r.get("thread_id") and f"unresolved_thread_drain:{r['thread_id']}" == eid
+    ]
+    assert rows_for_event == []
+    remaining = sup.list_unconsumed_events()
+    assert any(e.get("id") == eid for e in remaining)
+
+
+def test_round46_c14_nonterminal_disposition_refused(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head = "f" * 40
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    monkeypatch.setattr(sup, "_try_resolve_github_thread",
+                        lambda **_: "skipped")
+    for raw in ("STILL_ACTIONABLE", "INCOMPLETE_EVIDENCE",
+                "REAL_REPAIR_REQUIRED", "INSUFFICIENT_EVIDENCE"):
+        result = sup.consume_thread_drain_event_in_terminal_disposition(
+            event_id=eid,
+            thread_id=thread_id,
+            provider="coderabbit",
+            evaluated_head=head,
+            disposition_raw=raw,
+            worker_attempt_id="y",
+            directive_digest="z",
+            result_identity={
+                "repo": "Slideshow11/AutoDev",
+                "pr_number": 5,
+                "thread_id": thread_id,
+                "current_live_head": head,
+            },
+            thread_record={"thread_id": thread_id, "commit_oid": head},
+        )
+        assert result["consumed"] is False, (
+            f"round-46 C14: refusing non-terminal {raw!r} "
+            f"MUST NOT consume the drain event"
+        )
+    remaining = sup.list_unconsumed_events()
+    assert any(e.get("id") == eid for e in remaining)
+
+
+def test_round46_c14_thread_id_mismatch_refused(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    other_thread = "PRRT_kwDOTtyQLc6X-HAw"
+    head = "f" * 40
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    monkeypatch.setattr(sup, "_try_resolve_github_thread",
+                        lambda **_: "skipped")
+    result = sup.consume_thread_drain_event_in_terminal_disposition(
+        event_id=eid,
+        thread_id=other_thread,
+        provider="coderabbit",
+        evaluated_head=head,
+        disposition_raw="ALREADY_SATISFIED",
+        worker_attempt_id="x",
+        directive_digest="y",
+        result_identity={
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 5,
+            "thread_id": other_thread,
+            "current_live_head": head,
+        },
+        thread_record={"thread_id": other_thread, "commit_oid": head},
+    )
+    assert result["consumed"] is False
+    remaining = sup.list_unconsumed_events()
+    assert any(e.get("id") == eid for e in remaining)
+
+
+def test_round46_c14_idempotent_terminalization(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from pathlib import Path
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head = "f" * 40
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    monkeypatch.setattr(sup, "_try_resolve_github_thread",
+                        lambda **_: "skipped")
+    common = dict(
+        event_id=eid,
+        thread_id=thread_id,
+        provider="coderabbit",
+        evaluated_head=head,
+        disposition_raw="ALREADY_SATISFIED",
+        evidence="dup test",
+        worker_attempt_id="dup-1",
+        directive_digest="dup-digest",
+        result_identity={
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 5,
+            "thread_id": thread_id,
+            "current_live_head": head,
+        },
+        thread_record={"thread_id": thread_id, "commit_oid": head},
+    )
+    r1 = sup.consume_thread_drain_event_in_terminal_disposition(**common)
+    r2 = sup.consume_thread_drain_event_in_terminal_disposition(**common)
+    assert r1["consumed"] is True
+    assert r2["consumed"] is False
+    ledger = Path(str(tmp_path)) / ".hermes" / "aed" / "runs" / (
+        "Slideshow11/AutoDev") / "5" / "thread_dispositions.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    matching = [r for r in rows if r.get("thread_id") == thread_id]
+    assert len(matching) == 1
+
+
+def test_round46_c14_multiple_drain_events_only_targeted_consumed(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from autocoder_supervisor import supervisor as sup
+    monkeypatch.setattr(sup, "_try_resolve_github_thread",
+                        lambda **_: "skipped")
+    head = "f" * 40
+    monkeypatch.setattr(sup, "AUTHORITATIVE_HEAD", head)
+    monkeypatch.setattr(sup, "REPO_OWNER", "Slideshow11", raising=False)
+    monkeypatch.setattr(sup, "REPO_NAME", "AutoDev", raising=False)
+    monkeypatch.setattr(sup, "PR_NUMBER", 5, raising=False)
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    a_eid = "unresolved_thread_drain:PRRT_kwDOTtyQLc6XX_A"
+    b_eid = "unresolved_thread_drain:PRRT_kwDOTtyQLc6XX_B"
+    c_eid = "unresolved_thread_drain:PRRT_kwDOTtyQLc6XX_C"
+    for eid, tid in [(a_eid, "A"), (b_eid, "B"), (c_eid, "C")]:
+        sup.write_unconsumed_event({
+            "id": eid,
+            "kind": "unresolved_thread_drain",
+            "thread_id": f"PRRT_kwDOTtyQLc6XX_{tid}",
+            "head_sha": head,
+            "source": "round46_test",
+        })
+    sup.consume_thread_drain_event_in_terminal_disposition(
+        event_id=a_eid,
+        thread_id="PRRT_kwDOTtyQLc6XX_A",
+        provider="coderabbit",
+        evaluated_head=head,
+        disposition_raw="ALREADY_SATISFIED",
+        evidence="A is fixed",
+        worker_attempt_id="multi-1",
+        directive_digest="m-1",
+        result_identity={
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 5,
+            "thread_id": "PRRT_kwDOTtyQLc6XX_A",
+            "current_live_head": head,
+        },
+        thread_record={"thread_id": "PRRT_kwDOTtyQLc6XX_A", "commit_oid": head},
+    )
+    remaining = sup.list_unconsumed_events()
+    remaining_ids = {e.get("id") for e in remaining}
+    assert a_eid not in remaining_ids
+    assert b_eid in remaining_ids
+    assert c_eid in remaining_ids
+
+
+def test_round46_c14_extract_dispositions_parses_focused_proof(
+    isolated_state,
+):
+    from autocoder_supervisor import supervisor as sup
+    proof = {
+        "findings": [
+            {
+                "finding_id": "thread:PRRT_kwDOTtyQLc6XqAh0",
+                "disposition": "ALREADY_SATISFIED",
+                "evidence": "relay_wiring.py:227 already correct",
+            },
+            {
+                "finding_id": "thread:PRRT_kwDOTtyQLc6X-HAw",
+                "disposition": "ALREADY_SATISFIED",
+                "evidence": "global P1 already correct",
+            },
+        ],
+    }
+    rows = list(
+        sup.extract_per_finding_thread_dispositions(
+            proof, evaluated_head="a" * 40,
+            directive_digest="x", worker_attempt_id="y",
+        )
+    )
+    assert len(rows) == 2
+    by_id = {r["thread_id"]: r for r in rows if r["thread_id"]}
+    assert "PRRT_kwDOTtyQLc6XqAh0" in by_id
+    assert "PRRT_kwDOTtyQLc6X-HAw" in by_id
+
+
+def test_round46_c14_legacy_no_op_proof_consumes_focused_thread(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from pathlib import Path
+    from autocoder_supervisor import supervisor as sup
+    from autocoder_orchestration.worker_attempt import (
+        WorkerAttemptStore, WorkerAttemptRecord,
+        LIFECYCLE_WORKER_RUNNING,
+    )
+    thread_id = "PRRT_kwDOTtyQLc6XqAh0"
+    head = "d634bfae2e71fec2c41d5f49be88e5bb219fedc7"
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    monkeypatch.setattr(sup, "_try_resolve_github_thread",
+                        lambda **_: "skipped")
+    store = WorkerAttemptStore(sup.WORKER_ATTEMPTS_DIR)
+    attempt_id = "att-round46-full-flow-fixture"
+    rec = WorkerAttemptRecord(
+        schema_version="autocoder.worker_attempt.v1",
+        attempt_id=attempt_id,
+        claim_id="claim-round46-fixture-1",
+        repo_owner="Slideshow11",
+        repo_name="AutoDev",
+        pr_number=5,
+        event_ids=(eid,),
+        finding_ids=(f"thread:{thread_id}",),
+        directive_digest="deadbeef" * 8,
+        directive_path=str(tmp_path / "directive.json"),
+        prelaunch_head=head,
+        expected_branch="feat/review-repair-relay-v1",
+        pid=99999,
+        lease_id="lease-round46-fixture",
+        started_at="2026-08-11T16:00:00Z",
+        last_progress_at="2026-08-11T16:01:00Z",
+        finished_at=None,
+        lifecycle=LIFECYCLE_WORKER_RUNNING,
+        attempt_count=1,
+        stdout_path=None,
+        stderr_path=None,
+        exit_code=None,
+        signal=None,
+        result_artifact_path=None,
+        produced_commit_sha=None,
+        pushed_commit_sha=None,
+        origin_head_verified=False,
+        github_head_verified=False,
+        terminal_reason=None,
+    )
+    rec.extra = {
+        "no_changes_required_proof": {
+            "findings": [
+                {
+                    "finding_id": f"thread:{thread_id}",
+                    "disposition": "ALREADY_SATISFIED",
+                    "evidence": "relay_wiring.py:227 already correct",
+                    "severity": "P1",
+                },
+            ],
+        },
+        "directive_sha256": "deadbeef" * 8,
+    }
+    store.write(rec)
+    assert sup.poll_worker_attempt(
+        attempt_id=attempt_id, lease=None,
+    ) == "DIED"
+    remaining = sup.list_unconsumed_events()
+    assert all(e.get("id") != eid for e in remaining)
+    ledger = Path(str(tmp_path)) / ".hermes" / "aed" / "runs" / (
+        "Slideshow11/AutoDev") / "5" / "thread_dispositions.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    matching = [r for r in rows if r.get("thread_id") == thread_id]
+    assert len(matching) == 1
+
+
+def test_round46_c14_resolution_pending_separate_from_consume(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from pathlib import Path
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head = "f" * 40
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    # Disable governance resolution so the auth=False
+    # branch fires inside _try_resolve_github_thread; the
+    # real helper then persists a RESOLUTION_PENDING row.
+    monkeypatch.setenv(
+        "AED_OPERATOR_THREAD_RESOLUTION_DISABLED", "1",
+    )
+    # Stub the sub gh-call so no network is required. With
+    # governance disabled, the helper returns "pending"
+    # WITHOUT calling gh, and persists a RESOLUTION_PENDING
+    # row.
+    result = sup.consume_thread_drain_event_in_terminal_disposition(
+        event_id=eid,
+        thread_id=thread_id,
+        provider="coderabbit",
+        evaluated_head=head,
+        disposition_raw="ALREADY_SATISFIED",
+        evidence="local-evidence-present",
+        worker_attempt_id="rr-1",
+        directive_digest="d-1",
+        result_identity={
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 5,
+            "thread_id": thread_id,
+            "current_live_head": head,
+        },
+        thread_record={"thread_id": thread_id, "commit_oid": head},
+    )
+    assert result["consumed"] is True
+    assert result["github_resolution"] == "pending"
+    ledger = Path(str(tmp_path)) / ".hermes" / "aed" / "runs" / (
+        "Slideshow11/AutoDev") / "5" / "thread_dispositions.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    pending = [r for r in rows if r.get("thread_id") == thread_id and r.get("disposition") == "RESOLUTION_PENDING"]
+    assert len(pending) >= 1, (
+        "GitHub resolution failure MUST record RESOLUTION_PENDING"
+    )
+
+
+def test_round46_c14_head_safety_new_generation_per_head(
+    isolated_state,
+):
+    from autocoder_supervisor import supervisor as sup
+    h1 = "a" * 40
+    h2 = "b" * 40
+    g1 = sup._thread_disposition_generation(
+        repo="o/r", pr_number=5, provider="coderabbit",
+        thread_id="T1", evaluated_head=h1,
+    )
+    g2 = sup._thread_disposition_generation(
+        repo="o/r", pr_number=5, provider="coderabbit",
+        thread_id="T1", evaluated_head=h2,
+    )
+    assert g1 != g2
+
+
+def test_round46_c14_failure_path_worker_crashed_no_consume(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head = "f" * 40
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    remaining = sup.list_unconsumed_events()
+    assert any(e.get("id") == eid for e in remaining)
+
+
+def test_round46_c14_repaired_dispatched_consumes_and_terminalizes(
+    isolated_state, monkeypatch, tmp_path,
+):
+    from pathlib import Path
+    from autocoder_supervisor import supervisor as sup
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head = "d634bfae2e71fec2c41d5f49be88e5bb219fedc7"
+    eid = _round46_setup_thread_drain_event(
+        sup, monkeypatch, tmp_path, thread_id, head,
+    )
+    monkeypatch.setattr(sup, "_try_resolve_github_thread",
+                        lambda **_: "skipped")
+    result = sup.consume_thread_drain_event_in_terminal_disposition(
+        event_id=eid,
+        thread_id=thread_id,
+        provider="coderabbit",
+        evaluated_head=head,
+        disposition_raw="REPAIRED",
+        evidence="source edit pushed; tests green",
+        worker_attempt_id="att-repaired-1",
+        directive_digest="rep-1",
+        result_identity={
+            "repo": "Slideshow11/AutoDev",
+            "pr_number": 5,
+            "thread_id": thread_id,
+            "current_live_head": head,
+        },
+        thread_record={"thread_id": thread_id, "commit_oid": head},
+    )
+    assert result["consumed"] is True
+    assert result["terminalized"] is True
+    assert result["normalized_disposition"] == "REPAIRED"
+    remaining = sup.list_unconsumed_events()
+    assert all(e.get("id") != eid for e in remaining)
+    ledger = Path(str(tmp_path)) / ".hermes" / "aed" / "runs" / (
+        "Slideshow11/AutoDev") / "5" / "thread_dispositions.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+    matching = [r for r in rows if r.get("thread_id") == thread_id and r.get("disposition") == "REPAIRED"]
+    assert len(matching) == 1
