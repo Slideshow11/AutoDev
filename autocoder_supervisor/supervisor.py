@@ -6591,24 +6591,27 @@ def _invoke_relay_for_events(
     """
     # Round-45 C13: detect the targeted thread drain. The
     # supervisor emits at most one ``unresolved_thread_drain``
-    # per heartbeat (round-34 anti-burst guard), so the
-    # focused-thread scope is unambiguous when such an
-    # event is present and there is no competing head-level
-    # actionable event in the same batch.
+    # per heartbeat (round-34 anti-burst guard), but a
+    # previous round's drain may still be in unconsumed
+    # when a new actionable event arrives in the same batch
+    # (e.g. ``head_change``). When multiple drain events
+    # coexist, focus on the first one (sort-stable) so the
+    # worker evaluates a single thread instead of the
+    # historical 8-P1 backlog. After the worker exits with
+    # a terminal disposition for the targeted thread, the
+    # supervisor consumes the drain event (round 45
+    # Section 6) so the same thread is not dispatched again
+    # on the next heartbeat.
     focused_thread_id: Optional[str] = None
-    thread_drain_count = sum(
-        1 for ev in new_events
-        if isinstance(ev, dict)
-        and isinstance(ev.get("id"), str)
-        and ev["id"].startswith("unresolved_thread_drain:")
-    )
-    if thread_drain_count == 1:
-        for ev in new_events:
-            if isinstance(ev, dict):
-                eid = ev.get("id") or ""
-                if eid.startswith("unresolved_thread_drain:"):
-                    focused_thread_id = eid.split(":", 1)[1]
-                    break
+    for ev in new_events:
+        if not isinstance(ev, dict):
+            continue
+        eid = ev.get("id") or ""
+        if isinstance(eid, str) and eid.startswith(
+            "unresolved_thread_drain:"
+        ):
+            focused_thread_id = eid.split(":", 1)[1]
+            break
     from .relay_wiring import (
         EscalateToHuman,
         InvalidSnapshot,

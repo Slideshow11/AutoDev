@@ -2938,3 +2938,168 @@ def test_round44_c12_replay_with_stale_then_live_head(
     )
     assert payload["lifecycle"] == "REQUEST_INTENT"
     assert payload["request_head"] == live_head
+
+
+
+# ---------------------------------------------------------------------------
+# Round-45 C13: supervisor focused-thread-id extraction
+# ---------------------------------------------------------------------------
+#
+# These tests reproduce the round-45 supervisor-side defect
+# where _invoke_relay_for_events did not always pass
+# focused_thread_id to the relay CLI when a thread-drain
+# event was present in the new_events batch. C13 requires
+# that whenever an unresolved_thread_drain:<tid> event is
+# present, the supervisor passes the targeted thread id
+# to the relay so the directive is scoped to that thread.
+
+def test_round45_c13_supervisor_extracts_focused_thread_id_single_drain(
+    isolated_state, monkeypatch,
+):
+    """Round-45 C13: when new_events contains exactly one
+    ``unresolved_thread_drain:<tid>`` event, the supervisor
+    MUST pass that thread id as ``focused_thread_id`` to
+    the relay CLI.
+    """
+    from autocoder_supervisor import supervisor as sup
+
+    captured = {}
+
+    def _capture_relay(
+        *, snapshot, head_sha, state_root, run_id, pr_number,
+        evidence_root, required_check_names=(), timeout_seconds=60.0,
+        focused_thread_id=None,
+    ):
+        captured["focused_thread_id"] = focused_thread_id
+        return {"action": "launch_worker", "directive_digest": "abc"}
+
+    monkeypatch.setattr(sup, "capture_live_snapshot", lambda *a, **k: {
+        "head_sha": "f" * 40,
+        "head_match": True,
+        "review_threads": {},
+        "review_comments": [],
+        "issue_comments": [],
+        "_provider_issue_comments": {},
+        "required_checks": {},
+        "provider_surface_complete": True,
+    })
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+    from autocoder_supervisor import relay_wiring as rw
+    monkeypatch.setattr(rw, "should_invoke_relay", lambda s: True)
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring._resolve_orchestration_evidence_root", lambda *a, **k: "/tmp/e")
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring._resolve_orchestration_state_root", lambda *a, **k: "/tmp/s")
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring.delete_directive_if_present", lambda *a, **k: None)
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring.invoke_relay_round", _capture_relay)
+
+    new_events = [
+        {"id": "unresolved_thread_drain:PRRT_kwDOTtyQLc6XpixA",
+         "thread_id": "PRRT_kwDOTtyQLc6XpixA"},
+    ]
+    result = sup._invoke_relay_for_events(new_events)
+    assert result == "launch_worker"
+    assert captured["focused_thread_id"] == "PRRT_kwDOTtyQLc6XpixA", (
+        "round-45 C13: single drain event MUST produce "
+        "focused_thread_id set to the targeted thread"
+    )
+
+
+def test_round45_c13_supervisor_extracts_focused_thread_id_multi_drain(
+    isolated_state, monkeypatch,
+):
+    """Round-45 C13: when new_events contains multiple
+    ``unresolved_thread_drain:<tid>`` events (from prior
+    rounds still in unconsumed), the supervisor MUST focus
+    on the FIRST drain event (sort-stable). The other drains
+    remain runnable for subsequent rounds.
+    """
+    from autocoder_supervisor import supervisor as sup
+
+    captured = {}
+
+    def _capture_relay(
+        *, snapshot, head_sha, state_root, run_id, pr_number,
+        evidence_root, required_check_names=(), timeout_seconds=60.0,
+        focused_thread_id=None,
+    ):
+        captured["focused_thread_id"] = focused_thread_id
+        return {"action": "launch_worker", "directive_digest": "abc"}
+
+    monkeypatch.setattr(sup, "capture_live_snapshot", lambda *a, **k: {
+        "head_sha": "f" * 40,
+        "head_match": True,
+        "review_threads": {},
+        "review_comments": [],
+        "issue_comments": [],
+        "_provider_issue_comments": {},
+        "required_checks": {},
+        "provider_surface_complete": True,
+    })
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+    from autocoder_supervisor import relay_wiring as rw
+    monkeypatch.setattr(rw, "should_invoke_relay", lambda s: True)
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring._resolve_orchestration_evidence_root", lambda *a, **k: "/tmp/e")
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring._resolve_orchestration_state_root", lambda *a, **k: "/tmp/s")
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring.delete_directive_if_present", lambda *a, **k: None)
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring.invoke_relay_round", _capture_relay)
+
+    new_events = [
+        {"id": "provider_state:coderabbit", "kind": "provider_state_change"},
+        {"id": "new_issue_comment:5255251770"},
+        {"id": "unresolved_thread_drain:PRRT_kwDOTtyQLc6XqAh0"},
+        {"id": "unresolved_thread_drain:PRRT_kwDOTtyQLc6XqAh1"},
+        {"id": "head_changed:930da38b128129a2895cc40fb858797c5bcafe7c"},
+    ]
+    result = sup._invoke_relay_for_events(new_events)
+    assert result == "launch_worker"
+    assert captured["focused_thread_id"] == "PRRT_kwDOTtyQLc6XqAh0", (
+        "round-45 C13: when multiple drain events coexist, "
+        "focus on the FIRST one (sort-stable)"
+    )
+
+
+def test_round45_c13_supervisor_no_focused_thread_when_no_drain(
+    isolated_state, monkeypatch,
+):
+    """Round-45 C13: when new_events has no
+    ``unresolved_thread_drain`` event, ``focused_thread_id``
+    is None and the directive is the broad historical backlog
+    scope (not focused).
+    """
+    from autocoder_supervisor import supervisor as sup
+
+    captured = {}
+
+    def _capture_relay(
+        *, snapshot, head_sha, state_root, run_id, pr_number,
+        evidence_root, required_check_names=(), timeout_seconds=60.0,
+        focused_thread_id=None,
+    ):
+        captured["focused_thread_id"] = focused_thread_id
+        return {"action": "launch_worker", "directive_digest": "abc"}
+
+    monkeypatch.setattr(sup, "capture_live_snapshot", lambda *a, **k: {
+        "head_sha": "f" * 40,
+        "head_match": True,
+        "review_threads": {},
+        "review_comments": [],
+        "issue_comments": [],
+        "_provider_issue_comments": {},
+        "required_checks": {},
+        "provider_surface_complete": True,
+    })
+    monkeypatch.setattr(sup, "get_github_token", lambda: "tok")
+    from autocoder_supervisor import relay_wiring as rw
+    monkeypatch.setattr(rw, "should_invoke_relay", lambda s: True)
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring._resolve_orchestration_evidence_root", lambda *a, **k: "/tmp/e")
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring._resolve_orchestration_state_root", lambda *a, **k: "/tmp/s")
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring.delete_directive_if_present", lambda *a, **k: None)
+    monkeypatch.setattr("autocoder_supervisor.relay_wiring.invoke_relay_round", _capture_relay)
+
+    new_events = [
+        {"id": "provider_state:coderabbit", "kind": "provider_state_change"},
+        {"id": "head_changed:930da38b128129a2895cc40fb858797c5bcafe7c"},
+    ]
+    result = sup._invoke_relay_for_events(new_events)
+    assert captured["focused_thread_id"] is None, (
+        "round-45 C13: no drain event => focused_thread_id is None"
+    )
