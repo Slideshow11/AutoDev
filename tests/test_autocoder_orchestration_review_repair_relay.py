@@ -2621,3 +2621,307 @@ class TestFindingLedgerPersistsAcrossRounds:
         # The new comment must be emitted (different finding_id).
         assert d2.action == "launch_worker"
 
+
+
+
+# ---------------------------------------------------------------------------
+# Round-45 C13: focused-thread directive scoping
+# ---------------------------------------------------------------------------
+#
+# These tests reproduce the round-45 defect where the
+# supervisor repeatedly dispatched the durable-thread-drain
+# event for the same review thread (XpixA) and the worker
+# emitted a generic head-level NO-OP because the directive
+# did not contain the targeted thread. The relay classified
+# the 8 historical P1 findings ALREADY_SATISFIED but never
+# produced a per-thread disposition for XpixA, so the drain
+# event remained in the runnable queue and was dispatched
+# again on the next heartbeat.
+
+
+def _make_thread_snapshot(thread_id: str, head_sha: str = "f" * 40) -> dict:
+    """Build a minimal snapshot carrying one unresolved thread
+    bound to ``head_sha``. The thread has a real body and
+    path so it is actionable by the durable-thread-drain
+    heuristic.
+    """
+    return {
+        "head_sha": head_sha,
+        "head_match": True,
+        "review_threads": {
+            thread_id: {
+                "author": "coderabbitai",
+                "body": (
+                    "_Functional Correctness_ | _Quick win_\n\n"
+                    "The current implementation can be simplified. "
+                    "Inspect tests/test_autocoder_supervisor.py:165."
+                ),
+                "commit_oid": head_sha,
+                "line": 165,
+                "outdated": False,
+                "path": "tests/test_autocoder_supervisor.py",
+                "resolved": False,
+            },
+        },
+        "review_comments": [],
+        "issue_comments": [],
+        "_provider_issue_comments": {},
+        "required_checks": {},
+    }
+
+
+def test_round45_c13_focused_thread_directive_carries_only_target():
+    """Round-45 C13: when ``focused_thread_id`` is set, the
+    directive MUST contain exactly one finding whose
+    ``finding_id`` is ``"thread:<tid>"``. The historical
+    8-P1 backlog MUST NOT appear in the directive, even when
+    the snapshot also carries the 8 historical CodeRabbit
+    inline comments.
+    """
+    from autocoder_orchestration.review_repair_relay import (
+        collect_findings, build_directive,
+    )
+
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    head_sha = "f" * 40
+    snap = _make_thread_snapshot(thread_id, head_sha)
+    # Add historical 8-P1 comments to the snapshot. Without
+    # the focused-thread scope, the directive would carry
+    # these P1s and skip the targeted P2 thread.
+    snap["_provider_issue_comments"] = {
+        "coderabbit": [
+            {"id": 100 + i, "body": "P1 historical", "commit_id": head_sha}
+            for i in range(8)
+        ],
+    }
+    # Test collect_findings directly with the focused thread
+    findings = collect_findings(snap, focused_thread_id=thread_id)
+    assert len(findings) == 1, (
+        f"round-45 C13: focused_thread_id MUST scope "
+        f"collector to a single finding; got {len(findings)}"
+    )
+    assert findings[0].finding_id == f"thread:{thread_id}"
+    # Test build_directive enforces the single-finding contract.
+    d = build_directive(
+        round_index=1,
+        head_sha=head_sha,
+        repo="Slideshow11/AutoDev",
+        pr_number=5,
+        findings=findings,
+        coordinator_actor="controller",
+        target_thread_id=thread_id,
+    )
+    assert d.target_thread_id == thread_id
+    assert len(d.findings) == 1
+    assert d.findings[0].finding_id == f"thread:{thread_id}"
+
+
+def test_round45_c13_focused_thread_directive_violates_contract():
+    """Round-45 C13: build_directive MUST reject a directive
+    where ``target_thread_id`` is set but ``findings`` is empty
+    or contains the wrong thread. The contract enforces that
+    the targeted directive is scoped to exactly one finding
+    whose ``finding_id`` is ``"thread:<target_thread_id>"``.
+    """
+    from autocoder_orchestration.review_repair_relay import (
+        build_directive, Finding,
+        SEVERITY_P1, SEVERITY_P2,
+        DirectiveContractError,
+    )
+
+    f_wrong = Finding(
+        finding_id="thread:OTHER_THREAD",
+        source="review_thread",
+        severity=SEVERITY_P2,
+        title="wrong thread",
+        body="x",
+        file_path=None,
+        line=None,
+        url=None,
+        suggested_test=None,
+        review_id=None,
+        comment_id=None,
+        check_name=None,
+    )
+    try:
+        build_directive(
+            round_index=1,
+            head_sha="a" * 40,
+            repo="o/r",
+            pr_number=5,
+            findings=[f_wrong],
+            coordinator_actor="controller",
+            target_thread_id="PRRT_kwDOTtyQLc6XpixA",
+        )
+    except DirectiveContractError:
+        pass
+    else:
+        raise AssertionError(
+            "round-45 C13: build_directive MUST reject a directive "
+            "whose findings[0].finding_id does not match "
+            "thread:<target_thread_id>"
+        )
+
+    # Empty findings list also rejected (independent of focus).
+    try:
+        build_directive(
+            round_index=1,
+            head_sha="a" * 40,
+            repo="o/r",
+            pr_number=5,
+            findings=[],
+            coordinator_actor="controller",
+            target_thread_id="PRRT_kwDOTtyQLc6XpixA",
+        )
+    except DirectiveContractError:
+        pass
+    else:
+        raise AssertionError(
+            "round-45 C13: build_directive MUST reject empty findings"
+        )
+
+
+def test_round45_c13_prompt_carries_target_thread_id(
+    tmp_path,
+):
+    """Round-45 C13: the worker prompt MUST include the
+    targeted thread id so the worker knows to scope its
+    investigation. The prompt also MUST carry the round-45
+    C13 SCOPING line so the worker does not spend its tool
+    budget re-auditing the historical 8-P1 backlog.
+    """
+    from autocoder_orchestration.review_repair_relay import (
+        Finding, SEVERITY_P2, build_directive, build_worker_prompt,
+        RoundDecision,
+    )
+    f = Finding(
+        finding_id="thread:PRRT_kwDOTtyQLc6XpixA",
+        source="review_thread",
+        severity=SEVERITY_P2,
+        title="test",
+        body="x",
+        file_path="tests/test_autocoder_supervisor.py",
+        line=165,
+        url=None,
+        suggested_test=None,
+        review_id=None,
+        comment_id=None,
+        check_name=None,
+    )
+    d = build_directive(
+        round_index=1,
+        head_sha="a" * 40,
+        repo="o/r",
+        pr_number=5,
+        findings=[f],
+        coordinator_actor="controller",
+        target_thread_id="PRRT_kwDOTtyQLc6XpixA",
+    )
+    decision = RoundDecision(
+        action="launch_worker",
+        round_index=1,
+        head_sha="a" * 40,
+        outcome="completed",
+        p1_count=0, p2_count=1, ci_failure_count=0,
+        escalate_reasons=(),
+        directive=d,
+        directive_digest="abc",
+    )
+    prompt = build_worker_prompt(decision)
+    assert "PRRT_kwDOTtyQLc6XpixA" in prompt, (
+        "round-45 C13: worker prompt MUST include the targeted "
+        "thread id so the worker scopes its investigation"
+    )
+    assert "ROUND-45 C13 SCOPING" in prompt, (
+        "round-45 C13: worker prompt MUST include the round-45 "
+        "C13 SCOPING line so the worker knows to focus on the "
+        "targeted thread rather than re-auditing historical P1s"
+    )
+
+
+def test_round45_c13_no_focused_thread_returns_broad_directive(
+    tmp_path,
+):
+    """Round-45 C13: when ``focused_thread_id`` is NOT set, the
+    collector behaves exactly as before: returns the full set
+    of historical findings (filtered by current-head rule).
+    The directive's ``target_thread_id`` is None.
+    """
+    from autocoder_orchestration.review_repair_relay import (
+        build_directive, collect_findings,
+        Finding, SEVERITY_P1,
+    )
+    head_sha = "f" * 40
+    snap = _make_thread_snapshot("PRRT_kwDOTtyQLc6XpixA", head_sha)
+    snap["_provider_issue_comments"] = {
+        "coderabbit": [
+            {"id": 100, "body": "P1 historical", "commit_id": head_sha},
+        ],
+    }
+    # No focused_thread_id — collector returns ALL findings.
+    findings = collect_findings(snap)
+    assert len(findings) > 1, (
+        "round-45 C13: when focused_thread_id is None, the "
+        "collector returns the full set of findings"
+    )
+    # Directive carries no target_thread_id.
+    d = build_directive(
+        round_index=1,
+        head_sha=head_sha,
+        repo="o/r",
+        pr_number=5,
+        findings=findings,
+        coordinator_actor="controller",
+    )
+    assert d.target_thread_id is None
+
+
+def test_round45_c13_focused_thread_resolves_against_head():
+    """Round-45 C13: when the targeted thread has a body and
+    a path (actionable content), the current-head binding
+    rule does NOT apply. The thread is accepted regardless of
+    commit_oid. Only threads with NO body and NO path AND a
+    stale commit_oid are excluded.
+    """
+    from autocoder_orchestration.review_repair_relay import collect_findings
+
+    thread_id = "PRRT_kwDOTtyQLc6XpixA"
+    # Thread has a real body and path; commit_oid is stale.
+    stale_head = "a" * 40
+    live_head = "f" * 40
+    snap = _make_thread_snapshot(thread_id, head_sha=stale_head)
+    snap["head_sha"] = live_head
+    findings = collect_findings(snap, focused_thread_id=thread_id)
+    # Body + path present => current-head binding does NOT
+    # gate; thread is still actionable.
+    assert len(findings) == 1, (
+        "round-45 C13: threads with body+path are actionable "
+        "even when commit_oid is stale (the snapshot already "
+        "filters to the live head's review API)"
+    )
+
+    # Now test the stale-head exclusion: no body, no path, stale commit_oid.
+    snap_blank = {
+        "head_sha": live_head,
+        "head_match": True,
+        "review_threads": {
+            thread_id: {
+                "author": "coderabbitai",
+                "body": "",
+                "commit_oid": stale_head,
+                "line": None,
+                "outdated": False,
+                "path": "",
+                "resolved": False,
+            },
+        },
+        "review_comments": [],
+        "issue_comments": [],
+        "_provider_issue_comments": {},
+        "required_checks": {},
+    }
+    findings = collect_findings(snap_blank, focused_thread_id=thread_id)
+    assert findings == [], (
+        "round-45 C13: collector MUST exclude threads with no body, "
+        "no path, AND a stale commit_oid (no current-head binding)"
+    )

@@ -124,6 +124,7 @@ def invoke_relay_round(
     evidence_root: str,
     required_check_names: Tuple[str, ...] = (),
     timeout_seconds: float = 60.0,
+    focused_thread_id: Optional[str] = None,
 ) -> dict:
     """Invoke the relay's review-repair-round CLI subprocess.
 
@@ -132,6 +133,12 @@ def invoke_relay_round(
     ``RoundDecision`` dict. The subprocess is the only path
     the supervisor uses to talk to the relay — keeping the
     Python packages fully disjoint.
+
+    Round-45 C13: ``focused_thread_id`` scopes the directive
+    to a SINGLE targeted review thread. The supervisor's
+    durable-thread-drain path passes the targeted thread id
+    so the worker evaluates that specific thread rather than
+    the historical 8-P1 backlog.
 
     Raises ``RelayWiringError`` on any failure: missing CLI,
     subprocess non-zero exit, malformed JSON output, etc.
@@ -169,6 +176,8 @@ def invoke_relay_round(
             "--required-check-names", ",".join(required_check_names),
         ]
     )
+    if focused_thread_id:
+        cmd += ["--focused-thread-id", focused_thread_id]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True,

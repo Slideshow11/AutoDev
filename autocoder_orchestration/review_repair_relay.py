@@ -826,6 +826,7 @@ class ReviewDirective:
     findings: Tuple[Finding, ...]
     summary: str
     coordinator_actor: str
+    target_thread_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if (
@@ -837,7 +838,7 @@ class ReviewDirective:
             )
         if self.round_index < 0:
             raise DirectiveContractError(
-                f"round_index must be non-negative: {self.round_index}"
+                f"round_index must be non-negative: {self.round_index!r}"
             )
         if not self.findings:
             raise DirectiveContractError(
@@ -847,6 +848,19 @@ class ReviewDirective:
             if f.severity not in ALL_SEVERITIES:
                 raise DirectiveContractError(
                     f"finding has unknown severity {f.severity!r}"
+                )
+        if self.target_thread_id is not None:
+            expected_id = f"thread:{self.target_thread_id}"
+            if len(self.findings) != 1:
+                raise DirectiveContractError(
+                    f"target_thread_id={self.target_thread_id!r} requires "
+                    f"exactly one finding; directive has {len(self.findings)}"
+                )
+            if self.findings[0].finding_id != expected_id:
+                raise DirectiveContractError(
+                    f"target_thread_id={self.target_thread_id!r} requires "
+                    f"finding_id={expected_id!r}; directive has "
+                    f"finding_id={self.findings[0].finding_id!r}"
                 )
 
     def to_dict(self) -> dict:
@@ -1545,6 +1559,7 @@ def collect_findings(
     *,
     required_check_names: Tuple[str, ...] = (),
     ledger: Optional["FindingLedger"] = None,
+    focused_thread_id: Optional[str] = None,
 ) -> List[Finding]:
     """Collect all actionable findings from a snapshot.
 
@@ -1566,7 +1581,70 @@ def collect_findings(
     the filter is internal; callers who need the full set can
     pass ``ledger=None`` and filter separately via
     ``filter_findings_to_current_head``.
+
+    Round-45 C13: ``focused_thread_id`` scopes the collector to
+    a SINGLE targeted review thread. When set, the returned
+    list contains ONLY the finding with
+    ``finding_id == "thread:<focused_thread_id>"`` (or is empty
+    if no matching thread exists). The head-binding filter is
+    still applied so a thread whose ``commit_oid`` does not
+    match the current head is excluded. The supervisor's
+    durable-thread-drain path uses this to force the worker
+    to evaluate the targeted thread rather than the
+    historical 8-P1 backlog that the ``max_findings=8`` cap
+    would otherwise force into the directive.
     """
+    if focused_thread_id is not None:
+        threads = snapshot.get("review_threads") or {}
+        thread_data = (
+            threads.get(focused_thread_id)
+            if isinstance(threads, dict)
+            else None
+        )
+        current_head = snapshot.get("head_sha")
+        if isinstance(thread_data, dict):
+            if thread_data.get("resolved"):
+                return []
+            if thread_data.get("outdated"):
+                return []
+            thread_body = str(thread_data.get("body") or "").strip()
+            thread_path = thread_data.get("path") or ""
+            thread_line = thread_data.get("line")
+            thread_commit_oid = thread_data.get("commit_oid")
+            if (
+                not thread_body
+                and not thread_path
+                and thread_commit_oid
+                and current_head
+                and thread_commit_oid != current_head
+            ):
+                return []
+            severity = _classify_severity(thread_body)
+            title = (
+                thread_body.splitlines()[0]
+                if thread_body else f"(thread {focused_thread_id[-12:]})"
+            )
+            focused_finding = Finding(
+                finding_id=f"thread:{focused_thread_id}",
+                source="review_thread",
+                severity=severity,
+                title=title[:120],
+                body=thread_body,
+                file_path=thread_path if thread_path else None,
+                line=int(thread_line) if isinstance(thread_line, int) else None,
+                url=None,
+                suggested_test=None,
+                review_id=None,
+                comment_id=None,
+                check_name=None,
+            )
+            if ledger is not None:
+                focused_list = filter_findings_to_current_head(
+                    [focused_finding], ledger
+                )
+                return focused_list
+            return [focused_finding]
+        return []
     review_findings = _collect_review_findings(snapshot)
     ci_findings = _collect_ci_findings(snapshot, required_check_names)
     findings: List[Finding] = list(review_findings) + list(ci_findings)
@@ -1593,6 +1671,7 @@ def build_directive(
     findings: List[Finding],
     coordinator_actor: str,
     max_findings: Optional[int] = None,
+    target_thread_id: Optional[str] = None,
 ) -> ReviewDirective:
     """Build a structured repair directive from a list of findings.
 
@@ -1663,6 +1742,7 @@ def build_directive(
         findings=tuple(findings),
         summary=summary,
         coordinator_actor=coordinator_actor,
+        target_thread_id=target_thread_id,
     )
 
 
@@ -1826,6 +1906,7 @@ def evaluate_round(
     coordinator_actor: str = ACTOR_CONTROLLER,
     directive_store: Optional[DirectiveStore] = None,
     finding_ledger: Optional[FindingLedger] = None,
+    focused_thread_id: Optional[str] = None,
 ) -> RoundDecision:
     """Run one bounded round of evidence collection and classification.
 
@@ -1896,6 +1977,7 @@ def evaluate_round(
         snapshot,
         required_check_names=required_check_names,
         ledger=finding_ledger,
+        focused_thread_id=focused_thread_id,
     )
     # Round-30: if the snapshot's provider-surface
     # collection failed (``provider_surface_complete``
@@ -1996,7 +2078,8 @@ WORKER_PROMPT_TEMPLATE = (
     "PR {pr_number} ({repo}).\n\n"
     "Authoritative head: {head_sha}\n"
     "Directive ID: {directive_id}\n"
-    "Directive SHA-256: {directive_sha256}\n\n"
+    "Directive SHA-256: {directive_sha256}\n"
+    "Target thread: {target_thread_id}\n\n"
     "The relay has already collected exact-head CI and CodeRabbit evidence. Your "
     "job is to apply every P1 finding and the required CI failures. P2 findings "
     "are preferred but not blocking — apply them when straightforward (clean "
@@ -2044,6 +2127,16 @@ WORKER_PROMPT_TEMPLATE = (
     "commit with no new source edit is NOT convergence and IS a regression: "
     "it changes the head, invalidates exact-head evidence, resets the quiet "
     "window, can trigger provider auto-pause, and creates infinite churn.\n"
+    "ROUND-45 C13 SCOPING: when ``Target thread`` is non-empty, the directive is "
+    "scoped to that specific review thread. Read the targeted thread's body, "
+    "inspect the relevant file/line, classify that exact thread with one of "
+    "the dispositions above, and (if REAL_REPAIR_REQUIRED) commit a focused "
+    "fix. Do not re-audit the historical 8-P1 backlog unless the targeted "
+    "thread references one of those findings; this directive is intentionally "
+    "small so the worker can spend its tool budget on the targeted "
+    "investigation rather than re-proving already-classified historical "
+    "findings. If the targeted thread is not actionable (B / C / D), "
+    "persist the per-finding disposition and exit without changes.\n"
 )
 
 
@@ -2072,6 +2165,7 @@ def build_worker_prompt(decision: RoundDecision) -> str:
         directive_sha256=directive.compute_sha256(),
         summary=directive.summary,
         directive_json=payload,
+        target_thread_id=directive.target_thread_id or "(none — broad directive)",
     )
 
 
@@ -2289,6 +2383,7 @@ class RelayLoop:
         *,
         repo: str,
         pr_number: int,
+        focused_thread_id: Optional[str] = None,
     ) -> RoundDecision:
         """Run one round.
 
@@ -2381,6 +2476,7 @@ class RelayLoop:
             coordinator_actor=ACTOR_CONTROLLER,
             directive_store=self.directive_store,
             finding_ledger=finding_ledger,
+            focused_thread_id=focused_thread_id,
         )
         # Record the findings we just placed into a directive as
         # ``DISPATCHED`` on the current head. The ledger is the

@@ -1473,6 +1473,7 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
         decision = loop.run_once(
             snapshot, head_sha=head_sha,
             repo=repo, pr_number=int(ctx.pr_number or 0),
+            focused_thread_id=getattr(args, "focused_thread_id", None),
         )
     except EscalateToHuman as e:
         # Round-29 review: only ``EscalateToHuman`` carries
@@ -1620,6 +1621,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="Comma-separated CI check names that must pass for the head to be clean")
     rr.add_argument("--max-rounds", default=str(DEFAULT_MAX_ROUNDS),
                     help="Outer bound on relay rounds before BLOCKED")
+    rr.add_argument("--focused-thread-id", default=None,
+                    help="Round-45 C13: scope this round's directive to a SINGLE "
+                         "targeted review thread (PRRT_kw... id). The directive "
+                         "contains exactly one finding for that thread and bypasses "
+                         "the max_findings cap. The supervisor uses this on the "
+                         "durable-thread-drain path so the worker evaluates the "
+                         "specific thread instead of the historical backlog.")
 
     rs = sub.add_parser("review-repair-status", parents=[common])
     rs.add_argument("--evidence-root", default=None)

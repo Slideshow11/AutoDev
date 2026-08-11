@@ -6575,7 +6575,40 @@ def _invoke_relay_for_events(
       actionable findings, CLI missing, wiring failure).
       The supervisor falls back to the existing
       ``launch_worker`` path.
+
+    Round-45 C13: when ``new_events`` contains a single
+    ``unresolved_thread_drain:<tid>`` event, the directive is
+    scoped to that specific thread via the
+    ``focused_thread_id`` parameter. The supervisor's
+    durable-thread-drain path emits exactly one such event
+    per heartbeat; focusing the worker on the targeted
+    thread prevents it from re-auditing the historical 8-P1
+    backlog. After the worker exits with a terminal
+    disposition for the targeted thread, the supervisor
+    consumes the drain event (round 45 Section 6) so the
+    same thread is not dispatched again on the next
+    heartbeat.
     """
+    # Round-45 C13: detect the targeted thread drain. The
+    # supervisor emits at most one ``unresolved_thread_drain``
+    # per heartbeat (round-34 anti-burst guard), so the
+    # focused-thread scope is unambiguous when such an
+    # event is present and there is no competing head-level
+    # actionable event in the same batch.
+    focused_thread_id: Optional[str] = None
+    thread_drain_count = sum(
+        1 for ev in new_events
+        if isinstance(ev, dict)
+        and isinstance(ev.get("id"), str)
+        and ev["id"].startswith("unresolved_thread_drain:")
+    )
+    if thread_drain_count == 1:
+        for ev in new_events:
+            if isinstance(ev, dict):
+                eid = ev.get("id") or ""
+                if eid.startswith("unresolved_thread_drain:"):
+                    focused_thread_id = eid.split(":", 1)[1]
+                    break
     from .relay_wiring import (
         EscalateToHuman,
         InvalidSnapshot,
@@ -6648,6 +6681,7 @@ def _invoke_relay_for_events(
                     "required_check_names", [],
                 )
             ),
+            focused_thread_id=focused_thread_id,
         )
     except (InvalidSnapshot, RecoverableRetry, RelayError) as exc:
         # Round-31: typed recoverable relay failures (any
