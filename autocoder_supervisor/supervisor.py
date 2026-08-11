@@ -2443,6 +2443,57 @@ def poll_worker_attempt(
                             remove_lease()
                         except Exception:  # noqa: BLE001
                             pass
+                    # Round-46 C14 follow-up: if the worker did not
+                    # write extra.no_changes_required_proof (e.g.
+                    # a subagent worker that printed its
+                    # disposition to stdout but did not persist
+                    # it), extract per-finding dispositions from
+                    # the worker stdout and persist them into
+                    # the attempt's extra so the C14 hook can
+                    # consume the targeted drain event. Without
+                    # this, subagent workers that do not follow
+                    # the round-41 contract would silently skip
+                    # drain-event consumption.
+                    try:
+                        _stdout_path = rec.stdout_path
+                        if (
+                            _stdout_path
+                            and Path(_stdout_path).exists()
+                        ):
+                            _text = Path(_stdout_path).read_text(
+                                encoding="utf-8", errors="replace"
+                            )[:200000]
+                            _extracted = []
+                            import re as _re
+                            for _m in _re.finditer(
+                                r"Finding\s+(thread:\S+|[A-Za-z0-9_\-:]+)\s+[—-]+\s*\**([A-Z_]+)\**",
+                                _text,
+                            ):
+                                _fid = _m.group(1).strip()
+                                _disp = _m.group(2).strip()
+                                if not _fid.startswith("thread:"):
+                                    continue
+                                if not _disp:
+                                    continue
+                                _tid = _fid.split(":", 1)[1]
+                                _extracted.append({
+                                    "finding_id": _fid,
+                                    "disposition": _disp,
+                                    "thread_id": _tid,
+                                })
+                            if _extracted and isinstance(rec.extra, dict):
+                                rec.extra["no_changes_required_proof"] = {
+                                    "findings": _extracted,
+                                    "source": "stdout_extraction",
+                                }
+                                store.write(rec)
+                    except Exception as exc:  # noqa: BLE001
+                        log(
+                            "warning",
+                            "round-46 C14: stdout extraction failed; "
+                            "continuing without per-finding proof",
+                            error=str(exc)[:200],
+                        )
                     # Round-46 C14: thread-disposition terminalization.
                     # When the NO_CHANGES_REQUIRED proof carries
                     # per-finding dispositions for a focused
@@ -2561,6 +2612,110 @@ def poll_worker_attempt(
                 # Force a transition via RECOVERY_CHECK as a safety
                 # net; the next poll or recovery cycle will finalize.
                 rec.lifecycle = LIFECYCLE_RECOVERY_CHECK
+        # Round-46 C14 follow-up: if the worker's stdout emits
+        # per-finding dispositions but the attempt has no
+        # ``extra.no_changes_required_proof``, extract the
+        # dispositions from stdout, persist them as a structured
+        # proof, and (when valid) drive the per-thread drain
+        # consumption. This handles the orphan-reaped subagent
+        # workers that do not pre-populate
+        # ``no_changes_required_proof`` on entry. Idempotent on
+        # generation; only fires when an actual terminal
+        # disposition is recoverable from the worker's output.
+        try:
+            _stdout_path = (
+                getattr(rec, "stdout_path", None) if rec is not None
+                else None
+            )
+            if _stdout_path and Path(_stdout_path).exists():
+                _text = Path(_stdout_path).read_text(
+                    encoding="utf-8", errors="replace"
+                )[:200000]
+                _extracted = []
+                import re as _re
+                for _m in _re.finditer(
+                    r"Finding\s+(thread:\S+)\s+[—-]+\s*\**([A-Z_]+)\**",
+                    _text,
+                ):
+                    _fid = _m.group(1).strip()
+                    _disp = _m.group(2).strip()
+                    if not _fid.startswith("thread:"):
+                        continue
+                    if not _disp:
+                        continue
+                    _tid = _fid.split(":", 1)[1]
+                    _extracted.append({
+                        "finding_id": _fid,
+                        "disposition": _disp,
+                        "thread_id": _tid,
+                    })
+                if _extracted and isinstance(rec.extra, dict):
+                    rec.extra["no_changes_required_proof"] = {
+                        "findings": _extracted,
+                        "source": "stdout_extraction_orphan",
+                    }
+                    store.write(rec)
+                    # Drive the C14 consumption loop for the
+                    # just-extracted per-thread terminals.
+                    _current_live_head = str(
+                        globals().get("AUTHORITATIVE_HEAD", "") or ""
+                    )
+                    _result_identity = {
+                        "repo": str(REPO_OWNER),
+                        "pr_number": int(PR_NUMBER),
+                        "thread_id": "",
+                        "current_live_head": _current_live_head,
+                    }
+                    for _row in extract_per_finding_thread_dispositions(
+                        rec.extra["no_changes_required_proof"],
+                        evaluated_head=_current_live_head,
+                        directive_digest=str(
+                            rec.extra["no_changes_required_proof"].get(
+                                "directive_sha256",
+                                rec.extra["no_changes_required_proof"].get(
+                                    "directive_digest", "",
+                                ),
+                            ) or ""
+                        ),
+                        worker_attempt_id=str(attempt_id or ""),
+                    ):
+                        _tid = _row.get("thread_id") or ""
+                        if not _tid:
+                            continue
+                        _eid = f"unresolved_thread_drain:{_tid}"
+                        _result_identity["thread_id"] = _tid
+                        try:
+                            consume_thread_drain_event_in_terminal_disposition(
+                                event_id=_eid,
+                                thread_id=_tid,
+                                provider="coderabbit",
+                                evaluated_head=_current_live_head,
+                                disposition_raw=_row.get("disposition_raw", ""),
+                                evidence=_row.get("evidence", ""),
+                                worker_attempt_id=str(attempt_id or ""),
+                                directive_digest="",
+                                result_identity=_result_identity,
+                                thread_record={
+                                    "thread_id": _tid,
+                                    "commit_oid": _current_live_head,
+                                },
+                                extra_identity=_row.get("extra", {}),
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            log(
+                                "warning",
+                                "round-46 C14: orphan stdout-extract "
+                                "consume failed; continuing",
+                                event_id=_eid,
+                                error=str(exc)[:200],
+                            )
+        except Exception as exc:  # noqa: BLE001
+            log(
+                "warning",
+                "round-46 C14: WORKER_EXITED_NO_PUSH stdout "
+                "extraction failed; continuing",
+                error=str(exc)[:200],
+            )
         store.write(rec)
         # Round-39 P1#5: when the deferred push-recovery
         # branch attributed the dead worker to a live head
