@@ -6093,6 +6093,70 @@ def _persist_root_resolution_retry(exc: Any) -> None:
     )
 
 
+def _resolve_per_pr_evidence_roots(
+    *,
+    run_state_path: Any,
+    pr_numbers: Any,
+    expected_repo: str,
+    fallback_root: str,
+) -> list:
+    """Round-43 C11: resolve the canonical ``evidence/``
+    directory for every PR the supervisor owns.
+
+    Returns a list of absolute paths to ``evidence/``
+    directories, one per PR. The supervisor's main
+    heartbeat loop reads and writes the durable retry
+    ledger (``round_budget_retry.json``) at these
+    paths so it shares a single ledger with the relay
+    CLI. The legacy single-root fallback
+    (``RUN_STATE.parent / "evidence"``) is included
+    ONLY when the per-PR resolver fails entirely; in
+    the steady-state multi-PR architecture the
+    fallback path is empty.
+
+    The function is intentionally defensive: a
+    resolver failure for one PR MUST NOT prevent
+    iteration over the others, and a single-PR owner
+    MUST receive exactly one root.
+    """
+    roots: list = []
+    seen: set = set()
+    try:
+        for owned in pr_numbers or []:
+            try:
+                owned_int = int(owned)
+            except (TypeError, ValueError):
+                continue
+            if owned_int == 0:
+                continue
+            try:
+                from .orchestration_state_root import (
+                    resolve_orchestration_state_root,
+                )
+                state_root = resolve_orchestration_state_root(
+                    run_state_path=run_state_path,
+                    expected_repo=expected_repo,
+                    expected_pr_number=owned_int,
+                )
+            except Exception:  # noqa: BLE001
+                state_root = None
+            if state_root is None:
+                continue
+            root = str(Path(str(state_root)) / "evidence")
+            if root and root not in seen:
+                seen.add(root)
+                roots.append(root)
+    except Exception:  # noqa: BLE001
+        pass
+    if not roots:
+        # Defensive fallback: when no per-PR resolver
+        # succeeds (e.g. test environment with empty
+        # ``run_state.json``), fall back to the legacy
+        # global path so the heartbeat loop continues.
+        roots = [fallback_root]
+    return roots
+
+
 def _persist_round_budget_retry(
     *,
     head_sha: Any,
@@ -7002,19 +7066,54 @@ def main(argv: Optional[list[str]] = None) -> int:
             # the timestamp has elapsed, the supervisor
             # bumps the slice_epoch (starting a fresh
             # slice with a fresh budget) and continues.
-            retry_state = (
-                read_round_budget_retry(
-                    str(RUN_STATE.parent / "evidence"),  # type: ignore[name-defined]
-                )
-                if read_round_budget_retry is not None
-                else None
-            ) or {}
-            now = now_iso()
-            next_eligible = (
-                str(retry_state.get("next_eligible_retry_at") or "")
-                if retry_state
-                else ""
+            #
+            # Round-43 C11 fix: the retry ledger lives in
+            # the PER-PR orch state root
+            # (``orchestration_state_root/evidence``),
+            # NOT in ``RUN_STATE.parent / "evidence"``.
+            # The supervisor's prior path resolved to a
+            # global empty directory that the relay CLI
+            # never reads, so the slice_epoch never
+            # bumped and the budget-exhausted ledger
+            # caused a permanent ``recoverable_retry``
+            # stall. Resolve the per-PR evidence root
+            # via the same canonical resolver used by
+            # ``_clear_stale_retry_ledgers`` so the
+            # supervisor and relay share one ledger
+            # path per PR. When multiple PRs are owned
+            # in a single heartbeat, the supervisor
+            # honors the union of their
+            # ``next_eligible_retry_at`` windows and
+            # bumps each PR's ledger independently so
+            # the per-slice budget is fresh on every PR.
+            # Round-43 C11: delegate the per-PR evidence
+            # root resolution to ``_resolve_per_pr_evidence_roots``
+            # so the supervisor's main heartbeat loop reads
+            # and writes the durable retry ledger at the same
+            # paths the relay CLI uses (one path per PR).
+            _pr_evidence_roots = _resolve_per_pr_evidence_roots(
+                run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+                pr_numbers=(
+                    list(PR_NUMBERS)  # type: ignore[name-defined]
+                    if PR_NUMBERS  # type: ignore[name-defined]
+                    else [int(PR_NUMBER)]  # type: ignore[name-defined]
+                ),
+                expected_repo=(
+                    f"{REPO_OWNER}/{REPO_NAME}"  # type: ignore[name-defined]
+                ),
+                fallback_root=str(RUN_STATE.parent / "evidence"),  # type: ignore[name-defined]
             )
+            now = now_iso()
+            next_eligible = ""
+            for _root in _pr_evidence_roots:
+                _rs = (
+                    read_round_budget_retry(_root)
+                    if read_round_budget_retry is not None
+                    else None
+                ) or {}
+                _ne = str(_rs.get("next_eligible_retry_at") or "")
+                if _ne and (not next_eligible or _ne > next_eligible):
+                    next_eligible = _ne
             if (
                 next_eligible
                 and _dt is not None
@@ -7065,16 +7164,27 @@ def main(argv: Optional[list[str]] = None) -> int:
             # epoch on every heartbeat forever. Only
             # records that are still pending/active
             # participate in the slice-budget cycle.
-            if (
-                bump_slice_epoch is not None
-                and retry_state
-                and retry_state.get("last_attempt_at")
-                and retry_state.get("lifecycle")
-                not in ("cleared", "resolved", "consumed")
-            ):
-                bump_slice_epoch(
-                    str(RUN_STATE.parent / "evidence"),  # type: ignore[name-defined]
-                )
+            #
+            # Round-43 C11: bump EVERY per-PR ledger
+            # whose retry record is still pending/active,
+            # so each PR's slice budget is reset for the
+            # next iteration. The legacy single-root
+            # bump is retained as a fallback only when
+            # the resolver fails entirely.
+            for _root in _pr_evidence_roots:
+                _retry_state = (
+                    read_round_budget_retry(_root)
+                    if read_round_budget_retry is not None
+                    else None
+                ) or {}
+                if (
+                    bump_slice_epoch is not None
+                    and _retry_state
+                    and _retry_state.get("last_attempt_at")
+                    and _retry_state.get("lifecycle")
+                    not in ("cleared", "resolved", "consumed")
+                ):
+                    bump_slice_epoch(_root)
 
             rs = read_run_state()
             token = get_github_token()

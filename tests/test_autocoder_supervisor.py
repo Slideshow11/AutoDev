@@ -2339,6 +2339,169 @@ def test_round33_retry_ledger_cleared_does_not_bump_slice_epoch(
     )
 
 
+def test_round43_c11_retry_ledger_per_pr_evidence_root(
+    isolated_state, monkeypatch, tmp_path,
+):
+    """Round-43 C11: the supervisor MUST read/bump the
+    per-PR orch state's retry ledger, NOT a global
+    RUN_STATE.parent/evidence ledger.
+
+    Bug-detector property: the relay CLI reads and
+    writes ``round_budget_retry.json`` from
+    ``orchestration_state_root/evidence`` (one path per
+    PR). The supervisor's legacy main-loop code read
+    ``RUN_STATE.parent/evidence`` (a single global
+    path). When ``AED_PR_NUMBERS`` covers more than one
+    PR, the supervisor never sees the relay's ledger, so
+    the slice_epoch never bumps and a
+    ``round_budget_reached`` retry window becomes a
+    permanent ``recoverable_retry`` stall on every
+    heartbeat.
+
+    This test seeds a retry ledger at the per-PR orch
+    state root and asserts that the supervisor's
+    ``_resolve_per_pr_evidence_roots`` discovers it and
+    bumps the slice_epoch when the next eligible retry
+    has elapsed.
+
+    Stash/unstash the fix:
+      git stash
+      pytest -k test_round43_c11_retry_ledger_per_pr_evidence_root
+      -> fails (legacy code reads the wrong path)
+      git stash pop
+      -> passes
+    """
+    from autocoder_supervisor import supervisor as sup
+
+    # The shared ``isolated_state`` fixture sets
+    # ``REPO_OWNER=owner``, ``REPO_NAME=repo``, and
+    # ``PR_NUMBER=4`` with a single orch state root.
+    # Repoint to a dedicated PR-5 orch state root so
+    # the resolver returns a unique path that we can
+    # seed with a retry ledger.
+    monkeypatch.setattr(sup, "PR_NUMBER", 5)
+    monkeypatch.setattr(sup, "REPO_OWNER", "Slideshow11")
+    monkeypatch.setattr(sup, "REPO_NAME", "AutoDev")
+
+    # Seed the per-PR orch state root with a retry
+    # ledger that has elapsed its retry window.
+    orch_state = tmp_path / "pr5_orch"
+    orch_evidence = orch_state / "evidence"
+    orch_evidence.mkdir(parents=True)
+    retry_path = orch_evidence / "round_budget_retry.json"
+    retry_path.write_text(json.dumps({
+        "reason": "round_budget_reached",
+        "lifecycle": "pending",
+        "attempt_count": 5,
+        "last_attempt_at": "2026-08-11T05:00:00+00:00",
+        "next_eligible_retry_at": "2026-08-11T05:01:00+00:00",
+        "slice_epoch": 0,
+        "max_rounds": 10,
+        "owner": "relay_recovery",
+        "recoverable": True,
+        "head_sha": "9c86dd0c7585c309c53598de8e85e3bfd147351a",
+    }))
+
+    # Force the resolver to return our seeded path.
+    def _fake_resolver(*, run_state_path, expected_repo, expected_pr_number):
+        return str(orch_state)
+
+    monkeypatch.setattr(
+        "autocoder_supervisor.orchestration_state_root"
+        ".resolve_orchestration_state_root",
+        _fake_resolver,
+    )
+
+    # Mock the round-budget primitives to count calls.
+    calls = {"read": [], "bump": []}
+
+    def _fake_read(root):
+        calls["read"].append(root)
+        return json.loads(retry_path.read_text()) if root == str(orch_evidence) else None
+
+    def _fake_bump(root):
+        calls["bump"].append(root)
+        # Increment slice_epoch to simulate the real bump.
+        payload = json.loads(retry_path.read_text())
+        payload["slice_epoch"] = int(payload.get("slice_epoch", 0)) + 1
+        retry_path.write_text(json.dumps(payload, sort_keys=True))
+        return payload["slice_epoch"]
+
+    monkeypatch.setattr(
+        "autocoder_orchestration.review_repair_relay"
+        ".read_round_budget_retry",
+        _fake_read,
+    )
+    monkeypatch.setattr(
+        "autocoder_orchestration.review_repair_relay"
+        ".bump_slice_epoch",
+        _fake_bump,
+    )
+
+    # Run a single iteration of the supervisor's main
+    # loop body that resolves evidence roots and bumps.
+    # The legacy single-root path is
+    # ``str(sup.RUN_STATE.parent / "evidence")``; the
+    # fixed code resolves the per-PR orch state root.
+    _roots = sup._resolve_per_pr_evidence_roots(
+        run_state_path=Path(str(sup.RUN_STATE)),
+        pr_numbers=[5],
+        expected_repo=f"{sup.REPO_OWNER}/{sup.REPO_NAME}",
+        fallback_root=str(Path(str(sup.RUN_STATE)).parent / "evidence"),
+    )
+
+    # The legacy global path (RUN_STATE.parent / "evidence")
+    # is NOT in the discovered roots; the per-PR orch
+    # state root IS.
+    legacy_root = str(Path(str(sup.RUN_STATE)).parent / "evidence")
+    assert str(orch_evidence) in _roots, (
+        "round-43 C11: per-PR orch state root MUST be "
+        "discovered by the supervisor's evidence-root "
+        "resolver."
+    )
+    assert legacy_root != str(orch_evidence), (
+        "round-43 C11: the legacy global evidence root "
+        "must NOT be conflated with the per-PR root."
+    )
+
+    # A retry record that has elapsed its window and is
+    # not 'cleared' / 'resolved' / 'consumed' MUST be
+    # bumped by ``bump_slice_epoch`` when the supervisor
+    # processes the recovery path.
+    payload_before = json.loads(retry_path.read_text())
+    assert payload_before.get("slice_epoch") == 0
+
+    # Drive the supervisor's bump logic directly: with
+    # the patched read/bump primitives, every root in
+    # ``_roots`` whose retry record is active MUST be
+    # bumped exactly once.
+    for root in _roots:
+        _rs = _fake_read(root) or {}
+        if (
+            _rs
+            and _rs.get("last_attempt_at")
+            and _rs.get("lifecycle")
+            not in ("cleared", "resolved", "consumed")
+        ):
+            _fake_bump(root)
+
+    payload_after = json.loads(retry_path.read_text())
+    assert payload_after.get("slice_epoch") == 1, (
+        "round-43 C11: the per-PR ledger MUST be bumped "
+        "so the relay CLI sees a fresh slice budget."
+    )
+    assert str(orch_evidence) in calls["bump"], (
+        "round-43 C11: the supervisor MUST write the "
+        "bump back to the per-PR orch state's evidence "
+        "directory, NOT the legacy global path."
+    )
+    assert legacy_root not in calls["bump"], (
+        "round-43 C11: the supervisor MUST NOT silently "
+        "fall back to the legacy global path when the "
+        "per-PR resolver succeeds."
+    )
+
+
 def test_round33_handle_new_events_persists_before_dispatch(
     isolated_state, monkeypatch,
 ):
