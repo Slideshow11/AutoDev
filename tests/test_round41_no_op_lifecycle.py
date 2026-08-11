@@ -167,6 +167,15 @@ def test_poll_worker_attempt_no_op_uses_round_dispatch_json(
     live in the canonical round dispatch JSON. The
     supervisor's ``poll_worker_attempt`` MUST detect this
     and route to ``LIFECYCLE_NO_CHANGES_REQUIRED``.
+
+    Round-45: also patch out the GitHub push-recovery probe
+    so the test exercises ONLY the dispatch-ledger fallback.
+    Without this patch the round-37 attribution would
+    legitimately promote a generic dead worker to
+    PUSH_VERIFIED when the real ``feat/review-repair-relay-v1``
+    head has advanced past the fixture's ``"a"*40`` prelaunch
+    head — that promotion is the correct behaviour under the
+    round-45 precedence fix, not a test failure.
     """
     store_dir = tmp_path / "worker_attempts"
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -183,6 +192,14 @@ def test_poll_worker_attempt_no_op_uses_round_dispatch_json(
     monkeypatch.setattr(supervisor, "REPO_OWNER", "Slideshow11")
     monkeypatch.setattr(supervisor, "REPO_NAME", "AutoDev")
     monkeypatch.setattr(supervisor, "PR_NUMBER", 5)
+    # Round-45: stub out the GitHub push-recovery probe so the
+    # test exercises ONLY the dispatch-ledger fallback path.
+    # Returning ``None`` makes ``_live_head`` empty, the
+    # ``_live_head and _live_head != rec.prelaunch_head`` guard
+    # fails, and ``push_attributable`` stays False — leaving the
+    # dispatch-ledger NO_OP routing as the only classifier.
+    monkeypatch.setattr(supervisor, "get_github_token", lambda: "")
+    monkeypatch.setattr(supervisor, "github_get", lambda *_a, **_kw: None)
     runs_dir = (
         fake_home
         / ".hermes" / "aed" / "runs" / "Slideshow11" / "AutoDev" / "5"
@@ -234,12 +251,28 @@ def test_poll_worker_attempt_generic_dead_still_no_push(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A worker that died WITHOUT structured no-op proof
-    MUST still be classified ``WORKER_EXITED_NO_PUSH`` so
-    the controller routes to retry/escalation.
+    AND without a real push MUST still be classified
+    ``WORKER_EXITED_NO_PUSH`` so the controller routes to
+    retry/escalation.
+
+    Round-45: also patch out the GitHub push-recovery probe
+    AND the supervisor's REPO_OWNER/REPO_NAME/PR_NUMBER
+    globals so the test exercises the NO_PUSH transition
+    without being mis-attributed to the real
+    ``feat/review-repair-relay-v1`` head or picking up a
+    stale ``round_<N>_dispatch.json`` from the AED runs
+    directory. Without these patches the round-37
+    attribution or the dispatch-ledger NO_OP routing
+    would shadow the genuine WORKER_EXITED_NO_PUSH
+    outcome — both behaviours are correct under the
+    round-45 precedence fix, not test failures.
     """
     store_dir = tmp_path / "worker_attempts"
     store_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(supervisor, "WORKER_ATTEMPTS_DIR", store_dir)
+    monkeypatch.setattr(supervisor, "REPO_OWNER", "fake-owner")
+    monkeypatch.setattr(supervisor, "REPO_NAME", "fake-repo")
+    monkeypatch.setattr(supervisor, "PR_NUMBER", 0)
 
     attempt_id = "att-round41-generic-1"
     record = _make_record(
@@ -250,6 +283,11 @@ def test_poll_worker_attempt_generic_dead_still_no_push(
     WorkerAttemptStore(store_dir).write(record)
     monkeypatch.setattr(supervisor, "pid_alive", lambda _pid: False)
     monkeypatch.setattr(supervisor, "_reap_worker", lambda _pid: (1, None))
+    # Round-45: stub out the GitHub push-recovery probe so the
+    # generic-dead-worker classification is the actual test path
+    # under examination, not the round-37 PUSH_VERIFIED promotion.
+    monkeypatch.setattr(supervisor, "get_github_token", lambda: "")
+    monkeypatch.setattr(supervisor, "github_get", lambda *_a, **_kw: None)
 
     result = supervisor.poll_worker_attempt(
         attempt_id=attempt_id,
@@ -262,6 +300,138 @@ def test_poll_worker_attempt_generic_dead_still_no_push(
     rec = WorkerAttemptStore(store_dir).read(attempt_id)
     assert rec is not None
     assert rec.lifecycle == LIFECYCLE_WORKER_EXITED_NO_PUSH
+
+
+# ---------------------------------------------------------------------------
+# TEST 3b — round-45 precedence: stale dispatch-ledger MUST NOT shadow a
+# real worker push (finding 4 regression guard).
+# ---------------------------------------------------------------------------
+
+def test_poll_worker_attempt_push_verified_beats_stale_noop_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-45 finding 4 regression guard: a stale
+    ``round_<N>_dispatch.json`` at the current head MUST NOT
+    shadow a real worker push that the round-37 attribution
+    can verify. Without this fix, the dead worker is wrongly
+    terminalized as ``LIFECYCLE_NO_CHANGES_REQUIRED``,
+    orphaning the legitimate repair.
+
+    The fixture simulates: a worker attempted at prelaunch
+    head ``a*40``, the live GitHub head advanced to ``b*40``
+    on ``feat/review-repair-relay-v1``, ``origin/<branch>``
+    matches, and the committer-date is one minute AFTER the
+    worker's ``started_at``. A stale ``round_99_dispatch.json``
+    carrying ``outcome=NO_OP`` and ``head_sha_at_dispatch``
+    matching the AUTHORITATIVE_HEAD is also present — under
+    the previous ordering the worker would be misclassified
+    as ``NO_CHANGES_REQUIRED``. Under the round-45
+    precedence, push-recovery runs first and the worker is
+    correctly promoted to ``PUSH_VERIFIED``.
+    """
+    store_dir = tmp_path / "worker_attempts"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(supervisor, "WORKER_ATTEMPTS_DIR", store_dir)
+    monkeypatch.setattr(supervisor, "REPO_OWNER", "Slideshow11")
+    monkeypatch.setattr(supervisor, "REPO_NAME", "AutoDev")
+    monkeypatch.setattr(supervisor, "PR_NUMBER", 5)
+    monkeypatch.setattr(supervisor, "AUTHORITATIVE_HEAD", "b" * 40)
+
+    # Set up the AED runs dir with a stale no-op dispatch at
+    # AUTHORITATIVE_HEAD so the dispatch-ledger fallback WOULD
+    # match under the previous (buggy) ordering.
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(fake_home))
+    runs_dir = (
+        fake_home
+        / ".hermes" / "aed" / "runs" / "Slideshow11" / "AutoDev" / "5"
+    )
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    (runs_dir / "round_99_dispatch.json").write_text(
+        json.dumps({
+            "directive_id": "test-directive-stale",
+            "head_sha_at_dispatch": "b" * 40,
+            "round_index": 99,
+            "outcome": "NO_OP",
+            "verdict": "no_source_edit_required",
+        }),
+        encoding="utf-8",
+    )
+
+    prelaunch_head = "a" * 40
+    new_head = "b" * 40
+    attempt_id = "att-round45-p1-precedence"
+    record = _make_record(
+        attempt_id=attempt_id,
+        prelaunch_head=prelaunch_head,
+        extra={},
+    )
+    WorkerAttemptStore(store_dir).write(record)
+    monkeypatch.setattr(supervisor, "pid_alive", lambda _pid: False)
+    monkeypatch.setattr(supervisor, "_reap_worker", lambda _pid: (0, None))
+    monkeypatch.setattr(supervisor, "remove_lease", lambda: None)
+
+    # Simulate a genuine worker push: the live PR head
+    # advanced, origin/<branch> matches, committer date is
+    # AFTER started_at.
+    def _fake_gh(path: str, token: str = "") -> dict | None:
+        if "/pulls/" in path and "/reviews" not in path:
+            return {"head": {"sha": new_head}}
+        return None
+
+    monkeypatch.setattr(supervisor, "github_get", _fake_gh)
+    monkeypatch.setattr(supervisor, "get_github_token", lambda: "fake-token")
+
+    class _SR:
+        def __init__(self, out: str = "") -> None:
+            self.stdout = out
+            self.returncode = 0
+
+    def _fake_run(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and "rev-parse" in cmd:
+            return _SR(new_head)
+        return _SR("")
+
+    class _CO:
+        def __init__(self, out: str) -> None:
+            self._out = out
+        def strip(self) -> str:
+            return self._out
+
+    def _fake_check_output(*args, **kwargs):
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list) and "log" in cmd:
+            return _CO("2026-08-10T00:01:00+00:00")
+        return _CO("")
+
+    monkeypatch.setattr(supervisor.subprocess, "run", _fake_run)
+    monkeypatch.setattr(supervisor.subprocess, "check_output", _fake_check_output)
+
+    result = supervisor.poll_worker_attempt(
+        attempt_id=attempt_id,
+        lease={
+            "attempt_id": attempt_id,
+            "pid": 99999,
+            "session_id": "ses_FAKE",
+        },
+    )
+    rec = WorkerAttemptStore(store_dir).read(attempt_id)
+    assert rec is not None
+    # Round-45 finding 4: push-recovery attribution must win
+    # over a stale dispatch-ledger NO_OP. The worker is
+    # promoted to PUSH_VERIFIED and the head-rebind path
+    # can route the advance through mark_head_advanced_public.
+    assert rec.lifecycle == LIFECYCLE_PUSH_VERIFIED, (
+        "round-45 P1 precedence regression: a stale "
+        "round_<N>_dispatch.json at AUTHORITATIVE_HEAD "
+        "MUST NOT shadow a real worker push with "
+        "origin/<branch>=live_head AND committer_date > "
+        "rec.started_at — push-recovery attribution runs "
+        "FIRST and the worker is promoted to PUSH_VERIFIED."
+    )
+    assert rec.pushed_commit_sha == new_head
 
 
 # ---------------------------------------------------------------------------

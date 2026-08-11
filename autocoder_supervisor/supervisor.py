@@ -1382,10 +1382,209 @@ def poll_worker_attempt(
         rec.signal = signal
         rec.last_progress_at = now_iso()
         rec.finished_at = rec.finished_at or now_iso()
+        # Round-45 P1 precedence fix: classify a dead worker
+        # in the correct order. The previous ordering (round-41
+        # dispatch-ledger lookup FIRST, then round-37 push
+        # recovery) had a silent-bypass defect: a stale
+        # ``round_<N>_dispatch.json`` file at the current head —
+        # written by an earlier round that concluded no source
+        # edits were required — shadowed a genuine worker push
+        # that landed between heartbeats. The worker was wrongly
+        # terminalized as LIFECYCLE_NO_CHANGES_REQUIRED, the
+        # head-rebind path's ``find_active_worker_attempt_for_head``
+        # could not find the attempt (it only matches
+        # PUSH_VERIFIED state), and the controller stayed stuck
+        # in REPAIRING_REVIEW_FINDINGS while the live GitHub head
+        # advanced past the legitimate repair.
+        #
+        # The corrected precedence is:
+        #   1. WORKER-EMITTED proof via ``extra.no_changes_required_proof``
+        #      (a per-round ``round_<N>_disposition`` blob) is the
+        #      AUTHORITATIVE structured signal: it carries
+        #      per-finding disposition, verifier-tests-passed count,
+        #      and exact head. A worker that explicitly emitted this
+        #      proof MUST be routed to LIFECYCLE_NO_CHANGES_REQUIRED
+        #      regardless of what the live GitHub head looks like —
+        #      otherwise a repair that legitimately emitted
+        #      NO_CHANGES_REQUIRED AND happened to land a non-push
+        #      commit would be misclassified. We honour this signal
+        #      WITHOUT invoking the push-recovery probes.
+        #   2. STALE dispatch-ledger evidence
+        #      (``~/.hermes/aed/runs/.../round_<N>_dispatch.json``
+        #      at the current head) is a FALLBACK only. It MUST NOT
+        #      shadow a real worker push that the round-37
+        #      attribution can verify. So the dispatch-ledger
+        #      lookup runs AFTER push-recovery; if push-recovery
+        #      attributed the dead worker to a live head, we stay
+        #      PUSH_VERIFIED and never consult the dispatch ledger.
+        #   3. ROUND-37 PUSH-RECOVERY runs between the two
+        #      worker-emitted and dispatch-ledger NO_OP checks.
+        #      It requires (a) the live PR head advanced past
+        #      ``rec.prelaunch_head``, (b) origin/<branch> matches
+        #      that head, AND (c) the committer date is after
+        #      ``rec.started_at``. Exactly-one ownership: terminal
+        #      transitions happen at most once per attempt.
+        #
+        # Step 1: worker-emitted proof (authoritative).
+        _worker_emitted_no_op: bool = False
+        if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
+            _extra_d = rec.extra if isinstance(rec.extra, dict) else {}
+            for _key in (
+                "no_changes_required_proof",
+                "round_41_disposition",
+                "round_42_disposition",
+                "round_dispatch",
+            ):
+                _candidate = _extra_d.get(_key)
+                if isinstance(_candidate, dict) and _candidate:
+                    _worker_emitted_no_op = True
+                    break
+        if (
+            rec.lifecycle != LIFECYCLE_PUSH_VERIFIED
+            and not _worker_emitted_no_op
+        ):
+            # Step 3: round-37 push-recovery attribution.
+            # (Same body as before: refresh local/origin/live GitHub
+            # evidence, require committer date after rec.started_at,
+            # promote to PUSH_VERIFIED on match.)
+            push_attributable = False
+            try:
+                # Round-38: use ``get_github_token`` which
+                # honours both the dedicated env override and
+                # the canonical ``~/.config/gh/hosts.yml``
+                # source. Re-reading on every call lets a
+                # credential rotated by ``gh auth login`` be
+                # picked up without a supervisor restart.
+                _token_for_probe = get_github_token() or ""
+                if (
+                    rec.expected_branch
+                    and _token_for_probe
+                ):
+                    _pr_probe = github_get(
+                        f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
+                        _token_for_probe,
+                    )
+                    _live_head = ""
+                    if _pr_probe:
+                        _live_head = (
+                            _pr_probe.get("head", {}).get("sha")
+                            or ""
+                        )
+                    if (
+                        _live_head
+                        and _live_head != rec.prelaunch_head
+                    ):
+                        # Live head advanced past prelaunch;
+                        # ask git to verify origin/<branch>
+                        # actually points at it. The git
+                        # command runs against REPO_DIR.
+                        try:
+                            _out = subprocess.run(  # noqa: S602
+                                [
+                                    "git",
+                                    "-C",
+                                    str(REPO_DIR),  # type: ignore[name-defined]
+                                    "rev-parse",
+                                    "--verify",
+                                    f"refs/remotes/origin/{rec.expected_branch}",
+                                ],
+                                check=True,
+                                capture_output=True,
+                                text=True,
+                                timeout=10,
+                            )
+                            _origin_head = (
+                                _out.stdout.strip()
+                            )
+                            if (
+                                _origin_head
+                                and _origin_head
+                                == _live_head
+                            ):
+                                # Round-32 P1#6: origin equality
+                                # alone proves SOMEONE pushed the
+                                # commit. We MUST additionally
+                                # require the commit's committer
+                                # date to be strictly AFTER
+                                # ``rec.started_at`` so the
+                                # promotion is worker-specific
+                                # (matching the round-31 P1#6
+                                # contract enforced inside
+                                # ``verify_push_against_attempt``).
+                                _committer_ok, _committed_at = (
+                                    _git_committer_iso(_live_head)
+                                )
+                                _started_at_dt = parse_iso(
+                                    str(rec.started_at or "")
+                                )
+                                _worker_specific = (
+                                    _committer_ok
+                                    and _committed_at is not None
+                                    and _started_at_dt is not None
+                                    and _committed_at > _started_at_dt
+                                )
+                                if _worker_specific:
+                                    push_attributable = True
+                                    rec.pushed_commit_sha = (
+                                        _live_head
+                                    )
+                                    rec.origin_head_verified = True
+                                    rec.github_head_verified = (
+                                        True
+                                    )
+                                    rec.produced_commit_sha = (
+                                        _live_head
+                                    )
+                                    rec.lifecycle = (
+                                        LIFECYCLE_PUSH_VERIFIED
+                                    )
+                                    log(
+                                        "info",
+                                        "round-37 deferred push "
+                                        "recovery: dead worker "
+                                        "attributed to live head",
+                                        attempt_id=attempt_id,
+                                        pid=rec.pid,
+                                        pushed=_live_head[:12],
+                                    )
+                                else:
+                                    # Committer-date proof failed
+                                    # — treat the head as an
+                                    # external push and stay
+                                    # NO_PUSH. The head-rebind
+                                    # path that runs immediately
+                                    # after this poll will see
+                                    # the attempt already terminal
+                                    # and route the head advance
+                                    # via the bound active
+                                    # attempt, not this one.
+                                    log(
+                                        "warning",
+                                        "round-32 deferred push "
+                                        "recovery: candidate head "
+                                        "committer date fails "
+                                        "worker-specific proof; "
+                                        "treating as external push",
+                                        attempt_id=attempt_id,
+                                        pid=rec.pid,
+                                        candidate_head=_live_head[:12],
+                                        started_at=str(
+                                            rec.started_at or ""
+                                        ),
+                                        committer_ok=_committer_ok,
+                                    )
+                        except Exception:
+                            # git probe failed; stay
+                            # conservative. The attempt
+                            # remains in RECOVERY_CHECK /
+                            # WORKER_EXITED_NO_PUSH until
+                            # a stronger signal arrives.
+                            push_attributable = False
+            except Exception:
+                push_attributable = False
         # Round-41: route workers that exited cleanly with
         # a structured ``NO_CHANGES_REQUIRED`` disposition
-        # to the new terminal-success lifecycle BEFORE
-        # attempting push-recovery attribution. The worker
+        # to the new terminal-success lifecycle. The worker
         # is considered to have ACTUALLY EXECUTED the
         # directive if its attempt record carries an
         # ``extra.no_changes_required_proof`` blob with
@@ -1393,6 +1592,12 @@ def poll_worker_attempt(
         # verification summary, exact head), OR if the
         # canonical AED run-state ``round_<N>_dispatch.json``
         # file records ``outcome: NO_OP`` at the exact head.
+        #
+        # Round-45: the dispatch-ledger branch is the FALLBACK
+        # only — it MUST NOT shadow a real worker push that
+        # the round-37 push-recovery just attributed. So the
+        # gate skips this block when ``rec.lifecycle`` was
+        # already promoted to LIFECYCLE_PUSH_VERIFIED above.
         if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
             _no_op_proof: Optional[dict] = None
             _extra_d = rec.extra if isinstance(rec.extra, dict) else {}
@@ -1510,196 +1715,42 @@ def poll_worker_attempt(
                         attempt_id=attempt_id,
                         error=str(exc)[:200],
                     )
-        # Round-37 fix (WORKER_EXITED_NO_PUSH race): before
-        # terminalizing a dead worker as no-push, the supervisor
-        # MUST refresh local/origin/live GitHub evidence and
-        # check whether a push attributable to this attempt
-        # occurred between the last heartbeat and the worker
-        # death. Without this, a worker that pushed and exited
-        # in the gap would be wrongly recorded as NO_PUSH and
-        # the subsequent provenance lookup would reject the
-        # valid repair push — leaving the controller stuck
-        # while the live GitHub head already advanced past it.
-        # The check is best-effort: a transient 401 / network
-        # error here MUST NOT promote a no-push worker to
-        # PUSH_VERIFIED on weak evidence. We require:
-        #   (a) live GitHub PR head == a commit produced after
-        #       rec.prelaunch_head, AND
-        #   (b) origin/<expected_branch> head == the same SHA, AND
-        #   (c) rec.expected_branch is non-empty (otherwise we
-        #       cannot provenance-attribute the push to this
-        #       attempt and we conservatively stay NO_PUSH).
+        # Round-45: the round-37 push-recovery body was
+        # pulled forward in this function so the round-37
+        # attribution runs BEFORE the round-41 NO_OP routing
+        # (the previous ordering had a silent-bypass defect:
+        # a stale ``round_<N>_dispatch.json`` at the current
+        # head shadowed a genuine worker push and routed the
+        # worker to LIFECYCLE_NO_CHANGES_REQUIRED, orphaning
+        # the legitimate repair). The legacy duplicate block
+        # at the previous line offset (1513+) is removed; only
+        # the WORKER_EXITED_NO_PUSH transition remains here.
         if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
-            push_attributable = False
             try:
-                # Round-38: use ``get_github_token`` which
-                # honours both the dedicated env override and
-                # the canonical ``~/.config/gh/hosts.yml``
-                # source. Re-reading on every call lets a
-                # credential rotated by ``gh auth login`` be
-                # picked up without a supervisor restart.
-                _token_for_probe = get_github_token() or ""
-                if (
-                    rec.expected_branch
-                    and _token_for_probe
-                ):
-                    _pr_probe = github_get(
-                        f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
-                        _token_for_probe,
+                rec.assert_can_transition_to(
+                    LIFECYCLE_WORKER_EXITED_NO_PUSH,
+                )
+                rec.lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
+                if exit_code is not None and exit_code != 0:
+                    rec.terminal_reason = (
+                        f"worker exit_code={exit_code}"
                     )
-                    _live_head = ""
-                    if _pr_probe:
-                        _live_head = (
-                            _pr_probe.get("head", {}).get("sha")
-                            or ""
-                        )
-                    if (
-                        _live_head
-                        and _live_head != rec.prelaunch_head
-                    ):
-                        # Live head advanced past prelaunch;
-                        # ask git to verify origin/<branch>
-                        # actually points at it. The git
-                        # command runs against REPO_DIR.
-                        try:
-                            _out = subprocess.run(  # noqa: S602
-                                [
-                                    "git",
-                                    "-C",
-                                    str(REPO_DIR),  # type: ignore[name-defined]
-                                    "rev-parse",
-                                    "--verify",
-                                    f"refs/remotes/origin/{rec.expected_branch}",
-                                ],
-                                check=True,
-                                capture_output=True,
-                                text=True,
-                                timeout=10,
-                            )
-                            _origin_head = (
-                                _out.stdout.strip()
-                            )
-                            if (
-                                _origin_head
-                                and _origin_head
-                                == _live_head
-                            ):
-                                # Round-32 P1#6: origin equality
-                                # alone proves SOMEONE pushed the
-                                # commit. We MUST additionally
-                                # require the commit's committer
-                                # date to be strictly AFTER
-                                # ``rec.started_at`` so the
-                                # promotion is worker-specific
-                                # (matching the round-31 P1#6
-                                # contract enforced inside
-                                # ``verify_push_against_attempt``).
-                                # Without this guard, an external
-                                # actor's push (commit time before
-                                # the worker launched, but
-                                # matching ``origin/<branch>``) is
-                                # wrongly attributed to this
-                                # attempt and the worker is
-                                # promoted to PUSH_VERIFIED,
-                                # leaving the controller stuck on
-                                # a fraudulent repair.
-                                _committer_ok, _committed_at = (
-                                    _git_committer_iso(_live_head)
-                                )
-                                _started_at_dt = parse_iso(
-                                    str(rec.started_at or "")
-                                )
-                                _worker_specific = (
-                                    _committer_ok
-                                    and _committed_at is not None
-                                    and _started_at_dt is not None
-                                    and _committed_at > _started_at_dt
-                                )
-                                if _worker_specific:
-                                    push_attributable = True
-                                    rec.pushed_commit_sha = (
-                                        _live_head
-                                    )
-                                    rec.origin_head_verified = True
-                                    rec.github_head_verified = (
-                                        True
-                                    )
-                                    rec.produced_commit_sha = (
-                                        _live_head
-                                    )
-                                    rec.lifecycle = (
-                                        LIFECYCLE_PUSH_VERIFIED
-                                    )
-                                    log(
-                                        "info",
-                                        "round-37 deferred push "
-                                        "recovery: dead worker "
-                                        "attributed to live head",
-                                        attempt_id=attempt_id,
-                                        pid=rec.pid,
-                                        pushed=_live_head[:12],
-                                    )
-                                else:
-                                    # Committer-date proof failed
-                                    # — treat the head as an
-                                    # external push and stay
-                                    # NO_PUSH. The head-rebind
-                                    # path that runs immediately
-                                    # after this poll will see
-                                    # the attempt already terminal
-                                    # and route the head advance
-                                    # via the bound active
-                                    # attempt, not this one.
-                                    log(
-                                        "warning",
-                                        "round-32 deferred push "
-                                        "recovery: candidate head "
-                                        "committer date fails "
-                                        "worker-specific proof; "
-                                        "treating as external push",
-                                        attempt_id=attempt_id,
-                                        pid=rec.pid,
-                                        candidate_head=_live_head[:12],
-                                        started_at=str(
-                                            rec.started_at or ""
-                                        ),
-                                        committer_ok=_committer_ok,
-                                    )
-                        except Exception:
-                            # git probe failed; stay
-                            # conservative. The attempt
-                            # remains in RECOVERY_CHECK /
-                            # WORKER_EXITED_NO_PUSH until
-                            # a stronger signal arrives.
-                            push_attributable = False
-            except Exception:
-                push_attributable = False
-            if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
-                try:
-                    rec.assert_can_transition_to(
-                        LIFECYCLE_WORKER_EXITED_NO_PUSH,
+                elif signal is not None:
+                    rec.terminal_reason = (
+                        f"worker signal={signal}"
                     )
-                    rec.lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
-                    if exit_code is not None and exit_code != 0:
-                        rec.terminal_reason = (
-                            f"worker exit_code={exit_code}"
-                        )
-                    elif signal is not None:
-                        rec.terminal_reason = (
-                            f"worker signal={signal}"
-                        )
-                    else:
-                        rec.terminal_reason = "worker exited without push"
-                except Exception as exc:  # noqa: BLE001
-                    log(
-                        "warning",
-                        "could not transition attempt to WORKER_EXITED_NO_PUSH",
-                        attempt_id=attempt_id,
-                        error=str(exc),
-                    )
-                    # Force a transition via RECOVERY_CHECK as a safety
-                    # net; the next poll or recovery cycle will finalize.
-                    rec.lifecycle = LIFECYCLE_RECOVERY_CHECK
+                else:
+                    rec.terminal_reason = "worker exited without push"
+            except Exception as exc:  # noqa: BLE001
+                log(
+                    "warning",
+                    "could not transition attempt to WORKER_EXITED_NO_PUSH",
+                    attempt_id=attempt_id,
+                    error=str(exc),
+                )
+                # Force a transition via RECOVERY_CHECK as a safety
+                # net; the next poll or recovery cycle will finalize.
+                rec.lifecycle = LIFECYCLE_RECOVERY_CHECK
         store.write(rec)
         # Round-39 P1#5: when the deferred push-recovery
         # branch attributed the dead worker to a live head
