@@ -40,6 +40,7 @@ import pytest
 
 from autocoder_orchestration.worker_attempt import (
     LIFECYCLE_PUSH_VERIFIED,
+    LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
     LIFECYCLE_WORKER_EXITED_NO_PUSH,
     LIFECYCLE_WORKER_RUNNING,
     SCHEMA_VERSION,
@@ -231,11 +232,16 @@ def test_p1_06_poll_worker_rejects_external_actor_push_before_started_at(
 def test_p1_06_poll_worker_accepts_worker_push_after_started_at(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Companion to the rejection test: when the candidate
-    head's committer date is AFTER ``rec.started_at`` the
-    deferred-recovery branch MUST promote the attempt to
-    PUSH_VERIFIED (the round-31 contract still works for
-    genuine worker pushes).
+    """Round-42: when the worker has NOT durably recorded
+    the push, the committer-date guard alone is NOT
+    sufficient. The attempt is classified as
+    ``UNATTRIBUTED_HEAD_ADVANCE`` even when the
+    committer date is AFTER ``rec.started_at`` and the
+    origin branch matches.
+
+    The OLD round-32 contract (committer-date alone
+    sufficient) was REPLACED in round-42. The C9-style
+    manual commit incident is the canary for this guard.
     """
     from autocoder_supervisor import supervisor as sup
 
@@ -282,22 +288,6 @@ def test_p1_06_poll_worker_accepts_worker_push_after_started_at(
 
     monkeypatch.setattr(sup.subprocess, "run", _fake_run)
 
-    class _CheckOutput:
-        def __init__(self, _out: str) -> None:
-            self._out = _out
-
-        def strip(self) -> str:
-            return self._out
-
-    def _fake_check_output(*args, **kwargs):
-        cmd = args[0] if args else kwargs.get("args", [])
-        if isinstance(cmd, list) and "log" in cmd:
-            # 1 minute AFTER the worker's started_at.
-            return _CheckOutput("2026-08-10T00:01:00+00:00")
-        return _CheckOutput("")
-
-    monkeypatch.setattr(sup.subprocess, "check_output", _fake_check_output)
-
     lease = {
         "attempt_id": "att-round32-p1-6-accept",
         "pid": os.getpid(),
@@ -314,12 +304,14 @@ def test_p1_06_poll_worker_accepts_worker_push_after_started_at(
     store = sup._worker_attempt_store()
     rec = store.read("att-round32-p1-6-accept")
     assert rec is not None
-    assert rec.lifecycle == LIFECYCLE_PUSH_VERIFIED, (
-        "round-32 P1#6: poll_worker_attempt MUST promote a "
-        "genuine worker push (committer date AFTER "
-        "rec.started_at) to PUSH_VERIFIED so the head-rebind "
-        "path can route the advance through "
-        "mark_head_advanced_public."
+    # Round-42: the attempt did NOT record the push. The
+    # committer-date guard alone is INSUFFICIENT. The
+    # attempt is UNATTRIBUTED.
+    assert rec.lifecycle == LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE, (
+        "round-42: a worker that did not record the push is "
+        "UNATTRIBUTED, even when origin/live match and the "
+        "committer date is after started_at. The C9-style "
+        "manual commit incident is the canary for this guard."
     )
 
 

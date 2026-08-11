@@ -328,10 +328,19 @@ def test_p1_06_verify_rejects_external_actor_push_before_started_at(
 def test_p1_06_verify_accepts_push_after_started_at(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Companion to the rejection test: when the committer
-    date is AFTER ``rec.started_at``, the verifier MUST
-    mark the push as verified (the round-39 origin
-    fallthrough still works for genuine worker pushes).
+    """Round-42: when the committer date is AFTER
+    ``rec.started_at`` but the worker has NOT durably
+    recorded the push, the verifier MUST return False
+    for both flags. The C9-style manual commit incident
+    is the canary for this guard.
+
+    The OLD round-31 contract (committer-date alone
+    sufficient) was REPLACED in round-42. The verifier
+    requires a positive worker-emitted
+    ``pushed_commit_sha`` (or the LAST element of
+    ``pushed_commit_shas``) equal to the new head.
+    Time-based and origin-based evidence is diagnostic
+    only.
     """
     from autocoder_supervisor import supervisor as sup
 
@@ -343,6 +352,12 @@ def test_p1_06_verify_accepts_push_after_started_at(
         sup, "WORKER_ATTEMPTS_DIR", worker_attempts_dir, raising=False,
     )
 
+    # The attempt has NO recorded pushed_commit_sha. The
+    # committer date is AFTER started_at; the origin
+    # branch matches; the live head advanced. Under the
+    # round-31 contract this would be promoted; under
+    # round-42 the verifier returns False because the
+    # worker has not durably claimed the commit.
     _seed_attempt(
         store_dir=worker_attempts_dir,
         attempt_id="att-round31-p1-6-accept",
@@ -365,9 +380,6 @@ def test_p1_06_verify_accepts_push_after_started_at(
         cmd = args[0] if args else kwargs.get("args", [])
         if isinstance(cmd, list) and "rev-parse" in cmd:
             return _R(new_head)
-        # Committer date 1 minute AFTER started_at.
-        if isinstance(cmd, list) and "log" in cmd:
-            return _R("2026-08-10T00:01:00+00:00")
         return _R("")
 
     monkeypatch.setattr(
@@ -380,8 +392,10 @@ def test_p1_06_verify_accepts_push_after_started_at(
         new_head_sha=new_head,
     )
     assert out is not None
-    assert out.get("origin_head_verified") is True
-    assert out.get("github_head_verified") is True
+    # Round-42 invariant: both flags are False. The
+    # committer-date guard alone is INSUFFICIENT.
+    assert out.get("origin_head_verified") is False
+    assert out.get("github_head_verified") is False
 
 
 # ---------------------------------------------------------------------------

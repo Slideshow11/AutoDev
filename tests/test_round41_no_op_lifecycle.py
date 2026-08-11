@@ -32,6 +32,7 @@ import pytest
 from autocoder_supervisor import supervisor
 from autocoder_orchestration.worker_attempt import (
     LIFECYCLE_NO_CHANGES_REQUIRED,
+    LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
     LIFECYCLE_TERMINAL_REPAIRED,
     LIFECYCLE_WORKER_EXITED_NO_PUSH,
     LIFECYCLE_WORKER_RUNNING,
@@ -307,27 +308,31 @@ def test_poll_worker_attempt_generic_dead_still_no_push(
 # real worker push (finding 4 regression guard).
 # ---------------------------------------------------------------------------
 
-def test_poll_worker_attempt_push_verified_beats_stale_noop_dispatch(
+def test_poll_worker_attempt_no_worker_record_classified_unattributed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Round-45 finding 4 regression guard: a stale
-    ``round_<N>_dispatch.json`` at the current head MUST NOT
-    shadow a real worker push that the round-37 attribution
-    can verify. Without this fix, the dead worker is wrongly
-    terminalized as ``LIFECYCLE_NO_CHANGES_REQUIRED``,
-    orphaning the legitimate repair.
+    """Round-42: a worker attempt that did NOT record any
+    pushed_commit_sha MUST NOT be promoted to
+    PUSH_VERIFIED, even when the live GitHub head advanced,
+    origin/<branch> matches, and the committer date is
+    after the worker started. The head movement is
+    classified as UNATTRIBUTED_HEAD_ADVANCE.
 
     The fixture simulates: a worker attempted at prelaunch
     head ``a*40``, the live GitHub head advanced to ``b*40``
     on ``feat/review-repair-relay-v1``, ``origin/<branch>``
     matches, and the committer-date is one minute AFTER the
-    worker's ``started_at``. A stale ``round_99_dispatch.json``
-    carrying ``outcome=NO_OP`` and ``head_sha_at_dispatch``
-    matching the AUTHORITATIVE_HEAD is also present — under
-    the previous ordering the worker would be misclassified
-    as ``NO_CHANGES_REQUIRED``. Under the round-45
-    precedence, push-recovery runs first and the worker is
-    correctly promoted to ``PUSH_VERIFIED``.
+    worker's ``started_at``. A ``round_99_dispatch.json``
+    carrying ``outcome=NO_OP`` is also present — both the
+    dispatch-ledger no-op AND the round-37
+    time/origin-based attribution paths used to wrongly
+    promote this to PUSH_VERIFIED. Round-42 changes the
+    semantic: a worker that did NOT durably record the
+    push is UNATTRIBUTED. The C9-style manual commit
+    incident is the canary for this test.
+
+    (Replaces the round-45 P1 precedence test which
+    expected a different false-positive promotion.)
     """
     store_dir = tmp_path / "worker_attempts"
     store_dir.mkdir(parents=True, exist_ok=True)
@@ -337,9 +342,10 @@ def test_poll_worker_attempt_push_verified_beats_stale_noop_dispatch(
     monkeypatch.setattr(supervisor, "PR_NUMBER", 5)
     monkeypatch.setattr(supervisor, "AUTHORITATIVE_HEAD", "b" * 40)
 
-    # Set up the AED runs dir with a stale no-op dispatch at
-    # AUTHORITATIVE_HEAD so the dispatch-ledger fallback WOULD
-    # match under the previous (buggy) ordering.
+    # The dispatch-ledger fallback WOULD match under the
+    # previous (buggy) ordering. With round-42, the
+    # no-op dispatch cannot promote a worker that did
+    # not record its push.
     fake_home = tmp_path / "home"
     fake_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(fake_home))
@@ -361,7 +367,7 @@ def test_poll_worker_attempt_push_verified_beats_stale_noop_dispatch(
 
     prelaunch_head = "a" * 40
     new_head = "b" * 40
-    attempt_id = "att-round45-p1-precedence"
+    attempt_id = "att-round42-no-worker-record"
     record = _make_record(
         attempt_id=attempt_id,
         prelaunch_head=prelaunch_head,
@@ -372,9 +378,6 @@ def test_poll_worker_attempt_push_verified_beats_stale_noop_dispatch(
     monkeypatch.setattr(supervisor, "_reap_worker", lambda _pid: (0, None))
     monkeypatch.setattr(supervisor, "remove_lease", lambda: None)
 
-    # Simulate a genuine worker push: the live PR head
-    # advanced, origin/<branch> matches, committer date is
-    # AFTER started_at.
     def _fake_gh(path: str, token: str = "") -> dict | None:
         if "/pulls/" in path and "/reviews" not in path:
             return {"head": {"sha": new_head}}
@@ -394,20 +397,7 @@ def test_poll_worker_attempt_push_verified_beats_stale_noop_dispatch(
             return _SR(new_head)
         return _SR("")
 
-    class _CO:
-        def __init__(self, out: str) -> None:
-            self._out = out
-        def strip(self) -> str:
-            return self._out
-
-    def _fake_check_output(*args, **kwargs):
-        cmd = args[0] if args else kwargs.get("args", [])
-        if isinstance(cmd, list) and "log" in cmd:
-            return _CO("2026-08-10T00:01:00+00:00")
-        return _CO("")
-
     monkeypatch.setattr(supervisor.subprocess, "run", _fake_run)
-    monkeypatch.setattr(supervisor.subprocess, "check_output", _fake_check_output)
 
     result = supervisor.poll_worker_attempt(
         attempt_id=attempt_id,
@@ -419,19 +409,22 @@ def test_poll_worker_attempt_push_verified_beats_stale_noop_dispatch(
     )
     rec = WorkerAttemptStore(store_dir).read(attempt_id)
     assert rec is not None
-    # Round-45 finding 4: push-recovery attribution must win
-    # over a stale dispatch-ledger NO_OP. The worker is
-    # promoted to PUSH_VERIFIED and the head-rebind path
-    # can route the advance through mark_head_advanced_public.
-    assert rec.lifecycle == LIFECYCLE_PUSH_VERIFIED, (
-        "round-45 P1 precedence regression: a stale "
-        "round_<N>_dispatch.json at AUTHORITATIVE_HEAD "
-        "MUST NOT shadow a real worker push with "
-        "origin/<branch>=live_head AND committer_date > "
-        "rec.started_at — push-recovery attribution runs "
-        "FIRST and the worker is promoted to PUSH_VERIFIED."
+    # Round-42: the worker did NOT durably record the
+    # commit. The head movement is UNATTRIBUTED. The
+    # attempt becomes terminal as
+    # UNATTRIBUTED_HEAD_ADVANCE; the supervisor does NOT
+    # call mark_head_advanced_public for this attempt.
+    assert rec.lifecycle == LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE, (
+        "round-42: a worker that did not record the push is "
+        "UNATTRIBUTED, even when origin/live match and the "
+        "committer date is after started_at. The C9-style "
+        "manual commit incident is the canary for this "
+        "regression guard."
     )
-    assert rec.pushed_commit_sha == new_head
+    # The worker-emitted pushed_commit_sha is preserved
+    # (empty) — the supervisor MUST NOT invent one.
+    assert not rec.pushed_commit_sha
+    assert not rec.produced_commit_sha
 
 
 # ---------------------------------------------------------------------------

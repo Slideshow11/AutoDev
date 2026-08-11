@@ -63,6 +63,17 @@ LIFECYCLE_NO_CHANGES_REQUIRED = "NO_CHANGES_REQUIRED"
 LIFECYCLE_WORKER_STARTUP_FAILED = "WORKER_STARTUP_FAILED"
 LIFECYCLE_WORKER_EXECUTION_FAILED = "WORKER_EXECUTION_FAILED"
 
+# Round-42: the head advanced but the worker attempt
+# contains no recorded ``pushed_commit_sha`` for the new
+# head. The head movement is unattributed and MUST NOT
+# be promoted to PUSH_VERIFIED. The supervisor's
+# head-rebind path treats this as an external / manual
+# commit (e.g. an operator or another actor pushed while
+# the worker happened to be running).
+LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE = (
+    "UNATTRIBUTED_HEAD_ADVANCE"
+)
+
 # Terminal failure lifecycle values — the attempt is finished
 # but the work item is RETRY_PENDING.
 TERMINAL_FAILURE_LIFECYCLES = frozenset({
@@ -73,10 +84,16 @@ TERMINAL_FAILURE_LIFECYCLES = frozenset({
 
 # All lifecycle values that mark the attempt as finished
 # (success OR failure).
+# Round-42: ``UNATTRIBUTED_HEAD_ADVANCE`` is a terminal
+# state — the attempt is finished and the head movement
+# is external. The worker's finding remains
+# RETRY_PENDING (the next dispatch cycle will inspect
+# the new head).
 TERMINAL_LIFECYCLES = frozenset({
     LIFECYCLE_TERMINAL_REPAIRED,
     LIFECYCLE_NO_CHANGES_REQUIRED,
     LIFECYCLE_WORKER_EXITED_NO_PUSH,
+    LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
 })
 
 
@@ -113,15 +130,37 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
         # classified ``WORKER_EXECUTION_FAILED`` and remains
         # RETRY_PENDING.
         LIFECYCLE_WORKER_EXECUTION_FAILED,
+        # Round-42: the head advanced past the worker's
+        # prelaunch head but the worker attempt contains no
+        # recorded ``pushed_commit_sha`` for the new head.
+        # The head movement is unattributed. The attempt
+        # becomes terminal WITHOUT being promoted to
+        # PUSH_VERIFIED — the live head is an external
+        # commit and the finding remains RETRY_PENDING.
+        LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
     }),
     LIFECYCLE_COMMIT_PRODUCED: frozenset({
         LIFECYCLE_PUSH_VERIFIED,
         LIFECYCLE_WORKER_EXITED_NO_PUSH,  # commit produced but push failed
         LIFECYCLE_RECOVERY_CHECK,
+        # Round-42: a produced-but-not-yet-pushed worker
+        # can also be superseded by an external head
+        # movement; the attempt becomes terminal as
+        # ``UNATTRIBUTED_HEAD_ADVANCE`` (the worker's
+        # commit is preserved but the head is owned by
+        # another actor).
+        LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
     }),
     LIFECYCLE_PUSH_VERIFIED: frozenset({
         LIFECYCLE_TERMINAL_REPAIRED,
         LIFECYCLE_RECOVERY_CHECK,
+        # Round-42: a verified worker push can be
+        # superseded by an external head movement
+        # (e.g. the operator pushes again). The attempt
+        # becomes terminal as ``UNATTRIBUTED_HEAD_ADVANCE``
+        # for the new head, while preserving the worker's
+        # recorded ``pushed_commit_sha``.
+        LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
     }),
     LIFECYCLE_RECOVERY_CHECK: frozenset({
         LIFECYCLE_PUSH_VERIFIED,
@@ -166,6 +205,13 @@ class WorkerAttemptRecord:
     result_artifact_path: Optional[str]
     produced_commit_sha: Optional[str]
     pushed_commit_sha: Optional[str]
+    # Round-42: multi-commit worker attempts may produce
+    # more than one commit. The supervisor records an
+    # ORDERED list of produced/pushed SHAs in
+    # ``extra.produced_commit_shas`` /
+    # ``extra.pushed_commit_shas``. The single-SHA fields
+    # above are kept for backward compatibility (the
+    # final commit on the chain).
     origin_head_verified: bool
     github_head_verified: bool
     terminal_reason: Optional[str]
@@ -201,13 +247,183 @@ class WorkerAttemptRecord:
         """
         if next_lifecycle == self.lifecycle:
             return
-        allowed = _ALLOWED_TRANSITIONS.get(self.lifecycle, frozenset())
+        allowed = _ALLOWED_TRANSITIONS.get(
+            self.lifecycle, frozenset()
+        )
         if next_lifecycle not in allowed:
             raise AttemptLifecycleError(
                 f"attempt {self.attempt_id}: cannot transition "
                 f"{self.lifecycle!r} -> {next_lifecycle!r}; "
-                f"allowed next: {sorted(allowed) if allowed else '(terminal)'}"
+                f"allowed next: "
+                f"{sorted(allowed) if allowed else '(terminal)'}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Round-42: canonical worker result artifact
+# ---------------------------------------------------------------------------
+#
+# A ``WorkerResultArtifact`` is the durable, causally-bound
+# proof that a specific worker attempt executed. The
+# artifact is the SOLE source of truth for the worker's
+# produced commits and pushed SHAs. The supervisor MUST
+# NOT infer produced/pushed SHAs from generic remote
+# movement.
+#
+# The artifact is written by the worker execution path
+# immediately after each ``git commit`` and ``git push``
+# invocation. The supervisor reads it from
+# ``rec.result_artifact_path`` (set at attempt creation)
+# after the worker exits.
+# ---------------------------------------------------------------------------
+
+# Round-42: worker result type enum.
+RESULT_TYPE_REPAIR_COMMIT_PRODUCED = "REPAIR_COMMIT_PRODUCED"
+RESULT_TYPE_REPAIR_PUSHED = "REPAIR_PUSHED"
+RESULT_TYPE_NO_CHANGES_REQUIRED = "NO_CHANGES_REQUIRED"
+RESULT_TYPE_WORKER_EXECUTION_FAILED = "WORKER_EXECUTION_FAILED"
+RESULT_TYPE_COMMIT_PRODUCED_NOT_PUSHED = "COMMIT_PRODUCED_NOT_PUSHED"
+
+# Result artifact schema version. Bump when the schema
+# changes. The supervisor refuses to read artifacts
+# whose schema_version does not match.
+WORKER_RESULT_SCHEMA_VERSION = "autocoder.worker_result.v1"
+
+
+@dataclass
+class WorkerResultArtifact:
+    """Canonical worker result artifact.
+
+    Required fields (round-42 invariant):
+        schema_version — schema identifier; supervisor
+                         refuses unknown versions.
+        attempt_id     — exact attempt that produced the
+                         artifact. Bind a worker result to
+                         exactly one attempt.
+        claim_id       — exact claim.
+        directive_digest — exact directive that the worker
+                         executed.
+        result_type    — one of RESULT_TYPE_*.
+        produced_commit_shas — ORDERED list of commits the
+                         worker actually created. Empty
+                         list for NO_CHANGES_REQUIRED.
+        pushed_commit_shas — ORDERED list of commits the
+                         worker actually pushed. Empty
+                         list when the worker did not push.
+        completed_at   — ISO-8601 UTC.
+
+    Optional fields:
+        no_changes_required_proof — per-finding
+                         classification + verification
+                         summary (only for
+                         NO_CHANGES_REQUIRED).
+        tests_run / tests_passed — verification evidence.
+        attempt_nonce — optional defense against
+                         cross-attempt result adoption
+                         (round-42 §15).
+    """
+
+    schema_version: str
+    attempt_id: str
+    claim_id: str
+    directive_digest: str
+    result_type: str
+    produced_commit_shas: tuple[str, ...]
+    pushed_commit_shas: tuple[str, ...]
+    completed_at: str
+    no_changes_required_proof: Optional[dict] = None
+    tests_run: int = 0
+    tests_passed: int = 0
+    attempt_nonce: Optional[str] = None
+    # round-42 §5: bound these even if not all are set.
+    repo: Optional[str] = None
+    pr_number: Optional[int] = None
+    expected_branch: Optional[str] = None
+    prelaunch_head: Optional[str] = None
+    worker_session_id: Optional[str] = None
+    worker_pid: Optional[int] = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["produced_commit_shas"] = list(self.produced_commit_shas)
+        d["pushed_commit_shas"] = list(self.pushed_commit_shas)
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WorkerResultArtifact":
+        kwargs = dict(data)
+        kwargs["produced_commit_shas"] = tuple(
+            data.get("produced_commit_shas", ()) or ()
+        )
+        kwargs["pushed_commit_shas"] = tuple(
+            data.get("pushed_commit_shas", ()) or ()
+        )
+        kwargs["extra"] = dict(data.get("extra", {}) or {})
+        return cls(**kwargs)
+
+    def write(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(
+            json.dumps(self.to_dict(), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+
+    @classmethod
+    def read(cls, path: Path) -> Optional["WorkerResultArtifact"]:
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if data.get("schema_version") != WORKER_RESULT_SCHEMA_VERSION:
+            return None
+        return cls.from_dict(data)
+
+    def validate_against_attempt(
+        self, rec: "WorkerAttemptRecord",
+    ) -> list[str]:
+        """Return a list of invariant violations.
+
+        The supervisor MUST call this before using the
+        artifact to advance the controller state. The
+        artifact is the SOLE source of truth for the
+        worker's produced/pushed SHAs.
+        """
+        errors: list[str] = []
+        if self.attempt_id != rec.attempt_id:
+            errors.append(
+                f"attempt_id mismatch: result={self.attempt_id} "
+                f"record={rec.attempt_id}"
+            )
+        if self.claim_id != rec.claim_id:
+            errors.append(
+                f"claim_id mismatch: result={self.claim_id} "
+                f"record={rec.claim_id}"
+            )
+        if self.directive_digest != rec.directive_digest:
+            errors.append(
+                f"directive_digest mismatch: result="
+                f"{self.directive_digest} record="
+                f"{rec.directive_digest}"
+            )
+        # NO_CHANGES_REQUIRED must have ZERO produced
+        # and ZERO pushed commits.
+        if self.result_type == RESULT_TYPE_NO_CHANGES_REQUIRED:
+            if self.produced_commit_shas:
+                errors.append(
+                    "NO_CHANGES_REQUIRED has non-empty "
+                    "produced_commit_shas"
+                )
+            if self.pushed_commit_shas:
+                errors.append(
+                    "NO_CHANGES_REQUIRED has non-empty "
+                    "pushed_commit_shas"
+                )
+        return errors
 
 
 # ---------------------------------------------------------------------------

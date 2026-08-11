@@ -473,10 +473,13 @@ def test_p1_05_lease_preserved_on_push_verified(
 def test_p1_06_verify_push_against_attempt_accepts_origin_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When both ``pushed_commit_sha`` and ``produced_commit_sha``
-    are ``None`` (the production launch initializer), the
-    verifier MUST fall back to ``origin/<branch>`` matching
-    ``new_head_sha`` instead of failing closed.
+    """Round-42: when both ``pushed_commit_sha`` and
+    ``produced_commit_sha`` are None, the verifier MUST
+    return False for both flags. The OLD round-39
+    origin-fallback-with-committer-date-guard contract
+    was REPLACED. Origin matching is diagnostic only;
+    a positive worker-emitted ``pushed_commit_sha`` is
+    the SOLE source of truth.
     """
     from autocoder_supervisor import supervisor as sup
 
@@ -497,31 +500,16 @@ def test_p1_06_verify_push_against_attempt_accepts_origin_branch(
         expected_branch="feat/test-branch",
     )
 
-    # Mock the git probe to claim origin/<branch> == new_head_sha.
     new_head = "b" * 40
 
     class _R:
         def strip(self) -> str:
             return new_head
 
-    # Round-31 P1#6: the verifier also requires the
-    # committer date to be strictly AFTER the worker's
-    # ``started_at``. The seeded attempt starts at
-    # ``2026-08-10T00:00:00Z``; mock ``git log`` so the
-    # committer date is 1 minute later, satisfying the
-    # worker-specific-proof contract.
-    class _R2:
-        def strip(self) -> str:
-            return "2026-08-10T00:01:00+00:00"
-
     def _fake_check_output(*args, **kwargs):
         cmd = args[0] if args else kwargs.get("args", [])
-        # ``git rev-parse origin/<branch>``
         if isinstance(cmd, list) and "rev-parse" in cmd:
             return _R()
-        # ``git log -1 --format=%cI <sha>``
-        if isinstance(cmd, list) and "log" in cmd:
-            return _R2()
         return _R()
 
     monkeypatch.setattr(
@@ -534,12 +522,19 @@ def test_p1_06_verify_push_against_attempt_accepts_origin_branch(
         new_head_sha=new_head,
     )
     assert out is not None, (
-        "verify_push_against_attempt MUST fall back to the "
-        "origin/<branch> check when both pushed_commit_sha and "
-        "produced_commit_sha are None."
+        "verify_push_against_attempt must return a result "
+        "even when both SHAs are None"
     )
-    assert out.get("origin_head_verified") is True
-    assert out.get("github_head_verified") is True
+    # Round-42: the verifier does NOT fabricate positive
+    # verification from origin/live/date evidence. The
+    # worker has not durably recorded the push, so both
+    # flags are False.
+    assert out.get("origin_head_verified") is False, (
+        "round-42: a worker that did not record the push "
+        "MUST NOT be verified via the origin/<branch> "
+        "fallback. Origin matching is diagnostic only."
+    )
+    assert out.get("github_head_verified") is False
 
 
 # ---------------------------------------------------------------------------

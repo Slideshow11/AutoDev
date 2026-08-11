@@ -301,8 +301,17 @@ def test_poll_worker_attempt_defers_no_push_for_push_recovery() -> None:
     text = SUPERVISOR_PATH.read_text(encoding="utf-8")
     # The string is broken across adjacent literals by Python's
     # implicit concatenation; search for the unique prefix.
+    # Round-42: the round-37 ``deferred push recovery`` log
+    # was replaced by the round-42 positive/unattributed
+    # log (which preserves the same semantic: the
+    # supervisor MUST probe the live head before
+    # terminalizing a dead worker). The test is updated
+    # to look for either the round-37 OR the round-42
+    # marker so it covers the round-42 fix correctly.
     assert (
         "round-37 deferred push" in text
+        or "round-42 positive: worker reported" in text
+        or "round-42 unattributed head advance" in text
     ), (
         "poll_worker_attempt MUST probe live GitHub PR head "
         "and origin/<branch> before terminalizing a dead "

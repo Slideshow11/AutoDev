@@ -207,24 +207,41 @@ def test_p1_03_no_action_branch_persists_retry_with_correct_reason() -> None:
 
 
 def test_p1_04_poll_worker_defers_no_push_on_remote_head_match() -> None:
-    """``poll_worker_attempt`` MUST refresh local/origin/live
-    GitHub evidence before classifying a dead worker as
-    ``WORKER_EXITED_NO_PUSH``. The contract is implemented as
-    the Round-37 fix: when ``rec.expected_branch`` is non-empty
-    and the live GitHub PR head advanced past ``rec.prelaunch_head``
-    AND ``origin/<branch>`` resolves to the same SHA, the worker
-    is promoted (worker-specific proof still required).
+    """Round-42: ``poll_worker_attempt`` MUST NOT promote
+    a dead worker to PUSH_VERIFIED based on remote
+    evidence alone. The C9-style manual commit incident
+    is the canary for this guard.
+
+    The OLD round-37 contract (origin/<branch> fallback
+    with committer-date guard) was REPLACED. The
+    round-42 invariant requires a positive worker-emitted
+    ``pushed_commit_sha`` to verify a push.
     """
     src = _read(SUPERVISOR_PATH)
-    # The remote-head probe MUST use refs/remotes/origin/...
-    assert "refs/remotes/origin/" in src, (
-        "poll_worker_attempt must query refs/remotes/origin/ "
-        "for round-37 P1#4 fix"
+    # Round-42 invariant: the worker must durably
+    # record the commit. The source MUST contain the
+    # worker-reported-push check.
+    assert (
+        "_worker_reported_push" in src
+        or "_worker_pushed" in src
+        or "pushed_commit_shas" in src
+    ), (
+        "poll_worker_attempt must consult the worker's "
+        "durably-recorded pushed_commit_sha; remote "
+        "evidence alone is INSUFFICIENT (round-42 invariant)"
     )
-    # The promotion gate is the worker-specific committer-date
-    # check, enforced via ``_git_committer_iso``.
-    assert "_git_committer_iso" in src, (
-        "poll_worker_attempt must call _git_committer_iso for worker-specific proof"
+    # The promotion gate is the worker-emitted
+    # pushed_commit_sha. The verifier requires a
+    # positive worker-emitted commit; committer-date
+    # is diagnostic only.
+    assert (
+        "_worker_reported_push" in src
+        or "_worker_pushed" in src
+        or "pushed_commit_shas" in src
+    ), (
+        "poll_worker_attempt must consult the worker's "
+        "durably-recorded pushed_commit_sha; committer-date "
+        "is diagnostic only (round-42 invariant)"
     )
 
 
@@ -234,31 +251,36 @@ def test_p1_04_poll_worker_defers_no_push_on_remote_head_match() -> None:
 
 
 def test_p1_05_verify_push_falls_back_when_both_shas_none() -> None:
-    """``verify_push_against_attempt`` MUST NOT fail-closed when
-    both ``produced_commit_sha`` and ``pushed_commit_sha`` are
-    None (the production-launch initializer case). Instead, the
-    verifier falls back to ``origin/<expected_branch>`` AND
-    requires the committer-date proof (worker-specific).
+    """Round-42: ``verify_push_against_attempt`` MUST NOT
+    fabricate positive verification when both
+    ``produced_commit_sha`` and ``pushed_commit_sha`` are
+    None. The verifier returns False for both flags;
+    the head-rebind path treats the advance as
+    external.
+
+    The OLD round-35 contract (origin/<branch> fallback
+    with committer-date guard) was REPLACED. The
+    verifier requires a positive worker-emitted
+    ``pushed_commit_sha`` (or LAST element of
+    ``pushed_commit_shas``) equal to the new head.
     """
     src = _read(SUPERVISOR_PATH)
     fn_idx = src.find("def verify_push_against_attempt")
     assert fn_idx != -1, "verify_push_against_attempt not defined"
     fn_end = src.find("\ndef ", fn_idx + 1)
     fn_body = src[fn_idx:fn_end if fn_end != -1 else None]
-    # The fallback must query origin/<expected_branch>.
-    assert "origin/" in fn_body and "expected_branch" in fn_body, (
-        "verifier must query origin/<expected_branch> when both SHAs are None"
+    # The verifier must consult the worker's
+    # durably-recorded pushed_commit_sha (or the
+    # ``pushed_commit_shas`` list).
+    assert "_worker_pushed" in fn_body or "pushed_commit_shas" in fn_body, (
+        "verifier must consult the worker's "
+        "durably-recorded pushed_commit_sha (round-42 invariant)"
     )
-    # And require committer-date proof (Round-31 P1#6 contract).
-    assert "_git_committer_iso" in fn_body, (
-        "verifier must require committer-date proof on the fallback path"
-    )
-    # Both-SHAs-None branch is identified by the AND-not condition.
-    assert (
-        "not rec.pushed_commit_sha" in fn_body
-        and "not rec.produced_commit_sha" in fn_body
-    ), (
-        "verifier must have a both-SHAs-None branch (production-launch case)"
+    # The verifier handles the no-worker-record case by
+    # falling through to ``return out`` (both flags False).
+    assert "return out" in fn_body, (
+        "verifier must have an early-return path that "
+        "leaves both flags False when no worker record exists"
     )
 
 
@@ -268,20 +290,27 @@ def test_p1_05_verify_push_falls_back_when_both_shas_none() -> None:
 
 
 def test_p1_06_committer_date_must_be_after_started_at() -> None:
-    """The promotion gate (``pushed_commit_sha == new_head_sha``
-    or the origin fallback) MUST require
-    ``_committed_at > _started_at_dt`` so the head is attributed
-    to this specific worker (not to an external actor who
-    happened to push a commit while this worker was running).
+    """Round-42: committer-date evidence is diagnostic
+    only. The promotion gate
+    ``pushed_commit_sha == new_head_sha`` (or the
+    produced_commit_sha + origin path) does NOT
+    require ``_committed_at > _started_at_dt`` alone.
+    The C9-style manual commit incident is the canary:
+    the manual commit's committer date was AFTER the
+    worker started, yet the worker did NOT create it.
     """
     src = _read(SUPERVISOR_PATH)
-    pattern = re.compile(
-        r"_committed_at\s*>\s*_started_at_dt",
-        re.MULTILINE,
-    )
-    assert pattern.search(src), (
-        "push promotion must require _committed_at > _started_at_dt "
-        "(round-31 P1#6 contract)"
+    # The round-42 invariant: the worker must durably
+    # record the commit. Committer-date is NOT
+    # sufficient. The verifier source MUST contain the
+    # worker-reported-push check.
+    assert (
+        "_worker_pushed" in src
+        or "_worker_reported_push" in src
+    ), (
+        "verifier must consult the worker's "
+        "durably-recorded pushed_commit_sha; "
+        "committer-date is diagnostic only (round-42)"
     )
 
 

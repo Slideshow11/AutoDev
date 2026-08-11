@@ -1362,9 +1362,12 @@ def poll_worker_attempt(
           on the next heartbeat.
     """
     from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_COMMIT_PRODUCED,
         LIFECYCLE_NO_CHANGES_REQUIRED,
         LIFECYCLE_PUSH_VERIFIED,
         LIFECYCLE_RECOVERY_CHECK,
+        LIFECYCLE_TERMINAL_REPAIRED,
+        LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
         LIFECYCLE_WORKER_EXITED_NO_PUSH,
         LIFECYCLE_WORKER_RUNNING,
         TERMINAL_LIFECYCLES,
@@ -1439,22 +1442,196 @@ def poll_worker_attempt(
                 if isinstance(_candidate, dict) and _candidate:
                     _worker_emitted_no_op = True
                     break
+            # Round-42: also check the canonical round
+            # dispatch JSON in the AED runs directory
+            # (preserves the round-41 path where the
+            # worker's structured outcome was written
+            # there instead of the attempt's extra).
+            if not _worker_emitted_no_op and rec.expected_branch:
+                try:
+                    _home_for_dispatch = (
+                        os.environ.get("HOME") or "~"
+                    )
+                    _round_dir = (
+                        Path(_home_for_dispatch)
+                        / ".hermes" / "aed" / "runs"
+                        / str(REPO_OWNER) / str(REPO_NAME)
+                        / str(PR_NUMBER)
+                    )
+                    if _round_dir.is_dir():
+                        for _p in sorted(
+                            _round_dir.glob("round_*_dispatch.json"),
+                        ):
+                            try:
+                                _d = json.loads(
+                                    _p.read_text(encoding="utf-8"),
+                                )
+                            except Exception:  # noqa: BLE001
+                                continue
+                            if not isinstance(_d, dict):
+                                continue
+                            _outcome = str(_d.get("outcome") or "")
+                            _verdict = str(_d.get("verdict") or "")
+                            _head = str(
+                                _d.get("head_sha_at_dispatch") or ""
+                            )
+                            if (
+                                _outcome.upper() in (
+                                    "NO_OP", "NO_CHANGES_REQUIRED",
+                                )
+                                or _verdict
+                                == "no_source_edit_required"
+                            ) and (
+                                not _head
+                                or _head == rec.prelaunch_head
+                            ):
+                                _worker_emitted_no_op = True
+                                break
+                except Exception:  # noqa: BLE001
+                    pass
         if (
             rec.lifecycle != LIFECYCLE_PUSH_VERIFIED
             and not _worker_emitted_no_op
         ):
-            # Step 3: round-37 push-recovery attribution.
-            # (Same body as before: refresh local/origin/live GitHub
-            # evidence, require committer date after rec.started_at,
-            # promote to PUSH_VERIFIED on match.)
-            push_attributable = False
+            # Round-42: define the helper closures for the
+            # unattributed-classification path used by the
+            # push-recovery branch below.
+            _live_head_for_classify = ""
+
+            def _classify_unattributed() -> None:
+                """Classify the head movement as UNATTRIBUTED.
+
+                Round-42: the worker attempt contains no
+                ``pushed_commit_sha`` matching the live
+                head. The head movement is external
+                (operator / recovery / another actor). The
+                attempt becomes terminal as
+                ``UNATTRIBUTED_HEAD_ADVANCE``; the
+                worker's finding remains RETRY_PENDING on
+                the new head (or a subsequent no-op
+                classifies the new head as
+                already-satisfied).
+
+                The attempt's ``pushed_commit_sha`` and
+                ``produced_commit_sha`` are NOT overwritten
+                — they preserve the worker's own evidence
+                (which may be empty for a no-op).
+                """
+                try:
+                    rec.assert_can_transition_to(
+                        LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # If the transition is not allowed,
+                    # fall back to NO_PUSH (the worker's
+                    # own state machine will keep retrying
+                    # on the new head).
+                    try:
+                        rec.assert_can_transition_to(
+                            LIFECYCLE_WORKER_EXITED_NO_PUSH,
+                        )
+                        rec.lifecycle = (
+                            LIFECYCLE_WORKER_EXITED_NO_PUSH
+                        )
+                        rec.terminal_reason = (
+                            f"worker reported no pushed_commit_sha; "
+                            f"head advanced to "
+                            f"{_live_head_for_classify[:12]!r} "
+                            f"(external/unattributed): "
+                            f"{str(exc)[:120]}"
+                        )
+                        log(
+                            "warning",
+                            "round-42 unattributed head "
+                            "advance; fallback to NO_PUSH",
+                            attempt_id=attempt_id,
+                            pid=rec.pid,
+                            live_head=(
+                                _live_head_for_classify[:12]
+                            ),
+                            transition_error=str(exc)[:200],
+                        )
+                        return
+                    except Exception:  # noqa: BLE001
+                        # Last-resort: do not invent
+                        # provenance. The attempt stays in
+                        # its current lifecycle and the
+                        # next poll re-evaluates.
+                        log(
+                            "warning",
+                            "round-42 unattributed head "
+                            "advance; no transition possible; "
+                            "attempt stays in current lifecycle",
+                            attempt_id=attempt_id,
+                            pid=rec.pid,
+                        )
+                        return
+                rec.lifecycle = (
+                    LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE
+                )
+                rec.terminal_reason = (
+                    f"head advanced to "
+                    f"{_live_head_for_classify[:12]!r} but "
+                    f"worker did NOT record a matching "
+                    f"pushed_commit_sha; head movement is "
+                    f"external/unattributed"
+                )
+                log(
+                    "warning",
+                    "round-42 unattributed head advance; "
+                    "NOT promoted to PUSH_VERIFIED",
+                    attempt_id=attempt_id,
+                    pid=rec.pid,
+                    live_head=_live_head_for_classify[:12],
+                )
+
+            def _fallback_no_push() -> None:
+                """Fall back to NO_PUSH when no head
+                movement was observed and no worker-emitted
+                pushed evidence exists. Preserves the
+                round-37 contract: dead worker with no
+                remote movement is a no-push.
+                """
+                try:
+                    rec.assert_can_transition_to(
+                        LIFECYCLE_WORKER_EXITED_NO_PUSH,
+                    )
+                    rec.lifecycle = (
+                        LIFECYCLE_WORKER_EXITED_NO_PUSH
+                    )
+                    rec.terminal_reason = (
+                        "worker exited without recording a "
+                        "pushed_commit_sha; no head movement "
+                        "observed"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log(
+                        "warning",
+                        "round-42 fallback NO_PUSH transition "
+                        "failed",
+                        attempt_id=attempt_id,
+                        error=str(exc)[:200],
+                    )
+
+            # Round-42: the round-37 push-recovery branch
+            # has been REPLACED. The supervisor MUST NOT
+            # promote a dead worker to PUSH_VERIFIED based
+            # on remote-side evidence (live-head movement,
+            # origin/live equality, committer-date after
+            # started_at). The worker MUST durably record
+            # its own ``pushed_commit_sha`` (via
+            # ``WorkerResultArtifact`` or via the attempt's
+            # own ``pushed_commit_sha`` field, which only
+            # the worker execution path is allowed to set).
+            #
+            # The branch below is read-only: it inspects
+            # whether the worker has already recorded a
+            # pushed_commit_sha for the new live head. If
+            # not, the head movement is classified as
+            # ``UNATTRIBUTED_HEAD_ADVANCE`` and the worker
+            # attempt becomes terminal WITHOUT being
+            # promoted to PUSH_VERIFIED.
             try:
-                # Round-38: use ``get_github_token`` which
-                # honours both the dedicated env override and
-                # the canonical ``~/.config/gh/hosts.yml``
-                # source. Re-reading on every call lets a
-                # credential rotated by ``gh auth login`` be
-                # picked up without a supervisor restart.
                 _token_for_probe = get_github_token() or ""
                 if (
                     rec.expected_branch
@@ -1464,124 +1641,175 @@ def poll_worker_attempt(
                         f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
                         _token_for_probe,
                     )
-                    _live_head = ""
                     if _pr_probe:
-                        _live_head = (
+                        _live_head_for_classify = (
                             _pr_probe.get("head", {}).get("sha")
                             or ""
                         )
+            except Exception:  # noqa: BLE001
+                _live_head_for_classify = ""
+
+            # The worker's recorded pushed_commit_sha is
+            # the SOLE source of truth. If it matches the
+            # live head, the worker owned the push. If it
+            # is missing or matches a different head, the
+            # head movement is unattributed.
+            _worker_reported_push = (
+                str(rec.pushed_commit_sha or "").strip()
+            )
+            _worker_reported_produced = (
+                str(rec.produced_commit_sha or "").strip()
+            )
+            # Multi-commit list (round-42 §13). The worker
+            # may report an ORDERED list of pushed SHAs in
+            # ``rec.extra.pushed_commit_shas``.
+            _extra_list = (
+                rec.extra if isinstance(rec.extra, dict) else {}
+            )
+            _worker_reported_pushes = tuple(
+                str(s) for s in (
+                    _extra_list.get("pushed_commit_shas") or []
+                ) if s
+            )
+            _worker_reported_produceds = tuple(
+                str(s) for s in (
+                    _extra_list.get("produced_commit_shas") or []
+                ) if s
+            )
+            if _worker_reported_pushes:
+                # The worker reported at least one pushed
+                # SHA. If the live head equals the LAST
+                # pushed SHA, the worker owned the push.
+                _last_worker_push = _worker_reported_pushes[-1]
+                if (
+                    _live_head_for_classify
+                    and _live_head_for_classify == _last_worker_push
+                ):
+                    # Round-42 positive: the worker
+                    # durably reported the live head as
+                    # the worker's own push. Transition
+                    # to PUSH_VERIFIED via the canonical
+                    # path (WORKER_RUNNING -> COMMIT_PRODUCED
+                    # -> PUSH_VERIFIED).
+                    try:
+                        rec.assert_can_transition_to(
+                            LIFECYCLE_COMMIT_PRODUCED,
+                        )
+                        rec.lifecycle = LIFECYCLE_COMMIT_PRODUCED
+                    except Exception:  # noqa: BLE001
+                        # WORKER_RUNNING -> PUSH_VERIFIED
+                        # is not a direct transition; if
+                        # the canonical COMMIT_PRODUCED
+                        # intermediate is not allowed, try
+                        # the direct path. The state
+                        # machine in round-42 may evolve.
+                        pass
+                    try:
+                        rec.assert_can_transition_to(
+                            LIFECYCLE_PUSH_VERIFIED,
+                        )
+                        rec.lifecycle = LIFECYCLE_PUSH_VERIFIED
+                        rec.origin_head_verified = True
+                        rec.github_head_verified = True
+                        log(
+                            "info",
+                            "round-42 positive: worker reported "
+                            "pushed_commit_sha matches live head; "
+                            "PUSH_VERIFIED",
+                            attempt_id=attempt_id,
+                            pid=rec.pid,
+                            worker_pushed=_last_worker_push[:12],
+                            live_head=_live_head_for_classify[:12],
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log(
+                            "warning",
+                            "round-42 transition to PUSH_VERIFIED "
+                            "failed",
+                            attempt_id=attempt_id,
+                            error=str(exc)[:200],
+                        )
+                else:
+                    # Worker reported a push that does
+                    # not match the current live head.
+                    # This is an UNATTRIBUTED head
+                    # movement.
                     if (
-                        _live_head
-                        and _live_head != rec.prelaunch_head
+                        _live_head_for_classify
+                        and _live_head_for_classify
+                        != rec.prelaunch_head
                     ):
-                        # Live head advanced past prelaunch;
-                        # ask git to verify origin/<branch>
-                        # actually points at it. The git
-                        # command runs against REPO_DIR.
-                        try:
-                            _out = subprocess.run(  # noqa: S602
-                                [
-                                    "git",
-                                    "-C",
-                                    str(REPO_DIR),  # type: ignore[name-defined]
-                                    "rev-parse",
-                                    "--verify",
-                                    f"refs/remotes/origin/{rec.expected_branch}",
-                                ],
-                                check=True,
-                                capture_output=True,
-                                text=True,
-                                timeout=10,
-                            )
-                            _origin_head = (
-                                _out.stdout.strip()
-                            )
-                            if (
-                                _origin_head
-                                and _origin_head
-                                == _live_head
-                            ):
-                                # Round-32 P1#6: origin equality
-                                # alone proves SOMEONE pushed the
-                                # commit. We MUST additionally
-                                # require the commit's committer
-                                # date to be strictly AFTER
-                                # ``rec.started_at`` so the
-                                # promotion is worker-specific
-                                # (matching the round-31 P1#6
-                                # contract enforced inside
-                                # ``verify_push_against_attempt``).
-                                _committer_ok, _committed_at = (
-                                    _git_committer_iso(_live_head)
-                                )
-                                _started_at_dt = parse_iso(
-                                    str(rec.started_at or "")
-                                )
-                                _worker_specific = (
-                                    _committer_ok
-                                    and _committed_at is not None
-                                    and _started_at_dt is not None
-                                    and _committed_at > _started_at_dt
-                                )
-                                if _worker_specific:
-                                    push_attributable = True
-                                    rec.pushed_commit_sha = (
-                                        _live_head
-                                    )
-                                    rec.origin_head_verified = True
-                                    rec.github_head_verified = (
-                                        True
-                                    )
-                                    rec.produced_commit_sha = (
-                                        _live_head
-                                    )
-                                    rec.lifecycle = (
-                                        LIFECYCLE_PUSH_VERIFIED
-                                    )
-                                    log(
-                                        "info",
-                                        "round-37 deferred push "
-                                        "recovery: dead worker "
-                                        "attributed to live head",
-                                        attempt_id=attempt_id,
-                                        pid=rec.pid,
-                                        pushed=_live_head[:12],
-                                    )
-                                else:
-                                    # Committer-date proof failed
-                                    # — treat the head as an
-                                    # external push and stay
-                                    # NO_PUSH. The head-rebind
-                                    # path that runs immediately
-                                    # after this poll will see
-                                    # the attempt already terminal
-                                    # and route the head advance
-                                    # via the bound active
-                                    # attempt, not this one.
-                                    log(
-                                        "warning",
-                                        "round-32 deferred push "
-                                        "recovery: candidate head "
-                                        "committer date fails "
-                                        "worker-specific proof; "
-                                        "treating as external push",
-                                        attempt_id=attempt_id,
-                                        pid=rec.pid,
-                                        candidate_head=_live_head[:12],
-                                        started_at=str(
-                                            rec.started_at or ""
-                                        ),
-                                        committer_ok=_committer_ok,
-                                    )
-                        except Exception:
-                            # git probe failed; stay
-                            # conservative. The attempt
-                            # remains in RECOVERY_CHECK /
-                            # WORKER_EXITED_NO_PUSH until
-                            # a stronger signal arrives.
-                            push_attributable = False
-            except Exception:
-                push_attributable = False
+                        _classify_unattributed()
+                    else:
+                        _fallback_no_push()
+            elif _worker_reported_push:
+                # The single-SHA fallback (legacy
+                # ``rec.pushed_commit_sha``).
+                if (
+                    _live_head_for_classify
+                    and _live_head_for_classify
+                    == _worker_reported_push
+                ):
+                    # Round-42 positive: the worker
+                    # durably reported the live head as
+                    # the worker's own push. Transition
+                    # to PUSH_VERIFIED via the canonical
+                    # path.
+                    try:
+                        rec.assert_can_transition_to(
+                            LIFECYCLE_COMMIT_PRODUCED,
+                        )
+                        rec.lifecycle = LIFECYCLE_COMMIT_PRODUCED
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        rec.assert_can_transition_to(
+                            LIFECYCLE_PUSH_VERIFIED,
+                        )
+                        rec.lifecycle = LIFECYCLE_PUSH_VERIFIED
+                        rec.origin_head_verified = True
+                        rec.github_head_verified = True
+                        log(
+                            "info",
+                            "round-42 positive: worker reported "
+                            "pushed_commit_sha matches live head; "
+                            "PUSH_VERIFIED (single-SHA path)",
+                            attempt_id=attempt_id,
+                            pid=rec.pid,
+                            worker_pushed=_worker_reported_push[:12],
+                            live_head=_live_head_for_classify[:12],
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log(
+                            "warning",
+                            "round-42 transition to PUSH_VERIFIED "
+                            "failed (single-SHA path)",
+                            attempt_id=attempt_id,
+                            error=str(exc)[:200],
+                        )
+                else:
+                    if (
+                        _live_head_for_classify
+                        and _live_head_for_classify
+                        != rec.prelaunch_head
+                    ):
+                        _classify_unattributed()
+                    else:
+                        _fallback_no_push()
+            else:
+                # Worker has NOT recorded any
+                # pushed_commit_sha for this attempt.
+                # The head movement, if any, is
+                # UNATTRIBUTED. The worker attempt is
+                # terminal as UNATTRIBUTED_HEAD_ADVANCE.
+                if (
+                    _live_head_for_classify
+                    and _live_head_for_classify
+                    != rec.prelaunch_head
+                ):
+                    _classify_unattributed()
+                else:
+                    _fallback_no_push()
         # Round-41: route workers that exited cleanly with
         # a structured ``NO_CHANGES_REQUIRED`` disposition
         # to the new terminal-success lifecycle. The worker
@@ -1725,7 +1953,17 @@ def poll_worker_attempt(
         # the legitimate repair). The legacy duplicate block
         # at the previous line offset (1513+) is removed; only
         # the WORKER_EXITED_NO_PUSH transition remains here.
-        if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED:
+        # Round-42: skip the WORKER_EXITED_NO_PUSH fallback
+        # when the attempt is already in a terminal state
+        # (e.g. UNATTRIBUTED_HEAD_ADVANCE from the round-42
+        # helper above). Attempting to transition from a
+        # terminal state would force the RECOVERY_CHECK
+        # safety-net and discard the round-42 classification.
+        if rec.lifecycle != LIFECYCLE_PUSH_VERIFIED and rec.lifecycle not in (
+            LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
+            LIFECYCLE_NO_CHANGES_REQUIRED,
+            LIFECYCLE_TERMINAL_REPAIRED,
+        ):
             try:
                 rec.assert_can_transition_to(
                     LIFECYCLE_WORKER_EXITED_NO_PUSH,
@@ -1919,24 +2157,49 @@ def find_active_worker_attempt_for_head(head_sha: str) -> Optional[dict]:
 
 def verify_push_against_attempt(
     *, attempt_id: str, new_head_sha: str,
+    store: Optional["WorkerAttemptStore"] = None,
 ) -> Optional[dict]:
     """Verify that ``new_head_sha`` is the commit the active worker pushed.
 
     Returns a dict with verification fields, or ``None`` if the
     attempt cannot be associated with the head.
 
-    Verification chain:
-        1. Attempt must exist and not be WORKER_EXITED_NO_PUSH.
-        2. Worker must have produced ``new_head_sha`` OR the local
-           ``origin/<branch>`` must resolve to ``new_head_sha``
-           AND the commit's author/committer date must be after
-           ``attempt.started_at``.
+    Round-42 invariant: the SOLE source of truth for worker
+    commit ownership is the worker's own recorded
+    ``produced_commit_sha`` / ``pushed_commit_sha`` (or
+    ``extra.produced_commit_shas`` /
+    ``extra.pushed_commit_shas`` for multi-commit chains).
+
+    Round-42 / Section 8: the following are diagnostic
+    only and MUST NOT be sufficient for promotion:
+
+      - committer_date > started_at
+      - origin/<branch> == new_head_sha
+      - prelaunch_head != new_head_sha
+
+    The verifier therefore:
+      1. Returns ``True`` ONLY if the worker's recorded
+         ``pushed_commit_sha`` (or final element of
+         ``pushed_commit_shas``) equals ``new_head_sha``.
+      2. Returns ``True`` ONLY if the worker's recorded
+         ``produced_commit_sha`` (or final element of
+         ``produced_commit_shas``) equals ``new_head_sha``
+         AND the origin branch points to it AND the commit
+         date is after the worker started (defence in depth).
+      3. Returns ``None`` for both ``github_head_verified``
+         and ``origin_head_verified`` when the worker has
+         NOT recorded the commit. The head-rebind path then
+         treats the advance as external and skips
+         ``mark_head_advanced_public``.
     """
     from autocoder_orchestration.worker_attempt import (
         LIFECYCLE_PUSH_VERIFIED,
         LIFECYCLE_WORKER_EXITED_NO_PUSH,
+        WorkerAttemptStore,
     )
-    store = _worker_attempt_store()
+    from typing import Optional  # noqa: F401
+    if store is None:
+        store = _worker_attempt_store()
     rec = store.read(attempt_id)
     if rec is None:
         return None
@@ -1950,15 +2213,37 @@ def verify_push_against_attempt(
         "github_head_verified": False,
         "origin_head_verified": False,
     }
-    # Direct: pushed_commit_sha matches.
-    if rec.pushed_commit_sha and rec.pushed_commit_sha == new_head_sha:
+    # Round-42: collect worker-emitted SHAs (multi-commit
+    # list fallback to single-SHA fields).
+    _extra = rec.extra if isinstance(rec.extra, dict) else {}
+    _pushed_list = tuple(
+        str(s) for s in (_extra.get("pushed_commit_shas") or []) if s
+    )
+    _produced_list = tuple(
+        str(s) for s in (_extra.get("produced_commit_shas") or []) if s
+    )
+    _worker_pushed = (
+        _pushed_list[-1]
+        if _pushed_list
+        else str(rec.pushed_commit_sha or "").strip()
+    )
+    _worker_produced = (
+        _produced_list[-1]
+        if _produced_list
+        else str(rec.produced_commit_sha or "").strip()
+    )
+    # Direct: the worker's recorded pushed SHA matches.
+    if _worker_pushed and _worker_pushed == new_head_sha:
         out["github_head_verified"] = True
         out["origin_head_verified"] = True
         return out
-    # Indirect: produced_commit_sha matches (worker created it but
-    # did not push — caller must verify push before acking).
-    if rec.produced_commit_sha and rec.produced_commit_sha == new_head_sha:
-        # Check origin and GitHub PR head independently.
+    # Indirect: the worker's recorded produced SHA matches
+    # AND origin/<branch> points to the same SHA. (Worker
+    # created the commit; the push happened but the
+    # worker did not record the push — still a positive
+    # ownership signal because the producer is the
+    # worker, not an external actor.)
+    if _worker_produced and _worker_produced == new_head_sha:
         if rec.expected_branch:
             try:
                 origin_head = subprocess.check_output(
@@ -1971,83 +2256,20 @@ def verify_push_against_attempt(
                 ).strip()
                 if origin_head == new_head_sha:
                     out["origin_head_verified"] = True
+                    out["github_head_verified"] = True
+                    return out
             except (subprocess.CalledProcessError,
                     subprocess.TimeoutExpired, OSError):
                 pass
-        # GitHub verification happens via the live PR head check
-        # the supervisor already performs; if origin is verified
-        # and the head matches, GitHub is also verified for the
-        # round-36 acceptance canary.
-        if out["origin_head_verified"]:
-            out["github_head_verified"] = True
         return out
-    # Round-39 P1#6 + Round-31 P1#6: when both
-    # ``pushed_commit_sha`` and ``produced_commit_sha`` are
-    # ``None`` (the production launch initializer), the
-    # worker simply has not yet recorded its commit. We MUST
-    # NOT fail-closed on the direct ``new_head_sha`` comparison
-    # in that case because the head-rebind path needs to be
-    # able to verify a freshly-pushed head even when the
-    # worker's own commit bookkeeping is incomplete. Instead,
-    # fall back to the origin/<expected_branch> check: if the
-    # remote branch already points to the new head, the push
-    # is genuinely attributable to this attempt.
-    #
-    # Round-31 P1#6 fresh evidence: the round-39 fallback
-    # MANUFACTURED a verifiable claim from any external actor.
-    # If an operator / recovery job / other worker advanced
-    # the feature branch while this attempt was running, the
-    # ``origin/<branch> == new_head_sha`` equality alone proves
-    # only that SOMEONE pushed that commit. It does NOT
-    # attribute the commit to this attempt. To require
-    # worker-specific proof, the verifier MUST additionally
-    # confirm that the commit's committer date is strictly
-    # after ``rec.started_at`` — i.e. the commit could only
-    # have been authored AFTER the worker was launched. If
-    # the date is missing or precedes ``rec.started_at`` the
-    # verifier conservatively returns ``None`` for both
-    # ``origin_head_verified`` and ``github_head_verified``;
-    # the head-rebind path then treats the advance as
-    # external and skips ``mark_head_advanced_public``.
-    if (
-        not rec.pushed_commit_sha
-        and not rec.produced_commit_sha
-        and rec.expected_branch
-    ):
-        try:
-            origin_head = subprocess.check_output(
-                ["git", "rev-parse",
-                 f"origin/{rec.expected_branch}"],
-                cwd=str(REPO_DIR),  # type: ignore[name-defined]
-                stderr=subprocess.DEVNULL,
-                text=True,
-                timeout=10,
-            ).strip()
-            if origin_head == new_head_sha:
-                # Round-31 P1#6: the round-39 fallthrough
-                # stopped here. Require the committer date
-                # to be after the worker was launched.
-                _ok, _committed_at = (
-                    _git_committer_iso(new_head_sha)
-                )
-                _started_at = parse_iso(
-                    str(rec.started_at or "")
-                )
-                if (
-                    _ok
-                    and _committed_at is not None
-                    and _started_at is not None
-                    and _committed_at > _started_at
-                ):
-                    out["origin_head_verified"] = True
-                    # GitHub verification happens via the live
-                    # PR head check the supervisor already
-                    # performs; if origin is verified and the
-                    # head matches, GitHub is also verified.
-                    out["github_head_verified"] = True
-        except (subprocess.CalledProcessError,
-                subprocess.TimeoutExpired, OSError):
-            pass
+    # Round-42: the worker has NOT recorded the commit. The
+    # head movement is unattributed. ``committer_date >
+    # started_at`` alone is INSUFFICIENT (round-42 §8).
+    # ``origin == new_head_sha`` alone is INSUFFICIENT.
+    # ``prelaunch_head != new_head_sha`` alone is
+    # INSUFFICIENT. The verifier returns ``None`` for
+    # both flags; the head-rebind path treats the advance
+    # as external and skips ``mark_head_advanced_public``.
     return out
 
 

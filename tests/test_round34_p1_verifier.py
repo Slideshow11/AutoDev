@@ -163,17 +163,26 @@ def test_p1_03_no_action_persists_round_budget_retry() -> None:
 
 
 def test_p1_04_poll_worker_has_remote_head_verification_branch() -> None:
-    """The deferred push-recovery branch in ``poll_worker_attempt``
-    MUST verify the remote head against ``origin/<expected_branch>``
-    before promoting the worker to ``PUSH_VERIFIED``.
+    """Round-42: ``poll_worker_attempt`` MUST consult the
+    worker's durably-recorded ``pushed_commit_sha`` (or
+    ``pushed_commit_shas``) as the SOLE source of truth
+    for worker push ownership. Time-based, origin-based,
+    and ancestry-based evidence is INSUFFICIENT alone.
     """
     src = _read(SUPERVISOR_PATH)
-    assert "refs/remotes/origin/" in src, (
-        "poll_worker_attempt must query refs/remotes/origin/"
+    # The worker must durably record the commit. The
+    # round-42 invariant rejects origin/live/date-only
+    # attribution.
+    assert "_worker_reported_push" in src or "pushed_commit_sha" in src, (
+        "poll_worker_attempt must consult the worker's "
+        "durably-recorded pushed_commit_sha (round-42 "
+        "invariant)"
     )
-    # The committer-date proof is the worker-specific gate.
-    assert "_git_committer_iso" in src, (
-        "poll_worker_attempt must call _git_committer_iso for worker-specific proof"
+    # The unattributed path is the new fallback for
+    # external/manual head movement.
+    assert "UNATTRIBUTED_HEAD_ADVANCE" in src, (
+        "poll_worker_attempt must classify unattributed "
+        "head movement as UNATTRIBUTED_HEAD_ADVANCE"
     )
     assert "LIFECYCLE_PUSH_VERIFIED" in src, (
         "PUSH_VERIFIED lifecycle constant must remain"
@@ -233,20 +242,30 @@ def test_p1_05_worker_attempt_record_fields_exist() -> None:
 
 
 def test_p1_06_poll_worker_committer_date_guard() -> None:
-    """The deferred push-recovery branch in ``poll_worker_attempt``
-    MUST compare the candidate head's committer date against
-    ``rec.started_at`` and only promote the worker when the
-    commit is strictly AFTER ``started_at``.
+    """Round-42: committer-date is diagnostic only. The
+    ``poll_worker_attempt`` MUST NOT promote a worker to
+    PUSH_VERIFIED based on committer-date evidence alone.
+    The worker MUST durably record the push.
     """
     src = _read(SUPERVISOR_PATH)
-    # The guard is in poll_worker_attempt; the contract is that
-    # _committed_at > _started_at_dt must hold for promotion.
-    pattern = re.compile(
-        r"_committed_at\s*>\s*_started_at_dt",
-        re.MULTILINE,
+    # The round-42 invariant: the worker must durably
+    # record the commit. Time-based evidence is
+    # diagnostic only — the source MUST contain the
+    # worker-reported-push check.
+    assert (
+        "_worker_reported_push" in src
+        or "pushed_commit_sha" in src
+    ), (
+        "poll_worker_attempt must consult the worker's "
+        "durably-recorded pushed_commit_sha; committer-date "
+        "is diagnostic only (round-42 invariant)"
     )
-    assert pattern.search(src), (
-        "poll_worker_attempt must require _committed_at > _started_at_dt for PUSH_VERIFIED promotion"
+    # The unattributed path is the new fallback for
+    # external/manual head movement.
+    assert "UNATTRIBUTED_HEAD_ADVANCE" in src, (
+        "poll_worker_attempt must classify unattributed "
+        "head movement as UNATTRIBUTED_HEAD_ADVANCE "
+        "(round-42 invariant)"
     )
 
 
