@@ -6685,6 +6685,14 @@ def collect_provider_surfaces(
     }
     cfg = PROVIDERS[provider]
     bot_logins = cfg["bot_logins"]
+    # Round-135 P1: ``github_get`` swallows HTTP/network errors
+    # and returns ``None``. Without propagating that failure,
+    # ``capture_live_snapshot`` would record an empty surfaces
+    # dict while leaving ``provider_surface_complete=True``,
+    # letting the relay silently treat a provider outage as a
+    # clean head. Track per-request failure so the snapshot
+    # collector can fail-closed at the call site.
+    api_failure: Optional[str] = None
     if cfg.get("use_reviews_api"):
         # Round-37: per_page=100 (was 50). GitHub caps pages at
         # 100; a 50-cap silently hides every review submitted
@@ -6695,6 +6703,11 @@ def collect_provider_surfaces(
             f"?per_page=100",
             token,
         )
+        if reviews is None:
+            # Round-135 P1: propagate the outage. The snapshot
+            # loop will mark ``provider_surface_complete=False``
+            # and the relay will refuse to enter readiness.
+            api_failure = "reviews_api_unreachable"
         if reviews:
             for r in reviews:
                 if (
@@ -6831,6 +6844,18 @@ def collect_provider_surfaces(
                         "line": c.get("line"),
                         "body": (c.get("body") or "")[:500],
                     })
+    # Round-135 P1: if the canonical provider API was
+    # unreachable, the collected surfaces are NOT
+    # authoritative. Surface the failure to the snapshot
+    # loop (which catches this exception and marks the
+    # snapshot incomplete) so the relay refuses to enter
+    # qualifying-readiness on a silent outage.
+    if api_failure:
+        raise RuntimeError(
+            f"collect_provider_surfaces[{provider}] "
+            f"api_failure={api_failure}; snapshot evidence "
+            f"is incomplete"
+        )
     return surfaces
 
 
