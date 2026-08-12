@@ -279,15 +279,17 @@ def main() -> int:
         result_type = envelope.get("result_type") or result_type
 
     # The wrapper resolves the canonical attempt_id and
-    # claim_id by appending the worker's actual PID to the
-    # attempt_id_prefix the supervisor passed in. This
-    # matches the per-attempt filename the supervisor
-    # expects (attempt_id_prefix-PID.worker_result.json)
-    # AND passes identity validation: the canonical
-    # artifact's attempt_id and claim_id must equal
-    # the file's basename, which the supervisor parses
-    # from the artifact path.
-    _resolved_attempt_id = f"{args.attempt_id}-{proc.pid}"
+    # claim_id by appending the wrapper's OWN PID (not
+    # hermes's PID) to the attempt_id_prefix the supervisor
+    # passed in. The wrapper IS the process the supervisor
+    # launched and tracks in its WorkerAttemptRecord. The
+    # worker (hermes) is a child of the wrapper and uses
+    # its own PID for the filename suffix; the wrapper
+    # substitutes the wrapper's PID into both the filename
+    # AND the canonical artifact's attempt_id/claim_id so
+    # the supervisor's identity validation passes.
+    _wrapper_pid = os.getpid()
+    _resolved_attempt_id = f"{args.attempt_id}-{_wrapper_pid}"
     _resolved_claim_id = _resolved_attempt_id
 
     # Build the canonical WorkerResultArtifact
@@ -344,12 +346,15 @@ def main() -> int:
         }
 
     # Substitute <PID> in the target paths with the
-    # worker's actual PID. This is the per-attempt
-    # identifier the supervisor expects when validating
-    # the canonical artifact.
+    # wrapper's OWN PID. The wrapper is the process the
+    # supervisor launched and tracks in its
+    # WorkerAttemptRecord; the supervisor's identity
+    # validation expects the artifact's attempt_id to
+    # match the file's basename which carries the
+    # wrapper's PID (the supervisor's launch PID).
     def _resolve_pid(path_str: str) -> str:
         if "<PID>" in path_str:
-            return path_str.replace("<PID>", str(proc.pid))
+            return path_str.replace("<PID>", str(_wrapper_pid))
         return path_str
 
     # Write the canonical artifact
