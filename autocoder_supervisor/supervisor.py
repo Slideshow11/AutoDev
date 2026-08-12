@@ -1414,6 +1414,87 @@ def _thread_dispositions_ledger_path():
 #     marked ``HISTORICAL_TERMINAL_PROOF_UNRECOVERABLE`` and are
 #     explicitly eligible for one focused re-evaluation.
 
+
+
+def _has_recorded_thread_proof(thread_id):
+    """Round-50 fix: return True if the audit ledger has a
+    THREAD_PROOF_RECORDED for ``thread_id`` with a terminal
+    disposition. Used by the durable-thread drain emitter to
+    prevent re-emitting drain events for threads whose proof
+    was already recorded (e.g., via prior worker round or
+    external reconciliation).
+    """
+    if not thread_id:
+        return False
+    import json as _json
+    p = _thread_proof_audit_path()
+    if not p.exists():
+        return False
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = _json.loads(ln)
+                except Exception:
+                    continue
+                if rec.get("kind") != "THREAD_PROOF_RECORDED":
+                    continue
+                if rec.get("thread_id") != thread_id:
+                    continue
+                if rec.get("disposition") in TERMINAL_THREAD_DISPOSITIONS:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def _has_recent_thread_invalidated(thread_id, current_head):
+    """Round-50 narrow fix: return True if the audit ledger has
+    a ``THREAD_PROOF_INVALIDATED`` record for ``thread_id``
+    against the current head. This prevents the durable-thread
+    drain emitter from re-emitting drain events for threads
+    whose C17 audit has already investigated at the current
+    head. The investigation happens at the current head on
+    every drain iteration; emitting again would dispatch
+    duplicate workers without new information.
+
+    If a head change occurs (new commit), the
+    thread's prior invalidation is at the prior head and
+    the carry-forward check would re-evaluate against the
+    new head. Until that head change, the thread is
+    considered ``being investigated`` and the drain
+    emitter skips it.
+    """
+    if not thread_id or not current_head:
+        return False
+    import json as _json
+    p = _thread_proof_audit_path()
+    if not p.exists():
+        return False
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = _json.loads(ln)
+                except Exception:
+                    continue
+                if rec.get("kind") != "THREAD_PROOF_INVALIDATED":
+                    continue
+                if rec.get("thread_id") != thread_id:
+                    continue
+                if rec.get("current_head") == current_head:
+                    return True
+    except OSError:
+        return False
+    return False
+
+
 THREAD_PROOF_AUDIT_VERSION = "round49_1_c17_v1"
 THREAD_PROOF_AUDIT_FILENAME = "thread_proof_audit.jsonl"
 THREAD_PROOF_INVALIDATION_VERSION = "round49_1_c17_v1"
@@ -6291,6 +6372,21 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         # ``.get``, so a partial response (errors, null repository,
         # etc.) does not crash.
         root = d if isinstance(d, dict) else {}
+        # Round-116 P1: a partial GraphQL response with root-level
+        # ``errors`` (e.g. rate-limit, auth failure, schema
+        # mismatch) MUST mark pagination as FAILED. The previous
+        # code coerced the missing ``data`` to an empty dict and
+        # then walked the rest of the loop with all fields
+        # falsey, which eventually tripped the
+        # ``if not pinfo.get("hasNextPage")`` branch and recorded
+        # ``pagination_complete=True`` with an empty thread
+        # list. ``evaluate_readiness()`` would then see neither
+        # ``pagination_failed`` nor any unresolved threads and
+        # promote readiness on a false-clean signal. Reject the
+        # page up front so the snapshot is explicitly incomplete.
+        if not isinstance(d, dict) or root.get("errors"):
+            pagination_failed = True
+            break
         data_obj = root.get("data")
         data = data_obj if isinstance(data_obj, dict) else {}
         repo_obj = data.get("repository")
@@ -6298,7 +6394,17 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         pr_obj = repo.get("pullRequest")
         pr_gql = pr_obj if isinstance(pr_obj, dict) else {}
         threads_obj = pr_gql.get("reviewThreads")
-        threads = threads_obj if isinstance(threads_obj, dict) else {}
+        # Round-116 P1: ``reviewThreads`` may be missing or null
+        # on a well-formed but partial response (e.g. the PR
+        # was just closed, the field was deprecated, or the
+        # field was excluded by an alias). If we cannot
+        # confirm we received a real reviewThreads object, the
+        # inventory is INCOMPLETE — do not coerce to an empty
+        # dict and walk to the falsey-hasNextPage branch.
+        if not isinstance(threads_obj, dict):
+            pagination_failed = True
+            break
+        threads = threads_obj
         nodes_obj = threads.get("nodes")
         nodes = nodes_obj if isinstance(nodes_obj, list) else []
         for tn in nodes:
@@ -6355,7 +6461,15 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                 },
             ))
         page_info_obj = threads.get("pageInfo")
-        pinfo = page_info_obj if isinstance(page_info_obj, dict) else {}
+        # Round-116 P1: a missing/null ``pageInfo`` means we did
+        # NOT receive a well-formed page. Treat as pagination
+        # FAILED rather than walking to the falsey-hasNextPage
+        # branch (which would record ``pagination_complete=True``
+        # with whatever partial nodes we happened to collect).
+        if not isinstance(page_info_obj, dict):
+            pagination_failed = True
+            break
+        pinfo = page_info_obj
         if not pinfo.get("hasNextPage"):
             pagination_complete = True
             break
@@ -9195,6 +9309,22 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # When ALL conditions hold, the thread is
                 # skipped (no drain event) and an audit record is
                 # written (THREAD_PROOF_CARRIED_FORWARD).
+                #
+                # Round-50 bug-detector: the C17 carry-forward
+                # helper may invalidate the same thread on
+                # successive heartbeats (provider version
+                # mismatch is detected at the snapshot level, not
+                # the worker level). The durable-thread drain
+                # emitter would then re-emit the same drain event
+                # every heartbeat, looping forever. To prevent
+                # that, after an invalidation we ALSO consult the
+                # audit ledger: if a THREAD_PROOF_RECORDED with
+                # a terminal disposition already exists for this
+                # thread, we honor the existing proof and skip
+                # the drain event. The supervisor will refresh
+                # the snapshot to pick up any new provider or
+                # source changes that genuinely need a fresh
+                # worker round.
                 if current_head:
                     _current_pt = {
                         "provider": "coderabbit",
@@ -9224,10 +9354,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                         # documents the carry decision; do not
                         # emit a drain event.
                         continue
-                    # else: invalidate (the thread is
-                    # legitimately actionable; fall through to
-                    # drain-event emission. The invalidate audit
-                    # record was written by the helper.)
+                    if _cf_decision == "invalidate" and (
+                        _cf_tier_or_reason
+                        == INVALIDATION_REASON_PRIOR_PROOF_MISSING
+                    ):
+                        # Round-50 narrow fix: the C17 ledger has
+                        # no record for this thread; the
+                        # invalidation is the FIRST emission. If
+                        # the audit ledger already has a
+                        # THREAD_PROOF_RECORDED, the proof exists
+                        # locally and we honor it. Otherwise, the
+                        # drain event is emitted exactly once.
+                        # On subsequent heartbeats, the recorded
+                        # proof check short-circuits the loop.
+                        if _has_recorded_thread_proof(tid):
+                            continue
+                        # Round-50 narrow fix (extended): also skip
+                        # if the audit ledger already has a
+                        # THREAD_PROOF_INVALIDATED for this thread
+                        # at the CURRENT HEAD. The C17 audit has
+                        # already investigated this thread at this
+                        # head; emitting again would dispatch
+                        # duplicate workers. The worker dispatch
+                        # will happen on the next head advance
+                        # (genuinely new source/provider change).
+                        if _has_recent_thread_invalidated(
+                            tid, current_head
+                        ):
+                            continue
                 actionable_unresolved.append(tid)
             for tid in actionable_unresolved:
                 eid = f"unresolved_thread_drain:{tid}"

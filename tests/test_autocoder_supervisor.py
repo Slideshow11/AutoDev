@@ -1796,6 +1796,148 @@ def test_capture_live_snapshot_handles_null_graphql_data(
     assert isinstance(snap, dict)
     assert "review_threads" in snap
     assert snap["review_threads"] == {}
+    # Round-116 P1: a partial GraphQL response with ``errors``
+    # MUST set ``review_threads_pagination_failed=True`` and
+    # MUST NOT set ``review_threads_pagination_complete=True``.
+    # The previous code coerced the missing ``data`` to {} and
+    # walked to the falsey-hasNextPage branch, recording a
+    # false-clean complete pagination. ``evaluate_readiness()``
+    # would then promote readiness on an incomplete inventory.
+    assert snap.get("review_threads_pagination_failed") is True, (
+        f"partial GraphQL with errors MUST set pagination_failed; "
+        f"got snap={snap!r}"
+    )
+    assert snap.get("review_threads_pagination_complete") is False, (
+        f"partial GraphQL with errors MUST NOT set pagination_complete; "
+        f"got snap={snap!r}"
+    )
+
+
+def test_capture_live_snapshot_rejects_null_review_threads_field(
+    isolated_state, monkeypatch
+):
+    """Round-116 P1: a well-formed but partial response where
+    ``reviewThreads`` is missing/null MUST mark pagination as
+    FAILED. The previous code coerced the missing field to {}
+    and walked to the falsey-hasNextPage branch, recording a
+    false-clean complete pagination.
+    """
+    import json
+    import urllib.request
+    import autocoder_supervisor.supervisor as _sup
+
+    class _FakeResp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=20):
+        url = req.full_url if hasattr(req, "full_url") else req.get_full_url()
+        if "/graphql" in url:
+            body = {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": None,
+                        },
+                    },
+                },
+            }
+            return _FakeResp(json.dumps(body).encode())
+        if "/check-runs" in url:
+            return _FakeResp(json.dumps({"check_runs": []}).encode())
+        if "/pulls/" in url and "/reviews" in url:
+            return _FakeResp(json.dumps([]).encode())
+        if "/issues/" in url and "/comments" in url:
+            return _FakeResp(json.dumps([]).encode())
+        if "/pulls/" in url:
+            return _FakeResp(json.dumps({"head": {"sha": "deadbeef"}}).encode())
+        return _FakeResp(json.dumps({}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    snap = _sup.capture_live_snapshot({}, "fake-token")
+    assert isinstance(snap, dict)
+    assert snap.get("review_threads_pagination_failed") is True, (
+        f"null reviewThreads MUST set pagination_failed; got snap={snap!r}"
+    )
+    assert snap.get("review_threads_pagination_complete") is False, (
+        f"null reviewThreads MUST NOT set pagination_complete; "
+        f"got snap={snap!r}"
+    )
+
+
+def test_capture_live_snapshot_rejects_missing_page_info(
+    isolated_state, monkeypatch
+):
+    """Round-116 P1: a well-formed but partial response where
+    the page is missing ``pageInfo`` MUST mark pagination as
+    FAILED. The previous code coerced the missing field to {}
+    and walked to the falsey-hasNextPage branch, recording a
+    false-clean complete pagination.
+    """
+    import json
+    import urllib.request
+    import autocoder_supervisor.supervisor as _sup
+
+    class _FakeResp:
+        def __init__(self, body):
+            self._body = body
+
+        def read(self):
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=20):
+        url = req.full_url if hasattr(req, "full_url") else req.get_full_url()
+        if "/graphql" in url:
+            body = {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [],
+                                "pageInfo": None,
+                            },
+                        },
+                    },
+                },
+            }
+            return _FakeResp(json.dumps(body).encode())
+        if "/check-runs" in url:
+            return _FakeResp(json.dumps({"check_runs": []}).encode())
+        if "/pulls/" in url and "/reviews" in url:
+            return _FakeResp(json.dumps([]).encode())
+        if "/issues/" in url and "/comments" in url:
+            return _FakeResp(json.dumps([]).encode())
+        if "/pulls/" in url:
+            return _FakeResp(json.dumps({"head": {"sha": "deadbeef"}}).encode())
+        return _FakeResp(json.dumps({}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    snap = _sup.capture_live_snapshot({}, "fake-token")
+    assert isinstance(snap, dict)
+    assert snap.get("review_threads_pagination_failed") is True, (
+        f"missing pageInfo MUST set pagination_failed; got snap={snap!r}"
+    )
+    assert snap.get("review_threads_pagination_complete") is False, (
+        f"missing pageInfo MUST NOT set pagination_complete; "
+        f"got snap={snap!r}"
+    )
 
 
 
@@ -4691,6 +4833,100 @@ def test_round49_1_c17_no_duplicate_carry_records(tmp_path, monkeypatch):
         assert c["ancestry_result"] is True
         assert c["source_blob_equality"] is True
         assert c["provider_version_equality"] is True
+
+
+
+
+def test_round50_durable_thread_drain_skips_recently_invalidated_threads(tmp_path, monkeypatch):
+    """Round-50 bug-detector: the durable-thread drain
+    emitter MUST skip threads that have a recent
+    THREAD_PROOF_INVALIDATED for the CURRENT HEAD. This
+    prevents the drain loop where the same thread is
+    re-emitted on every heartbeat.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json
+    import os
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    audit_path = sm._thread_proof_audit_path()
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    # Pre-populate the audit ledger with a THREAD_PROOF_INVALIDATED
+    # for thread X at the current head.
+    current_head = "0" * 40
+    with open(audit_path, "w") as f:
+        f.write(json.dumps({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "thread_id": "PRRT_AT_CURRENT_HEAD",
+            "current_head": current_head,
+            "reason": "PRIOR_PROOF_MISSING",
+        }) + "\n")
+        # An invalidation at a DIFFERENT head must not block.
+        f.write(json.dumps({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "thread_id": "PRRT_AT_OLD_HEAD",
+            "current_head": "1" * 40,
+            "reason": "PRIOR_PROOF_MISSING",
+        }) + "\n")
+    # _has_recent_thread_invalidated should return True for the
+    # thread invalidated at the current head.
+    assert sm._has_recent_thread_invalidated(
+        "PRRT_AT_CURRENT_HEAD", current_head
+    ) is True
+    # But False for the thread invalidated at a different head.
+    assert sm._has_recent_thread_invalidated(
+        "PRRT_AT_OLD_HEAD", current_head
+    ) is False
+    # And False for a thread with no invalidation record.
+    assert sm._has_recent_thread_invalidated(
+        "PRRT_UNKNOWN", current_head
+    ) is False
+
+
+def test_round50_durable_thread_drain_skips_recorded_threads(tmp_path, monkeypatch):
+    """Round-50 bug-detector: the durable-thread drain
+    emitter MUST skip threads that have a THREAD_PROOF_RECORDED
+    in the audit ledger. This prevents the drain loop bug
+    where the same thread is re-emitted on every heartbeat.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json
+    import os
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    audit_path = sm._thread_proof_audit_path()
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    # Pre-populate the audit ledger with a THREAD_PROOF_RECORDED
+    # for thread X.
+    with open(audit_path, "w") as f:
+        f.write(json.dumps({
+            "kind": "THREAD_PROOF_RECORDED",
+            "thread_id": "PRRT_RECORDED",
+            "disposition": "ALREADY_SATISFIED",
+            "proof_head": "0" * 40,
+            "evaluated_head": "0" * 40,
+            "source_blob_sha": "abc123",
+            "provider_thread_version": "v1",
+        }) + "\n")
+    # _has_recorded_thread_proof should return True for the
+    # recorded thread.
+    assert sm._has_recorded_thread_proof("PRRT_RECORDED") is True
+    # And should return False for an unknown thread.
+    assert sm._has_recorded_thread_proof("PRRT_UNRECORDED") is False
+    # And False for a thread with a non-terminal recorded
+    # disposition (e.g. RESOLUTION_PENDING).
+    with open(audit_path, "w") as f:
+        f.write(json.dumps({
+            "kind": "THREAD_PROOF_RECORDED",
+            "thread_id": "PRRT_PENDING",
+            "disposition": "RESOLUTION_PENDING",
+            "proof_head": "0" * 40,
+        }) + "\n")
+    assert sm._has_recorded_thread_proof("PRRT_PENDING") is False
 
 
 def test_round49_1_c17_bug_detector_mass_resurrection_returns_with_pre_fix(monkeypatch):
