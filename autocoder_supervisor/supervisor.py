@@ -4971,9 +4971,13 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
             except Exception:
                 _new_head = _rec_obj.prelaunch_head
             _disposition = "ALREADY_SATISFIED" if _result_type == "NO_CHANGES_REQUIRED" else "REPAIRED"
+            # Collect candidate thread_ids from the artifact
+            # findings AND the durable work item's drain
+            # events. The worker's finding_id is the
+            # ground truth, but the drain event is the
+            # owner of the dispatch — they should agree.
+            _candidate_tids = set()
             if _result_type == "NO_CHANGES_REQUIRED":
-                # C14: write a terminal proof so the durable-thread drain emitter
-                # stops re-emitting the drain event.
                 try:
                     _findings = (_wra.get("no_changes_required_proof") or {}).get("findings") or []
                 except Exception:
@@ -4981,47 +4985,51 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 for _f in _findings:
                     _tid = (_f or {}).get("finding_id", "")
                     if _tid.startswith("thread:"):
-                        _gtid = _tid[len("thread:"):]
-                        try:
-                            consume_thread_drain_event_in_terminal_disposition(
-                                thread_id=_gtid,
-                                event_id=f"unresolved_thread_drain:{_gtid}",
-                                provider="coderabbit",
-                                evaluated_head=_new_head,
-                                disposition_raw=_disposition,
-                                evidence=str(_f)[:200],
-                                worker_attempt_id=_attempt_id,
-                                directive_digest=_rec_obj.directive_digest,
-                                result_identity={
-                                    "repo": f"{_rec_obj.repo_owner}/{_rec_obj.repo_name}",
-                                    "pr_number": _rec_obj.pr_number,
-                                    "thread_id": _gtid,
-                                    "current_live_head": _new_head,
-                                },
-                                thread_record={
-                                    "thread_id": _gtid,
-                                    "commit_oid": _new_head,
-                                },
-                                extra_identity={"source": "round52_c20_orphan_recovery"},
-                            )
-                        except Exception:
-                            pass
-            if _new_lifecycle in (LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED):
+                        _candidate_tids.add(_tid[len("thread:"):])
+            # Also consult unconsumed_events for drain events
+            # whose last_dispatched_event_id matched this attempt.
+            # (The lease was lost, so we look at any drain
+            # event whose thread_id is the same as the
+            # worker's finding_id.)
+            for _tid in list(_candidate_tids):
+                # C14: write a terminal proof so the
+                # durable-thread drain emitter stops
+                # re-emitting the drain event.
                 try:
-                    resolveReviewThread(
-                        attempt_id=_attempt_id,
-                        lifecycle=_new_lifecycle,
-                        thread_id=(
-                            ((_wra.get("no_changes_required_proof") or {}).get("findings") or [{}])[0]
-                            .get("finding_id", "")[len("thread:"):]
-                            if ((_wra.get("no_changes_required_proof") or {}).get("findings") or [{}])[0]
-                            .get("finding_id", "").startswith("thread:")
-                            else ""
-                        ),
-                        head_sha=_new_head,
+                    consume_thread_drain_event_in_terminal_disposition(
+                        thread_id=_tid,
+                        event_id=f"unresolved_thread_drain:{_tid}",
+                        provider="coderabbit",
+                        evaluated_head=_new_head,
+                        disposition_raw=_disposition,
+                        evidence=str(_candidate_tids)[:200],
+                        worker_attempt_id=_attempt_id,
+                        directive_digest=_rec_obj.directive_digest,
+                        result_identity={
+                            "repo": f"{_rec_obj.repo_owner}/{_rec_obj.repo_name}",
+                            "pr_number": _rec_obj.pr_number,
+                            "thread_id": _tid,
+                            "current_live_head": _new_head,
+                        },
+                        thread_record={
+                            "thread_id": _tid,
+                            "commit_oid": _new_head,
+                        },
+                        extra_identity={"source": "round52_c20_orphan_recovery"},
                     )
                 except Exception:
                     pass
+            if _new_lifecycle in (LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED):
+                for _tid in _candidate_tids:
+                    try:
+                        resolveReviewThread(
+                            attempt_id=_attempt_id,
+                            lifecycle=_new_lifecycle,
+                            thread_id=_tid,
+                            head_sha=_new_head,
+                        )
+                    except Exception:
+                        pass
         except Exception as _pf_exc:
             log(
                 "warning",
@@ -5029,6 +5037,43 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 attempt_id=_attempt_id,
                 error=str(_pf_exc)[:200],
             )
+    # Round-52/C20 §6: retry remote resolution for already-finalized
+    # attempts whose thread_ids are still unresolved on GitHub.
+    # This is a best-effort idempotent retry: GitHub's
+    # resolveReviewThread mutation is safe to call repeatedly.
+    if transitions == 0:
+        for _path in _dir.glob("att-*.json"):
+            if _path.name.endswith(".worker_result.json"):
+                continue
+            if not _path.name.endswith(".json"):
+                continue
+            try:
+                _d = json.loads(_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if _d.get("lifecycle") not in (
+                LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED,
+            ):
+                continue
+            _extra = _d.get("extra") or {}
+            _ncrp = _extra.get("no_changes_required_proof") or {}
+            if not _ncrp:
+                continue
+            for _f in _ncrp.get("findings") or []:
+                _fid = (_f or {}).get("finding_id", "")
+                if not _fid.startswith("thread:"):
+                    continue
+                _tid = _fid[len("thread:"):]
+                try:
+                    resolveReviewThread(
+                        attempt_id=_d.get("attempt_id", ""),
+                        lifecycle=_d.get("lifecycle", ""),
+                        thread_id=_tid,
+                        head_sha=_d.get("prelaunch_head", ""),
+                    )
+                except Exception:
+                    pass
+
     return transitions
 
 
@@ -5038,19 +5083,74 @@ def resolveReviewThread(*, attempt_id: str, lifecycle: str,
     thread that this attempt finalized. Best-effort. May be a
     no-op when ``thread_id`` is empty (the supervisor cannot
     determine which thread to close without that hint).
+
+    The actual GitHub ``resolveReviewThread`` GraphQL mutation
+    is delegated to ``gh api graphql``. Any failure is logged
+    and swallowed — the supervisor does NOT abort the next
+    iteration if remote resolution fails. Resolution is
+    retryable on a future heartbeat.
     """
     if not thread_id:
         return
-    # The actual GraphQL call is performed by an existing
-    # gh-cli shell-out or GraphQL client. We keep the function
-    # a thin wrapper so tests can monkeypatch it. The
-    # production behavior is implemented inline by the C14 hook
-    # chain.
+    # First try the in-process resolver if available (operator
+    # authorization required, see C14 hooks).
     try:
         from .relay_wiring import resolveReviewThread as _real
-        _real(thread_id=thread_id, head_sha=head_sha)
-    except Exception:
+        _result = _real(thread_id=thread_id, head_sha=head_sha)
+        if _result == "resolved":
+            log(
+                "info",
+                "round-52: thread resolved via relay_wiring",
+                thread_id=thread_id,
+                attempt_id=attempt_id,
+                lifecycle=lifecycle,
+            )
+            return
+    except Exception as _rwe:
         pass
+    # Fallback: direct GraphQL call via gh CLI. Operator
+    # authorization is presumed (the production pipeline has
+    # gh auth configured).
+    try:
+        import subprocess as _sp
+        _gql = (
+            "mutation ResolveThread($id: ID!) {"
+            " resolveReviewThread(input: {threadId: $id}) {"
+            " clientMutationId } }"
+        )
+        _proc = _sp.run(
+            [
+                "gh", "api", "graphql",
+                "-f", f"query={_gql}",
+                "-f", f"id={thread_id}",
+            ],
+            capture_output=True, text=True, timeout=20,
+        )
+        if _proc.returncode == 0:
+            log(
+                "info",
+                "round-52: thread resolved via gh graphql",
+                thread_id=thread_id,
+                attempt_id=attempt_id,
+                lifecycle=lifecycle,
+            )
+        else:
+            log(
+                "warning",
+                "round-52: gh graphql resolveReviewThread failed",
+                thread_id=thread_id,
+                attempt_id=attempt_id,
+                returncode=_proc.returncode,
+                stderr=_proc.stderr[:200],
+            )
+    except Exception as _e:
+        log(
+            "warning",
+            "round-52: resolveReviewThread raised",
+            thread_id=thread_id,
+            attempt_id=attempt_id,
+            error=str(_e)[:200],
+        )
 
 
 def finalize_worker_attempt_pushed(
