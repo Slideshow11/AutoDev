@@ -7449,6 +7449,24 @@ def evaluate_readiness(
                 "review_threads_pagination_complete"
             ),
         }
+    # Round-117 P1: fail closed when provider surface
+    # collection did not complete. ``capture_live_snapshot``
+    # sets ``provider_surface_complete = False`` whenever
+    # ``collect_provider_surfaces`` raises for any
+    # required provider, but the readiness gate must NOT
+    # treat an incomplete-evidence snapshot as ready.
+    # Without this check, two stable incomplete snapshots
+    # inside the quiet-window polling would otherwise
+    # promote readiness despite the provider evidence
+    # being untrustworthy.
+    if snap.get("provider_surface_complete") is False:
+        return {
+            "ready": False,
+            "reason": "provider_surface_incomplete",
+            "provider_surface_failures": snap.get(
+                "provider_surface_failures", {}
+            ),
+        }
     blockers = threads_block_readiness(snap)
     if blockers:
         return {
