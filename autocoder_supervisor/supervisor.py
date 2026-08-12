@@ -7232,6 +7232,20 @@ def collect_provider_surfaces(
         # so the latest review in this list is the
         # canonical head-bound review identity.
         latest_review_commit_oid = head_sha
+    # Round-140 P1: track the most-recent bot-authored
+    # issue comment id for this provider across all pages.
+    # GitHub returns ``/issues/{N}/comments`` newest-first
+    # within each page; iterating ``reversed(comments)``
+    # gives chronological order per page, so the LAST
+    # bot-authored comment we encounter (highest ``cid``)
+    # is the freshest in the current review cycle.
+    #
+    # Binding is computed in a SECOND pass after the
+    # pagination loop completes, so only the actual
+    # freshest comment carries a non-None ``commit_id``
+    # / ``review_cycle``. Earlier comments are left
+    # unbound (None) and the relay's filter rejects them.
+    latest_provider_cid: Optional[int] = None
     for page in range(1, 6):
         comments = github_get(
             f"/repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments"  # type: ignore[name-defined]
@@ -7255,60 +7269,68 @@ def collect_provider_surfaces(
                     if surfaces.get("reviews")
                     else None
                 )
+                # Track the freshest bot-authored comment
+                # for this provider across all pages. ``cid``
+                # is monotonic for issue comments, so the
+                # highest one we observe wins.
+                if (
+                    isinstance(cid, int)
+                    and (
+                        latest_provider_cid is None
+                        or cid > latest_provider_cid
+                    )
+                ):
+                    latest_provider_cid = cid
                 surfaces["issue_comments"].append({
                     "id": cid,
                     "user": c["user"]["login"],
                     "created_at": c.get("created_at"),
                     "body": (c.get("body") or "")[:500],
-                    # Round-32: per-head review-cycle
-                    # binding is conditional on the
-                    # current head actually being the
-                    # provider's review target.
+                    # Round-32 / Round-140 P1: the
+                    # ``commit_id`` field on the comment
+                    # is always absent from the production
+                    # ``/issues/{PR}/comments`` endpoint
+                    # (documented at lines 7206-7208). The
+                    # previous gate required
+                    # ``c.get("commit_id") == head_sha``
+                    # which was unreachable. Round-140
+                    # rebinds using evidence THIS endpoint
+                    # DOES expose: the freshest bot-authored
+                    # issue comment id for this provider
+                    # (``latest_provider_cid``) AND a
+                    # head-bound review cycle for this
+                    # provider (``surfaces["reviews"]``
+                    # non-empty).
                     #
-                    # A formal review on the current head
-                    # is NOT sufficient evidence that an
-                    # arbitrary historical issue comment
-                    # belongs to this head. The binding
-                    # is positive: a comment is bound to
-                    # the current head only when either
-                    # (a) the comment has its own intrinsic
-                    # ``commit_id`` matching ``head_sha``,
-                    # or
-                    # (b) the comment is the latest
-                    # ``latest_comments_by_provider`` for
-                    # this provider AND the provider's
-                    # last review is the current head.
-                    #
-                    # Otherwise ``commit_id`` is ``None``
-                    # and the relay's
-                    # ``collect_findings`` filter rejects
-                    # the comment (no current-head binding
-                    # = no actionable finding).
-                    "commit_id": (
-                        c.get("commit_id")
-                        or c.get("commit_oid")
-                        if isinstance(c.get("commit_id"), str)
-                        and c.get("commit_id") == head_sha
-                        else None
-                    ),
-                    "review_cycle": (
-                        # Per-head ledger entry. The
-                        # cycle identity is keyed by
-                        # provider + head_sha + comment
-                        # id. The relay's filter accepts
-                        # the comment only when
-                        # ``commit_id`` matches the
-                        # current head (production path)
-                        # OR when ``review_cycle`` is
-                        # present (backward-compat path
-                        # for legacy captures).
-                        f"{provider}:{head_sha}:{cid}"
-                        if surfaces.get("reviews")
-                        and isinstance(c.get("commit_id"), str)
-                        and c.get("commit_id") == head_sha
-                        else None
-                    ),
+                    # ``commit_id`` and ``review_cycle``
+                    # are left ``None`` here so the
+                    # second pass below can stamp ONLY the
+                    # freshest comment.
+                    "commit_id": None,
+                    "review_cycle": None,
                 })
+    # Round-140 P1: second-pass binding for issue
+    # comments. The pagination loop above records every
+    # bot-authored comment with ``commit_id=None`` /
+    # ``review_cycle=None``; this pass stamps ONLY the
+    # comment whose ``id`` equals ``latest_provider_cid``
+    # (the highest bot-authored cid observed, which is
+    # the freshest comment in the current review cycle).
+    # All other comments remain unbound, preserving the
+    # round-31 invariant that head-A chatter cannot
+    # reappear on head-B.
+    if (
+        latest_provider_cid is not None
+        and surfaces.get("reviews")
+    ):
+        for entry in surfaces["issue_comments"]:
+            if entry.get("id") == latest_provider_cid:
+                entry["commit_id"] = head_sha
+                entry["review_cycle"] = (
+                    f"{provider}:{head_sha}:{latest_provider_cid}"
+                )
+                break
+
     if cfg.get("use_reviews_api"):
         for review in surfaces["reviews"]:
             inline = github_get(
