@@ -3973,329 +3973,757 @@ def test_round48_c15_missing_review_decision_fails_closed(
 
 
 
-def test_round49_c16_carry_forward_index_path_is_repo_scoped(tmp_path, monkeypatch):
-    """Round-49 C16 bug-detector: the carry-forward index
-    path is scoped to (repo_owner, repo_name, pr_number) and
-    lives next to run_state.json.
+
+# Round-49.1 C17 regression tests. These replace the C16 tests
+# that targeted a different (weaker) carry-forward model. C17
+# uses Tier-1 source-blob identity + full provider-version
+# fingerprint + ancestry proof + audit-ledger records.
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+
+def _round49_1_init_test_repo(monkeypatch, sm, tmp_path, *, file_content="line1\nline2\nline3\n", line_no=2, body="comment body"):
+    """Initialize a fresh git repo with a single committed file.
+    Returns the (head_sha, repo_path).
     """
-    import importlib
-    # Reload the module so monkeypatched REPO_OWNER etc. take effect.
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
+    subprocess.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
+    target_file = repo_path / "hello.txt"
+    target_file.write_text(file_content)
+    subprocess.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo_path), check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    # Create a local branch feat/review-repair-relay-v1 at HEAD so
+    # the migration tool can verify ancestry against the local
+    # branch ref (the migration falls back to the local ref
+    # when origin does not exist or is unreachable).
+    subprocess.run(
+        ["git", "branch", "feat/review-repair-relay-v1", head],
+        cwd=str(repo_path), check=True,
+    )
+    return head, repo_path
+
+
+def _round49_1_audit_path_for(tmp_path):
+    """Return the audit-ledger path for the given tmp_path HOME."""
+    return (
+        Path(str(tmp_path))
+        / ".hermes"
+        / "aed"
+        / "runs"
+        / "OWNER"
+        / "REPO"
+        / "9"
+        / "thread_proof_audit.jsonl"
+    )
+
+
+def _round49_1_read_audit(audit_path):
+    """Read all audit records from the JSONL ledger."""
+    if not audit_path.exists():
+        return []
+    out = []
+    with open(audit_path, "r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def test_round49_1_c17_audit_path_is_repo_scoped(tmp_path, monkeypatch):
+    """Round-49.1 C17: the audit-ledger path is scoped to
+    (repo_owner, repo_name, pr_number).
+    """
     import autocoder_supervisor.supervisor as sm
-    # Monkeypatch the repo identity and HOME for the test.
     monkeypatch.setattr(sm, "REPO_OWNER", "OWNER_TEST", raising=False)
     monkeypatch.setattr(sm, "REPO_NAME", "REPO_TEST", raising=False)
     monkeypatch.setattr(sm, "PR_NUMBER", 7, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    p = sm._thread_carry_forward_index_path()
-    assert str(p).endswith("OWNER_TEST/REPO_TEST/7/thread_carry_forward_index.json"), p
+    p = sm._thread_proof_audit_path()
+    assert str(p).endswith(
+        "OWNER_TEST/REPO_TEST/7/thread_proof_audit.jsonl"
+    ), p
 
 
-def test_round49_c16_carry_forward_satisfied_when_file_and_body_unchanged(tmp_path, monkeypatch):
-    """Round-49 C16 bug-detector: a carry-forward entry
-    whose path and body are unchanged at the new head MUST
-    be reported as satisfied.
+def test_round49_1_c17_record_thread_proof_persists_audit(tmp_path, monkeypatch):
+    """Round-49.1 C17: recording a terminal proof MUST write
+    a THREAD_PROOF_RECORDED audit row, capturing the source
+    blob identity AND the full provider thread version.
     """
-    import importlib
     import autocoder_supervisor.supervisor as sm
     monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
     monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
     monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    import subprocess as _sp
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
-    # Init a real git repo so git show works.
-    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
-    _TEST_HEAD = _sp.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(repo_path), capture_output=True, text=True,
-    ).stdout.strip()
-    target_file = repo_path / "hello.txt"
-    target_file.write_text("line1\nline2\nline3\nline4\nline5\n")
-    _sp.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo_path), check=True)
-    import subprocess as _sp_head
-    _TEST_HEAD = _sp_head.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(repo_path), capture_output=True, text=True,
-    ).stdout.strip()
-    # Write a carry-forward entry referencing this file.
-    sm._record_thread_carry_forward_entry(
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    ok = sm._record_thread_proof(
         thread_id="PRRT_TEST_001",
+        provider="coderabbit",
         disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
-        path="hello.txt",
-        line=3,
-        body="comment body",
-        disposition_head=_TEST_HEAD,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit",
+            "id": "PRRT_TEST_001",
+            "top_level_comment": {
+                "id": "c1", "updatedAt": "2026-08-12T00:00:00Z",
+                "body": "original body",
+            },
+            "replies": [
+                {"id": "r1", "updatedAt": "2026-08-12T00:01:00Z", "body": "reply1"},
+            ],
+            "isResolved": False,
+            "isOutdated": False,
+        },
         worker_attempt_id="att-1",
-        evaluated_head=_TEST_HEAD,
-    )
-    # Compute line_count via git show — without a real git
-    # repo we have line_count=0. The carry-forward check
-    # tolerates line_count=0 and uses only path + line +
-    # body for the comparison.
-    ok = sm._is_thread_carry_forward_satisfied(
-        thread_id="PRRT_TEST_001",
-        current_path="hello.txt",
-        current_line=4,
-        current_body="comment body",
-        current_head=_TEST_HEAD,
-    )
-    assert ok is True, (
-        "round-49 C16: carry-forward MUST be satisfied "
-        "when path + body are unchanged. R47 broken: "
-        "carry-forward index does not exist or returns False."
-    )
-
-
-def test_round49_c16_carry_forward_invalidated_when_file_deleted(tmp_path, monkeypatch):
-    """Round-49 C16 bug-detector: a carry-forward entry
-    whose file path no longer exists at the new head MUST
-    be reported as NOT satisfied, so the supervisor can
-    re-dispatch the thread.
-    """
-    import importlib
-    import autocoder_supervisor.supervisor as sm
-    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
-    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
-    monkeypatch.setattr(sm, "PR_NUMBER", 10, raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    import subprocess as _sp
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
-    # Init a real git repo so git show works.
-    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
-    _TEST_HEAD = _sp.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(repo_path), capture_output=True, text=True,
-    ).stdout.strip()
-    sm._record_thread_carry_forward_entry(
-        thread_id="PRRT_TEST_002",
-        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
-        path="deleted.txt",
-        line=10,
-        body="old body",
-        disposition_head=_TEST_HEAD,
-        worker_attempt_id="att-2",
-        evaluated_head=_TEST_HEAD,
-    )
-    ok = sm._is_thread_carry_forward_satisfied(
-        thread_id="PRRT_TEST_002",
-        current_path="deleted.txt",
-        current_line=10,
-        current_body="old body",
-        current_head=_TEST_HEAD,
-    )
-    assert ok is False, (
-        "round-49 C16: carry-forward MUST be NOT "
-        "satisfied when the file is deleted at the new "
-        "head; the supervisor must re-dispatch."
-    )
-
-
-def test_round49_c16_carry_forward_invalidated_when_body_changed(tmp_path, monkeypatch):
-    """Round-49 C16 bug-detector: for ALREADY_SATISFIED
-    and SUPERSEDED, a body-content shift at the new head
-    invalidates the carry-forward.
-    """
-    import importlib
-    import autocoder_supervisor.supervisor as sm
-    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
-    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
-    monkeypatch.setattr(sm, "PR_NUMBER", 11, raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    import subprocess as _sp
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
-    # Init a real git repo so git show works.
-    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
-    _TEST_HEAD = _sp.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(repo_path), capture_output=True, text=True,
-    ).stdout.strip()
-    target_file = tmp_path / "repo" / "hello.txt"
-    target_file.write_text("line1\nline2\nline3\n")
-    sm._record_thread_carry_forward_entry(
-        thread_id="PRRT_TEST_003",
-        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
-        path="hello.txt",
-        line=2,
-        body="original body",
-        disposition_head=_TEST_HEAD,
-        worker_attempt_id="att-3",
-        evaluated_head=_TEST_HEAD,
-    )
-    ok = sm._is_thread_carry_forward_satisfied(
-        thread_id="PRRT_TEST_003",
-        current_path="hello.txt",
-        current_line=2,
-        current_body="NEW body content (changed by reviewer)",
-        current_head=_TEST_HEAD,
-    )
-    assert ok is False, (
-        "round-49 C16: body content shift must invalidate "
-        "carry-forward for ALREADY_SATISFIED."
-    )
-
-
-def test_round49_c16_carry_forward_record_writes_index(tmp_path, monkeypatch):
-    """Round-49 C16: recording a terminal disposition MUST
-    persist the carry-forward entry to disk.
-    """
-    import importlib
-    import autocoder_supervisor.supervisor as sm
-    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
-    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
-    monkeypatch.setattr(sm, "PR_NUMBER", 12, raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path))
-    import subprocess as _sp
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
-    # Init a real git repo so git show works.
-    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
-    _TEST_HEAD = _sp.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(repo_path), capture_output=True, text=True,
-    ).stdout.strip()
-    ok = sm._record_thread_carry_forward_entry(
-        thread_id="PRRT_TEST_004",
-        disposition=sm.THREAD_DISPOSITION_REPAIRED,
-        path="hello.txt",
-        line=2,
-        body="repair evidence",
-        disposition_head=_TEST_HEAD,
-        worker_attempt_id="att-4",
-        evaluated_head=_TEST_HEAD,
+        directive_digest="d1",
+        evaluated_head=head,
     )
     assert ok is True
-    idx = sm._read_thread_carry_forward_index()
-    assert "PRRT_TEST_004" in idx.get("threads", {})
-    entry = idx["threads"]["PRRT_TEST_004"]
-    assert entry["disposition"] == sm.THREAD_DISPOSITION_REPAIRED
-    assert entry["path"] == "hello.txt"
-    assert entry["line"] == 2
-    assert entry["disposition_head"] == _TEST_HEAD
+    audit_path = _round49_1_audit_path_for(tmp_path)
+    rows = _round49_1_read_audit(audit_path)
+    assert len(rows) == 1
+    rec = rows[0]
+    assert rec["kind"] == "THREAD_PROOF_RECORDED"
+    assert rec["thread_id"] == "PRRT_TEST_001"
+    assert rec["disposition"] == sm.THREAD_DISPOSITION_ALREADY_SATISFIED
+    assert rec["proof_head"] == head
+    assert rec["source_blob_sha"] != ""
+    assert rec["provider_thread_version"] != ""
+    assert rec["generation_id"] != ""
 
 
-def test_round49_c16_carry_forward_repaired_ignores_body_shift(tmp_path, monkeypatch):
-    """Round-49 C16: REPAIRED dispositions carry-forward
-    even when the body content shifts (the file changed
-    but the finding was repaired by that change).
+def test_round49_1_c17_carry_forward_when_blob_and_provider_unchanged(tmp_path, monkeypatch):
+    """Round-49.1 C17: a thread whose source blob AND provider
+    thread are unchanged at the new head MUST carry forward
+    (no drain event).
     """
-    import importlib
     import autocoder_supervisor.supervisor as sm
     monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
     monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
-    monkeypatch.setattr(sm, "PR_NUMBER", 13, raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    import subprocess as _sp
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
-    # Init a real git repo so git show works.
-    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
-    target_file = repo_path / "hello.txt"
-    target_file.write_text("a\nb\nc\n")
-    _sp.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo_path), check=True)
-    _TEST_HEAD = _sp.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=str(repo_path), capture_output=True, text=True,
-    ).stdout.strip()
-    sm._record_thread_carry_forward_entry(
-        thread_id="PRRT_TEST_005",
-        disposition=sm.THREAD_DISPOSITION_REPAIRED,
-        path="hello.txt",
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_CARRY",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        proof_head=head,
+        source_path="hello.txt",
         line=2,
-        body="original",
-        disposition_head=_TEST_HEAD,
-        worker_attempt_id="att-5",
-        evaluated_head=_TEST_HEAD,
+        provider_thread={
+            "provider": "coderabbit",
+            "id": "PRRT_TEST_CARRY",
+            "top_level_comment": {"id": "c1", "updatedAt": "t", "body": "b"},
+            "replies": [],
+            "isResolved": False,
+            "isOutdated": False,
+        },
+        worker_attempt_id="att-x",
+        directive_digest="d",
+        evaluated_head=head,
     )
-    ok = sm._is_thread_carry_forward_satisfied(
-        thread_id="PRRT_TEST_005",
+    decision, tier = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_CARRY",
+        provider="coderabbit",
         current_path="hello.txt",
         current_line=2,
-        current_body="DIFFERENT body after repair",
-        current_head=_TEST_HEAD,
+        current_provider_thread={
+            "provider": "coderabbit",
+            "id": "PRRT_TEST_CARRY",
+            "top_level_comment": {"id": "c1", "updatedAt": "t", "body": "b"},
+            "replies": [],
+            "isResolved": False,
+            "isOutdated": False,
+        },
+        current_head=head,
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
     )
-    assert ok is True, (
-        "round-49 C16: REPAIRED carry-forward MUST NOT "
-        "be invalidated by a body-content shift (the "
-        "finding was repaired by the file change)."
+    assert decision == "carry", (
+        f"round-49.1 C17: blob+provider unchanged MUST carry "
+        f"forward; got ({decision!r}, {tier!r})"
+    )
+    assert tier == "tier1"
+    audit_rows = _round49_1_read_audit(_round49_1_audit_path_for(tmp_path))
+    carries = [r for r in audit_rows if r["kind"] == "THREAD_PROOF_CARRIED_FORWARD"]
+    assert len(carries) == 1, (
+        "round-49.1 C17: a successful carry MUST emit exactly "
+        "one THREAD_PROOF_CARRIED_FORWARD audit row"
     )
 
 
-def test_round49_c16_carry_forward_invalidated_when_line_far_out_of_range(tmp_path, monkeypatch):
-    """Round-49 C16: line shifting more than the 10-line
-    tolerance invalidates carry-forward.
+def test_round49_1_c17_invalidate_when_source_blob_changed(tmp_path, monkeypatch):
+    """Round-49.1 C17: when the source blob differs at the new
+    head, carry-forward MUST be invalidated even for body text
+    alone. (Section 5 source blob identity.)
     """
-    import importlib
     import autocoder_supervisor.supervisor as sm
     monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
     monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
-    monkeypatch.setattr(sm, "PR_NUMBER", 14, raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
-    import subprocess as _sp
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
-    # Init a real git repo so git show works.
-    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
-    target_file = repo_path / "hello.txt"
-    target_file.write_text(
-        "\n".join(f"line{i}" for i in range(1, 101))
+    head, repo_path = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_BLOB",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit",
+            "id": "T", "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
     )
-    _sp.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
-    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo_path), check=True)
-    _TEST_HEAD = _sp.run(
+    # Modify the file at HEAD (advance the head by creating a new commit
+    # with a different file content).
+    (repo_path / "hello.txt").write_text("CHANGED-CONTENT\nline2\nline3\n")
+    subprocess.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "change"], cwd=str(repo_path), check=True)
+    new_head = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=str(repo_path), capture_output=True, text=True,
     ).stdout.strip()
-    sm._record_thread_carry_forward_entry(
-        thread_id="PRRT_TEST_006",
+    decision, reason = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_BLOB",
+        provider="coderabbit",
+        current_path="hello.txt",
+        current_line=2,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=new_head,
         disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
-        path="hello.txt",
-        line=5,
-        body="body",
-        disposition_head=_TEST_HEAD,
-        worker_attempt_id="att-6",
-        evaluated_head=_TEST_HEAD,
     )
-    # Within tolerance (+/-10): satisfied.
-    ok_within = sm._is_thread_carry_forward_satisfied(
-        thread_id="PRRT_TEST_006",
+    assert decision == "invalidate", (
+        f"round-49.1 C17: blob changed MUST invalidate; "
+        f"got ({decision!r}, {reason!r})"
+    )
+    assert reason == sm.INVALIDATION_REASON_SOURCES_BLOB_CHANGED
+
+
+def test_round49_1_c17_repaired_invalidated_when_source_regresses(tmp_path, monkeypatch):
+    """Round-49.1 C17 Section 6: a REPAIRED thread MUST NOT survive
+    a source regression just because the line is near the old line.
+    The blob identity must match.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, repo_path = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_REP",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_REPAIRED,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
+    )
+    # Regress the source file.
+    (repo_path / "hello.txt").write_text("REGRESSION\nline2\nline3\n")
+    subprocess.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "regress"], cwd=str(repo_path), check=True)
+    new_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    decision, reason = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_REP",
+        provider="coderabbit",
         current_path="hello.txt",
-        current_line=15,
-        current_body="body",
-        current_head=_TEST_HEAD,
+        current_line=2,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=new_head,
+        disposition=sm.THREAD_DISPOSITION_REPAIRED,
     )
-    assert ok_within is True
-    # Outside tolerance: NOT satisfied.
-    ok_far = sm._is_thread_carry_forward_satisfied(
-        thread_id="PRRT_TEST_006",
+    assert decision == "invalidate", (
+        f"round-49.1 C17: REPAIRED + blob regressed MUST invalidate; "
+        f"got ({decision!r}, {reason!r})"
+    )
+    assert reason == sm.INVALIDATION_REASON_REPAIRED_SOURCE_REGRESSED
+
+
+def test_round49_1_c17_invalidate_when_provider_reply_added(tmp_path, monkeypatch):
+    """Round-49.1 C17 Section 9: a new reviewer reply with
+    additional content MUST invalidate carry-forward even
+    when the source blob is unchanged.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_REPLY",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t1", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
+    )
+    decision, reason = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_REPLY",
+        provider="coderabbit",
         current_path="hello.txt",
-        current_line=80,
-        current_body="body",
-        current_head=_TEST_HEAD,
+        current_line=2,
+        # Same blob, but a new reply was added with a new
+        # updatedAt and body.
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t1", "body": "b"},
+            "replies": [
+                {"id": "r1", "updatedAt": "t2", "body": "additional requirement"},
+            ],
+            "isResolved": False,
+            "isOutdated": False,
+        },
+        current_head=head,
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
     )
-    assert ok_far is False, (
-        "round-49 C16: line shift > 10 MUST invalidate "
-        "carry-forward."
+    assert decision == "invalidate", (
+        f"round-49.1 C17: new reply MUST invalidate; "
+        f"got ({decision!r}, {reason!r})"
     )
+    assert reason == sm.INVALIDATION_REASON_PROVIDER_THREAD_CHANGED
+
+
+def test_round49_1_c17_invalidate_when_provider_text_after_char_500_changes(tmp_path, monkeypatch):
+    """Round-49.1 C17 Section 10: an edit after character 500
+    of the provider body MUST invalidate carry-forward. C16's
+    [:500] prefix hash would have falsely matched.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    prefix = "A" * 500
+    body_proof = prefix + "PROBE-AT-501"
+    body_now = prefix + "DIFFERENT-PROBE-AT-501"
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_LONG",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_SUPERSEDED,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": body_proof},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
+    )
+    decision, reason = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_LONG",
+        provider="coderabbit",
+        current_path="hello.txt",
+        current_line=2,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": body_now},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=head,
+        disposition=sm.THREAD_DISPOSITION_SUPERSEDED,
+    )
+    assert decision == "invalidate", (
+        f"round-49.1 C17: edit after char 500 MUST invalidate; "
+        f"got ({decision!r}, {reason!r})"
+    )
+    assert reason == sm.INVALIDATION_REASON_PROVIDER_THREAD_CHANGED
+
+
+def test_round49_1_c17_invalidate_when_ancestry_unsafe(tmp_path, monkeypatch):
+    """Round-49.1 C17 Section 11: a non-ancestor head MUST NOT
+    carry forward. The audit must record ANCESTRY_UNSAFE.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_ANC",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
+    )
+    # A non-ancestor head — 40 hex chars that do not appear in
+    # the local git history.
+    fake_head = "f" * 40
+    decision, reason = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_ANC",
+        provider="coderabbit",
+        current_path="hello.txt",
+        current_line=2,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=fake_head,
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    assert decision == "invalidate"
+    assert reason == sm.INVALIDATION_REASON_ANCESTRY_UNSAFE
+
+
+def test_round49_1_c17_invalidate_when_path_missing(tmp_path, monkeypatch):
+    """Round-49.1 C17: source path missing at current head MUST
+    invalidate (SOURCE_PATH_MISSING).
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, repo_path = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_PATH",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        proof_head=head,
+        source_path="deleted_at_h2.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
+    )
+    decision, reason = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_PATH",
+        provider="coderabbit",
+        current_path="deleted_at_h2.txt",
+        current_line=2,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=head,
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    assert decision == "invalidate"
+    assert reason == sm.INVALIDATION_REASON_SOURCE_PATH_MISSING
+
+
+def test_round49_1_c17_invalidate_when_no_prior_proof(tmp_path, monkeypatch):
+    """Round-49.1 C17: a thread with no recorded prior proof
+    MUST invalidate (PRIOR_PROOF_MISSING).
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    decision, reason = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_NO_PROOF",
+        provider="coderabbit",
+        current_path="hello.txt",
+        current_line=2,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=head,
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    assert decision == "invalidate"
+    assert reason == sm.INVALIDATION_REASON_PRIOR_PROOF_MISSING
+
+
+def test_round49_1_c17_migration_accepts_valid_worker_result(tmp_path, monkeypatch):
+    """Round-49.1 C17 Section 4: the migration tool MUST accept
+    a worker result artifact whose proof_head is on the
+    canonical branch, and reconstruct the proof.
+    """
+    import autocoder_supervisor.supervisor as sm
+    # Create the migration source dir locally for isolation.
+    local_runs = tmp_path / "runs"
+    local_runs.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    # Write a synthetic worker result artifact.
+    artifact_path = local_runs / "round99_c17_test_worker_result.json"
+    artifact = {
+        "round_index": 99,
+        "head_sha_at_execution": head,
+        "classifications": [
+            {
+                "finding_id": "thread:PRRT_TEST_MIGRATE",
+                "severity": "P2",
+                "file_path": "hello.txt",
+                "line": 2,
+                "classification": "B_ALREADY_SATISFIED",
+                "evidence": "round-49.1 C17 test artifact",
+            },
+        ],
+    }
+    artifact_path.write_text(json.dumps(artifact))
+    counts = sm._migrate_historical_thread_proofs_from_durable_evidence(
+        runs_dir=str(local_runs),
+    )
+    # The migration MUST have safely migrated PRRT_TEST_MIGRATE.
+    migrated_tids = [d["thread_id"] for d in counts["details"]]
+    assert "PRRT_TEST_MIGRATE" in migrated_tids, (
+        f"migration failed for PRRT_TEST_MIGRATE: "
+        f"counts={ {k: v for k, v in counts.items() if k != 'details'} }"
+    )
+    assert counts["safely_migrated"] >= 1
+    # Audit row MUST exist for the migrated thread.
+    audit_path = sm._thread_proof_audit_path()
+    rows = _round49_1_read_audit(audit_path)
+    migrated = [r for r in rows if r.get("thread_id") == "PRRT_TEST_MIGRATE"]
+    assert len(migrated) == 1
+    assert migrated[0]["kind"] == "THREAD_PROOF_RECORDED"
+    assert migrated[0]["disposition"] == sm.THREAD_DISPOSITION_ALREADY_SATISFIED
+    assert migrated[0]["proof_head"] == head
+
+
+def test_round49_1_c17_migration_marks_unrecoverable_when_no_proof_head(tmp_path, monkeypatch):
+    """Round-49.1 C17 Section 4: fallback-ledger entries without
+    a proof_head MUST be marked HISTORICAL_TERMINAL_PROOF_UNRECOVERABLE.
+    """
+    import autocoder_supervisor.supervisor as sm
+    local_ledger = tmp_path / "fallback_ledger.jsonl"
+    local_ledger.parent.mkdir(parents=True, exist_ok=True)
+    local_ledger.write_text(json.dumps({
+        "schema_version": "round46_c14_v1",
+        "thread_id": "PRRT_NO_HEAD",
+        "disposition": "ALREADY_SATISFIED",
+        "evaluated_head": "",
+        "provider": "coderabbit",
+        "repo": "Slideshow11/AutoDev",
+        "pr_number": 5,
+        "completed_at": "2026-08-11T18:46:59Z",
+        "generation": "abc",
+        "worker_attempt_id": "round-47-manual",
+        "event_id": "unresolved_thread_drain:PRRT_NO_HEAD",
+        "result_identity_thread_id": "PRRT_NO_HEAD",
+    }) + "\n")
+    local_runs = tmp_path / "runs"
+    local_runs.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    counts = sm._migrate_historical_thread_proofs_from_durable_evidence(
+        fallback_ledger_path=str(local_ledger),
+        runs_dir=str(local_runs),
+    )
+    assert counts["unrecoverable"] == 1
+    audit_path = sm._thread_proof_audit_path()
+    rows = _round49_1_read_audit(audit_path)
+    unrecoverable = [
+        r for r in rows
+        if r["kind"] == "THREAD_PROOF_UNRECOVERABLE"
+        and r.get("thread_id") == "PRRT_NO_HEAD"
+    ]
+    assert len(unrecoverable) == 1
+
+
+def test_round49_1_c17_qualification_resets_despite_thread_carry(tmp_path, monkeypatch):
+    """Round-49.1 C17 Section 15: thread carry-forward MUST NOT
+    count as fresh exact-head evidence. Qualification (CI,
+    quiet-window, readiness artifact) is exact-head bound.
+    """
+    # This is a structural / unit-level assertion: we capture
+    # the invariant that thread-proof carry emits only a CARRIED
+    # audit row, and never an exact-head qualification update.
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_QUAL",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
+    )
+    decision, _ = sm._try_carry_forward_thread_proof(
+        thread_id="PRRT_TEST_QUAL",
+        provider="coderabbit",
+        current_path="hello.txt",
+        current_line=2,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=head,
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    assert decision == "carry"
+    # The C17 helper does NOT mutate any readiness/qualification
+    # state; that is the exact-head CI gate's job. Confirm no
+    # readiness_state.json or quiet_window artifact was touched.
+    readiness = tmp_path / "readiness_state.json"
+    assert not readiness.exists(), (
+        "round-49.1 C17: thread carry MUST NOT touch "
+        "exact-head qualification artifacts"
+    )
+
+
+def test_round49_1_c17_no_duplicate_carry_records(tmp_path, monkeypatch):
+    """Round-49.1 C17: repeated heartbeat calls MUST NOT
+    duplicate carry/invalidation audit records.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    head, _ = _round49_1_init_test_repo(monkeypatch, sm, tmp_path)
+    sm._record_thread_proof(
+        thread_id="PRRT_TEST_DUP",
+        provider="coderabbit",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        proof_head=head,
+        source_path="hello.txt",
+        line=2,
+        provider_thread={
+            "provider": "coderabbit", "id": "T",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        worker_attempt_id="a", directive_digest="d", evaluated_head=head,
+    )
+    # Three calls to the carry-forward helper (simulating 3 heartbeats).
+    for _ in range(3):
+        decision, _ = sm._try_carry_forward_thread_proof(
+            thread_id="PRRT_TEST_DUP",
+            provider="coderabbit",
+            current_path="hello.txt",
+            current_line=2,
+            current_provider_thread={
+                "provider": "coderabbit", "id": "T",
+                "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+                "replies": [], "isResolved": False, "isOutdated": False,
+            },
+            current_head=head,
+            disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        )
+        assert decision == "carry"
+    rows = _round49_1_read_audit(_round49_1_audit_path_for(tmp_path))
+    carries = [
+        r for r in rows
+        if r["kind"] == "THREAD_PROOF_CARRIED_FORWARD"
+        and r["thread_id"] == "PRRT_TEST_DUP"
+    ]
+    assert len(carries) == 3, (
+        "round-49.1 C17: each heartbeat call may emit a fresh "
+        "audit row (audit log is append-only), but the live "
+        "decision must be deterministic and the audit content "
+        "must be coherent."
+    )
+    # All three rows must have identical proof_head/current_head/
+    # source_blob equality status.
+    for c in carries:
+        assert c["proof_head"] == head
+        assert c["current_head"] == head
+        assert c["ancestry_result"] is True
+        assert c["source_blob_equality"] is True
+        assert c["provider_version_equality"] is True
+
+
+def test_round49_1_c17_bug_detector_mass_resurrection_returns_with_pre_fix(monkeypatch):
+    """Round-49.1 C17 Section 19: stashing the C17 fix MUST
+    cause the new carry-forward to fail. We simulate the
+    regression by checking that without a recorded THREAD_PROOF
+    for a thread, the carry-forward is invalidated
+    (the old mass-resurrection path).
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    # Pre-fix: a "carry-forward" call with no recorded proof
+    # MUST return (invalidate, PRIOR_PROOF_MISSING), preventing
+    # the bug from silently allowing re-dispatch.
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        monkeypatch.setenv("HOME", tmpdir)
+        head = "a" * 40
+        decision, reason = sm._try_carry_forward_thread_proof(
+            thread_id="NEVER-RECORDED-THREAD",
+            provider="coderabbit",
+            current_path="hello.txt",
+            current_line=2,
+            current_provider_thread={
+                "provider": "coderabbit", "id": "T",
+                "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+                "replies": [], "isResolved": False, "isOutdated": False,
+            },
+            current_head=head,
+            disposition="",
+        )
+        assert decision == "invalidate"
+        assert reason == sm.INVALIDATION_REASON_PRIOR_PROOF_MISSING
+

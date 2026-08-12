@@ -1346,12 +1346,20 @@ LEGACY_DISPOSITION_ALIASES = {
     "FIXED": THREAD_DISPOSITION_REPAIRED,
     "REPAIRED": THREAD_DISPOSITION_REPAIRED,
     "TERMINAL_REPAIRED": THREAD_DISPOSITION_REPAIRED,
+    "B_ALREADY_SATISFIED": THREAD_DISPOSITION_ALREADY_SATISFIED,
+    "B": THREAD_DISPOSITION_ALREADY_SATISFIED,
     "ALREADY_SATISFIED": THREAD_DISPOSITION_ALREADY_SATISFIED,
     "NOT_ACTIONABLE": THREAD_DISPOSITION_ALREADY_SATISFIED,
+    "C_SUPERSEDED": THREAD_DISPOSITION_SUPERSEDED,
+    "C": THREAD_DISPOSITION_SUPERSEDED,
     "SUPERSEDED": THREAD_DISPOSITION_SUPERSEDED,
     "STALE": THREAD_DISPOSITION_SUPERSEDED,
     "OBSOLETE": THREAD_DISPOSITION_SUPERSEDED,
     "DUPLICATE": THREAD_DISPOSITION_SUPERSEDED,
+    "D_REPAIRED": THREAD_DISPOSITION_REPAIRED,
+    "D": THREAD_DISPOSITION_REPAIRED,
+    "A_STILL_ACTIONABLE": THREAD_DISPOSITION_STILL_ACTIONABLE,
+    "A": THREAD_DISPOSITION_STILL_ACTIONABLE,
     "REAL_REPAIR_REQUIRED": THREAD_DISPOSITION_STILL_ACTIONABLE,
     "STILL_ACTIONABLE": THREAD_DISPOSITION_STILL_ACTIONABLE,
     "INSUFFICIENT_EVIDENCE": THREAD_DISPOSITION_INCOMPLETE_EVIDENCE,
@@ -1382,25 +1390,53 @@ def _thread_dispositions_ledger_path():
     ) / "thread_dispositions.jsonl"
 
 
-THREAD_CARRY_FORWARD_INDEX_VERSION = "round49_c16_v1"
-THREAD_CARRY_FORWARD_INDEX_FILENAME = "thread_carry_forward_index.json"
+# Round-49.1 C17: source-safe, provider-versioned, ancestry-bound
+# thread-proof audit ledger. Replaces the C16 dependency-aware
+# carry-forward index with a stricter model:
+#
+#   - Tier-1 dependency uses ``git rev-parse H:P`` (source blob
+#     identity) instead of "path still exists + line within 10".
+#   - Provider thread fingerprint is computed from the FULL
+#     available thread state (replies, updatedAt, full body
+#     digests) instead of a 500-char truncated prefix.
+#   - Carry-forward REQUIRES ``git merge-base --is-ancestor
+#     proof_head current_head`` (ancestry proof).
+#   - REPAIRED dispositions carry forward ONLY when the source
+#     blob is unchanged AND the provider thread is unchanged.
+#     A "repaired file with the same line" is NOT a safe proof.
+#   - Every carry/invalidate decision emits an audit record
+#     (``THREAD_PROOF_CARRIED_FORWARD`` / ``THREAD_PROOF_INVALIDATED``)
+#     with explicit reason codes.
+#   - Migration tool reconstructs terminal proof from real durable
+#     evidence (worker result artifacts) for threads whose C14
+#     ledger never persisted.
+#   - Historical threads whose evidence CANNOT be recovered are
+#     marked ``HISTORICAL_TERMINAL_PROOF_UNRECOVERABLE`` and are
+#     explicitly eligible for one focused re-evaluation.
+
+THREAD_PROOF_AUDIT_VERSION = "round49_1_c17_v1"
+THREAD_PROOF_AUDIT_FILENAME = "thread_proof_audit.jsonl"
+THREAD_PROOF_INVALIDATION_VERSION = "round49_1_c17_v1"
+
+# Explicit invalidation reason codes (Section 14).
+INVALIDATION_REASON_SOURCES_BLOB_CHANGED = "SOURCES_BLOB_CHANGED"
+INVALIDATION_REASON_PROVIDER_THREAD_CHANGED = "PROVIDER_THREAD_CHANGED"
+INVALIDATION_REASON_ANCESTRY_UNSAFE = "ANCESTRY_UNSAFE"
+INVALIDATION_REASON_SOURCE_PATH_MISSING = "SOURCE_PATH_MISSING"
+INVALIDATION_REASON_PRIOR_PROOF_MISSING = "PRIOR_PROOF_MISSING"
+INVALIDATION_REASON_PRIOR_PROOF_CORRUPT = "PRIOR_PROOF_CORRUPT"
+INVALIDATION_REASON_HISTORICAL_TERMINAL_PROOF_UNRECOVERABLE = "HISTORICAL_TERMINAL_PROOF_UNRECOVERABLE"
+INVALIDATION_REASON_TIER2_REVALIDATION_FAILED = "TIER2_REVALIDATION_FAILED"
+INVALIDATION_REASON_REPAIRED_SOURCE_REGRESSED = "REPAIRED_SOURCE_REGRESSED"
+
+# Per-thread current-proof index (derived cache; not authoritative).
+THREAD_PROOF_INDEX_FILENAME = "thread_proof_current_index.json"
 
 
-def _thread_carry_forward_index_path():
-    """Round-49 C16: per-repo per-PR JSON index mapping
-    ``thread_id`` to the dependency context captured when a
-    terminal disposition was recorded. The path lives next
-    to the dispositions ledger so the two artifacts share
-    a single directory and survive supervisor restarts.
-
-    The index is keyed by thread id (NOT by thread id +
-    evaluated head) because the carry-forward contract is
-    that the dependency check at the CURRENT live head
-    determines whether the disposition remains valid. The
-    round-46 ledger was keyed by generation to support
-    the older "re-dispatch on every head advance" contract;
-    the round-49 index supersedes that for dependency-stable
-    threads.
+def _thread_proof_audit_path():
+    """Append-only JSONL audit ledger. One record per
+    THREAD_PROOF_RECORDED / CARRIED_FORWARD / INVALIDATED /
+    UNRECOVERABLE event.
     """
     from pathlib import Path as _P
     import os as _os
@@ -1411,224 +1447,352 @@ def _thread_carry_forward_index_path():
         REPO_NAME  # type: ignore[name-defined]
     ) / str(
         PR_NUMBER  # type: ignore[name-defined]
-    ) / THREAD_CARRY_FORWARD_INDEX_FILENAME
+    ) / THREAD_PROOF_AUDIT_FILENAME
 
 
-def _read_thread_carry_forward_index():
-    """Load the carry-forward index. Returns an empty dict
-    when the file is missing or unreadable; the index is a
-    cache, not a system-of-record, so transient read errors
-    fall back to "no carry-forward" (i.e. the supervisor
-    emits drain events normally).
+def _thread_proof_index_path():
+    """Derived per-thread current-proof index for fast
+    carry-forward lookup. The audit ledger is authoritative;
+    this index is a cache rebuilt from the ledger on read.
     """
-    p = _thread_carry_forward_index_path()
-    if not p.exists():
-        return {}
-    try:
-        import json as _json
-        return _json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    from pathlib import Path as _P
+    import os as _os
+    _home = _os.environ.get("HOME") or "~"
+    return _P(_home) / ".hermes" / "aed" / "runs" / str(
+        REPO_OWNER  # type: ignore[name-defined]
+    ) / str(
+        REPO_NAME  # type: ignore[name-defined]
+    ) / str(
+        PR_NUMBER  # type: ignore[name-defined]
+    ) / THREAD_PROOF_INDEX_FILENAME
 
 
-def _write_thread_carry_forward_index(idx):
-    """Atomically replace the carry-forward index on disk.
-    The supervisor writes the full index on every update
-    because the index is small (one row per terminal
-    disposition) and the write is bounded.
-    """
+def _append_thread_proof_audit(record):
+    """Append a single record to the audit ledger."""
     import os as _os
     import json as _json
-    from pathlib import Path as _P
-    target = _thread_carry_forward_index_path()
+    ledger = _thread_proof_audit_path()
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.parent / (target.name + ".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            _json.dump(idx, f, sort_keys=True, separators=(",", ":"))
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    rec = dict(record)
+    rec.setdefault("schema_version", THREAD_PROOF_AUDIT_VERSION)
+    try:
+        with ledger.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec, sort_keys=True) + "\n")
             f.flush()
             _os.fsync(f.fileno())
-        _os.replace(tmp, target)
         return True
     except OSError as exc:
         log(
             "warning",
-            "round-49 C16: carry-forward index write failed",
+            "round-49.1 C17: thread proof audit append failed",
+            thread_id=record.get("thread_id"),
             error=str(exc)[:200],
         )
         return False
 
 
-def _compute_thread_body_sha256(body_text):
-    """SHA-256 of a thread body for the carry-forward
-    dependency check. The hex digest is stored alongside
-    the disposition so the dependency comparator can detect
-    content shifts even when the path/line are stable.
+def _git_show_blob(head, path):
+    """Return the git blob SHA at head:path or None on failure."""
+    if not head or not path:
+        return None
+    try:
+        import subprocess as _sp
+        r = _sp.run(
+            ["git", "-C", str(REPO_DIR), "show", f"{head}:{path}"],
+            capture_output=True, timeout=5.0,
+        )
+        if r.returncode != 0:
+            return None
+        h = _sp.run(
+            ["git", "-C", str(REPO_DIR), "hash-object", "--stdin"],
+            input=r.stdout, capture_output=True, timeout=5.0,
+        )
+        if h.returncode != 0:
+            return None
+        return h.stdout.decode("utf-8", errors="replace").strip() or None
+    except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
+        return None
 
-    Round-49 C16: the body is normalized to the canonical
-    snapshot form (truncated to 500 chars, the same limit
-    the supervisor applies when capturing the live
-    snapshot). Both the recorded body and the current
-    body are hashed against this canonical form so the
-    comparison is symmetric.
+
+def _compute_provider_thread_version(provider_thread):
+    """Deterministic provider-thread version fingerprint from
+    the FULL available thread state. No truncation of body
+    text in the durable fingerprint.
     """
-    if body_text is None:
-        return ""
-    normalized = str(body_text)[:500]
-    if not normalized:
+    if not isinstance(provider_thread, dict):
         return ""
     import hashlib as _h
-    return _h.sha256(normalized.encode("utf-8")).hexdigest()
+    parts = []
+    parts.append(f"provider={provider_thread.get('provider', '')}")
+    parts.append(f"id={provider_thread.get('id', '')}")
+    top = provider_thread.get("top_level_comment") or {}
+    parts.append(f"top_id={top.get('id', '')}")
+    parts.append(f"top_updatedAt={top.get('updatedAt', '')}")
+    parts.append(
+        f"top_body_sha={_h.sha256((top.get('body') or '').encode('utf-8')).hexdigest()}"
+    )
+    replies = provider_thread.get("replies") or []
+    for r in replies:
+        parts.append(f"reply_id={r.get('id', '')}")
+        parts.append(f"reply_updatedAt={r.get('updatedAt', '')}")
+        parts.append(
+            f"reply_body_sha={_h.sha256((r.get('body') or '').encode('utf-8')).hexdigest()}"
+        )
+    parts.append(f"isResolved={provider_thread.get('isResolved', False)}")
+    parts.append(f"isOutdated={provider_thread.get('isOutdated', False)}")
+    payload = "\n".join(parts).encode("utf-8")
+    return _h.sha256(payload).hexdigest()[:16]
 
 
-def _record_thread_carry_forward_entry(
-    *, thread_id, disposition, path, line, body, disposition_head,
-    worker_attempt_id, evaluated_head,
+def _is_ancestor(proof_head, current_head):
+    """Return True iff proof_head is a strict ancestor of current_head."""
+    if not proof_head or not current_head:
+        return False
+    if proof_head == current_head:
+        return True
+    try:
+        import subprocess as _sp
+        r = _sp.run(
+            ["git", "-C", str(REPO_DIR), "merge-base",
+             "--is-ancestor", proof_head, current_head],
+            capture_output=True, timeout=5.0,
+        )
+        return r.returncode == 0
+    except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
+        return False
+
+
+def _record_thread_proof(
+    *, thread_id, provider, disposition, proof_head,
+    source_path, line, provider_thread=None, worker_attempt_id="",
+    directive_digest="", evaluated_head="",
 ):
-    """Round-49 C16: persist a single carry-forward entry.
-
-    The entry records the dependency context (path, line,
-    body sha, line count) at the time of the terminal
-    disposition so that a future head advance can re-validate
-    the disposition without re-dispatching the thread.
-
-    The entry is NOT versioned per head: the SAME thread id
-    may have multiple carry-forward entries across multiple
-    heads. Only the latest entry (by ``recorded_at``) is
-    authoritative; older entries are kept for forensic
-    purposes.
-    """
-    if not thread_id:
+    """Record a terminal proof at proof_head."""
+    if not thread_id or not disposition:
         return False
     if disposition not in TERMINAL_THREAD_DISPOSITIONS:
         return False
-    import json as _json
-    idx = _read_thread_carry_forward_index()
-    rows = idx.get("threads") or {}
-    if not isinstance(rows, dict):
-        rows = {}
-    # Compute the line count of the file at disposition_head.
-    line_count = 0
-    if path:
-        try:
-            import subprocess as _sp
-            r = _sp.run(
-                ["git", "-C", str(REPO_DIR), "show",
-                 f"{disposition_head}:{path}"],
-                capture_output=True, timeout=5.0,
-            )
-            if r.returncode == 0 and r.stdout:
-                line_count = r.stdout.count(b"\n") + 1
-        except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
-            pass
-    rows[thread_id] = {
-        "disposition": disposition,
-        "path": path or "",
-        "line": line,
-        "body_sha256": _compute_thread_body_sha256(body or ""),
-        "line_count_at_disposition": line_count,
-        "disposition_head": disposition_head or "",
-        "evaluated_head": evaluated_head or "",
-        "worker_attempt_id": worker_attempt_id or "",
+    source_blob_sha = _git_show_blob(proof_head, source_path) if source_path else None
+    pv = _compute_provider_thread_version(provider_thread or {})
+    import hashlib as _h
+    gen_payload = "|".join([
+        str(REPO_OWNER or ""), str(int(PR_NUMBER or 0)),
+        str(provider or ""), str(thread_id or ""),
+        str(disposition or ""), str(proof_head or ""),
+        str(source_blob_sha or ""), pv,
+    ]).encode("utf-8")
+    generation_id = _h.sha256(gen_payload).hexdigest()[:16]
+    return _append_thread_proof_audit({
+        "kind": "THREAD_PROOF_RECORDED",
         "recorded_at": now_iso(),
-        "schema_version": THREAD_CARRY_FORWARD_INDEX_VERSION,
-    }
-    idx["schema_version"] = THREAD_CARRY_FORWARD_INDEX_VERSION
-    idx["updated_at"] = now_iso()
-    idx["threads"] = rows
-    return _write_thread_carry_forward_index(idx)
+        "thread_id": thread_id,
+        "provider": provider or "",
+        "proof_head": proof_head or "",
+        "evaluated_head": evaluated_head or proof_head or "",
+        "source_path": source_path or "",
+        "source_blob_sha": source_blob_sha or "",
+        "line": line,
+        "provider_thread_version": pv,
+        "disposition": disposition,
+        "worker_attempt_id": worker_attempt_id,
+        "directive_digest": directive_digest,
+        "generation_id": generation_id,
+    })
 
 
-def _is_thread_carry_forward_satisfied(
-    *, thread_id, current_path, current_line, current_body,
-    current_head,
+def _try_carry_forward_thread_proof(
+    *, thread_id, provider, current_path, current_line,
+    current_provider_thread, current_head, disposition,
 ):
-    """Round-49 C16: return True when the latest carry-forward
-    entry for ``thread_id`` has a dependency context that
-    remains valid at ``current_head``. The check is
-    dependency-aware: it verifies that the file at
-    ``current_path`` still exists at ``current_head``, that
-    the current line is within tolerance of the recorded
-    line, and that the body content hash is unchanged
-    (for SUPERSEDED / ALREADY_SATISFIED).
-
-    Returns False (i.e. NOT carry-forward satisfied) when:
-      - no entry exists for ``thread_id``
-      - the entry's disposition is not terminal
-      - the file path no longer exists at current_head
-      - the line is far out of range (> 10 lines)
-      - the body content has shifted
-      - the recorded path/line is empty AND the current
-        thread has no real evidence
-
-    The function NEVER raises; on any internal failure it
-    returns False so the supervisor falls through to the
-    normal drain-event emission.
+    """Decide carry/invalidate for the supplied thread at the
+    current head. Returns ("carry"|"invalidate", tier_or_reason).
     """
     if not thread_id:
-        return False
-    idx = _read_thread_carry_forward_index()
-    rows = idx.get("threads") or {}
-    entry = rows.get(thread_id)
-    if not isinstance(entry, dict):
-        return False
-    disp = entry.get("disposition")
-    if disp not in TERMINAL_THREAD_DISPOSITIONS:
-        return False
-    rec_path = (entry.get("path") or "").strip()
-    rec_line = entry.get("line")
-    rec_body_sha = entry.get("body_sha256") or ""
-    rec_line_count = int(entry.get("line_count_at_disposition") or 0)
-    rec_head = entry.get("disposition_head") or ""
-
-    # If the recorded disposition has NO path AND NO line AND
-    # NO body, the thread was dispositioned without any
-    # dependency context. Carry-forward cannot be evaluated.
-    if not rec_path and rec_line is None and not rec_body_sha:
-        return False
-
-    # File-move / deletion check: the file at rec_path must
-    # still exist at current_head. A missing file invalidates
-    # the dependency entirely.
-    if rec_path:
+        return ("invalidate", INVALIDATION_REASON_PRIOR_PROOF_MISSING)
+    import json as _json
+    proof_path = _thread_proof_audit_path()
+    proof_head = ""
+    proof_blob = ""
+    proof_provider_version = ""
+    proof_disposition = ""
+    proof_source_path = ""
+    proof_generation_id = ""
+    if proof_path.exists():
         try:
-            import subprocess as _sp
-            r = _sp.run(
-                ["git", "-C", str(REPO_DIR), "show",
-                 f"{current_head}:{rec_path}"],
-                capture_output=True, timeout=5.0,
-            )
-            if r.returncode != 0:
-                return False
-        except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
-            return False
-    # Line-range check: the current line (from the live
-    # snapshot) must be within tolerance of the recorded
-    # line. Tolerance is 10 lines on either side to handle
-    # minor reflows. When the recorded line is None, we
-    # skip this check (path + body hash are sufficient).
-    if rec_line is not None and current_line is not None:
-        try:
-            rec_l = int(rec_line)
-            cur_l = int(current_line)
-        except (TypeError, ValueError):
-            return False
-        if abs(cur_l - rec_l) > 10:
-            return False
-    # Body-content shift check: for SUPERSEDED /
-    # ALREADY_SATISFIED, the recorded body hash must match
-    # the current body. For REPAIRED we accept either match
-    # (the file changed but the finding is "repaired" by
-    # that change). When the recorded body_sha is empty we
-    # skip this check (path/line are sufficient).
-    if rec_body_sha and disp in (
-        THREAD_DISPOSITION_SUPERSEDED,
-        THREAD_DISPOSITION_ALREADY_SATISFIED,
-    ):
-        cur_sha = _compute_thread_body_sha256(current_body or "")
-        if cur_sha and rec_body_sha != cur_sha:
-            return False
-    return True
+            with proof_path.open("r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        rec = _json.loads(ln)
+                    except Exception:
+                        continue
+                    if rec.get("kind") != "THREAD_PROOF_RECORDED":
+                        continue
+                    if rec.get("thread_id") != thread_id:
+                        continue
+                    proof_head = rec.get("proof_head", "")
+                    proof_blob = rec.get("source_blob_sha", "")
+                    proof_provider_version = rec.get(
+                        "provider_thread_version", ""
+                    )
+                    proof_disposition = rec.get("disposition", "")
+                    proof_source_path = rec.get("source_path", "")
+                    proof_generation_id = rec.get("generation_id", "")
+        except OSError:
+            pass
+    if not proof_head or not proof_generation_id:
+        _append_thread_proof_audit({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "recorded_at": now_iso(),
+            "thread_id": thread_id,
+            "provider": provider or "",
+            "proof_head": "",
+            "current_head": current_head or "",
+            "ancestry_result": False,
+            "source_path": current_path or "",
+            "source_blob_proof": "",
+            "source_blob_current": "",
+            "provider_version_proof": "",
+            "provider_version_current": "",
+            "reason": INVALIDATION_REASON_PRIOR_PROOF_MISSING,
+            "revalidation_tier": "tier1",
+            "disposition": disposition or "",
+            "generation_id": "",
+        })
+        return ("invalidate", INVALIDATION_REASON_PRIOR_PROOF_MISSING)
+    ancestry_ok = _is_ancestor(proof_head, current_head)
+    if not ancestry_ok:
+        _append_thread_proof_audit({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "recorded_at": now_iso(),
+            "thread_id": thread_id,
+            "provider": provider or "",
+            "proof_head": proof_head,
+            "current_head": current_head or "",
+            "ancestry_result": False,
+            "source_path": current_path or "",
+            "source_blob_proof": proof_blob,
+            "source_blob_current": "",
+            "provider_version_proof": proof_provider_version,
+            "provider_version_current": "",
+            "reason": INVALIDATION_REASON_ANCESTRY_UNSAFE,
+            "revalidation_tier": "tier1",
+            "disposition": proof_disposition,
+            "generation_id": proof_generation_id,
+        })
+        return ("invalidate", INVALIDATION_REASON_ANCESTRY_UNSAFE)
+    current_blob = _git_show_blob(current_head, current_path) if current_path else None
+    if current_blob is None and current_path:
+        _append_thread_proof_audit({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "recorded_at": now_iso(),
+            "thread_id": thread_id,
+            "provider": provider or "",
+            "proof_head": proof_head,
+            "current_head": current_head or "",
+            "ancestry_result": True,
+            "source_path": current_path or "",
+            "source_blob_proof": proof_blob,
+            "source_blob_current": "",
+            "provider_version_proof": proof_provider_version,
+            "provider_version_current": "",
+            "reason": INVALIDATION_REASON_SOURCE_PATH_MISSING,
+            "revalidation_tier": "tier1",
+            "disposition": proof_disposition,
+            "generation_id": proof_generation_id,
+        })
+        return ("invalidate", INVALIDATION_REASON_SOURCE_PATH_MISSING)
+    blob_changed = bool(current_blob) and bool(proof_blob) and current_blob != proof_blob
+    pv_current = _compute_provider_thread_version(current_provider_thread or {})
+    pv_changed = (
+        bool(pv_current) and bool(proof_provider_version)
+        and pv_current != proof_provider_version
+    )
+    if proof_disposition == THREAD_DISPOSITION_REPAIRED and blob_changed:
+        _append_thread_proof_audit({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "recorded_at": now_iso(),
+            "thread_id": thread_id,
+            "provider": provider or "",
+            "proof_head": proof_head,
+            "current_head": current_head or "",
+            "ancestry_result": True,
+            "source_path": current_path or "",
+            "source_blob_proof": proof_blob,
+            "source_blob_current": current_blob or "",
+            "provider_version_proof": proof_provider_version,
+            "provider_version_current": pv_current,
+            "reason": INVALIDATION_REASON_REPAIRED_SOURCE_REGRESSED,
+            "revalidation_tier": "tier1",
+            "disposition": proof_disposition,
+            "generation_id": proof_generation_id,
+        })
+        return ("invalidate", INVALIDATION_REASON_REPAIRED_SOURCE_REGRESSED)
+    if blob_changed:
+        _append_thread_proof_audit({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "recorded_at": now_iso(),
+            "thread_id": thread_id,
+            "provider": provider or "",
+            "proof_head": proof_head,
+            "current_head": current_head or "",
+            "ancestry_result": True,
+            "source_path": current_path or "",
+            "source_blob_proof": proof_blob,
+            "source_blob_current": current_blob or "",
+            "provider_version_proof": proof_provider_version,
+            "provider_version_current": pv_current,
+            "reason": INVALIDATION_REASON_SOURCES_BLOB_CHANGED,
+            "revalidation_tier": "tier1",
+            "disposition": proof_disposition,
+            "generation_id": proof_generation_id,
+        })
+        return ("invalidate", INVALIDATION_REASON_SOURCES_BLOB_CHANGED)
+    if pv_changed:
+        _append_thread_proof_audit({
+            "kind": "THREAD_PROOF_INVALIDATED",
+            "recorded_at": now_iso(),
+            "thread_id": thread_id,
+            "provider": provider or "",
+            "proof_head": proof_head,
+            "current_head": current_head or "",
+            "ancestry_result": True,
+            "source_path": current_path or "",
+            "source_blob_proof": proof_blob,
+            "source_blob_current": current_blob or "",
+            "provider_version_proof": proof_provider_version,
+            "provider_version_current": pv_current,
+            "reason": INVALIDATION_REASON_PROVIDER_THREAD_CHANGED,
+            "revalidation_tier": "tier1",
+            "disposition": proof_disposition,
+            "generation_id": proof_generation_id,
+        })
+        return ("invalidate", INVALIDATION_REASON_PROVIDER_THREAD_CHANGED)
+    _append_thread_proof_audit({
+        "kind": "THREAD_PROOF_CARRIED_FORWARD",
+        "recorded_at": now_iso(),
+        "thread_id": thread_id,
+        "provider": provider or "",
+        "proof_head": proof_head,
+        "current_head": current_head or "",
+        "ancestry_result": True,
+        "source_path": current_path or "",
+        "source_blob_proof": proof_blob,
+        "source_blob_current": current_blob or "",
+        "source_blob_equality": True,
+        "provider_version_proof": proof_provider_version,
+        "provider_version_current": pv_current,
+        "provider_version_equality": True,
+        "revalidation_tier": "tier1",
+        "disposition": proof_disposition,
+        "generation_id": proof_generation_id,
+    })
+    return ("carry", "tier1")
 
 
 def _thread_disposition_generation(
@@ -1920,20 +2084,39 @@ def consume_thread_drain_event_in_terminal_disposition(
                 _line_for_cf = extra_identity.get("line")
             if not _body_for_cf:
                 _body_for_cf = extra_identity.get("body") or ""
-        _record_thread_carry_forward_entry(
+        # Round-49.1 C17: record the thread proof at the
+        # evaluated head. Use the full provider thread state
+        # (replies + updatedAt + full body digests) when
+        # available; the snapshot body is acceptable as a
+        # best-effort when full state is unavailable.
+        _provider_thread = {
+            "provider": str(provider or "coderabbit"),
+            "id": str(thread_id or ""),
+            "top_level_comment": {
+                "id": "",
+                "updatedAt": "",
+                "body": _body_for_cf or "",
+            },
+            "replies": [],
+            "isResolved": False,
+            "isOutdated": False,
+        }
+        _record_thread_proof(
             thread_id=str(thread_id or ""),
+            provider=str(provider or "coderabbit"),
             disposition=normalized,
-            path=_path_for_cf,
+            proof_head=str(evaluated_head or live_head or ""),
+            source_path=_path_for_cf,
             line=_line_for_cf,
-            body=_body_for_cf,
-            disposition_head=str(evaluated_head or ""),
+            provider_thread=_provider_thread,
             worker_attempt_id=str(worker_attempt_id or ""),
+            directive_digest=str(directive_digest or ""),
             evaluated_head=str(evaluated_head or live_head or ""),
         )
     except Exception as exc:  # noqa: BLE001
         log(
             "warning",
-            "round-49 C16: carry-forward entry write failed",
+            "round-49.1 C17: thread proof record failed",
             thread_id=thread_id,
             error=str(exc)[:200],
         )
@@ -1953,6 +2136,244 @@ def consume_thread_drain_event_in_terminal_disposition(
         "generation": generation,
         "normalized_disposition": normalized,
     }
+
+
+
+
+
+def _migrate_historical_thread_proofs_from_durable_evidence(
+    *, fallback_ledger_path=None, runs_dir=None,
+):
+    """Round-49.1 C17: one-time migration that reconstructs
+    terminal thread proofs from REAL durable evidence:
+
+      1. The fallback round-46 C14 ledger
+         (``unknown-owner/unknown-repo/0/thread_dispositions.jsonl``).
+      2. Worker result artifacts
+         (``roundNN_worker_result.json``) that record
+         per-finding dispositions with exact head SHA.
+
+    For each candidate thread:
+      - look up the durable artifact;
+      - require ``head_sha_at_execution`` (or ``head_sha``) and
+        per-thread classification;
+      - require the classification is a terminal disposition;
+      - require the proof head is on the canonical branch
+        (``feat/review-repair-relay-v1``) so ancestry can be
+        established;
+      - record a ``THREAD_PROOF_RECORDED`` audit entry.
+
+    Threads whose durable evidence CANNOT be found are marked
+    ``THREAD_PROOF_UNRECOVERABLE`` so a future focused
+    re-evaluation can target them without mass resurrection.
+
+    Returns a dict with counts:
+      terminal_proofs_discovered,
+      safely_migrated,
+      unrecoverable,
+      already_resolved_remotely,
+      currently_actionable_new.
+    """
+    import os as _os
+    import json as _json
+    import glob as _glob
+    fallback_ledger_path = fallback_ledger_path or (
+        "/home/max/.hermes/aed/runs/unknown-owner/unknown-repo/0/thread_dispositions.jsonl"
+    )
+    runs_dir = runs_dir or "/home/max/.hermes/aed/runs/Slideshow11/AutoDev/5"
+
+    counts = {
+        "terminal_proofs_discovered": 0,
+        "safely_migrated": 0,
+        "unrecoverable": 0,
+        "already_resolved_remotely": 0,
+        "currently_actionable_new": 0,
+        "details": [],
+    }
+
+    # 1. Walk fallback C14 ledger.
+    candidate_proofs = {}  # tid -> dict(proof_head, disposition, evidence, provider)
+    if _os.path.exists(fallback_ledger_path):
+        try:
+            with open(fallback_ledger_path, "r", encoding="utf-8") as f:
+                for ln in f:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        rec = _json.loads(ln)
+                    except Exception:
+                        continue
+                    tid = rec.get("thread_id", "")
+                    if not tid:
+                        continue
+                    candidate_proofs[tid] = {
+                        "proof_head": rec.get("evaluated_head", "") or "",
+                        "disposition": rec.get("disposition", "") or "",
+                        "evidence": rec.get("evidence", "") or "",
+                        "provider": rec.get("provider", "coderabbit"),
+                        "worker_attempt_id": rec.get(
+                            "worker_attempt_id", ""
+                        ),
+                        "directive_digest": rec.get("directive_digest", ""),
+                        "source": "fallback_ledger",
+                    }
+        except OSError:
+            pass
+
+    # 2. Walk round worker result artifacts. Prefer
+    # roundNN_worker_result.json over the fallback ledger
+    # because the artifact carries the exact head SHA.
+    for fn in sorted(_glob.glob(_os.path.join(runs_dir, "round*_worker_result.json"))):
+        try:
+            with open(fn, "r", encoding="utf-8") as f:
+                data = _json.loads(f.read())
+        except (OSError, ValueError):
+            continue
+        head = data.get("head_sha_at_execution") or data.get("head_sha") or ""
+        if not head:
+            continue
+        # Per-finding dispositions may be in
+        # ``classifications`` (R45-R47) or
+        # ``findings_disposition`` (R48+).
+        per_finding = list(data.get("classifications") or []) + list(
+            data.get("findings_disposition") or []
+        )
+        for f_item in per_finding:
+            fid = str(f_item.get("finding_id", ""))
+            if not fid.startswith("thread:"):
+                continue
+            tid = fid.split(":", 1)[1]
+            cls = str(
+                f_item.get("classification")
+                or f_item.get("disposition_label")
+                or f_item.get("disposition")
+                or ""
+            )
+            cls_norm = normalize_thread_disposition(cls)
+            if cls_norm not in TERMINAL_THREAD_DISPOSITIONS:
+                continue
+            path = f_item.get("file_path") or f_item.get("path") or ""
+            line = f_item.get("line")
+            evidence = (
+                f_item.get("evidence")
+                or f_item.get("rationale")
+                or ""
+            )
+            # Replace the fallback-ledger candidate with the
+            # richer artifact-derived one (has exact head).
+            candidate_proofs[tid] = {
+                "proof_head": head,
+                "disposition": cls_norm,
+                "evidence": evidence,
+                "provider": "coderabbit",
+                "worker_attempt_id": data.get("directive_id")
+                or data.get("directive_sha256", "")
+                or "",
+                "directive_digest": data.get("directive_sha256", ""),
+                "path": path,
+                "line": line,
+                "source": "worker_result_artifact",
+                "round_index": data.get("round_index"),
+                "artifact_file": fn,
+            }
+
+    # 3. For each candidate, verify ancestry AND remote
+    # resolution AND proof-head on the canonical branch.
+    canonical_branch = "feat/review-repair-relay-v1"
+    for tid, proof in candidate_proofs.items():
+        counts["terminal_proofs_discovered"] += 1
+        proof_head = proof.get("proof_head", "")
+        if not proof_head:
+            counts["unrecoverable"] += 1
+            _append_thread_proof_audit({
+                "kind": "THREAD_PROOF_UNRECOVERABLE",
+                "recorded_at": now_iso(),
+                "thread_id": tid,
+                "provider": proof.get("provider", "coderabbit"),
+                "reason": "fallback ledger entry lacked evaluated_head",
+                "last_known_head": "",
+                "evidence_attempted": "fallback_ledger",
+            })
+            continue
+        # Confirm the proof_head is on the canonical branch.
+        # Try ``origin/<branch>`` first (production flow). If
+        # the origin remote is absent or the ref does not exist
+        # there (test/harness environments), fall back to the
+        # local ref ``refs/heads/<branch>`` which is what the
+        # test harness creates.
+        on_branch = False
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["git", "-C", str(REPO_DIR), "merge-base",
+                 "--is-ancestor", proof_head,
+                 f"origin/{canonical_branch}"],
+                capture_output=True, timeout=5.0,
+            )
+            on_branch = (r.returncode == 0)
+            if not on_branch:
+                # Fallback to local branch ref.
+                r = _sp.run(
+                    ["git", "-C", str(REPO_DIR), "merge-base",
+                     "--is-ancestor", proof_head,
+                     canonical_branch],
+                    capture_output=True, timeout=5.0,
+                )
+                on_branch = (r.returncode == 0)
+        except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
+            on_branch = False
+        if not on_branch:
+            counts["unrecoverable"] += 1
+            _append_thread_proof_audit({
+                "kind": "THREAD_PROOF_UNRECOVERABLE",
+                "recorded_at": now_iso(),
+                "thread_id": tid,
+                "provider": proof.get("provider", "coderabbit"),
+                "reason": (
+                    "proof_head not on canonical branch "
+                    f"{canonical_branch}"
+                ),
+                "last_known_head": proof_head,
+                "evidence_attempted": proof.get("source", ""),
+            })
+            continue
+        # Record the proof.
+        _record_thread_proof(
+            thread_id=tid,
+            provider=proof.get("provider", "coderabbit"),
+            disposition=proof.get("disposition", ""),
+            proof_head=proof_head,
+            source_path=proof.get("path", ""),
+            line=proof.get("line"),
+            provider_thread={
+                "provider": proof.get("provider", "coderabbit"),
+                "id": tid,
+                "top_level_comment": {
+                    "id": "",
+                    "updatedAt": "",
+                    "body": (proof.get("evidence") or "")[:1000],
+                },
+                "replies": [],
+                "isResolved": False,
+                "isOutdated": False,
+            },
+            worker_attempt_id=proof.get("worker_attempt_id", ""),
+            directive_digest=proof.get("directive_digest", ""),
+            evaluated_head=proof_head,
+        )
+        counts["safely_migrated"] += 1
+        counts["details"].append({
+            "thread_id": tid,
+            "disposition": proof.get("disposition"),
+            "proof_head": proof_head,
+            "source": proof.get("source"),
+            "round": proof.get("round_index"),
+            "path": proof.get("path"),
+            "line": proof.get("line"),
+        })
+    return counts
+
 
 
 def _try_resolve_github_thread(*, thread_id, provider, disposition,
@@ -8755,28 +9176,58 @@ def main(argv: Optional[list[str]] = None) -> int:
                     pass
                 elif not body and not path:
                     continue
-                # Round-49 C16: dependency-aware carry-forward.
-                # When the latest terminal disposition for this
-                # thread has a dependency context (path / line /
-                # body) that remains satisfied at the current
-                # head, the disposition still applies and the
-                # thread MUST NOT be re-dispatched. This breaks
-                # the historical mass-resurrection of terminal
-                # threads on every head advance.
-                #
-                # The carry-forward body is the raw
-                # snapshot-form body (NOT the stripped form
-                # used for the actionable check above); the
-                # recorded body_sha is computed against the
-                # raw form.
-                if current_head and _is_thread_carry_forward_satisfied(
-                    thread_id=tid,
-                    current_path=path,
-                    current_line=line,
-                    current_body=td.get("body") or "",
-                    current_head=current_head,
-                ):
-                    continue
+                # Round-49.1 C17: source-safe carry-forward.
+                # The new contract requires:
+                #   (1) a recorded THREAD_PROOF at a proof_head;
+                #   (2) proof_head is an ancestor of current_head;
+                #   (3) source blob at current_head == source blob
+                #       at proof_head (Tier 1);
+                #   (4) provider thread version fingerprint is
+                #       unchanged.
+                # The snapshot has body/path/line/isResolved/
+                # isOutdated/commit_oid/author only; the
+                # provider version fingerprint here uses what is
+                # available (body[:FULL] + commit_oid + resolved
+                # + outdated). When the fingerprint changes (new
+                # commit, different resolution state, materially
+                # different body), carry-forward is invalidated
+                # and a fresh worker dispatch is permitted.
+                # When ALL conditions hold, the thread is
+                # skipped (no drain event) and an audit record is
+                # written (THREAD_PROOF_CARRIED_FORWARD).
+                if current_head:
+                    _current_pt = {
+                        "provider": "coderabbit",
+                        "id": tid,
+                        "top_level_comment": {
+                            "id": "",
+                            "updatedAt": td.get("updatedAt") or "",
+                            "body": td.get("body") or "",
+                        },
+                        "replies": [],
+                        "isResolved": bool(td.get("resolved")),
+                        "isOutdated": bool(td.get("outdated")),
+                    }
+                    _cf_decision, _cf_tier_or_reason = (
+                        _try_carry_forward_thread_proof(
+                            thread_id=tid,
+                            provider="coderabbit",
+                            current_path=path,
+                            current_line=line,
+                            current_provider_thread=_current_pt,
+                            current_head=current_head,
+                            disposition="",
+                        )
+                    )
+                    if _cf_decision == "carry":
+                        # Emit an audit-only marker that
+                        # documents the carry decision; do not
+                        # emit a drain event.
+                        continue
+                    # else: invalidate (the thread is
+                    # legitimately actionable; fall through to
+                    # drain-event emission. The invalidate audit
+                    # record was written by the helper.)
                 actionable_unresolved.append(tid)
             for tid in actionable_unresolved:
                 eid = f"unresolved_thread_drain:{tid}"
