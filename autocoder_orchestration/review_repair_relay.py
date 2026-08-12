@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 import uuid
@@ -2365,13 +2366,18 @@ class RelayLoop:
             )
             tmp_path.replace(retry_path)
         except OSError:
-            # Persistence failure: log via controller and
+            # Persistence failure: log the error and
             # continue; the recovery signal is still raised.
+            # The relay module does not bind a module-level
+            # logger; use the stdlib ``logging`` module so
+            # the failure is observable in operator logs
+            # while remaining best-effort (any logging
+            # failure is swallowed).
             try:
-                self.controller.log_event(
-                    "error",
-                    "round-budget retry state persistence failed; "
-                    "slice ended, supervisor will retry on resume",
+                logging.getLogger(__name__).error(
+                    "round-budget retry state persistence "
+                    "failed; slice ended, supervisor will "
+                    "retry on resume",
                 )
             except Exception:  # noqa: BLE001 - defensive
                 pass
