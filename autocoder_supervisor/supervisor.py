@@ -3165,8 +3165,12 @@ def _round50_ingest_worker_result_artifact(rec):
     # of two locations depending on their AED_EVIDENCE_ROOT
     # resolution: the supervisor's WORKER_ATTEMPTS_DIR or the
     # canonical orchestration-state-root worker_attempts
-    # subdirectory. Both are searched, with deterministic
-    # priority.
+    # subdirectory. Workers use the worker's own PID in the
+    # attempt_id filename (not the supervisor's) because the
+    # launch command template injects the worker PID, so the
+    # file naming is: ``<attempt_id_prefix>-<worker_PID>.worker_result.json``.
+    # Search the exact path AND the attempt_id_prefix prefix
+    # in each directory, with deterministic priority.
     _search_dirs = []
     try:
         _search_dirs.append(Path(WORKER_ATTEMPTS_DIR))
@@ -3190,9 +3194,11 @@ def _round50_ingest_worker_result_artifact(rec):
             _search_dirs.append(Path(_rs) / "worker_attempts")
     except Exception:
         pass
+    _attempt_id_prefix = rec.attempt_id.rsplit("-", 1)[0] if rec.attempt_id else ""
     for _dir in _search_dirs:
         if raw_payload is not None:
             break
+        # First: exact attempt_id match.
         try:
             _wadir = _dir / f"{rec.attempt_id}.worker_result.json"
             if _wadir.is_file():
@@ -3201,6 +3207,26 @@ def _round50_ingest_worker_result_artifact(rec):
                 rpap_parsed = _wadir
         except Exception:
             raw_payload = None
+        # Second: attempt_id_prefix match (worker used its own
+        # PID, not the supervisor's; same generation prefix).
+        if raw_payload is None and _attempt_id_prefix:
+            try:
+                for _sfn in _os.listdir(str(_dir)):
+                    if not _sfn.startswith(_attempt_id_prefix + "-"):
+                        continue
+                    if not _sfn.endswith(".worker_result.json"):
+                        continue
+                    _sp = _dir / _sfn
+                    if not _sp.is_file():
+                        continue
+                    raw_payload = _json.loads(_sp.read_text(encoding="utf-8"))
+                    source_surface = (
+                        "deterministic_per_attempt_path_with_worker_pid"
+                    )
+                    rpap_parsed = _sp
+                    break
+            except Exception:
+                raw_payload = None
 
     # 3. Standalone roundNN_worker_attempt_result.json files in
     #    REPO_DIR — explicit validated compatibility parser
