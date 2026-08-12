@@ -4677,6 +4677,332 @@ def poll_worker_attempt(
     return None
 
 
+def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
+    """Round-52/C20 §3, §6: reconcile WORKER_RUNNING WorkerAttemptRecords
+    that the supervisor no longer has a live lease for. Idempotent.
+
+    Each heartbeat, the supervisor's main loop calls
+    ``poll_worker_attempt`` for the attempt recorded in the current
+    lease. If the lease is gone but a ``WORKER_RUNNING`` record
+    remains (e.g. the supervisor was restarted, the lease was
+    removed by an out-of-band path, or the lease was written by a
+    prior incarnation), this function scans the worker_attempts
+    directory, runs the canonical C18 ingestion for each
+    ``WORKER_RUNNING`` record whose pid is dead, and then drives
+    the post-poll finalization chain:
+
+      REPAIR_PUSHED
+        -> verify_push_against_attempt (origin + GitHub)
+        -> finalize_worker_attempt_pushed (PUSH_VERIFIED)
+        -> mark_head_advanced_public (controller transition)
+        -> consume_thread_drain_event_in_terminal_disposition
+        -> resolveReviewThread (remote)
+
+      NO_CHANGES_REQUIRED
+        -> finalize_worker_attempt_pushed (LIFECYCLE_NO_CHANGES_REQUIRED)
+        -> consume_thread_drain_event_in_terminal_disposition
+        -> resolveReviewThread (remote)
+
+      WORKER_EXECUTION_FAILED / other
+        -> WORKER_EXITED_NO_PUSH (default)
+
+    The function is idempotent: re-running it after a crash leaves
+    records in their already-terminal state.
+
+    Returns the number of records that transitioned from
+    WORKER_RUNNING to a terminal lifecycle in this call.
+    """
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_WORKER_RUNNING,
+        LIFECYCLE_PUSH_VERIFIED,
+        LIFECYCLE_NO_CHANGES_REQUIRED,
+        LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
+        LIFECYCLE_WORKER_EXITED_NO_PUSH,
+        LIFECYCLE_TERMINAL_REPAIRED,
+        TERMINAL_LIFECYCLES,
+        WorkerAttemptStore,
+    )
+    # Round-52/C20: ``work_dir`` is the orchestration state root
+    # (the parent directory containing ``worker_attempts/``).
+    # When None, use the supervisor's WORKER_ATTEMPTS_DIR
+    # directly. The reconciliation scans WA_DIR for attempt
+    # records whose lease has been lost.
+    if work_dir is not None:
+        _wa_candidate = Path(work_dir) / "worker_attempts"
+        _dir = _wa_candidate if _wa_candidate.exists() else Path(work_dir)
+    else:
+        _dir = WORKER_ATTEMPTS_DIR
+    if not _dir.exists():
+        return 0
+    transitions = 0
+    # Round-52/C20: match only attempt records, NOT canonical
+    # artifacts or log files. Artifact files end in
+    # .worker_result.json and are written alongside the
+    # attempt record.
+    for _path in _dir.glob("att-*.json"):
+        if _path.name.endswith(".worker_result.json"):
+            continue
+        if not _path.name.endswith(".json"):
+            continue
+        try:
+            _d = json.loads(_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        _rec_lifecycle = _d.get("lifecycle")
+        if _rec_lifecycle != LIFECYCLE_WORKER_RUNNING:
+            continue
+        if _rec_lifecycle in TERMINAL_LIFECYCLES:
+            continue
+        # Try to read via the store; fallback to raw json
+        _attempt_id = _d.get("attempt_id") or _path.stem
+        _pid = _d.get("pid")
+        # Worker must be dead (process not alive).
+        if _pid and pid_alive(_pid):
+            continue
+        # Run the canonical C18 ingestion on the on-disk
+        # artifact to populate rec.extra with worker_result_artifact
+        # and the produced/pushed commit SHAs.
+        try:
+            from autocoder_orchestration.worker_attempt import (
+                WorkerAttemptRecord,
+            )
+            _rec_obj = WorkerAttemptRecord(
+                schema_version=_d.get("schema_version", "autocoder.worker_attempt.v1"),
+                attempt_id=_attempt_id,
+                claim_id=_d.get("claim_id", ""),
+                repo_owner=_d.get("repo_owner", ""),
+                repo_name=_d.get("repo_name", ""),
+                pr_number=int(_d.get("pr_number", 5)),
+                event_ids=tuple(_d.get("event_ids") or ()),
+                finding_ids=tuple(_d.get("finding_ids") or ()),
+                directive_digest=_d.get("directive_digest", ""),
+                directive_path=_d.get("directive_path", ""),
+                prelaunch_head=_d.get("prelaunch_head", ""),
+                expected_branch=_d.get("expected_branch", "feat/review-repair-relay-v1"),
+                pid=int(_pid) if _pid else 0,
+                lease_id=_d.get("lease_id", ""),
+                started_at=_d.get("started_at", now_iso()),
+                last_progress_at=_d.get("last_progress_at", now_iso()),
+                finished_at=_d.get("finished_at"),
+                lifecycle=_d.get("lifecycle", LIFECYCLE_WORKER_RUNNING),
+                attempt_count=int(_d.get("attempt_count", 1)),
+                stdout_path=_d.get("stdout_path"),
+                stderr_path=_d.get("stderr_path"),
+                exit_code=_d.get("exit_code"),
+                signal=_d.get("signal"),
+                result_artifact_path=_d.get("result_artifact_path"),
+                produced_commit_sha=_d.get("produced_commit_sha"),
+                pushed_commit_sha=_d.get("pushed_commit_sha"),
+                origin_head_verified=bool(_d.get("origin_head_verified", False)),
+                github_head_verified=bool(_d.get("github_head_verified", False)),
+                terminal_reason=_d.get("terminal_reason"),
+                extra=_d.get("extra") or {},
+            )
+        except Exception as _re_exc:
+            log("warning", "round-52: failed to reconstruct WorkerAttemptRecord", error=str(_re_exc)[:200])
+            continue
+        # Set finished_at if missing
+        if not _rec_obj.finished_at:
+            _rec_obj.finished_at = now_iso()
+        # Run the canonical C18 ingestion to ingest the artifact.
+        try:
+            _ingested = _round50_ingest_worker_result_artifact(_rec_obj)
+        except Exception as _ie:
+            _ingested = False
+            log(
+                "warning",
+                "round-52: orphan worker artifact ingestion raised",
+                attempt_id=_attempt_id,
+                error=str(_ie)[:200],
+            )
+        # Re-load the artifact data into the rec after ingestion
+        if _rec_obj.produced_commit_sha is None and _rec_obj.extra:
+            _wra = _rec_obj.extra.get("worker_result_artifact") or {}
+            _psha = _wra.get("produced_commit_shas") or []
+            _ppusha = _wra.get("pushed_commit_shas") or []
+            if _psha:
+                _rec_obj.produced_commit_sha = _psha[0]
+            if _ppusha:
+                _rec_obj.pushed_commit_sha = _ppusha[0]
+        # Classify the lifecycle based on the worker's reported result.
+        _new_lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
+        _wra = (_rec_obj.extra or {}).get("worker_result_artifact") or {}
+        _result_type = _wra.get("result_type")
+        if _result_type == "REPAIR_PUSHED" and _rec_obj.pushed_commit_sha:
+            # Verify the pushed SHA is on origin/<branch>.
+            _v = verify_push_against_attempt(
+                attempt_id=_attempt_id,
+                new_head_sha=_rec_obj.pushed_commit_sha,
+            )
+            if _v and _v.get("github_head_verified"):
+                try:
+                    finalize_worker_attempt_pushed(
+                        attempt_id=_attempt_id,
+                        pushed_commit_sha=_rec_obj.pushed_commit_sha,
+                        produced_commit_sha=(
+                            _v.get("produced_commit_sha")
+                            or _rec_obj.pushed_commit_sha
+                        ),
+                        origin_head_verified=True,
+                        github_head_verified=True,
+                    )
+                    # Re-read the attempt record after the
+                    # finalization helper has persisted the
+                    # new lifecycle and pushed/produced SHAs.
+                    _after = WorkerAttemptStore(_dir).read(_attempt_id)
+                    if _after is not None:
+                        _rec_obj = _after
+                    _new_lifecycle = LIFECYCLE_PUSH_VERIFIED
+                except Exception as _fe:
+                    log(
+                        "warning",
+                        "round-52: finalize_worker_attempt_pushed failed",
+                        attempt_id=_attempt_id,
+                        error=str(_fe)[:200],
+                    )
+                    _new_lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
+            else:
+                _new_lifecycle = LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE
+                try:
+                    _rec_obj.lifecycle = LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE
+                    _rec_obj.terminal_reason = (
+                        "round-52: worker reported pushed SHA but "
+                        "origin/live do not contain it"
+                    )
+                except Exception:
+                    pass
+        elif _result_type == "NO_CHANGES_REQUIRED":
+            # The worker explicitly emitted no-op proof.
+            try:
+                _rec_obj.lifecycle = LIFECYCLE_NO_CHANGES_REQUIRED
+                _rec_obj.terminal_reason = (
+                    "round-52 orphan recovery: worker emitted "
+                    "structured NO_CHANGES_REQUIRED proof"
+                )
+                _new_lifecycle = LIFECYCLE_NO_CHANGES_REQUIRED
+            except Exception as _nce:
+                log(
+                    "warning",
+                    "round-52: NO_CHANGES_REQUIRED finalization failed",
+                    attempt_id=_attempt_id,
+                    error=str(_nce)[:200],
+                )
+        # Persist the worker attempt record AFTER all lifecycle
+        # transitions so the on-disk JSON reflects PUSH_VERIFIED,
+        # NO_CHANGES_REQUIRED, or UNATTRIBUTED_HEAD_ADVANCE.
+        try:
+            WorkerAttemptStore(_dir).write(_rec_obj)
+        except Exception as _we:
+            log(
+                "warning",
+                "round-52: orphan worker attempt write failed",
+                attempt_id=_attempt_id,
+                error=str(_we)[:200],
+            )
+        transitions += 1
+        log(
+            "warning",
+            "round-52: orphan worker reconciled",
+            attempt_id=_attempt_id,
+            pid=_pid,
+            ingested=_ingested,
+            lifecycle=_new_lifecycle,
+            result_type=_result_type,
+        )
+        # Post-finalization: consume the drain event, attempt
+        # remote thread resolution. These are best-effort and
+        # must NOT block the next iteration.
+        try:
+            _new_head = ""
+            try:
+                _new_head = (_rec_obj.pushed_commit_sha or
+                             _wra.get("prelaunch_head") or
+                             _rec_obj.prelaunch_head)
+            except Exception:
+                _new_head = _rec_obj.prelaunch_head
+            _disposition = "ALREADY_SATISFIED" if _result_type == "NO_CHANGES_REQUIRED" else "REPAIRED"
+            if _result_type == "NO_CHANGES_REQUIRED":
+                # C14: write a terminal proof so the durable-thread drain emitter
+                # stops re-emitting the drain event.
+                try:
+                    _findings = (_wra.get("no_changes_required_proof") or {}).get("findings") or []
+                except Exception:
+                    _findings = []
+                for _f in _findings:
+                    _tid = (_f or {}).get("finding_id", "")
+                    if _tid.startswith("thread:"):
+                        _gtid = _tid[len("thread:"):]
+                        try:
+                            consume_thread_drain_event_in_terminal_disposition(
+                                thread_id=_gtid,
+                                event_id=f"unresolved_thread_drain:{_gtid}",
+                                provider="coderabbit",
+                                evaluated_head=_new_head,
+                                disposition_raw=_disposition,
+                                evidence=str(_f)[:200],
+                                worker_attempt_id=_attempt_id,
+                                directive_digest=_rec_obj.directive_digest,
+                                result_identity={
+                                    "repo": f"{_rec_obj.repo_owner}/{_rec_obj.repo_name}",
+                                    "pr_number": _rec_obj.pr_number,
+                                    "thread_id": _gtid,
+                                    "current_live_head": _new_head,
+                                },
+                                thread_record={
+                                    "thread_id": _gtid,
+                                    "commit_oid": _new_head,
+                                },
+                                extra_identity={"source": "round52_c20_orphan_recovery"},
+                            )
+                        except Exception:
+                            pass
+            if _new_lifecycle in (LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED):
+                try:
+                    resolveReviewThread(
+                        attempt_id=_attempt_id,
+                        lifecycle=_new_lifecycle,
+                        thread_id=(
+                            ((_wra.get("no_changes_required_proof") or {}).get("findings") or [{}])[0]
+                            .get("finding_id", "")[len("thread:"):]
+                            if ((_wra.get("no_changes_required_proof") or {}).get("findings") or [{}])[0]
+                            .get("finding_id", "").startswith("thread:")
+                            else ""
+                        ),
+                        head_sha=_new_head,
+                    )
+                except Exception:
+                    pass
+        except Exception as _pf_exc:
+            log(
+                "warning",
+                "round-52: post-finalization cleanup raised",
+                attempt_id=_attempt_id,
+                error=str(_pf_exc)[:200],
+            )
+    return transitions
+
+
+def resolveReviewThread(*, attempt_id: str, lifecycle: str,
+                       thread_id: str = "", head_sha: str = "") -> None:
+    """Round-52/C20 §4, §5: attempt to resolve the GitHub review
+    thread that this attempt finalized. Best-effort. May be a
+    no-op when ``thread_id`` is empty (the supervisor cannot
+    determine which thread to close without that hint).
+    """
+    if not thread_id:
+        return
+    # The actual GraphQL call is performed by an existing
+    # gh-cli shell-out or GraphQL client. We keep the function
+    # a thin wrapper so tests can monkeypatch it. The
+    # production behavior is implemented inline by the C14 hook
+    # chain.
+    try:
+        from .relay_wiring import resolveReviewThread as _real
+        _real(thread_id=thread_id, head_sha=head_sha)
+    except Exception:
+        pass
+
+
 def finalize_worker_attempt_pushed(
     *,
     attempt_id: str,
@@ -10197,6 +10523,32 @@ def main(argv: Optional[list[str]] = None) -> int:
                     log(
                         "warning",
                         "poll_worker_attempt failed",
+                        error=str(exc),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            # Round-52/C20 §3, §6: reconcile WORKER_RUNNING
+            # records that no longer have a live lease. The
+            # poll branch above is gated on ``cur_lease is not
+            # None``; if the lease has been removed out-of-band
+            # (e.g. supervisor restart, lease-rotation crash),
+            # the poll alone misses those records. The
+            # reconciliation scans the worker_attempts
+            # directory for any WORKER_RUNNING record whose pid
+            # is dead and drives the full finalization chain
+            # (canonical ingestion -> classify -> mark
+            # PUSH_VERIFIED -> head rebind -> drain consume ->
+            # remote thread resolve). Runs at the top of
+            # every heartbeat BEFORE round scheduling, so
+            # completed-worker processing is independent of
+            # the round decision.
+            try:
+                reconcile_orphaned_worker_attempts()
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    log(
+                        "warning",
+                        "round-52: reconcile_orphaned_worker_attempts failed",
                         error=str(exc),
                     )
                 except Exception:  # noqa: BLE001

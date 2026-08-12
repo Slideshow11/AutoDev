@@ -5723,6 +5723,431 @@ def test_round51_c19_repair_before_qualification_dead_lease_recoverable(tmp_path
     )
 
 
+# =============================================================================
+# Round 52 (C20): completed-worker finalization runs regardless of round decision
+# =============================================================================
+
+
+def _c20_make_running_record(
+    *,
+    attempt_id: str = "att-c20-001",
+    pid: int = 999999,
+    prelaunch_head: str = "0" * 40,
+    produced_commit_sha: str = None,
+    pushed_commit_sha: str = None,
+    extra: dict = None,
+    result_artifact_path: str = None,
+):
+    """Construct a serialisable WorkerAttemptRecord dict in WORKER_RUNNING."""
+    return {
+        "schema_version": "autocoder.worker_attempt.v1",
+        "attempt_id": attempt_id,
+        "claim_id": f"lease-c20-test-{attempt_id[-6:]}",
+        "repo_owner": "OWNER",
+        "repo_name": "REPO",
+        "pr_number": 5,
+        "event_ids": [],
+        "finding_ids": [],
+        "directive_digest": "c20" + "0" * 60,
+        "directive_path": "/tmp/c20/directive.json",
+        "prelaunch_head": prelaunch_head,
+        "expected_branch": "feat/review-repair-relay-v1",
+        "pid": pid,
+        "lease_id": f"lease-c20-test-{attempt_id[-6:]}",
+        "started_at": "2026-01-01T00:00:00Z",
+        "last_progress_at": "2026-01-01T00:00:00Z",
+        "finished_at": None,
+        "lifecycle": "WORKER_RUNNING",
+        "attempt_count": 1,
+        "stdout_path": None,
+        "stderr_path": None,
+        "exit_code": None,
+        "signal": None,
+        "result_artifact_path": result_artifact_path,
+        "produced_commit_sha": produced_commit_sha,
+        "pushed_commit_sha": pushed_commit_sha,
+        "origin_head_verified": False,
+        "github_head_verified": False,
+        "terminal_reason": None,
+        "extra": extra or {},
+    }
+
+
+def _c20_make_artifact(
+    *,
+    attempt_id: str,
+    claim_id: str,
+    directive_digest: str = "c20" + "0" * 60,
+    result_type: str = "NO_CHANGES_REQUIRED",
+    produced_shas: list = None,
+    pushed_shas: list = None,
+    findings: list = None,
+) -> dict:
+    return {
+        "schema_version": "autocoder.worker_result.v1",
+        "attempt_id": attempt_id,
+        "claim_id": claim_id,
+        "directive_digest": directive_digest,
+        "result_type": result_type,
+        "produced_commit_shas": produced_shas or [],
+        "pushed_commit_shas": pushed_shas or [],
+        "completed_at": "2026-01-01T00:00:00Z",
+        "no_changes_required_proof": {
+            "findings": findings or [],
+            "source": "round50_envelope_parser",
+        },
+        "attempt_nonce": attempt_id.rsplit("-", 1)[0],
+        "repo": "OWNER/REPO",
+        "pr_number": 5,
+        "expected_branch": "feat/review-repair-relay-v1",
+        "prelaunch_head": "0" * 40,
+    }
+
+
+def test_round52_c20_orphan_repair_pushed_finalizes_without_lease(
+    tmp_path, monkeypatch
+):
+    """Round-52/C20: when the lease is gone but a WORKER_RUNNING
+    record exists for a dead worker with a REPAIR_PUSHED canonical
+    artifact, the supervisor MUST reconcile the attempt end-to-end:
+    ingest the artifact, classify as PUSH_VERIFIED, persist terminal
+    state, consume the drain event, and attempt remote resolution.
+    This MUST happen independently of round decision (skip/rebind).
+    """
+    import os
+    from autocoder_supervisor import supervisor as sm
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_WORKER_RUNNING, LIFECYCLE_PUSH_VERIFIED,
+    )
+
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+    # Provide a real RUN_STATE-like value
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        '''{"current_head": "d65b56e0", "orchestration_state_root": ""}'''
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+
+    # Persistent record: WORKER_RUNNING, no lease, canonical REPAIR_PUSHED
+    attempt_id = "att-20260812T200000Z-12345"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        prelaunch_head="7fdd8e40510022990897faad2c77f62f4a4d05ba",
+        result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    artifact = _c20_make_artifact(
+        attempt_id=attempt_id,
+        claim_id=rec_dict["claim_id"],
+        result_type="REPAIR_PUSHED",
+        produced_shas=["d65b56efa884570eaa52a0dc06bc82d8f2dea3b6"],
+        pushed_shas=["d65b56efa884570eaa52a0dc06bc82d8f2dea3b6"],
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+    (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
+
+    # No lease file
+    assert not (tmp_path / "worker_lease.json").exists()
+
+    # Patch lease_alive to return None (worker dead) and suppress remote IO
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    remote_calls = []
+    monkeypatch.setattr(sm, "resolveReviewThread", lambda **kw: remote_calls.append(kw))
+    monkeypatch.setattr(sm, "consume_thread_drain_event_in_terminal_disposition", lambda **kw: True)
+
+    # Run reconciliation
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    # Re-read the persistent record
+    new_rec = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    assert new_rec["lifecycle"] == "PUSH_VERIFIED", (
+        f"Round-52/C20: orphan REPAIR_PUSHED MUST finalize to PUSH_VERIFIED; "
+        f"got lifecycle={new_rec.get('lifecycle')!r}"
+    )
+    assert new_rec["produced_commit_sha"] == "d65b56efa884570eaa52a0dc06bc82d8f2dea3b6"
+    assert new_rec["pushed_commit_sha"] == "d65b56efa884570eaa52a0dc06bc82d8f2dea3b6"
+    assert remote_calls, (
+        "Round-52/C20: remote thread resolution MUST be attempted"
+    )
+
+
+def test_round52_c20_orphan_no_change_finalizes_without_lease(
+    tmp_path, monkeypatch
+):
+    """Round-52/C20: when the lease is gone but a WORKER_RUNNING
+    record exists for a dead worker with a NO_CHANGES_REQUIRED
+    canonical artifact, the supervisor MUST finalize the attempt
+    to LIFECYCLE_NO_CHANGES_REQUIRED, persist terminal proof,
+    consume the drain event, and attempt remote resolution.
+    """
+    import os
+    from autocoder_supervisor import supervisor as sm
+    from autocoder_orchestration.worker_attempt import (
+        LIFECYCLE_WORKER_RUNNING, LIFECYCLE_NO_CHANGES_REQUIRED,
+    )
+
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        '''{"current_head": "0" * 40, "orchestration_state_root": ""}'''
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-20260812T210000Z-12346"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        prelaunch_head="0" * 40,
+        result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    artifact = _c20_make_artifact(
+        attempt_id=attempt_id,
+        claim_id=rec_dict["claim_id"],
+        result_type="NO_CHANGES_REQUIRED",
+        findings=[{
+            "finding_id": "thread:PRRT_TEST",
+            "disposition": "ALREADY_SATISFIED",
+        }],
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+    (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
+
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    remote_calls = []
+    monkeypatch.setattr(sm, "resolveReviewThread", lambda **kw: remote_calls.append(kw))
+    monkeypatch.setattr(sm, "consume_thread_drain_event_in_terminal_disposition", lambda **kw: True)
+
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    new_rec = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    assert new_rec["lifecycle"] == "NO_CHANGES_REQUIRED", (
+        f"Round-52/C20: orphan NO_CHANGES_REQUIRED MUST finalize; "
+        f"got lifecycle={new_rec.get('lifecycle')!r}"
+    )
+    assert remote_calls, (
+        "Round-52/C20: remote thread resolution MUST be attempted "
+        "even when lease is gone"
+    )
+
+
+def test_round52_c20_alive_worker_not_finalized(tmp_path, monkeypatch):
+    """Round-52/C20: a WORKER_RUNNING record whose pid is still alive
+    MUST NOT be finalized. The reconciliation passes it by.
+    """
+    from autocoder_supervisor import supervisor as sm
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        '''{"current_head": "0" * 40, "orchestration_state_root": ""}'''
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-20260812T220000Z-12347"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        pid=os.getpid(),  # self = alive
+        prelaunch_head="0" * 40,
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    monkeypatch.setattr(sm, "resolveReviewThread", lambda **kw: None)
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    new_rec = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    assert new_rec["lifecycle"] == "WORKER_RUNNING", (
+        "Round-52/C20: alive worker MUST stay WORKER_RUNNING"
+    )
+
+
+def test_round52_c20_restart_recovers_pushed_attempt(tmp_path, monkeypatch):
+    """Round-52/C20 §6: after a worker exits and writes the canonical
+    artifact, supervisor crashes BEFORE attempt update. Restart
+    finalizes exactly once.
+    """
+    from autocoder_supervisor import supervisor as sm
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        '''{"current_head": "0" * 40, "orchestration_state_root": ""}'''
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-20260812T230000Z-12348"
+    D = "abcdef1234567890abcdef1234567890abcdef12"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        prelaunch_head="0" * 40,
+        result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    artifact = _c20_make_artifact(
+        attempt_id=attempt_id,
+        claim_id=rec_dict["claim_id"],
+        result_type="REPAIR_PUSHED",
+        produced_shas=[D],
+        pushed_shas=[D],
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+    (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
+
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    monkeypatch.setattr(sm, "resolveReviewThread", lambda **kw: None)
+    monkeypatch.setattr(sm, "consume_thread_drain_event_in_terminal_disposition", lambda **kw: True)
+
+    # First restart
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+    rec1 = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    assert rec1["lifecycle"] == "PUSH_VERIFIED"
+
+    # Second restart (idempotency check)
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+    rec2 = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    assert rec2["lifecycle"] == "PUSH_VERIFIED"
+    assert rec2["produced_commit_sha"] == D
+
+
+def test_round52_c20_existing_terminal_not_retouched(tmp_path, monkeypatch):
+    """Round-52/C20: reconciliation MUST NOT modify records that
+    are already terminal (PUSH_VERIFIED, NO_CHANGES_REQUIRED,
+    UNATTRIBUTED_HEAD_ADVANCE, WORKER_EXITED_NO_PUSH, etc.).
+    """
+    from autocoder_supervisor import supervisor as sm
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text('''{"current_head": "0" * 40, "orchestration_state_root": ""}''')
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-c20-already-terminal"
+    D = "deadbeef" + "0" * 32
+    rec_dict = {
+        "schema_version": "autocoder.worker_attempt.v1",
+        "attempt_id": attempt_id,
+        "claim_id": "lease-c20-terminal",
+        "repo_owner": "OWNER", "repo_name": "REPO", "pr_number": 5,
+        "event_ids": (), "finding_ids": (),
+        "directive_digest": "c20" + "0" * 60,
+        "directive_path": "/tmp/c20/directive.json",
+        "prelaunch_head": "0" * 40,
+        "expected_branch": "feat/review-repair-relay-v1",
+        "pid": 99999, "lease_id": "lease-c20-terminal",
+        "started_at": "2026-01-01T00:00:00Z",
+        "last_progress_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:01:00Z",
+        "lifecycle": "PUSH_VERIFIED",  # ALREADY TERMINAL
+        "attempt_count": 1,
+        "stdout_path": None, "stderr_path": None,
+        "exit_code": 0, "signal": None,
+        "result_artifact_path": None,
+        "produced_commit_sha": D,
+        "pushed_commit_sha": D,
+        "origin_head_verified": True,
+        "github_head_verified": True,
+        "terminal_reason": "round-42 positive: worker reported pushed_commit_sha matches live head",
+        "extra": {},
+    }
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    # Record must be unchanged
+    new_rec = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    assert new_rec["lifecycle"] == "PUSH_VERIFIED"
+    assert new_rec["terminal_reason"].startswith("round-42 positive")
+    assert new_rec["finished_at"] == "2026-01-01T00:01:00Z"
+
+
+def test_round52_c20_pushed_origin_head_mismatch_unattributed(
+    tmp_path, monkeypatch
+):
+    """Round-52/C20: when the worker reports D but the provenance
+    check (origin + GitHub head) FAILS, the attempt MUST be
+    classified as UNATTRIBUTED_HEAD_ADVANCE (not PUSH_VERIFIED).
+    We mock verify_push_against_attempt to return a failed
+    verification result.
+    """
+    from autocoder_supervisor import supervisor as sm
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        json.dumps({"current_head": "differenthead" + "0" * 26, "orchestration_state_root": ""})
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-c20-unattributed"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        prelaunch_head="0" * 40,
+        result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    D = "deadbeef" + "0" * 32
+    artifact = _c20_make_artifact(
+        attempt_id=attempt_id,
+        claim_id=rec_dict["claim_id"],
+        result_type="REPAIR_PUSHED",
+        produced_shas=[D],
+        pushed_shas=[D],
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+    (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
+
+    # Mock verify_push_against_attempt to return a FAILED check
+    def _fake_verify(**kw):
+        return {"github_head_verified": False, "origin_head_verified": False}
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    monkeypatch.setattr(sm, "resolveReviewThread", lambda **kw: None)
+    monkeypatch.setattr(sm, "consume_thread_drain_event_in_terminal_disposition", lambda **kw: True)
+    monkeypatch.setattr(sm, "verify_push_against_attempt", _fake_verify)
+
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    new_rec = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    assert new_rec["lifecycle"] in ("UNATTRIBUTED_HEAD_ADVANCE", "WORKER_EXITED_NO_PUSH"), (
+        f"Round-52/C20: head-mismatch with worker-claimed push MUST NOT "
+        f"be PUSH_VERIFIED; got {new_rec.get('lifecycle')!r}"
+    )
+
+
+def test_round52_c20_c19_envelope_transport_still_works(
+    tmp_path, monkeypatch
+):
+    """Round-52/C20 §12: the C19 envelope transport MUST remain green.
+    The wrapper still writes the canonical artifact; C20 only
+    adds reconciliation on top.
+    """
+    from autocoder_supervisor.aed_worker_wrapper import _resolve_wrapper_argv
+    wrapper_kwargs = {
+        "attempt_id": "att-c20-test",
+        "directive_digest": "c20" + "0" * 60,
+        "claim_id": "lease-c20-test",
+        "prelaunch_head": "0" * 40,
+    }
+    wrapper_argv = _resolve_wrapper_argv(wrapper_kwargs, ["echo", "hello"])
+    # The wrapper is the first executable; the original cmd is appended after --
+    joined = " ".join(str(a) for a in wrapper_argv)
+    assert "aed_worker_wrapper" in joined
+    assert "--" in wrapper_argv
+    # The original cmd comes after --
+    sep_idx = wrapper_argv.index("--")
+    assert "echo" in wrapper_argv[sep_idx + 1:]
+    assert "hello" in wrapper_argv[sep_idx + 1:]
+
+
 def test_round51_c19_repair_before_qualification_empty_unconsumed(tmp_path, monkeypatch):
     """Round-51/C19: with no unconsumed events at all, the
     helper returns False. The quiet window proceeds.
