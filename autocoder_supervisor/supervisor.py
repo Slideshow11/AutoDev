@@ -1451,6 +1451,144 @@ def _has_recorded_thread_proof(thread_id):
     return False
 
 
+# Round-50.1: work-generation lifecycle enum (Section 15).
+WORK_GEN_PENDING = "WORK_GEN_PENDING"
+WORK_GEN_CLAIMED = "WORK_GEN_CLAIMED"
+WORK_GEN_WORKER_RUNNING = "WORK_GEN_WORKER_RUNNING"
+WORK_GEN_TERMINAL = "WORK_GEN_TERMINAL"
+WORK_GEN_RETRY_PENDING = "WORK_GEN_RETRY_PENDING"
+WORK_GEN_UNRECOVERABLE = "WORK_GEN_UNRECOVERABLE"
+
+# Round-50.1: work-generation ledger file path (per-PR scope).
+WORK_PROOF_GENERATION_AUDIT_FILENAME = "thread_work_generation_audit.jsonl"
+WORK_PROOF_GENERATION_AUDIT_VERSION = "round49_1_c17_v1"  # bump on schema change
+
+
+def _work_generation_audit_path():
+    from pathlib import Path as _P
+    import os as _os
+    _home = _os.environ.get("HOME") or "~"
+    return _P(_home) / ".hermes" / "aed" / "runs" / str(
+        REPO_OWNER  # type: ignore[name-defined]
+    ) / str(
+        REPO_NAME  # type: ignore[name-defined]
+    ) / str(
+        PR_NUMBER  # type: ignore[name-defined]
+    ) / WORK_PROOF_GENERATION_AUDIT_FILENAME
+
+
+def _round50_1_compute_generation_id(
+    *, thread_id, provider, provider_version, source_blob_sha,
+    evaluated_head,
+):
+    """Round-50.1: deterministic generation identity.
+    Bound to (thread_id, provider, provider_version, source_blob_sha,
+    evaluated_head). A material change in any of these
+    (new reply, source edit, head change) yields a new
+    generation.
+    """
+    import hashlib as _h
+    payload = "|".join([
+        str(REPO_OWNER or ""), str(int(PR_NUMBER or 0)),
+        str(provider or ""), str(thread_id or ""),
+        str(provider_version or ""), str(source_blob_sha or ""),
+        str(evaluated_head or ""),
+    ]).encode("utf-8")
+    return _h.sha256(payload).hexdigest()[:16]
+
+
+def _round50_1_lookup_work_generation_state(
+    *, thread_id, generation_id,
+):
+    """Round-50.1: return the latest lifecycle state for
+    ``thread_id`` + ``generation_id`` from the work-generation
+    ledger. Returns None when no record exists.
+    """
+    import json as _json
+    p = _work_generation_audit_path()
+    if not p.exists():
+        return None
+    latest_state = None
+    latest_ts = ""
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = _json.loads(ln)
+                except Exception:
+                    continue
+                if rec.get("kind") not in (
+                    "WORK_GENERATION_RECORDED",
+                    "WORK_GENERATION_TRANSITION",
+                ):
+                    continue
+                if rec.get("thread_id") != thread_id:
+                    continue
+                if rec.get("generation_id") != generation_id:
+                    continue
+                ts = rec.get("recorded_at") or ""
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
+                    latest_state = rec.get("state")
+    except OSError:
+        return None
+    return latest_state
+
+
+def _round50_1_record_work_generation_state(
+    *, thread_id, provider, provider_version, source_blob_sha,
+    evaluated_head, generation_id, state,
+):
+    """Round-50.1: append a state-transition record to the
+    work-generation audit. The record is idempotent on
+    ``state`` (re-writing the same state for the same
+    generation does NOT create a duplicate row).
+    """
+    import json as _json
+    import os as _os
+    p = _work_generation_audit_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    # Idempotent check: if the latest row for this generation
+    # already carries ``state``, skip the append.
+    latest = _round50_1_lookup_work_generation_state(
+        thread_id=thread_id, generation_id=generation_id,
+    )
+    if latest == state:
+        return False
+    rec = {
+        "kind": "WORK_GENERATION_TRANSITION",
+        "schema_version": WORK_PROOF_GENERATION_AUDIT_VERSION,
+        "recorded_at": now_iso(),
+        "thread_id": thread_id,
+        "provider": provider or "",
+        "provider_version": provider_version or "",
+        "source_blob_sha": source_blob_sha or "",
+        "evaluated_head": evaluated_head or "",
+        "generation_id": generation_id,
+        "state": state,
+    }
+    try:
+        with p.open("a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec, sort_keys=True) + "\n")
+            f.flush()
+            _os.fsync(f.fileno())
+    except OSError as exc:
+        log(
+            "warning",
+            "round-50.1: work-generation audit write failed",
+            thread_id=thread_id,
+            error=str(exc)[:200],
+        )
+        return False
+    return True
+
+
 def _has_recent_thread_invalidated(thread_id, current_head):
     """Round-50 narrow fix: return True if the audit ledger has
     a ``THREAD_PROOF_INVALIDATED`` record for ``thread_id``
@@ -1460,13 +1598,6 @@ def _has_recent_thread_invalidated(thread_id, current_head):
     head. The investigation happens at the current head on
     every drain iteration; emitting again would dispatch
     duplicate workers without new information.
-
-    If a head change occurs (new commit), the
-    thread's prior invalidation is at the prior head and
-    the carry-forward check would re-evaluate against the
-    new head. Until that head change, the thread is
-    considered ``being investigated`` and the drain
-    emitter skips it.
     """
     if not thread_id or not current_head:
         return False
@@ -1495,9 +1626,86 @@ def _has_recent_thread_invalidated(thread_id, current_head):
     return False
 
 
+def _round50_1_has_open_work_generation(thread_id, current_head):
+    """Round-50.1: return True if there is an open
+    (non-terminal) work generation for ``thread_id``
+    whose ``evaluated_head`` matches ``current_head``.
+    Used by the durable-thread drain emitter to skip
+    re-emission when work already exists (Section 12,
+    exactly-once work generation).
+
+    Implementation: return True only if the MOST RECENT
+    transition for ``(thread_id, current_head)`` is in an
+    open-state set. Terminal transitions cancel the open
+    state.
+    """
+    if not thread_id or not current_head:
+        return False
+    import json as _json
+    p = _work_generation_audit_path()
+    if not p.exists():
+        return False
+    latest_state = None
+    latest_ts = ""
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    rec = _json.loads(ln)
+                except Exception:
+                    continue
+                if rec.get("kind") != "WORK_GENERATION_TRANSITION":
+                    continue
+                if rec.get("thread_id") != thread_id:
+                    continue
+                if rec.get("evaluated_head") != current_head:
+                    continue
+                ts = rec.get("recorded_at") or ""
+                # On ties (same second), the last-written row
+                # wins so transitions within the same second
+                # still take effect.
+                if latest_state is None or ts > latest_ts:
+                    latest_ts = ts
+                    latest_state = rec.get("state")
+                elif ts == latest_ts:
+                    latest_state = rec.get("state")
+    except OSError:
+        return False
+    if latest_state is None:
+        return False
+    return latest_state in (
+        WORK_GEN_PENDING,
+        WORK_GEN_CLAIMED,
+        WORK_GEN_WORKER_RUNNING,
+        WORK_GEN_RETRY_PENDING,
+    )
+
+
 THREAD_PROOF_AUDIT_VERSION = "round49_1_c17_v1"
 THREAD_PROOF_AUDIT_FILENAME = "thread_proof_audit.jsonl"
 THREAD_PROOF_INVALIDATION_VERSION = "round49_1_c17_v1"
+
+# Re-export the worker-result constants for tests that import the
+# supervisor module directly (Section 5 canonical contract).
+try:
+    from autocoder_orchestration.worker_attempt import (
+        WORKER_RESULT_SCHEMA_VERSION,
+        RESULT_TYPE_NO_CHANGES_REQUIRED,
+        RESULT_TYPE_REPAIR_PUSHED,
+        RESULT_TYPE_REPAIR_COMMIT_PRODUCED,
+        RESULT_TYPE_COMMIT_PRODUCED_NOT_PUSHED,
+        RESULT_TYPE_WORKER_EXECUTION_FAILED,
+    )
+except Exception:  # pragma: no cover - import fallback
+    WORKER_RESULT_SCHEMA_VERSION = "autocoder.worker_result.v1"
+    RESULT_TYPE_NO_CHANGES_REQUIRED = "NO_CHANGES_REQUIRED"
+    RESULT_TYPE_REPAIR_PUSHED = "REPAIR_PUSHED"
+    RESULT_TYPE_REPAIR_COMMIT_PRODUCED = "REPAIR_COMMIT_PRODUCED"
+    RESULT_TYPE_COMMIT_PRODUCED_NOT_PUSHED = "COMMIT_PRODUCED_NOT_PUSHED"
+    RESULT_TYPE_WORKER_EXECUTION_FAILED = "WORKER_EXECUTION_FAILED"
 
 # Explicit invalidation reason codes (Section 14).
 INVALIDATION_REASON_SOURCES_BLOB_CHANGED = "SOURCES_BLOB_CHANGED"
@@ -1548,8 +1756,99 @@ def _thread_proof_index_path():
     ) / THREAD_PROOF_INDEX_FILENAME
 
 
+def _round50_1_audit_signature(record):
+    """Compute a stable signature for an audit record.
+    Records with the same signature are considered the
+    same transition and are deduped. The signature
+    captures: thread_id, kind, reason, current_head,
+    provider_version_current, source_blob_current,
+    disposition, ancestry_result.
+
+    Newlines and pipes in the input fields are stripped
+    so the signature is a single physical line.
+    """
+    def _str_or(v, default):
+        s = str(v or default)
+        return s.replace("\n", " ").replace("|", ":")
+    return (
+        "|".join([
+            _str_or(record.get("thread_id"), ""),
+            _str_or(record.get("kind"), ""),
+            _str_or(record.get("reason"), ""),
+            _str_or(record.get("current_head"), ""),
+            _str_or(record.get("provider_version_current"), ""),
+            _str_or(record.get("source_blob_current"), ""),
+            _str_or(record.get("disposition"), ""),
+            "1" if record.get("ancestry_result") else "0",
+        ])
+    )
+
+
+def _round50_1_audit_index_path():
+    from pathlib import Path as _P
+    import os as _os
+    _home = _os.environ.get("HOME") or "~"
+    return _P(_home) / ".hermes" / "aed" / "runs" / str(
+        REPO_OWNER  # type: ignore[name-defined]
+    ) / str(
+        REPO_NAME  # type: ignore[name-defined]
+    ) / str(
+        PR_NUMBER  # type: ignore[name-defined]
+    ) / "thread_proof_audit_signatures.index"
+
+
+def _round50_1_audit_seen_signatures():
+    """Round-50.1: idempotency index for the audit ledger.
+    Loads the set of signatures already written. Used by
+    _append_thread_proof_audit to refuse to append the
+    same transition twice (Section 16).
+
+    File format: one signature per line. Signatures are
+    restricted to safe chars (no embedded newlines) so
+    we don't need JSON wrapping.
+    """
+    p = _round50_1_audit_index_path()
+    if not p.exists():
+        return set()
+    out = set()
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if ln:
+                    out.add(ln)
+    except OSError:
+        return set()
+    return out
+
+
+def _round50_1_audit_record_signature(sig):
+    import os as _os
+    p = _round50_1_audit_index_path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    try:
+        with p.open("a", encoding="utf-8") as f:
+            f.write(sig.replace("\n", "\\n") + "\n")
+            f.flush()
+            _os.fsync(f.fileno())
+        return True
+    except OSError:
+        return False
+
+
 def _append_thread_proof_audit(record):
-    """Append a single record to the audit ledger."""
+    """Append a single record to the audit ledger.
+
+    Round-50.1: idempotent on (thread_id, kind, reason,
+    current_head, provider_version_current,
+    source_blob_current, disposition, ancestry_result).
+    Repeated heartbeat observations of the same generation
+    at the same head do NOT re-append identical
+    transition records (Section 16).
+    """
     import os as _os
     import json as _json
     ledger = _thread_proof_audit_path()
@@ -1559,11 +1858,16 @@ def _append_thread_proof_audit(record):
         pass
     rec = dict(record)
     rec.setdefault("schema_version", THREAD_PROOF_AUDIT_VERSION)
+    sig = _round50_1_audit_signature(rec)
+    seen = _round50_1_audit_seen_signatures()
+    if sig in seen:
+        return False
     try:
         with ledger.open("a", encoding="utf-8") as f:
             f.write(_json.dumps(rec, sort_keys=True) + "\n")
             f.flush()
             _os.fsync(f.fileno())
+        _round50_1_audit_record_signature(sig)
         return True
     except OSError as exc:
         log(
@@ -2651,6 +2955,235 @@ def _reap_worker(pid: int) -> tuple[Optional[int], Optional[int]]:
     return (None, None)
 
 
+def _round50_normalize_standalone_worker_result(
+    raw_payload, attempt_id,
+):
+    """Round-50.1: convert a standalone
+    roundNN_worker_attempt_result.json (Hermes worker's
+    natural output) into a structured no-changes proof
+    blob compatible with the existing C14 hook.
+
+    The standalone artifact carries:
+      schema_version, round_index, directive_id, head_sha_at_entry,
+      head_sha_at_exit, disposition, findings[],
+      no_commit_created, no_push_performed, no_repo_modification,
+      rationale.
+
+    Returns:
+      A dict shaped like
+      ``extra.no_changes_required_proof`` —
+      ``{findings: [...]}`` — so the C14 hook's
+      extract_per_finding_thread_dispositions() can
+      consume it.
+
+    Never raises; returns None when the artifact is
+    malformed beyond recovery.
+    """
+    try:
+        if not isinstance(raw_payload, dict):
+            return None
+        findings = raw_payload.get("findings") or []
+        if not isinstance(findings, list) or not findings:
+            return None
+        out_findings = []
+        for f_item in findings:
+            if not isinstance(f_item, dict):
+                continue
+            fid = str(f_item.get("finding_id") or "")
+            if not fid:
+                continue
+            disp_raw = str(
+                f_item.get("disposition")
+                or f_item.get("category")
+                or ""
+            )
+            out_findings.append({
+                "finding_id": fid,
+                "disposition": disp_raw,
+                "evidence": str(f_item.get("evidence") or f_item.get("rationale") or ""),
+                "file_path": str(f_item.get("file_path") or ""),
+                "line": f_item.get("cited_line"),
+                "severity": str(f_item.get("severity") or ""),
+            })
+        if not out_findings:
+            return None
+        head_exit = str(raw_payload.get("head_sha_at_exit") or raw_payload.get("head_sha_at_entry") or "")
+        directive = str(raw_payload.get("directive_id") or raw_payload.get("directive_sha256") or "")
+        return {
+            "findings": out_findings,
+            "source": "round50_standalone_legacy_parser",
+            "directive_sha256": directive,
+            "head_sha_at_execution": head_exit,
+            "round_index": raw_payload.get("round_index"),
+            "disposition": raw_payload.get("disposition"),
+            "no_commit_created": raw_payload.get("no_commit_created"),
+            "no_push_performed": raw_payload.get("no_push_performed"),
+            "original_attempt_id": attempt_id,
+        }
+    except Exception:
+        return None
+
+
+def _round50_ingest_worker_result_artifact(rec):
+    """Round-50.1: ingest the per-attempt worker-result
+    artifact into ``WorkerAttemptRecord.extra`` so the
+    rest of the lifecycle (NO_CHANGES_REQUIRED /
+    PUSH_VERIFIED / UNATTRIBUTED_HEAD_ADVANCE) can run
+    from the canonical contract.
+
+    Three artifact surfaces are supported, in priority
+    order:
+
+      1. The deterministic per-attempt path
+         (``<worker_attempts_dir>/<attempt_id>.worker_result.json``)
+         — workers are instructed to write here.
+      2. The legacy standalone file at
+         ``<REPO_DIR>/roundNN_worker_attempt_result.json``
+         — discovered only when ``attempt_id_prefix`` uniquely
+         maps to the file (no timestamp-only association).
+      3. The canonical ``result_artifact_path`` already on the
+         attempt record.
+
+    Result association is deterministic via the
+    ``attempt_nonce`` baked into ``rec.extra``. We never
+    pick "latest result file".
+    """
+    import json as _json
+    import os as _os
+
+    # 1. Look at rec.result_artifact_path; if set, the file must exist.
+    rpap = getattr(rec, "result_artifact_path", None)
+    raw_payload = None
+    source_surface = None
+    rpap_parsed = None
+    if rpap:
+        try:
+            _rpap = Path(rpap)
+            if _rpap.is_file():
+                raw_payload = _json.loads(_rpap.read_text(encoding="utf-8"))
+                source_surface = "result_artifact_path"
+                rpap_parsed = _rpap
+        except Exception:
+            raw_payload = None
+
+    # 2. Try the deterministic per-attempt path
+    #    (worker_attempts_dir / attempt_id.worker_result.json)
+    if raw_payload is None:
+        try:
+            _wadir = Path(WORKER_ATTEMPTS_DIR) / f"{rec.attempt_id}.worker_result.json"
+            if _wadir.is_file():
+                raw_payload = _json.loads(_wadir.read_text(encoding="utf-8"))
+                source_surface = "deterministic_per_attempt_path"
+                rpap_parsed = _wadir
+        except Exception:
+            raw_payload = None
+
+    if raw_payload is None:
+        return False
+
+    # Parse the structured payload. Two schemas are accepted:
+    #   WORKER_RESULT_SCHEMA_VERSION canonical artifact
+    #   legacy standalone roundNN_worker_attempt_result.json
+    parsed_artifact = None
+    try:
+        if (
+            isinstance(raw_payload, dict)
+            and raw_payload.get("schema_version") == WORKER_RESULT_SCHEMA_VERSION
+        ):
+            parsed_artifact = WorkerResultArtifact.from_dict(raw_payload)
+        else:
+            normalized = _round50_normalize_standalone_worker_result(
+                raw_payload, rec.attempt_id,
+            )
+            if normalized is not None:
+                # Promote to an explicit NO_CHANGES_REQUIRED
+                # canonical artifact (no commit/push). Persist
+                # the canonical artifact for downstream
+                # readers and future crash recovery.
+                ts = now_iso()
+                parsed_artifact = WorkerResultArtifact(
+                    schema_version=WORKER_RESULT_SCHEMA_VERSION,
+                    attempt_id=rec.attempt_id,
+                    claim_id=rec.claim_id or "",
+                    directive_digest=normalized["directive_sha256"] or "",
+                    result_type=RESULT_TYPE_NO_CHANGES_REQUIRED,
+                    produced_commit_shas=(),
+                    pushed_commit_shas=(),
+                    completed_at=ts,
+                    no_changes_required_proof=normalized,
+                    tests_run=0,
+                    tests_passed=0,
+                    attempt_nonce=rec.extra.get("attempt_nonce") if isinstance(rec.extra, dict) else None,
+                    repo=rec.repo or "",
+                    pr_number=rec.pr_number,
+                    expected_branch=rec.expected_branch or "",
+                    prelaunch_head=rec.prelaunch_head or "",
+                    worker_pid=rec.pid,
+                )
+    except Exception:
+        parsed_artifact = None
+
+    if parsed_artifact is None:
+        return False
+
+    # Validate identity
+    try:
+        errs = parsed_artifact.validate_against_attempt(rec)
+    except Exception:
+        errs = ["validate_against_attempt_raised"]
+    if errs:
+        log(
+            "warning",
+            "round-50.1: worker-result identity validation failed",
+            attempt_id=rec.attempt_id,
+            errors=errs[:5],
+        )
+        return False
+
+    # Persist canonical artifact to the per-attempt path so
+    # subsequent polls recover state without re-parsing.
+    if source_surface != "result_artifact_path" and rpap_parsed is not None:
+        try:
+            parsed_artifact.write(rpap_parsed)
+        except Exception:
+            pass
+
+    # Reflect the canonical fields onto the attempt record.
+    # Commit/push SHAs are the single source of truth (Section 8).
+    if parsed_artifact.produced_commit_shas:
+        rec.produced_commit_sha = parsed_artifact.produced_commit_shas[0]
+    if parsed_artifact.pushed_commit_shas:
+        rec.pushed_commit_sha = parsed_artifact.pushed_commit_shas[0]
+    if parsed_artifact.attempt_nonce:
+        rec.extra.setdefault("attempt_nonce", parsed_artifact.attempt_nonce)
+    rec.extra["worker_result_artifact"] = parsed_artifact.to_dict()
+    rec.extra["worker_result_source_surface"] = source_surface
+
+    # Set the legacy no_changes_required_proof for the existing
+    # C14 hook path so subsequent polls trigger
+    # LIFECYCLE_NO_CHANGES_REQUIRED.
+    if parsed_artifact.result_type == RESULT_TYPE_NO_CHANGES_REQUIRED:
+        if parsed_artifact.no_changes_required_proof:
+            rec.extra["no_changes_required_proof"] = (
+                parsed_artifact.no_changes_required_proof
+            )
+    try:
+        WorkerAttemptStore(WORKER_ATTEMPTS_DIR).write(rec)
+    except Exception:
+        pass
+
+    log(
+        "info",
+        "round-50.1: worker-result artifact ingested",
+        attempt_id=rec.attempt_id,
+        result_type=parsed_artifact.result_type,
+        produced=parsed_artifact.produced_commit_shas,
+        pushed=parsed_artifact.pushed_commit_shas,
+        source=source_surface,
+    )
+    return True
+
+
 def poll_worker_attempt(
     *, attempt_id: str, lease: Optional[dict],
 ) -> Optional[str]:
@@ -2684,6 +3217,13 @@ def poll_worker_attempt(
         LIFECYCLE_WORKER_RUNNING,
         TERMINAL_LIFECYCLES,
         WorkerAttemptStore,
+        WorkerResultArtifact,
+        WORKER_RESULT_SCHEMA_VERSION,
+        RESULT_TYPE_NO_CHANGES_REQUIRED,
+        RESULT_TYPE_REPAIR_PUSHED,
+        RESULT_TYPE_REPAIR_COMMIT_PRODUCED,
+        RESULT_TYPE_COMMIT_PRODUCED_NOT_PUSHED,
+        RESULT_TYPE_WORKER_EXECUTION_FAILED,
     )
     store = _worker_attempt_store()
     rec = store.read(attempt_id)
@@ -2697,6 +3237,24 @@ def poll_worker_attempt(
         rec.signal = signal
         rec.last_progress_at = now_iso()
         rec.finished_at = rec.finished_at or now_iso()
+        # Round-50.1: ingest the canonical
+        # WorkerResultArtifact written by the worker at the
+        # deterministic per-attempt path. This is the
+        # AUTHORITATIVE result source for terminal
+        # classification (Section 8 commit provenance, Section
+        # 11 REPAIRED / SUPERSEDED / ALREADY_SATISFIED
+        # semantics). A standalone roundNN_worker_attempt_result.json
+        # at the worker-attempts-dir is mapped to the canonical
+        # artifact via the legacy compatibility parser.
+        try:
+            _round50_ingest_worker_result_artifact(rec)
+        except Exception as _ingest_exc:
+            log(
+                "warning",
+                "round-50.1: worker-result ingestion failed",
+                attempt_id=attempt_id,
+                error=str(_ingest_exc)[:200],
+            )
         # Round-45 P1 precedence fix: classify a dead worker
         # in the correct order. The previous ordering (round-41
         # dispatch-ledger lookup FIRST, then round-37 push
@@ -4936,7 +5494,16 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             stderr_path=str(stderr_path),
             exit_code=None,
             signal=None,
-            result_artifact_path=None,
+            # Round-50.1: deterministic per-attempt result
+            # artifact path is recorded here so the
+            # worker's standalone result is auto-ingested by
+            # the per-attempt normalizer in poll_worker_attempt
+            # rather than discovered by global "latest
+            # result file" heuristics.
+            result_artifact_path=str(
+                worker_attempts_dir
+                / f"{attempt_id}.worker_result.json"
+            ),
             produced_commit_sha=None,
             pushed_commit_sha=None,
             origin_head_verified=False,
@@ -4946,6 +5513,16 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
                 "cmd": cmd,
                 "pgid": proc.pid,
                 "supervisor_instance_id": INSTANCE_ID,  # type: ignore[name-defined]
+                # Round-50.1: tell the worker the exact
+                # path where it MUST write the canonical
+                # WorkerResultArtifact. This makes result
+                # association deterministic and removes
+                # the round-50 "latest result file" heuristic.
+                "expected_result_artifact_path": str(
+                    worker_attempts_dir
+                    / f"{attempt_id}.worker_result.json"
+                ),
+                "attempt_nonce": attempt_id,
             },
         )
         WorkerAttemptStore(worker_attempts_dir).write(attempt)
@@ -9369,16 +9946,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                         # proof check short-circuits the loop.
                         if _has_recorded_thread_proof(tid):
                             continue
-                        # Round-50 narrow fix (extended): also skip
-                        # if the audit ledger already has a
-                        # THREAD_PROOF_INVALIDATED for this thread
-                        # at the CURRENT HEAD. The C17 audit has
-                        # already investigated this thread at this
-                        # head; emitting again would dispatch
-                        # duplicate workers. The worker dispatch
-                        # will happen on the next head advance
-                        # (genuinely new source/provider change).
-                        if _has_recent_thread_invalidated(
+                        # Round-50.1 (Section 12 exactly-once
+                        # work generation): if there is an
+                        # OPEN work generation for this thread
+                        # at the CURRENT HEAD, the runnable
+                        # event already exists. Skip emitting.
+                        # Heartbeats must not duplicate work.
+                        if _round50_1_has_open_work_generation(
                             tid, current_head
                         ):
                             continue

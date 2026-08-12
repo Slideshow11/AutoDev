@@ -4837,6 +4837,338 @@ def test_round49_1_c17_no_duplicate_carry_records(tmp_path, monkeypatch):
 
 
 
+
+
+def test_round50_1_audit_signature_dedupes_duplicate_invalidation(tmp_path, monkeypatch):
+    """Round-50.1 Section 16: repeated heartbeat observations
+    of the SAME generation MUST NOT append duplicate
+    THREAD_PROOF_INVALIDATED audit records.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    sig = sm._round50_1_audit_signature({
+        "thread_id": "T1",
+        "kind": "THREAD_PROOF_INVALIDATED",
+        "reason": "PRIOR_PROOF_MISSING",
+        "current_head": "abc123",
+        "provider_version_current": "v1",
+        "source_blob_current": "blob1",
+        "disposition": "ALREADY_SATISFIED",
+        "ancestry_result": True,
+    })
+    # First write succeeds (returns True on success).
+    assert sm._round50_1_audit_record_signature(sig) is True
+    seen = sm._round50_1_audit_seen_signatures()
+    assert sig in seen
+    # Idempotency: writing the same signature again still succeeds
+    # (no error); the index retains the row.
+    assert sm._round50_1_audit_record_signature(sig) is True
+    seen2 = sm._round50_1_audit_seen_signatures()
+    assert sig in seen2
+
+    # Different signature (different head) is a NEW transition.
+    sig2 = sm._round50_1_audit_signature({
+        "thread_id": "T1",
+        "kind": "THREAD_PROOF_INVALIDATED",
+        "reason": "PRIOR_PROOF_MISSING",
+        "current_head": "def456",  # different head
+        "provider_version_current": "v1",
+        "source_blob_current": "blob1",
+        "disposition": "ALREADY_SATISFIED",
+        "ancestry_result": True,
+    })
+    assert sig != sig2
+
+
+def test_round50_1_carry_forward_invalidation_is_idempotent(tmp_path, monkeypatch):
+    """Round-50.1 Section 16: the C17 carry-forward helper
+    MUST NOT append duplicate THREAD_PROOF_INVALIDATED records
+    for the same (thread_id, current_head, reason) across
+    heartbeat observations.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import os
+    import subprocess
+
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # Initialize a git repo so _git_show_blob can run.
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo), raising=False)
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "hello.txt").write_text("line1\n")
+    subprocess.run(["git", "add", "hello.txt"], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True).stdout.strip()
+
+    # First call: nothing recorded => PRIOR_PROOF_MISSING recorded.
+    d1, r1 = sm._try_carry_forward_thread_proof(
+        thread_id="T_DEDUP",
+        provider="coderabbit",
+        current_path="hello.txt",
+        current_line=1,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T_DEDUP",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=head,
+        disposition="",
+    )
+    assert d1 == "invalidate"
+    assert r1 == sm.INVALIDATION_REASON_PRIOR_PROOF_MISSING
+
+    # Same heartbeat observation again: idempotent on signature.
+    d2, r2 = sm._try_carry_forward_thread_proof(
+        thread_id="T_DEDUP",
+        provider="coderabbit",
+        current_path="hello.txt",
+        current_line=1,
+        current_provider_thread={
+            "provider": "coderabbit", "id": "T_DEDUP",
+            "top_level_comment": {"id": "c", "updatedAt": "t", "body": "b"},
+            "replies": [], "isResolved": False, "isOutdated": False,
+        },
+        current_head=head,
+        disposition="",
+    )
+    assert d2 == "invalidate"
+    assert r2 == sm.INVALIDATION_REASON_PRIOR_PROOF_MISSING
+
+    # The audit ledger should have ONE THREAD_PROOF_INVALIDATED
+    # for this thread (not two). Section 16 invariant.
+    audit = sm._thread_proof_audit_path()
+    with open(audit) as f:
+        records = [json.loads(ln) for ln in f if ln.strip()]
+    inv = [r for r in records
+           if r.get("kind") == "THREAD_PROOF_INVALIDATED"
+           and r.get("thread_id") == "T_DEDUP"]
+    assert len(inv) == 1, (
+        f"expected exactly 1 invalidation; got {len(inv)}: "
+        f"signatures dedupe failed"
+    )
+
+
+def test_round50_1_worker_result_normalizer_produces_canonical_artifact(tmp_path, monkeypatch):
+    """Round-50.1 Section 21: a standalone
+    roundNN_worker_attempt_result.json MUST be normalized
+    into a canonical WorkerResultArtifact ready for the
+    C14 hook.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json as _json
+
+    payload = {
+        "round_index": 117,
+        "directive_id": "abc-123",
+        "head_sha_at_entry": "deadbeef" * 5,
+        "head_sha_at_exit": "deadbeef" * 5,
+        "disposition": "NO_OP_ALL_ALREADY_SATISFIED",
+        "no_commit_created": True,
+        "no_push_performed": True,
+        "no_repo_modification": True,
+        "rationale": "Already satisfied",
+        "findings": [{
+            "finding_id": "thread:PRRT_TNORM",
+            "severity": "P1",
+            "file_path": "x.py",
+            "cited_line": 7,
+            "title": "Test finding",
+            "category": "B",
+            "disposition": "ALREADY_SATISFIED",
+            "evidence": "Already satisfied",
+        }],
+        "p1_count": 1,
+        "p2_count": 0,
+        "ci_fail_count": 0,
+        "round39_contract_observed": True,
+    }
+    norm = sm._round50_normalize_standalone_worker_result(
+        payload, "att-test-001",
+    )
+    assert norm is not None
+    assert "findings" in norm
+    assert len(norm["findings"]) == 1
+    assert norm["findings"][0]["finding_id"] == "thread:PRRT_TNORM"
+    assert norm["findings"][0]["disposition"] == "ALREADY_SATISFIED"
+    assert norm["source"] == "round50_standalone_legacy_parser"
+    assert norm["original_attempt_id"] == "att-test-001"
+
+    # Malformed payload (no findings list) -> None
+    assert sm._round50_normalize_standalone_worker_result(
+        {"round_index": 0, "findings": []}, "att-test-002",
+    ) is None
+    assert sm._round50_normalize_standalone_worker_result(
+        "not a dict", "att-test-003",
+    ) is None
+
+
+def test_round50_1_worker_result_ingestion_fails_closed_on_wrong_attempt(tmp_path, monkeypatch):
+    """Round-50.1 Section 23: when an artifact's
+    attempt_id mismatches the WorkerAttemptRecord, the
+    ingestion MUST fail closed. No "latest file" heuristic.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json as _json
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    audit_path = sm._thread_proof_audit_path()
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Construct a WorkerAttemptRecord stub with attempt_id "A".
+    class _StubRec:
+        attempt_id = "att-A"
+        claim_id = "claim-A"
+        directive_digest = "dir-A"
+        prelaunch_head = "deadbeef" * 5
+        pid = 12345
+        extra = {}
+        produced_commit_sha = None
+        pushed_commit_sha = None
+        origin_head_verified = False
+        github_head_verified = False
+        repo = "OWNER/REPO"
+        pr_number = 9
+        expected_branch = "feat/test"
+        result_artifact_path = None
+        lifecycle = "WORKER_RUNNING"
+
+    # Forge a canonical artifact whose attempt_id is "B".
+    bad = {
+        "schema_version": sm.WORKER_RESULT_SCHEMA_VERSION,
+        "attempt_id": "B",
+        "claim_id": "claim-B",
+        "directive_digest": "dir-B",
+        "result_type": sm.RESULT_TYPE_NO_CHANGES_REQUIRED,
+        "produced_commit_shas": [],
+        "pushed_commit_shas": [],
+        "completed_at": "2026-01-01T00:00:00Z",
+        "no_changes_required_proof": {"findings": []},
+        "repo": "OWNER/REPO",
+        "pr_number": 9,
+        "attempt_nonce": None,
+    }
+    from autocoder_orchestration.worker_attempt import WorkerResultArtifact
+    errs = WorkerResultArtifact.from_dict(bad).validate_against_attempt(_StubRec())
+    assert any("attempt_id mismatch" in e for e in errs), errs
+
+
+def test_round50_1_generation_identity_changes_with_source_blob(tmp_path, monkeypatch):
+    """Round-50.1 Section 14: a work generation identity
+    MUST change when source blob changes (otherwise the
+    system would stale-carry stale proofs).
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+
+    g1 = sm._round50_1_compute_generation_id(
+        thread_id="T1", provider="coderabbit",
+        provider_version="v1", source_blob_sha="blob-A",
+        evaluated_head="head1",
+    )
+    g2 = sm._round50_1_compute_generation_id(
+        thread_id="T1", provider="coderabbit",
+        provider_version="v1", source_blob_sha="blob-B",  # different
+        evaluated_head="head1",
+    )
+    g3 = sm._round50_1_compute_generation_id(
+        thread_id="T1", provider="coderabbit",
+        provider_version="v1", source_blob_sha="blob-A",
+        evaluated_head="head1",
+    )
+    assert g1 != g2
+    assert g1 == g3  # deterministic
+
+
+def test_round50_1_open_work_generation_lookup(tmp_path, monkeypatch):
+    """Round-50.1 Section 12: an OPEN work generation
+    persists. The drain emitter uses this to skip
+    duplicate emissions.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # No audit yet -> no open generation
+    assert sm._round50_1_has_open_work_generation("T1", "h1") is False
+
+    # Record PENDING transition
+    sm._round50_1_record_work_generation_state(
+        thread_id="T1", provider="coderabbit", provider_version="v1",
+        source_blob_sha="blob1", evaluated_head="h1",
+        generation_id="gen1",
+        state=sm.WORK_GEN_PENDING,
+    )
+    assert sm._round50_1_has_open_work_generation("T1", "h1") is True
+    # Different head -> not open (new generation requires work)
+    assert sm._round50_1_has_open_work_generation("T1", "h2") is False
+
+    # Record TERMINAL transition
+    sm._round50_1_record_work_generation_state(
+        thread_id="T1", provider="coderabbit", provider_version="v1",
+        source_blob_sha="blob1", evaluated_head="h1",
+        generation_id="gen1",
+        state=sm.WORK_GEN_TERMINAL,
+    )
+    # Terminal -> not open
+    assert sm._round50_1_has_open_work_generation("T1", "h1") is False
+
+
+def test_round50_1_retry_keeps_same_generation(tmp_path, monkeypatch):
+    """Round-50.1 Section 15: a retry MUST reuse the same
+    generation, not create a duplicate.
+    """
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    gen_id = sm._round50_1_compute_generation_id(
+        thread_id="T1", provider="coderabbit",
+        provider_version="v1", source_blob_sha="blob1",
+        evaluated_head="h1",
+    )
+    # Initial generation record
+    sm._round50_1_record_work_generation_state(
+        thread_id="T1", provider="coderabbit", provider_version="v1",
+        source_blob_sha="blob1", evaluated_head="h1",
+        generation_id=gen_id,
+        state=sm.WORK_GEN_PENDING,
+    )
+    # Worker launched, then crashed
+    sm._round50_1_record_work_generation_state(
+        thread_id="T1", provider="coderabbit", provider_version="v1",
+        source_blob_sha="blob1", evaluated_head="h1",
+        generation_id=gen_id,
+        state=sm.WORK_GEN_WORKER_RUNNING,
+    )
+    # Retry reuses same generation id (NOT a new generation).
+    sm._round50_1_record_work_generation_state(
+        thread_id="T1", provider="coderabbit", provider_version="v1",
+        source_blob_sha="blob1", evaluated_head="h1",
+        generation_id=gen_id,
+        state=sm.WORK_GEN_RETRY_PENDING,
+    )
+    # The latest state is RETRY_PENDING (still open).
+    assert sm._round50_1_has_open_work_generation("T1", "h1") is True
+
+
 def test_round50_durable_thread_drain_skips_recently_invalidated_threads(tmp_path, monkeypatch):
     """Round-50 bug-detector: the durable-thread drain
     emitter MUST skip threads that have a recent
