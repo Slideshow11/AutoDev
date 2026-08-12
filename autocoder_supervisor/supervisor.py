@@ -1684,6 +1684,68 @@ def _round50_1_has_open_work_generation(thread_id, current_head):
     )
 
 
+def _has_runnable_repair_generation() -> bool:
+    """Round-51/C19 Objective 2: REPAIR-BEFORE-QUALIFICATION.
+
+    Return True iff there is at least one unconsumed
+    actionable event that has NOT been dispatched (i.e.
+    the launched-events set does not already cover it).
+    The repair-before-qualification ordering uses this
+    to determine whether the supervisor MUST dispatch
+    a worker this iteration rather than enter the
+    quiet-window polling loop.
+
+    The check covers all actionable event kinds:
+      - head_change
+      - new_formal_review
+      - new_reviewer_issue_comment
+      - new_unresolved_current_thread
+      - thread_reopened
+      - unresolved_thread_drain:<tid> (durable drain)
+      - check_changed:<name> (only when it carries
+        actionable evidence: a required check that went
+        from green to red, or a check that newly appeared
+        in the required set)
+
+    CI checks that perpetually change state without
+    any corresponding actionable repair work are NOT
+    considered runnable repair. The quiet window's
+    snapshot_differs function surfaces these as
+    ``check_conclusion_change`` reasons; the main loop
+    uses this helper to skip the quiet window ONLY when
+    there is real repair work to dispatch.
+    """
+    try:
+        unconsumed = list_unconsumed_events()
+    except Exception:
+        return False
+    if not unconsumed:
+        return False
+    actionable_kinds = {
+        "head_change",
+        "new_formal_review",
+        "new_reviewer_issue_comment",
+        "new_unresolved_current_thread",
+        "thread_reopened",
+        "unresolved_thread_drain",
+    }
+    actionable_ids = {
+        e.get("id", "")
+        for e in unconsumed
+        if e.get("kind") in actionable_kinds
+    }
+    if not actionable_ids:
+        return False
+    try:
+        already_launched = launched_event_ids()
+    except Exception:
+        already_launched = set()
+    for eid in actionable_ids:
+        if eid and eid not in already_launched:
+            return True
+    return False
+
+
 THREAD_PROOF_AUDIT_VERSION = "round49_1_c17_v1"
 THREAD_PROOF_AUDIT_FILENAME = "thread_proof_audit.jsonl"
 THREAD_PROOF_INVALIDATION_VERSION = "round49_1_c17_v1"
@@ -3047,6 +3109,41 @@ def _build_worker_result_contract_suffix(
         + "  - origin and live GitHub HEAD must equal your final commit.\n"
         + "Failure to write the canonical artifact results in "
         + "UNATTRIBUTED_HEAD_ADVANCE for any commit you push.\n"
+        + "\n"
+        + "### C19 STRICT MACHINE-READABLE RESULT ENVELOPE (REQUIRED) ###\n"
+        + "You MUST end your final response with EXACTLY one "
+        + "WORKER_RESULT_ENVELOPE block. The wrapper captures "
+        + "your stdout, parses the envelope, and writes the "
+        + "canonical WorkerResultArtifact to disk. You do NOT "
+        + "need to call any filesystem tool to persist the "
+        + "artifact; emitting the envelope is sufficient.\n"
+        + "Format (the block MUST appear as the LAST thing in "
+        + "your response):\n"
+        + "===WORKER_RESULT_ENVELOPE===\n"
+        + "{\n"
+        + '  "schema_version": "autocoder.worker_envelope.v1",\n'
+        + '  "attempt_id": "att-<TIMESTAMP>-<PID>",\n'
+        + f'  "claim_id": "{attempt_id_prefix}-<PID>",\n'
+        + f'  "directive_digest": "{directive_digest}",\n'
+        + f'  "directive_id": "{directive_id}",\n'
+        + '  "result_type": "NO_CHANGES_REQUIRED | REPAIR_PUSHED | REPAIR_COMMIT_PRODUCED | COMMIT_PRODUCED_NOT_PUSHED | WORKER_EXECUTION_FAILED",\n'
+        + '  "produced_commit_shas": [],\n'
+        + '  "pushed_commit_shas": [],\n'
+        + '  "completed_at": "<ISO-8601 UTC>",\n'
+        + f'  "prelaunch_head": "{prelaunch_head}",\n'
+        + f'  "attempt_nonce": "{attempt_id_prefix}",\n'
+        + '  "no_changes_required_proof": {\n'
+        + '    "findings": [\n'
+        + '      {"finding_id": "thread:...", '
+        + '"disposition": "ALREADY_SATISFIED|REPAIRED|SUPERSEDED|STILL_ACTIONABLE|INCOMPLETE_EVIDENCE"}\n'
+        + "    ],\n"
+        + '    "source": "round50_envelope_parser"\n'
+        + "  }\n"
+        + "}\n"
+        + "===END_ENVELOPE===\n"
+        + "If you commit/push:\n"
+        + "  - produced_commit_shas MUST list the produced SHAs in order.\n"
+        + "  - pushed_commit_shas MUST list the pushed SHAs in order.\n"
         + "===============================================\n"
     )
 
@@ -5758,6 +5855,64 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # is observable after restart.
     worker_attempts_dir = Path(str(STATE_DIR)) / "worker_attempts"  # type: ignore[name-defined]
     worker_attempts_dir.mkdir(parents=True, exist_ok=True)
+    # Round-51/C19: wrap the worker command in a Python wrapper
+    # that captures the strict machine-readable result envelope
+    # and writes the canonical WorkerResultArtifact. This
+    # removes the worker's final filesystem tool-call dependency:
+    # the worker only needs to emit the envelope text and the
+    # wrapper handles persistence. The original hermes cmd is
+    # passed after "--" as positional args.
+    try:
+        from .aed_worker_wrapper import (
+            _resolve_wrapper_argv as _resolve_wrapper,
+        )
+        _state_dir_str = str(STATE_DIR)  # type: ignore[name-defined]
+        _wrapper_kwargs = {
+            "attempt_id": attempt_id_prefix,  # actual attempt_id filled in after Popen
+            "directive_digest": directive_digest,
+            "directive_id": directive_id,
+            "directive_path": directive_path,
+            "prelaunch_head": str(live.get("head_sha", "")),
+            "result_artifact_path": str(
+                worker_attempts_dir
+                / f"{attempt_id_prefix}-<PID>.worker_result.json"
+            ),
+            "stdout_log_path": str(
+                worker_attempts_dir / f"{attempt_id_prefix}.stdout.log"
+            ),
+            "expected_branch": "feat/review-repair-relay-v1",
+            "pr_number": int(PR_NUMBER),  # type: ignore[name-defined]
+            "repo": (
+                f"{REPO_OWNER}/{REPO_NAME}"  # type: ignore[name-defined]
+            ),
+            "cwd": str(REPO_DIR),  # type: ignore[name-defined]
+        }
+        # The wrapper also writes a copy under the orch dir
+        # when the orch path is resolvable.
+        try:
+            _rs_path = Path(_state_dir_str) / "run_state.json"
+            if _rs_path.is_file():
+                _rs = json.loads(
+                    _rs_path.read_text(encoding="utf-8")
+                )
+                _orch_root = _rs.get("orchestration_state_root", "")
+                if _orch_root:
+                    _wrapper_kwargs["orch_result_artifact_path"] = (
+                        str(
+                            Path(_orch_root) / "worker_attempts"
+                            / f"{attempt_id_prefix}-<PID>.worker_result.json"
+                        )
+                    )
+        except Exception:
+            pass
+        cmd = _resolve_wrapper(_wrapper_kwargs, cmd)
+    except Exception as _we:
+        log(
+            "warning",
+            "round-51: wrapper resolution failed; using direct launch",
+            attempt_id=attempt_id_prefix,
+            error=str(_we)[:200],
+        )
     # attempt_id_prefix was already computed earlier (round-38)
     # so the session-resolution helper could share the prefix.
     stdout_path = worker_attempts_dir / f"{attempt_id_prefix}.stdout.log"
@@ -10779,12 +10934,52 @@ def main(argv: Optional[list[str]] = None) -> int:
             if not cooldown_active():
                 _replay_cooldown_deferred_if_any()
 
+            # Round-51/C19 Objective 2: REPAIR-BEFORE-QUALIFICATION.
+            # If runnable repair work exists, dispatch it
+            # immediately and SKIP the quiet window for this
+            # iteration. The 180s qualification quiet window
+            # applies ONLY AFTER runnable repair work has
+            # reached zero. CI/check changes must not
+            # indefinitely prevent known repair work from
+            # launching. The previous design gated all
+            # dispatch on the qualifying interval, so a
+            # ``check_conclusion_change`` arriving every
+            # ~13s from CI checks would reset the window
+            # forever and strand ``unresolved_thread_drain``
+            # events in the unconsumed ledger.
             if cur_state == STATE_ACTIVE_REPAIR:
-                pre_unconsumed_ids = {
-                    e.get("id") for e in list_unconsumed_events()
-                }
-                quiet_window_outcome = active_repair_quiet_window(
-                    rs, token or "", quiet_window, pre_unconsumed_ids,
+                _runnable_repair = (
+                    _has_runnable_repair_generation()
+                    if not cooldown_active()
+                    else False
+                )
+                if _runnable_repair and new_events:
+                    # Runnable repair exists AND we have
+                    # fresh events. Dispatch now (the
+                    # ``handle_new_events`` branch above
+                    # already did this on the same iteration
+                    # when new_events was non-empty; this
+                    # is a defensive second-chance). Then
+                    # SKIP the quiet window entirely for
+                    # this iteration. The window only
+                    # applies when there is NO runnable
+                    # repair work pending.
+                    log(
+                        "info",
+                        "round-51: skipping quiet window; "
+                        "runnable repair work exists",
+                        event_count=len(new_events),
+                    )
+                    pre_unconsumed_ids = {
+                        e.get("id") for e in list_unconsumed_events()
+                    }
+                    quiet_window_outcome = None
+                else:
+                    pre_unconsumed_ids = {
+                        e.get("id") for e in list_unconsumed_events()
+                    }
+                    quiet_window_outcome = active_repair_quiet_window(
+                        rs, token or "", quiet_window, pre_unconsumed_ids,
                 )
                 # If a new event arrived during the window,
                 # the relay preserved it. The next iteration

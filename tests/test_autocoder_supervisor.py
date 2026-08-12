@@ -5412,6 +5412,270 @@ def test_round50_1_ownership_validates_directive_sha256_not_uuid(tmp_path, monke
 
 
 
+
+
+def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artifact(
+    tmp_path, monkeypatch,
+):
+    """Round-51/C19 Objective 1: the worker wrapper captures
+    the worker's strict machine-readable result envelope and
+    writes the canonical WorkerResultArtifact. The worker
+    itself NEVER needs to call a filesystem tool to persist
+    the artifact. The wrapper handles it from the captured
+    stdout.
+    """
+    import subprocess as _sp
+    import json as _json
+
+    # Build a fake worker that emits the envelope then exits.
+    fake_worker = tmp_path / "fake_worker.sh"
+    envelope = {
+        "schema_version": "autocoder.worker_envelope.v1",
+        "attempt_id": "att-20260812T120000Z-99999",
+        "claim_id": "att-20260812T120000Z-99999",
+        "directive_digest": "deadbeef" * 8,
+        "directive_id": "test-uuid",
+        "result_type": "NO_CHANGES_REQUIRED",
+        "produced_commit_shas": [],
+        "pushed_commit_shas": [],
+        "completed_at": "2026-01-01T00:00:00Z",
+        "prelaunch_head": "abc" * 14,
+        "no_changes_required_proof": {
+            "findings": [{
+                "finding_id": "thread:PRRT_TEST",
+                "disposition": "ALREADY_SATISFIED",
+            }],
+            "source": "round50_envelope_parser",
+        },
+    }
+    fake_worker.write_text(
+        "#!/bin/bash\n"
+        "echo 'Some worker output'\n"
+        "echo '===WORKER_RESULT_ENVELOPE==='\n"
+        f"echo '{_json.dumps(envelope)}'\n"
+        "echo '===END_ENVELOPE==='\n"
+        "echo 'final output'\n"
+        "exit 0\n"
+    )
+    fake_worker.chmod(0o755)
+
+    artifact_path = tmp_path / "result.json"
+    stdout_log = tmp_path / "stdout.log"
+
+    # Invoke the wrapper
+    from autocoder_supervisor import aed_worker_wrapper
+    result = _sp.run(
+        [
+            sys.executable,
+            aed_worker_wrapper.__file__,
+            "--attempt-id", "att-20260812T120000Z-99999",
+            "--directive-digest", "deadbeef" * 8,
+            "--directive-id", "test-uuid",
+            "--prelaunch-head", "abc" * 14,
+            "--result-artifact-path", str(artifact_path),
+            "--stdout-log-path", str(stdout_log),
+            "--repo", "OWNER/REPO",
+            "--pr-number", "9",
+            "--", str(fake_worker),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, (
+        f"wrapper must exit 0; got {result.returncode} stderr={result.stderr}"
+    )
+
+    # Canonical artifact must exist
+    assert artifact_path.exists(), (
+        "Round-51/C19: wrapper must write the canonical artifact"
+    )
+    artifact = _json.loads(artifact_path.read_text())
+    assert artifact["schema_version"] == "autocoder.worker_result.v1"
+    assert artifact["attempt_id"] == "att-20260812T120000Z-99999"
+    assert artifact["result_type"] == "NO_CHANGES_REQUIRED"
+    assert artifact["produced_commit_shas"] == []
+    assert artifact["pushed_commit_shas"] == []
+    assert artifact["no_changes_required_proof"]["source"] == "round50_envelope_parser"
+    assert artifact["directive_digest"] == "deadbeef" * 8
+
+    # Stdout log must be preserved for forensic chain-of-custody
+    assert stdout_log.exists()
+    log_text = stdout_log.read_text()
+    assert "Some worker output" in log_text
+    assert "===WORKER_RESULT_ENVELOPE===" in log_text
+    assert "final output" in log_text
+
+
+def test_round51_c19_worker_wrapper_handles_no_envelope(tmp_path, monkeypatch):
+    """Round-51/C19: if the worker emits no envelope, the
+    wrapper must still write a canonical artifact (with a
+    synthesized empty proof) so the supervisor's ingestion
+    path runs. The worker's stdout is captured for forensic
+    review; the lifecycle is WORKER_EXECUTION_FAILED by
+    default.
+    """
+    import subprocess as _sp
+    fake_worker = tmp_path / "fake_worker.sh"
+    fake_worker.write_text(
+        "#!/bin/bash\necho 'I did stuff but forgot the envelope'\nexit 0\n"
+    )
+    fake_worker.chmod(0o755)
+
+    artifact_path = tmp_path / "result.json"
+    stdout_log = tmp_path / "stdout.log"
+
+    from autocoder_supervisor import aed_worker_wrapper
+    result = _sp.run(
+        [
+            sys.executable, aed_worker_wrapper.__file__,
+            "--attempt-id", "att-20260812T130000Z-88888",
+            "--result-artifact-path", str(artifact_path),
+            "--stdout-log-path", str(stdout_log),
+            "--result-type-default", "WORKER_EXECUTION_FAILED",
+            "--", str(fake_worker),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0
+    assert artifact_path.exists()
+    import json as _json
+    artifact = _json.loads(artifact_path.read_text())
+    assert artifact["result_type"] == "WORKER_EXECUTION_FAILED"
+    assert artifact["no_changes_required_proof"]["source"] == "round51_c19_no_envelope_fallback"
+
+
+def test_round51_c19_worker_wrapper_preserves_exit_code(tmp_path, monkeypatch):
+    """Round-51/C19: the wrapper must propagate the worker's
+    exit code so the supervisor can apply the correct
+    lifecycle transition (PUSH_VERIFIED, NO_CHANGES_REQUIRED,
+    WORKER_EXECUTION_FAILED, etc.) without ambiguity.
+    """
+    import subprocess as _sp
+    fake_worker = tmp_path / "fake_worker.sh"
+    fake_worker.write_text(
+        "#!/bin/bash\necho 'oops'\nexit 42\n"
+    )
+    fake_worker.chmod(0o755)
+
+    artifact_path = tmp_path / "result.json"
+    stdout_log = tmp_path / "stdout.log"
+
+    from autocoder_supervisor import aed_worker_wrapper
+    result = _sp.run(
+        [
+            sys.executable, aed_worker_wrapper.__file__,
+            "--attempt-id", "att-X",
+            "--result-artifact-path", str(artifact_path),
+            "--stdout-log-path", str(stdout_log),
+            "--", str(fake_worker),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 42, (
+        f"Round-51/C19: wrapper must propagate exit code; "
+        f"got {result.returncode}, expected 42"
+    )
+
+
+
+
+def test_round51_c19_repair_before_qualification_runnable_present(tmp_path, monkeypatch):
+    """Round-51/C19 Objective 2: REPAIR-BEFORE-QUALIFICATION.
+
+    When the unconsumed-events ledger contains an
+    actionable event (e.g. unresolved_thread_drain) that
+    has NOT been dispatched yet, the supervisor MUST
+    dispatch it instead of entering the 180s quiet-window
+    polling loop. This prevents the previous
+    ``check_conclusion_change``-from-CI stranding where
+    CI checks running every ~13s reset the quiet window
+    indefinitely and no worker is ever launched.
+    """
+    import autocoder_supervisor.supervisor as sm
+
+    # The helper depends on list_unconsumed_events and
+    # launched_event_ids; monkeypatch them to return a
+    # controlled state.
+    fake_unconsumed = [
+        {"id": "unresolved_thread_drain:PRRT_Xr_ZK",
+         "kind": "unresolved_thread_drain", "thread_id": "PRRT_Xr_ZK"},
+    ]
+    monkeypatch.setattr(
+        sm, "list_unconsumed_events", lambda: fake_unconsumed
+    )
+    monkeypatch.setattr(sm, "launched_event_ids", lambda: set())
+
+    assert sm._has_runnable_repair_generation() is True, (
+        "Round-51/C19: actionable unconsumed event without "
+        "a launched_events entry MUST count as runnable repair"
+    )
+
+
+def test_round51_c19_repair_before_qualification_no_runnable(tmp_path, monkeypatch):
+    """Round-51/C19: when there are no unconsumed actionable
+    events (everything is dispatched or empty), the helper
+    returns False and the supervisor MAY enter the quiet
+    window. CI-only check_conclusion_change events do NOT
+    count as runnable repair.
+    """
+    import autocoder_supervisor.supervisor as sm
+
+    # All unconsumed events are non-actionable (CI check
+    # changes only).
+    fake_unconsumed = [
+        {"id": "check_changed:committed-state-scan",
+         "kind": "required_check_conclusion_change",
+         "check": "committed-state-scan"},
+    ]
+    monkeypatch.setattr(
+        sm, "list_unconsumed_events", lambda: fake_unconsumed
+    )
+    monkeypatch.setattr(sm, "launched_event_ids", lambda: set())
+
+    assert sm._has_runnable_repair_generation() is False, (
+        "Round-51/C19: non-actionable CI check events MUST NOT "
+        "count as runnable repair; the quiet window MAY run"
+    )
+
+
+def test_round51_c19_repair_before_qualification_already_launched(tmp_path, monkeypatch):
+    """Round-51/C19: an actionable event that has already
+    been launched is NOT runnable repair (it has an
+    owner). The supervisor must NOT redispatch.
+    """
+    import autocoder_supervisor.supervisor as sm
+
+    fake_unconsumed = [
+        {"id": "unresolved_thread_drain:PRRT_Xr_ZK",
+         "kind": "unresolved_thread_drain", "thread_id": "PRRT_Xr_ZK"},
+    ]
+    monkeypatch.setattr(
+        sm, "list_unconsumed_events", lambda: fake_unconsumed
+    )
+    monkeypatch.setattr(
+        sm, "launched_event_ids",
+        lambda: {"unresolved_thread_drain:PRRT_Xr_ZK"},
+    )
+
+    assert sm._has_runnable_repair_generation() is False, (
+        "Round-51/C19: an already-launched event MUST NOT "
+        "count as runnable repair (it has an owner)"
+    )
+
+
+def test_round51_c19_repair_before_qualification_empty_unconsumed(tmp_path, monkeypatch):
+    """Round-51/C19: with no unconsumed events at all, the
+    helper returns False. The quiet window proceeds.
+    """
+    import autocoder_supervisor.supervisor as sm
+
+    monkeypatch.setattr(sm, "list_unconsumed_events", lambda: [])
+    monkeypatch.setattr(sm, "launched_event_ids", lambda: set())
+
+    assert sm._has_runnable_repair_generation() is False
+
+
+
+
 def test_round50_1_audit_signature_dedupes_duplicate_invalidation(tmp_path, monkeypatch):
     """Round-50.1 Section 16: repeated heartbeat observations
     of the SAME generation MUST NOT append duplicate
