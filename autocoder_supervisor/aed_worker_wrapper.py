@@ -104,6 +104,11 @@ def main() -> int:
     parser.add_argument("--directive-path", default="")
     parser.add_argument("--prelaunch-head", default="")
     parser.add_argument(
+        "--claim-id",
+        default="",
+        help="The WorkerAttemptRecord.claim_id (lease or directive UUID) the wrapper MUST write into the canonical artifact.",
+    )
+    parser.add_argument(
         "--result-artifact-path",
         required=True,
         help="Path where the canonical WorkerResultArtifact must be written.",
@@ -290,7 +295,14 @@ def main() -> int:
     # the supervisor's identity validation passes.
     _wrapper_pid = os.getpid()
     _resolved_attempt_id = f"{args.attempt_id}-{_wrapper_pid}"
-    _resolved_claim_id = _resolved_attempt_id
+    # claim_id must equal the WorkerAttemptRecord.claim_id
+    # for the C18 identity validation to pass. The supervisor
+    # passes the lease-id or directive-UUID via --claim-id.
+    # If the supervisor did not pass one (e.g. legacy path),
+    # fall back to the resolved attempt_id (which still
+    # passes the attempt_id check but will fail the claim_id
+    # check — a clear signal of a misconfigured launch).
+    _resolved_claim_id = args.claim_id or _resolved_attempt_id
 
     # Build the canonical WorkerResultArtifact
     artifact = {

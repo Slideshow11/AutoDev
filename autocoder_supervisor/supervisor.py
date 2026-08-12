@@ -5914,11 +5914,16 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             if resolved_directive is not None else ""
         )
         _state_dir_str = str(STATE_DIR)  # type: ignore[name-defined]
+        _early_claim_id = (
+            directive_id
+            or f"lease-{_resolved_session_id}"
+        )
         _wrapper_kwargs = {
             "attempt_id": attempt_id_prefix,  # actual attempt_id filled in after Popen
             "directive_digest": _early_directive_digest,
             "directive_id": _early_directive_id,
             "directive_path": _early_directive_path,
+            "claim_id": _early_claim_id,
             "prelaunch_head": str(live.get("head_sha", "")),
             "result_artifact_path": str(
                 worker_attempts_dir
