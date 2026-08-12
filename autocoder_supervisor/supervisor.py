@@ -3160,11 +3160,41 @@ def _round50_ingest_worker_result_artifact(rec):
         except Exception:
             raw_payload = None
 
-    # 2. Try the deterministic per-attempt path
-    #    (worker_attempts_dir / attempt_id.worker_result.json)
-    if raw_payload is None:
+    # 2. Try the deterministic per-attempt paths.
+    # Round-50.1 Section 5/7: workers may write to either
+    # of two locations depending on their AED_EVIDENCE_ROOT
+    # resolution: the supervisor's WORKER_ATTEMPTS_DIR or the
+    # canonical orchestration-state-root worker_attempts
+    # subdirectory. Both are searched, with deterministic
+    # priority.
+    _search_dirs = []
+    try:
+        _search_dirs.append(Path(WORKER_ATTEMPTS_DIR))
+    except Exception:
+        pass
+    try:
+        _orch_root = globals().get("RUN_STATE")
+        _rs = None
+        if isinstance(_orch_root, dict):
+            _rs = _orch_root.get("orchestration_state_root")
+        elif _orch_root is not None:
+            try:
+                _rs = json.loads(_orch_root.read_text(encoding="utf-8")).get(
+                    "orchestration_state_root"
+                )
+            except Exception:
+                pass
+        if not _rs:
+            _rs = globals().get("ORCHESTRATION_STATE_ROOT") or ""
+        if _rs:
+            _search_dirs.append(Path(_rs) / "worker_attempts")
+    except Exception:
+        pass
+    for _dir in _search_dirs:
+        if raw_payload is not None:
+            break
         try:
-            _wadir = Path(WORKER_ATTEMPTS_DIR) / f"{rec.attempt_id}.worker_result.json"
+            _wadir = _dir / f"{rec.attempt_id}.worker_result.json"
             if _wadir.is_file():
                 raw_payload = _json.loads(_wadir.read_text(encoding="utf-8"))
                 source_surface = "deterministic_per_attempt_path"
