@@ -5866,12 +5866,30 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         from .aed_worker_wrapper import (
             _resolve_wrapper_argv as _resolve_wrapper,
         )
+        # directive_digest/directive_id/directive_path are
+        # extracted from the resolved_directive BEFORE
+        # entering the WorkerAttemptRecord construction so
+        # the wrapper kwargs are populated correctly.
+        _early_directive_digest = (
+            getattr(resolved_directive, "directive_sha256", "")
+            or ""
+            if resolved_directive is not None else ""
+        )
+        _early_directive_id = (
+            getattr(resolved_directive, "directive_id", "")
+            or ""
+            if resolved_directive is not None else ""
+        )
+        _early_directive_path = (
+            str(getattr(resolved_directive, "path", "") or "")
+            if resolved_directive is not None else ""
+        )
         _state_dir_str = str(STATE_DIR)  # type: ignore[name-defined]
         _wrapper_kwargs = {
             "attempt_id": attempt_id_prefix,  # actual attempt_id filled in after Popen
-            "directive_digest": directive_digest,
-            "directive_id": directive_id,
-            "directive_path": directive_path,
+            "directive_digest": _early_directive_digest,
+            "directive_id": _early_directive_id,
+            "directive_path": _early_directive_path,
             "prelaunch_head": str(live.get("head_sha", "")),
             "result_artifact_path": str(
                 worker_attempts_dir
