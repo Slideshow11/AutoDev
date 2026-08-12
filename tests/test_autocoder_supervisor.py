@@ -6123,6 +6123,71 @@ def test_round52_c20_pushed_origin_head_mismatch_unattributed(
     )
 
 
+def test_round52_c20_incomplete_evidence_preserves_drain_for_redispatch(
+    tmp_path, monkeypatch
+):
+    """Round-52/C20 §13: when the worker emits INCOMPLETE_EVIDENCE
+    for every finding, the attempt is terminalized but the drain
+    event is preserved so the next heartbeat re-dispatches a
+    fresh worker. The thread remains actionable.
+    """
+    from autocoder_supervisor import supervisor as sm
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        json.dumps({"current_head": "0" * 40, "orchestration_state_root": ""})
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-c20-incomplete"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        prelaunch_head="0" * 40,
+        result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    artifact = _c20_make_artifact(
+        attempt_id=attempt_id,
+        claim_id=rec_dict["claim_id"],
+        result_type="NO_CHANGES_REQUIRED",
+        findings=[{
+            "finding_id": "thread:PRRT_TEST_INCOMPLETE",
+            "disposition": "INCOMPLETE_EVIDENCE",
+        }],
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+    (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
+
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    remote_calls = []
+    monkeypatch.setattr(sm, "resolveReviewThread", lambda **kw: remote_calls.append(kw))
+    consume_calls = []
+    monkeypatch.setattr(sm, "consume_thread_drain_event_in_terminal_disposition", lambda **kw: consume_calls.append(kw))
+
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    new_rec = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    # Worker attempt is terminalized as WORKER_EXITED_NO_PUSH (not
+    # NO_CHANGES_REQUIRED) — the worker did NOT actually do no work,
+    # it ran out of evidence.
+    assert new_rec["lifecycle"] == "WORKER_EXITED_NO_PUSH", (
+        f"Round-52/C20: INCOMPLETE_EVIDENCE MUST terminalize as "
+        f"WORKER_EXITED_NO_PUSH; got {new_rec.get('lifecycle')!r}"
+    )
+    # CRITICAL: no remote resolution attempt (thread stays actionable)
+    assert not remote_calls, (
+        f"Round-52/C20: INCOMPLETE_EVIDENCE MUST NOT attempt remote "
+        f"resolution; got {remote_calls}"
+    )
+    # CRITICAL: no drain event consumption (drain stays for redispatch)
+    assert not consume_calls, (
+        f"Round-52/C20: INCOMPLETE_EVIDENCE MUST NOT consume drain event; "
+        f"got {consume_calls}"
+    )
+
+
 def test_round52_c20_c19_envelope_transport_still_works(
     tmp_path, monkeypatch
 ):

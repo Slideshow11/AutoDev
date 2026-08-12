@@ -4828,6 +4828,56 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
         _new_lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
         _wra = (_rec_obj.extra or {}).get("worker_result_artifact") or {}
         _result_type = _wra.get("result_type")
+        # Round-52/C20 §13: if the worker's disposition is
+        # INCOMPLETE_EVIDENCE, the round-39 contract requires
+        # the attempt to be a no-op, the thread to remain
+        # actionable, and the durable work item to be retried
+        # on the next heartbeat (the worker ran out of tool
+        # budget). We persist the attempt as NO_CHANGES_REQUIRED
+        # so the lifecycle is terminal, but we DO NOT consume
+        # the drain event or attempt remote resolution — the
+        # next round will re-dispatch a fresh worker.
+        if _result_type == "NO_CHANGES_REQUIRED":
+            _findings = (_wra.get("no_changes_required_proof") or {}).get("findings") or []
+            _all_incomplete = (
+                _findings
+                and all(
+                    (f.get("disposition") or "").upper() == "INCOMPLETE_EVIDENCE"
+                    for f in _findings
+                )
+            )
+            if _all_incomplete:
+                # Treat as STILL_ACTIONABLE: terminalize the
+                # attempt (the worker really did no work) but
+                # leave the drain event and thread untouched so
+                # the next heartbeat re-dispatches.
+                try:
+                    _rec_obj.lifecycle = "WORKER_EXITED_NO_PUSH"
+                    _rec_obj.terminal_reason = (
+                        "round-52: worker emitted INCOMPLETE_EVIDENCE "
+                        "for every finding; thread remains actionable, "
+                        "no remote resolution attempted"
+                    )
+                    WorkerAttemptStore(_dir).write(_rec_obj)
+                    _new_lifecycle = "WORKER_EXITED_NO_PUSH"
+                    # Skip the post-finalization drain-consume
+                    # and remote-resolution block below.
+                    transitions += 1
+                    log(
+                        "warning",
+                        "round-52: orphan worker INCOMPLETE_EVIDENCE; "
+                        "drain event preserved for re-dispatch",
+                        attempt_id=_attempt_id,
+                        pid=_pid,
+                    )
+                    continue
+                except Exception as _iie:
+                    log(
+                        "warning",
+                        "round-52: INCOMPLETE_EVIDENCE persist failed",
+                        attempt_id=_attempt_id,
+                        error=str(_iie)[:200],
+                    )
         if _result_type == "REPAIR_PUSHED" and _rec_obj.pushed_commit_sha:
             # Verify the pushed SHA is on origin/<branch>.
             _v = verify_push_against_attempt(
