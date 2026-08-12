@@ -4940,6 +4940,43 @@ def test_round50_1_worker_visible_prompt_contains_result_contract(tmp_path, monk
         prelaunch_head=head,
     )
 
+    # Round-50.1 Section 5: the worker MUST see a pre-resolved
+    # absolute path (no $STATE_DIR placeholder). The path MUST
+    # be a literal absolute path the worker can use directly.
+    import os as _os
+    # Determine the expected pre-resolved path. The function
+    # uses AED_SUPERVISOR_STATE_DIR || HOME/.hermes/aed-supervisor/state
+    # as the resolved state dir, then the orch root if present.
+    _state_dir = _os.environ.get(
+        "AED_SUPERVISOR_STATE_DIR", ""
+    ) or (_os.environ.get("HOME", "") + "/.hermes/aed-supervisor/state")
+    _orch_root = ""
+    try:
+        _rs_path = _os.environ.get("RUN_STATE", "") or (
+            _state_dir + "/run_state.json"
+        )
+        if _os.path.exists(_rs_path):
+            _orch_root = _json.loads(
+                _os.read_text(_rs_path, encoding="utf-8")
+            ).get("orchestration_state_root", "")
+    except Exception:
+        pass
+    _expected_dir = (
+        (_orch_root + "/worker_attempts")
+        if _orch_root
+        else (_state_dir + "/worker_attempts")
+    )
+    _expected_full = _expected_dir + f"/{attempt_id_prefix}-<PID>.worker_result.json"
+    assert _expected_full in suffix, (
+        f"Section 5: worker prompt MUST contain the pre-resolved "
+        f"absolute path; expected: {_expected_full!r}, suffix starts: {suffix[:500]}"
+    )
+    # No shell-variable placeholder.
+    assert "$STATE_DIR" not in suffix, (
+        "Section 5: worker prompt MUST NOT contain a shell "
+        "variable placeholder; pre-resolve the path."
+    )
+
     # Verify all Section 5 required fields appear in the suffix.
     required_substrings = [
         # expected result path

@@ -2961,29 +2961,56 @@ def _build_worker_result_contract_suffix(
     target_thread, prelaunch_head,
 ):
     """Round-50.1 Section 5: build the worker-visible canonical
-    result contract block that is appended to every worker's
-    prompt. The block MUST contain:
-      - the exact expected result artifact path;
-      - the exact attempt_id prefix;
-      - the directive digest and directive_id;
-      - the target thread identity;
-      - an explicit requirement to write the canonical result;
-      - produced/pushed SHA reporting requirements.
+    result contract block. Round-50.1 pre-resolves the
+    ``$STATE_DIR`` placeholder to a literal absolute path
+    and enumerates BOTH the supervisor's WORKER_ATTEMPTS_DIR
+    AND the canonical orchestration-state-root worker_attempts
+    subdirectory, so the worker has a deterministic place
+    to write regardless of which AED_EVIDENCE_ROOT variant
+    it picked up.
     """
-    expected_result_path = (
-        "$STATE_DIR/worker_attempts/"
-        f"{attempt_id_prefix}-<PID>.worker_result.json"
+    import os as _os_for_path
+    _resolved_state_dir = _os_for_path.environ.get(
+        "AED_SUPERVISOR_STATE_DIR", ""
+    ) or (_os_for_path.environ.get("HOME", "") + "/.hermes/aed-supervisor/state")
+    _worker_attempts_dir = _resolved_state_dir + "/worker_attempts"
+    _orch_evidence_root = ""
+    try:
+        _rs_path = _os_for_path.environ.get("RUN_STATE", "")
+        if not _rs_path:
+            _candidate = _resolved_state_dir + "/run_state.json"
+            if _os_for_path.exists(_candidate):
+                _rs_path = _candidate
+        if _rs_path and _os_for_path.exists(_rs_path):
+            _orch_evidence_root = _json.loads(
+                _os_for_path.read_text(_rs_path, encoding="utf-8")
+            ).get("orchestration_state_root", "")
+    except Exception:
+        pass
+    _orch_worker_attempts_dir = (
+        _orch_evidence_root + "/worker_attempts"
+        if _orch_evidence_root else ""
     )
+    if _orch_worker_attempts_dir:
+        _expected_result_path = (
+            _orch_worker_attempts_dir + "/"
+            + f"{attempt_id_prefix}-<PID>.worker_result.json"
+        )
+    else:
+        _expected_result_path = (
+            _worker_attempts_dir + "/"
+            + f"{attempt_id_prefix}-<PID>.worker_result.json"
+        )
     return (
         prompt_prefix
         + "\n\n=== ROUND-50.1 WORKER RESULT CONTRACT ===\n"
         + "You MUST write a canonical WorkerResultArtifact at:\n"
-        + f"  {expected_result_path}\n"
+        + f"  {_expected_result_path}\n"
         + "BEFORE exiting successfully. The schema is `autocoder.worker_result.v1`.\n"
         + "Required fields (all must be present):\n"
         + "  - schema_version: 'autocoder.worker_result.v1'\n"
-        + f"  - attempt_id: 'att-<TIMESTAMP>-<PID>'\n"
-        + f"  - claim_id: '{attempt_id_prefix}-<PID>'\n"
+        + f"  - attempt_id: 'att-<TIMESTAMP>-<PID>' (must equal the filename's <PID>)\n"
+        + f"  - claim_id: '{attempt_id_prefix}-<PID>' (must equal the filename's <PID>)\n"
         + f"  - directive_digest: '{directive_digest}'\n"
         + f"  - directive_id (UUID): '{directive_id}'\n"
         + f"  - directive_path: '{directive_path}'\n"
@@ -2993,9 +3020,9 @@ def _build_worker_result_contract_suffix(
         + "  - produced_commit_shas: <ordered list, [] for NO_CHANGES_REQUIRED>\n"
         + "  - pushed_commit_shas: <ordered list, [] for NO_CHANGES_REQUIRED>\n"
         + "  - completed_at: <ISO-8601 UTC timestamp>\n"
-        + "  - repo: '<owner>/<repo>'\n"
-        + "  - pr_number: <int>\n"
-        + "  - expected_branch: <str>\n"
+        + "  - repo: 'Slideshow11/AutoDev'\n"
+        + "  - pr_number: 5\n"
+        + "  - expected_branch: 'feat/review-repair-relay-v1'\n"
         + f"  - prelaunch_head: '{prelaunch_head}'\n"
         + f"  - attempt_nonce: '{attempt_id_prefix}'\n"
         + "  - no_changes_required_proof: <dict with findings[], "
@@ -3006,7 +3033,14 @@ def _build_worker_result_contract_suffix(
         + f"  - directive_sha256: {directive_digest}\n"
         + f"  - directive_path: {directive_path}\n"
         + "Your work is NOT complete until the canonical artifact is "
-        + "persisted at the path above with all required fields.\n"
+        + "persisted at the EXACT path above.\n"
+        + "CRITICAL: The filename is the LITERAL replacement of <PID> "
+        + "in the path with your own process PID. Use os.getpid() or "
+        + "$PPID to find it.\n"
+        + "The supervisor will look for: "
+        + f"{attempt_id_prefix}-<PID>.worker_result.json in either of:\n"
+        + f"  - {_worker_attempts_dir}\n"
+        + (f"  - {_orch_worker_attempts_dir}\n" if _orch_worker_attempts_dir else "")
         + "If you commit/push:\n"
         + "  - produced_commit_shas MUST list the produced SHAs in order.\n"
         + "  - pushed_commit_shas MUST list the pushed SHAs in order.\n"
