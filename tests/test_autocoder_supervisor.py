@@ -5637,10 +5637,11 @@ def test_round51_c19_repair_before_qualification_no_runnable(tmp_path, monkeypat
     )
 
 
-def test_round51_c19_repair_before_qualification_already_launched(tmp_path, monkeypatch):
+def test_round51_c19_repair_before_qualification_already_launched_with_active_lease(tmp_path, monkeypatch):
     """Round-51/C19: an actionable event that has already
-    been launched is NOT runnable repair (it has an
-    owner). The supervisor must NOT redispatch.
+    been launched AND whose owning worker lease is still
+    alive is NOT runnable repair (it has an active owner).
+    The supervisor must NOT redispatch.
     """
     import autocoder_supervisor.supervisor as sm
 
@@ -5655,10 +5656,43 @@ def test_round51_c19_repair_before_qualification_already_launched(tmp_path, monk
         sm, "launched_event_ids",
         lambda: {"unresolved_thread_drain:PRRT_Xr_ZK"},
     )
+    # An active lease = an active worker is responsible.
+    monkeypatch.setattr(
+        sm, "read_lease", lambda: {"attempt_id": "att-active"}
+    )
 
     assert sm._has_runnable_repair_generation() is False, (
-        "Round-51/C19: an already-launched event MUST NOT "
-        "count as runnable repair (it has an owner)"
+        "Round-51/C19: an already-launched event with an "
+        "active lease MUST NOT count as runnable repair"
+    )
+
+
+def test_round51_c19_repair_before_qualification_dead_lease_recoverable(tmp_path, monkeypatch):
+    """Round-51/C19: an actionable event in launched_events
+    whose owning worker is DEAD (no active lease) IS
+    runnable repair. The supervisor must dispatch a new
+    worker for it. This prevents a dead worker from
+    stranding a launched event forever.
+    """
+    import autocoder_supervisor.supervisor as sm
+
+    fake_unconsumed = [
+        {"id": "unresolved_thread_drain:PRRT_Xr_ZK",
+         "kind": "unresolved_thread_drain", "thread_id": "PRRT_Xr_ZK"},
+    ]
+    monkeypatch.setattr(
+        sm, "list_unconsumed_events", lambda: fake_unconsumed
+    )
+    monkeypatch.setattr(
+        sm, "launched_event_ids",
+        lambda: {"unresolved_thread_drain:PRRT_Xr_ZK"},
+    )
+    # No active lease = dead worker.
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+
+    assert sm._has_runnable_repair_generation() is True, (
+        "Round-51/C19: a launched event with a dead owner "
+        "MUST count as runnable repair"
     )
 
 

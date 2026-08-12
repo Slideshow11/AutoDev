@@ -1688,12 +1688,19 @@ def _has_runnable_repair_generation() -> bool:
     """Round-51/C19 Objective 2: REPAIR-BEFORE-QUALIFICATION.
 
     Return True iff there is at least one unconsumed
-    actionable event that has NOT been dispatched (i.e.
-    the launched-events set does not already cover it).
-    The repair-before-qualification ordering uses this
-    to determine whether the supervisor MUST dispatch
-    a worker this iteration rather than enter the
-    quiet-window polling loop.
+    actionable event whose owner is NOT an active worker.
+    The check covers:
+
+      (1) actionable events in the unconsumed ledger that
+          are NOT in the launched_events set (no owner ever
+          claimed them), OR
+      (2) actionable events that ARE in launched_events but
+          whose owning worker lease is no longer alive (the
+          worker died, the lease was released, but the
+          launched marker was not unmarked because
+          poll_worker_attempt only unmarks the LAST dispatched
+          event id, not every event in the lease's
+          last_dispatched_event_ids list).
 
     The check covers all actionable event kinds:
       - head_change
@@ -1729,19 +1736,41 @@ def _has_runnable_repair_generation() -> bool:
         "thread_reopened",
         "unresolved_thread_drain",
     }
-    actionable_ids = {
+    actionable_ids = [
         e.get("id", "")
         for e in unconsumed
         if e.get("kind") in actionable_kinds
-    }
+    ]
+    actionable_ids = [eid for eid in actionable_ids if eid]
     if not actionable_ids:
         return False
     try:
         already_launched = launched_event_ids()
     except Exception:
         already_launched = set()
+    # Check (1): undispatched actionable events.
     for eid in actionable_ids:
-        if eid and eid not in already_launched:
+        if eid not in already_launched:
+            return True
+    # Check (2): actionable events that ARE in launched_events
+    # but whose owning worker is dead (lease released).
+    try:
+        lease = read_lease()
+        lease_alive_owner = (
+            lease.get("attempt_id") if lease is not None else None
+        )
+    except Exception:
+        lease_alive_owner = None
+    if lease_alive_owner is not None:
+        # An active worker is already responsible for all
+        # launched events; no need to redispatch.
+        return False
+    # No active lease: every launched_event id is owned by
+    # a dead worker. Any actionable event still in
+    # launched_events must be unblocked so a new attempt
+    # can claim it.
+    for eid in actionable_ids:
+        if eid in already_launched:
             return True
     return False
 
