@@ -5094,6 +5094,185 @@ def test_round50_1_generation_identity_changes_with_source_blob(tmp_path, monkey
     assert g1 == g3  # deterministic
 
 
+
+
+def test_round50_1_standalone_ingestion_matches_via_directive_id(tmp_path, monkeypatch):
+    """Round-50.1 Section 6 compatibility parser: a standalone
+    roundNN_worker_attempt_result.json in REPO_DIR is associated
+    with the attempt via directive_id == directive_digest when
+    no attempt_id is present. The supervisor MUST NOT require
+    attempt_id for ingestion (many legacy artifacts omit it).
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json as _json
+    import subprocess as _sp
+
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    # Real-ish git repo for REPO_DIR
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo), raising=False)
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "hello.txt").write_text("x\n")
+    _sp.run(["git", "add", "hello.txt"], cwd=str(repo), check=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    # Forge a standalone legacy artifact with directive_id but
+    # NO attempt_id (the case that round 120 hit).
+    directive_digest = "abc123directive"
+    artifact = {
+        "schema_version": "round-50-1-legacy",
+        "directive_id": directive_digest,
+        "round_index": 121,
+        "head_sha_at_entry": "07d34877" * 5,
+        "head_sha_at_exit": "07d34877" * 5,
+        "disposition": {"no_op": True, "no_op_reason": "test"},
+        "findings": [{
+            "finding_id": "thread:PRRT_TEST_X",
+            "severity": "P1",
+            "file_path": "x.py",
+            "title": "Test finding",
+            "category": "B",
+            "disposition": "ALREADY_SATISFIED",
+        }],
+    }
+    (repo / "round121_worker_attempt_result.json").write_text(
+        _json.dumps(artifact), encoding="utf-8"
+    )
+
+    directive_digest_local = directive_digest
+
+    # Build a stub attempt record whose directive_digest matches
+    # Redirect WORKER_ATTEMPTS_DIR into the test tmp so the
+    # persistence side effect does not touch the production state.
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", str(wa_dir), raising=False)
+
+    # Build a real WorkerAttemptRecord with the right fields.
+    from autocoder_orchestration.worker_attempt import WorkerAttemptRecord
+    rec = WorkerAttemptRecord(
+        schema_version="autocoder.worker_attempt.v1",
+        attempt_id="att-20260812T120000Z-9999",
+        claim_id="claim-test",
+        repo_owner="OWNER",
+        repo_name="REPO",
+        pr_number=9,
+        event_ids=(),
+        finding_ids=(),
+        directive_digest=directive_digest_local,
+        directive_path="(stub)",
+        prelaunch_head="07d34877" * 5,
+        expected_branch="feat/test",
+        pid=42424,
+        lease_id="lease-test",
+        started_at="2026-01-01T00:00:00Z",
+        last_progress_at="2026-01-01T00:00:00Z",
+        finished_at=None,
+        lifecycle="WORKER_RUNNING",
+        attempt_count=1,
+        stdout_path=None,
+        stderr_path=None,
+        exit_code=None,
+        signal=None,
+        result_artifact_path=None,
+        produced_commit_sha=None,
+        pushed_commit_sha=None,
+        origin_head_verified=False,
+        github_head_verified=False,
+        terminal_reason=None,
+        extra={"attempt_nonce": "att-20260812T120000Z-9999"},
+    )
+
+    # The ingestion function should succeed via directive_id match.
+    ok = sm._round50_ingest_worker_result_artifact(rec)
+    assert ok is True, "ingestion must succeed when directive_id matches directive_digest"
+
+
+def test_round50_1_standalone_ingestion_rejects_wrong_directive_id(tmp_path, monkeypatch):
+    """Round-50.1 Section 6/23: a standalone file whose
+    directive_id does NOT match the attempt's directive_digest
+    MUST be rejected. No "latest file" heuristic.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json as _json
+    import subprocess as _sp
+
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo), raising=False)
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "h.txt").write_text("x\n")
+    _sp.run(["git", "add", "h.txt"], cwd=str(repo), check=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    artifact = {
+        "directive_id": "WRONG",
+        "round_index": 121,
+        "findings": [],
+    }
+    (repo / "round121_worker_attempt_result.json").write_text(
+        _json.dumps(artifact), encoding="utf-8"
+    )
+
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", str(wa_dir), raising=False)
+
+    from autocoder_orchestration.worker_attempt import WorkerAttemptRecord
+    rec = WorkerAttemptRecord(
+        schema_version="autocoder.worker_attempt.v1",
+        attempt_id="att-X",
+        claim_id="c",
+        repo_owner="OWNER",
+        repo_name="REPO",
+        pr_number=9,
+        event_ids=(),
+        finding_ids=(),
+        directive_digest="RIGHT",
+        directive_path="(stub)",
+        prelaunch_head="h",
+        expected_branch="feat/test",
+        pid=1,
+        lease_id="lease-test",
+        started_at="2026-01-01T00:00:00Z",
+        last_progress_at="2026-01-01T00:00:00Z",
+        finished_at=None,
+        lifecycle="WORKER_RUNNING",
+        attempt_count=1,
+        stdout_path=None,
+        stderr_path=None,
+        exit_code=None,
+        signal=None,
+        result_artifact_path=None,
+        produced_commit_sha=None,
+        pushed_commit_sha=None,
+        origin_head_verified=False,
+        github_head_verified=False,
+        terminal_reason=None,
+        extra={},
+    )
+
+    # Wrong directive_id MUST NOT match. The artifact's findings
+    # list is also empty, so even if it had matched the
+    # normalizer would return None. The combined result is False.
+    ok = sm._round50_ingest_worker_result_artifact(rec)
+    assert ok is False
+
+
 def test_round50_1_open_work_generation_lookup(tmp_path, monkeypatch):
     """Round-50.1 Section 12: an OPEN work generation
     persists. The drain emitter uses this to skip

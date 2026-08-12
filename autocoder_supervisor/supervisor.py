@@ -3050,6 +3050,13 @@ def _round50_ingest_worker_result_artifact(rec):
     """
     import json as _json
     import os as _os
+    # Import here to avoid module-level circular import. The
+    # canonical worker-result contract lives in the
+    # orchestration package.
+    from autocoder_orchestration.worker_attempt import (
+        WorkerResultArtifact,
+        RESULT_TYPE_NO_CHANGES_REQUIRED,
+    )
 
     # 1. Look at rec.result_artifact_path; if set, the file must exist.
     rpap = getattr(rec, "result_artifact_path", None)
@@ -3075,6 +3082,60 @@ def _round50_ingest_worker_result_artifact(rec):
                 raw_payload = _json.loads(_wadir.read_text(encoding="utf-8"))
                 source_surface = "deterministic_per_attempt_path"
                 rpap_parsed = _wadir
+        except Exception:
+            raw_payload = None
+
+    # 3. Standalone roundNN_worker_attempt_result.json files in
+    #    REPO_DIR — explicit validated compatibility parser
+    #    (Section 6). A standalone file is associated with the
+    #    attempt ONLY when one of these deterministic identifiers
+    #    matches:
+    #      a) artifact.attempt_id == rec.attempt_id  (preferred)
+    #      b) artifact.directive_id == rec.directive_digest
+    #         OR artifact.directive_sha256 == rec.directive_digest
+    #         (a secondary identifier — many workers populate
+    #          directive_id but not attempt_id in legacy artifacts)
+    #    Round-index, mtime, filename-heuristic, and timestamp
+    #    matches are FORBIDDEN: they create cross-attempt
+    #    association ambiguity. We NEVER pick "latest result
+    #    file".
+    if raw_payload is None:
+        try:
+            for _sfn in _os.listdir(REPO_DIR):
+                if not _sfn.endswith("_worker_attempt_result.json"):
+                    continue
+                _sp = Path(REPO_DIR) / _sfn
+                if not _sp.is_file():
+                    continue
+                try:
+                    _cand = _json.loads(_sp.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if not isinstance(_cand, dict):
+                    continue
+                _cand_attempt_id = str(_cand.get("attempt_id") or "")
+                _cand_directive_id = str(
+                    _cand.get("directive_id")
+                    or _cand.get("directive_sha256")
+                    or ""
+                )
+                if (
+                    _cand_attempt_id
+                    and _cand_attempt_id == rec.attempt_id
+                ):
+                    raw_payload = _cand
+                    source_surface = "standalone_with_attempt_id"
+                    rpap_parsed = _sp
+                    break
+                if (
+                    _cand_directive_id
+                    and rec.directive_digest
+                    and _cand_directive_id == rec.directive_digest
+                ):
+                    raw_payload = _cand
+                    source_surface = "standalone_with_directive_id"
+                    rpap_parsed = _sp
+                    break
         except Exception:
             raw_payload = None
 
@@ -3114,7 +3175,12 @@ def _round50_ingest_worker_result_artifact(rec):
                     tests_run=0,
                     tests_passed=0,
                     attempt_nonce=rec.extra.get("attempt_nonce") if isinstance(rec.extra, dict) else None,
-                    repo=rec.repo or "",
+                    repo=(
+                        f"{rec.repo_owner}/{rec.repo_name}"
+                        if getattr(rec, "repo_owner", None)
+                        and getattr(rec, "repo_name", None)
+                        else ""
+                    ),
                     pr_number=rec.pr_number,
                     expected_branch=rec.expected_branch or "",
                     prelaunch_head=rec.prelaunch_head or "",
