@@ -5041,38 +5041,42 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
     # attempts whose thread_ids are still unresolved on GitHub.
     # This is a best-effort idempotent retry: GitHub's
     # resolveReviewThread mutation is safe to call repeatedly.
-    if transitions == 0:
-        for _path in _dir.glob("att-*.json"):
-            if _path.name.endswith(".worker_result.json"):
+    # Runs on EVERY invocation (not gated on transitions == 0)
+    # because the WORKER_RUNNING loop and the retry pass address
+    # different records: the first is for active attempts; the
+    # second is for terminalized attempts whose remote
+    # resolution call silently failed in a prior run.
+    for _path in _dir.glob("att-*.json"):
+        if _path.name.endswith(".worker_result.json"):
+            continue
+        if not _path.name.endswith(".json"):
+            continue
+        try:
+            _d = json.loads(_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if _d.get("lifecycle") not in (
+            LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED,
+        ):
+            continue
+        _extra = _d.get("extra") or {}
+        _ncrp = _extra.get("no_changes_required_proof") or {}
+        if not _ncrp:
+            continue
+        for _f in _ncrp.get("findings") or []:
+            _fid = (_f or {}).get("finding_id", "")
+            if not _fid.startswith("thread:"):
                 continue
-            if not _path.name.endswith(".json"):
-                continue
+            _tid = _fid[len("thread:"):]
             try:
-                _d = json.loads(_path.read_text(encoding="utf-8"))
+                resolveReviewThread(
+                    attempt_id=_d.get("attempt_id", ""),
+                    lifecycle=_d.get("lifecycle", ""),
+                    thread_id=_tid,
+                    head_sha=_d.get("prelaunch_head", ""),
+                )
             except Exception:
-                continue
-            if _d.get("lifecycle") not in (
-                LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED,
-            ):
-                continue
-            _extra = _d.get("extra") or {}
-            _ncrp = _extra.get("no_changes_required_proof") or {}
-            if not _ncrp:
-                continue
-            for _f in _ncrp.get("findings") or []:
-                _fid = (_f or {}).get("finding_id", "")
-                if not _fid.startswith("thread:"):
-                    continue
-                _tid = _fid[len("thread:"):]
-                try:
-                    resolveReviewThread(
-                        attempt_id=_d.get("attempt_id", ""),
-                        lifecycle=_d.get("lifecycle", ""),
-                        thread_id=_tid,
-                        head_sha=_d.get("prelaunch_head", ""),
-                    )
-                except Exception:
-                    pass
+                pass
 
     return transitions
 
