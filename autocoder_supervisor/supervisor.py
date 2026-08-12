@@ -5915,7 +5915,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         )
         _state_dir_str = str(STATE_DIR)  # type: ignore[name-defined]
         _early_claim_id = (
-            directive_id
+            _early_directive_id
             or f"lease-{_resolved_session_id}"
         )
         _wrapper_kwargs = {
