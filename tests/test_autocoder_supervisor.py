@@ -5431,8 +5431,8 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
     fake_worker = tmp_path / "fake_worker.sh"
     envelope = {
         "schema_version": "autocoder.worker_envelope.v1",
-        "attempt_id": "att-20260812T120000Z-99999",
-        "claim_id": "att-20260812T120000Z-99999",
+        "attempt_id": "att-20260812T120000Z",  # no PID; wrapper appends it
+        "claim_id": "att-20260812T120000Z",    # wrapper appends PID
         "directive_digest": "deadbeef" * 8,
         "directive_id": "test-uuid",
         "result_type": "NO_CHANGES_REQUIRED",
@@ -5459,7 +5459,7 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
     )
     fake_worker.chmod(0o755)
 
-    artifact_path = tmp_path / "result.json"
+    artifact_path = tmp_path / "att-20260812T120000Z-<PID>.worker_result.json"
     stdout_log = tmp_path / "stdout.log"
 
     # Invoke the wrapper
@@ -5468,7 +5468,7 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
         [
             sys.executable,
             aed_worker_wrapper.__file__,
-            "--attempt-id", "att-20260812T120000Z-99999",
+            "--attempt-id", "att-20260812T120000Z",
             "--directive-digest", "deadbeef" * 8,
             "--directive-id", "test-uuid",
             "--prelaunch-head", "abc" * 14,
@@ -5484,18 +5484,45 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
         f"wrapper must exit 0; got {result.returncode} stderr={result.stderr}"
     )
 
-    # Canonical artifact must exist
-    assert artifact_path.exists(), (
-        "Round-51/C19: wrapper must write the canonical artifact"
+    # Canonical artifact must exist. The wrapper substitutes
+    # <PID> in the path with the worker's actual PID. The
+    # written file basename therefore contains the worker's
+    # PID, matching the canonical attempt_id.
+    import re as _re
+    written_files = [p for p in artifact_path.parent.iterdir() if p.suffix == ".json" and "120000Z" in p.name]
+    assert written_files, (
+        f"Round-51/C19: wrapper must write the canonical artifact; "
+        f"saw: {list(artifact_path.parent.iterdir())}"
     )
-    artifact = _json.loads(artifact_path.read_text())
+    # Find the file with the substituted PID (not the literal
+    # <PID>).
+    resolved_files = [p for p in written_files if "<PID>" not in p.name]
+    assert resolved_files, (
+        f"Round-51/C19: <PID> in path was not substituted; saw: {written_files}"
+    )
+    resolved = resolved_files[0]
+    artifact = _json.loads(resolved.read_text())
     assert artifact["schema_version"] == "autocoder.worker_result.v1"
-    assert artifact["attempt_id"] == "att-20260812T120000Z-99999"
+    # attempt_id MUST be the worker's PID-suffixed form so
+    # the supervisor's identity validation passes.
+    assert artifact["attempt_id"].startswith("att-20260812T120000Z-"), (
+        f"attempt_id must start with the attempt_id_prefix; got {artifact['attempt_id']!r}"
+    )
+    # The PID portion must equal the worker's actual PID
+    # (the same PID that ended up in the filename).
+    _expected_pid = resolved.name.rsplit("-", 1)[-1].replace(".worker_result.json", "")
+    assert artifact["attempt_id"].endswith(f"-{_expected_pid}"), (
+        f"attempt_id must end with the worker's PID; got {artifact['attempt_id']!r}, expected suffix -{_expected_pid}"
+    )
     assert artifact["result_type"] == "NO_CHANGES_REQUIRED"
     assert artifact["produced_commit_shas"] == []
     assert artifact["pushed_commit_shas"] == []
     assert artifact["no_changes_required_proof"]["source"] == "round50_envelope_parser"
     assert artifact["directive_digest"] == "deadbeef" * 8
+    # claim_id is the same as attempt_id.
+    assert artifact["claim_id"] == artifact["attempt_id"], (
+        f"claim_id must equal attempt_id; got claim_id={artifact['claim_id']!r}, attempt_id={artifact['attempt_id']!r}"
+    )
 
     # Stdout log must be preserved for forensic chain-of-custody
     assert stdout_log.exists()

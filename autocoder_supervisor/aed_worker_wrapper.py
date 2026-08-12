@@ -278,11 +278,23 @@ def main() -> int:
     if envelope and isinstance(envelope, dict):
         result_type = envelope.get("result_type") or result_type
 
+    # The wrapper resolves the canonical attempt_id and
+    # claim_id by appending the worker's actual PID to the
+    # attempt_id_prefix the supervisor passed in. This
+    # matches the per-attempt filename the supervisor
+    # expects (attempt_id_prefix-PID.worker_result.json)
+    # AND passes identity validation: the canonical
+    # artifact's attempt_id and claim_id must equal
+    # the file's basename, which the supervisor parses
+    # from the artifact path.
+    _resolved_attempt_id = f"{args.attempt_id}-{proc.pid}"
+    _resolved_claim_id = _resolved_attempt_id
+
     # Build the canonical WorkerResultArtifact
     artifact = {
         "schema_version": "autocoder.worker_result.v1",
-        "attempt_id": args.attempt_id,
-        "claim_id": envelope.get("claim_id", args.attempt_id) if isinstance(envelope, dict) else args.attempt_id,
+        "attempt_id": _resolved_attempt_id,
+        "claim_id": _resolved_claim_id,
         "directive_digest": args.directive_digest,
         "result_type": result_type,
         "produced_commit_shas": (
@@ -331,8 +343,17 @@ def main() -> int:
             "note": "Worker emitted no envelope; wrapper synthesized empty proof. Worker stdout captured for forensic review.",
         }
 
+    # Substitute <PID> in the target paths with the
+    # worker's actual PID. This is the per-attempt
+    # identifier the supervisor expects when validating
+    # the canonical artifact.
+    def _resolve_pid(path_str: str) -> str:
+        if "<PID>" in path_str:
+            return path_str.replace("<PID>", str(proc.pid))
+        return path_str
+
     # Write the canonical artifact
-    target = Path(args.result_artifact_path)
+    target = Path(_resolve_pid(args.result_artifact_path))
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
         target.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
@@ -342,7 +363,7 @@ def main() -> int:
 
     # Optional second copy under the orch dir
     if args.orch_result_artifact_path:
-        orch_target = Path(args.orch_result_artifact_path)
+        orch_target = Path(_resolve_pid(args.orch_result_artifact_path))
         try:
             orch_target.parent.mkdir(parents=True, exist_ok=True)
             orch_target.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
