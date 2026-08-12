@@ -1382,6 +1382,255 @@ def _thread_dispositions_ledger_path():
     ) / "thread_dispositions.jsonl"
 
 
+THREAD_CARRY_FORWARD_INDEX_VERSION = "round49_c16_v1"
+THREAD_CARRY_FORWARD_INDEX_FILENAME = "thread_carry_forward_index.json"
+
+
+def _thread_carry_forward_index_path():
+    """Round-49 C16: per-repo per-PR JSON index mapping
+    ``thread_id`` to the dependency context captured when a
+    terminal disposition was recorded. The path lives next
+    to the dispositions ledger so the two artifacts share
+    a single directory and survive supervisor restarts.
+
+    The index is keyed by thread id (NOT by thread id +
+    evaluated head) because the carry-forward contract is
+    that the dependency check at the CURRENT live head
+    determines whether the disposition remains valid. The
+    round-46 ledger was keyed by generation to support
+    the older "re-dispatch on every head advance" contract;
+    the round-49 index supersedes that for dependency-stable
+    threads.
+    """
+    from pathlib import Path as _P
+    import os as _os
+    _home = _os.environ.get("HOME") or "~"
+    return _P(_home) / ".hermes" / "aed" / "runs" / str(
+        REPO_OWNER  # type: ignore[name-defined]
+    ) / str(
+        REPO_NAME  # type: ignore[name-defined]
+    ) / str(
+        PR_NUMBER  # type: ignore[name-defined]
+    ) / THREAD_CARRY_FORWARD_INDEX_FILENAME
+
+
+def _read_thread_carry_forward_index():
+    """Load the carry-forward index. Returns an empty dict
+    when the file is missing or unreadable; the index is a
+    cache, not a system-of-record, so transient read errors
+    fall back to "no carry-forward" (i.e. the supervisor
+    emits drain events normally).
+    """
+    p = _thread_carry_forward_index_path()
+    if not p.exists():
+        return {}
+    try:
+        import json as _json
+        return _json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_thread_carry_forward_index(idx):
+    """Atomically replace the carry-forward index on disk.
+    The supervisor writes the full index on every update
+    because the index is small (one row per terminal
+    disposition) and the write is bounded.
+    """
+    import os as _os
+    import json as _json
+    from pathlib import Path as _P
+    target = _thread_carry_forward_index_path()
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.parent / (target.name + ".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            _json.dump(idx, f, sort_keys=True, separators=(",", ":"))
+            f.flush()
+            _os.fsync(f.fileno())
+        _os.replace(tmp, target)
+        return True
+    except OSError as exc:
+        log(
+            "warning",
+            "round-49 C16: carry-forward index write failed",
+            error=str(exc)[:200],
+        )
+        return False
+
+
+def _compute_thread_body_sha256(body_text):
+    """SHA-256 of a thread body for the carry-forward
+    dependency check. The hex digest is stored alongside
+    the disposition so the dependency comparator can detect
+    content shifts even when the path/line are stable.
+
+    Round-49 C16: the body is normalized to the canonical
+    snapshot form (truncated to 500 chars, the same limit
+    the supervisor applies when capturing the live
+    snapshot). Both the recorded body and the current
+    body are hashed against this canonical form so the
+    comparison is symmetric.
+    """
+    if body_text is None:
+        return ""
+    normalized = str(body_text)[:500]
+    if not normalized:
+        return ""
+    import hashlib as _h
+    return _h.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _record_thread_carry_forward_entry(
+    *, thread_id, disposition, path, line, body, disposition_head,
+    worker_attempt_id, evaluated_head,
+):
+    """Round-49 C16: persist a single carry-forward entry.
+
+    The entry records the dependency context (path, line,
+    body sha, line count) at the time of the terminal
+    disposition so that a future head advance can re-validate
+    the disposition without re-dispatching the thread.
+
+    The entry is NOT versioned per head: the SAME thread id
+    may have multiple carry-forward entries across multiple
+    heads. Only the latest entry (by ``recorded_at``) is
+    authoritative; older entries are kept for forensic
+    purposes.
+    """
+    if not thread_id:
+        return False
+    if disposition not in TERMINAL_THREAD_DISPOSITIONS:
+        return False
+    import json as _json
+    idx = _read_thread_carry_forward_index()
+    rows = idx.get("threads") or {}
+    if not isinstance(rows, dict):
+        rows = {}
+    # Compute the line count of the file at disposition_head.
+    line_count = 0
+    if path:
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["git", "-C", str(REPO_DIR), "show",
+                 f"{disposition_head}:{path}"],
+                capture_output=True, timeout=5.0,
+            )
+            if r.returncode == 0 and r.stdout:
+                line_count = r.stdout.count(b"\n") + 1
+        except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
+            pass
+    rows[thread_id] = {
+        "disposition": disposition,
+        "path": path or "",
+        "line": line,
+        "body_sha256": _compute_thread_body_sha256(body or ""),
+        "line_count_at_disposition": line_count,
+        "disposition_head": disposition_head or "",
+        "evaluated_head": evaluated_head or "",
+        "worker_attempt_id": worker_attempt_id or "",
+        "recorded_at": now_iso(),
+        "schema_version": THREAD_CARRY_FORWARD_INDEX_VERSION,
+    }
+    idx["schema_version"] = THREAD_CARRY_FORWARD_INDEX_VERSION
+    idx["updated_at"] = now_iso()
+    idx["threads"] = rows
+    return _write_thread_carry_forward_index(idx)
+
+
+def _is_thread_carry_forward_satisfied(
+    *, thread_id, current_path, current_line, current_body,
+    current_head,
+):
+    """Round-49 C16: return True when the latest carry-forward
+    entry for ``thread_id`` has a dependency context that
+    remains valid at ``current_head``. The check is
+    dependency-aware: it verifies that the file at
+    ``current_path`` still exists at ``current_head``, that
+    the current line is within tolerance of the recorded
+    line, and that the body content hash is unchanged
+    (for SUPERSEDED / ALREADY_SATISFIED).
+
+    Returns False (i.e. NOT carry-forward satisfied) when:
+      - no entry exists for ``thread_id``
+      - the entry's disposition is not terminal
+      - the file path no longer exists at current_head
+      - the line is far out of range (> 10 lines)
+      - the body content has shifted
+      - the recorded path/line is empty AND the current
+        thread has no real evidence
+
+    The function NEVER raises; on any internal failure it
+    returns False so the supervisor falls through to the
+    normal drain-event emission.
+    """
+    if not thread_id:
+        return False
+    idx = _read_thread_carry_forward_index()
+    rows = idx.get("threads") or {}
+    entry = rows.get(thread_id)
+    if not isinstance(entry, dict):
+        return False
+    disp = entry.get("disposition")
+    if disp not in TERMINAL_THREAD_DISPOSITIONS:
+        return False
+    rec_path = (entry.get("path") or "").strip()
+    rec_line = entry.get("line")
+    rec_body_sha = entry.get("body_sha256") or ""
+    rec_line_count = int(entry.get("line_count_at_disposition") or 0)
+    rec_head = entry.get("disposition_head") or ""
+
+    # If the recorded disposition has NO path AND NO line AND
+    # NO body, the thread was dispositioned without any
+    # dependency context. Carry-forward cannot be evaluated.
+    if not rec_path and rec_line is None and not rec_body_sha:
+        return False
+
+    # File-move / deletion check: the file at rec_path must
+    # still exist at current_head. A missing file invalidates
+    # the dependency entirely.
+    if rec_path:
+        try:
+            import subprocess as _sp
+            r = _sp.run(
+                ["git", "-C", str(REPO_DIR), "show",
+                 f"{current_head}:{rec_path}"],
+                capture_output=True, timeout=5.0,
+            )
+            if r.returncode != 0:
+                return False
+        except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
+            return False
+    # Line-range check: the current line (from the live
+    # snapshot) must be within tolerance of the recorded
+    # line. Tolerance is 10 lines on either side to handle
+    # minor reflows. When the recorded line is None, we
+    # skip this check (path + body hash are sufficient).
+    if rec_line is not None and current_line is not None:
+        try:
+            rec_l = int(rec_line)
+            cur_l = int(current_line)
+        except (TypeError, ValueError):
+            return False
+        if abs(cur_l - rec_l) > 10:
+            return False
+    # Body-content shift check: for SUPERSEDED /
+    # ALREADY_SATISFIED, the recorded body hash must match
+    # the current body. For REPAIRED we accept either match
+    # (the file changed but the finding is "repaired" by
+    # that change). When the recorded body_sha is empty we
+    # skip this check (path/line are sufficient).
+    if rec_body_sha and disp in (
+        THREAD_DISPOSITION_SUPERSEDED,
+        THREAD_DISPOSITION_ALREADY_SATISFIED,
+    ):
+        cur_sha = _compute_thread_body_sha256(current_body or "")
+        if cur_sha and rec_body_sha != cur_sha:
+            return False
+    return True
+
+
 def _thread_disposition_generation(
     *, repo, pr_number, provider, thread_id, evaluated_head,
 ):
@@ -1636,6 +1885,57 @@ def consume_thread_drain_event_in_terminal_disposition(
             provider=str(provider or "coderabbit"),
             disposition=normalized,
             worker_attempt_id=str(worker_attempt_id or ""),
+        )
+    # Round-49 C16: persist a carry-forward entry so the
+    # disposition survives head advances when the underlying
+    # file/line/body dependency remains satisfied. The
+    # carry-forward index is keyed by thread_id and stores
+    # the dependency context (path, line, body sha, line
+    # count) at the time of disposition. The disposition
+    # is then re-validated at each subsequent head advance.
+    try:
+        _path_for_cf = ""
+        _line_for_cf = None
+        _body_for_cf = ""
+        if isinstance(thread_record, dict):
+            _path_for_cf = (
+                thread_record.get("path")
+                or thread_record.get("commit_path")
+                or ""
+            )
+            _line_for_cf = thread_record.get("line")
+            _body_for_cf = thread_record.get("body") or ""
+        # ``extra`` carries the snapshot evidence captured
+        # by the drain-event emitter when the directive was
+        # dispatched; fall back to it when thread_record
+        # omits the field.
+        if isinstance(extra_identity, dict):
+            if not _path_for_cf:
+                _path_for_cf = (
+                    extra_identity.get("path")
+                    or extra_identity.get("commit_path")
+                    or ""
+                )
+            if _line_for_cf is None:
+                _line_for_cf = extra_identity.get("line")
+            if not _body_for_cf:
+                _body_for_cf = extra_identity.get("body") or ""
+        _record_thread_carry_forward_entry(
+            thread_id=str(thread_id or ""),
+            disposition=normalized,
+            path=_path_for_cf,
+            line=_line_for_cf,
+            body=_body_for_cf,
+            disposition_head=str(evaluated_head or ""),
+            worker_attempt_id=str(worker_attempt_id or ""),
+            evaluated_head=str(evaluated_head or live_head or ""),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-49 C16: carry-forward entry write failed",
+            thread_id=thread_id,
+            error=str(exc)[:200],
         )
     log(
         "info",
@@ -8440,6 +8740,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 td = threads[tid] or {}
                 body = (td.get("body") or "").strip()
                 path = (td.get("path") or "").strip()
+                line = td.get("line")
                 commit_oid = td.get("commit_oid")
                 # Real evidence: the thread carries content.
                 if not body and not path:
@@ -8453,6 +8754,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                 ):
                     pass
                 elif not body and not path:
+                    continue
+                # Round-49 C16: dependency-aware carry-forward.
+                # When the latest terminal disposition for this
+                # thread has a dependency context (path / line /
+                # body) that remains satisfied at the current
+                # head, the disposition still applies and the
+                # thread MUST NOT be re-dispatched. This breaks
+                # the historical mass-resurrection of terminal
+                # threads on every head advance.
+                #
+                # The carry-forward body is the raw
+                # snapshot-form body (NOT the stripped form
+                # used for the actionable check above); the
+                # recorded body_sha is computed against the
+                # raw form.
+                if current_head and _is_thread_carry_forward_satisfied(
+                    thread_id=tid,
+                    current_path=path,
+                    current_line=line,
+                    current_body=td.get("body") or "",
+                    current_head=current_head,
+                ):
                     continue
                 actionable_unresolved.append(tid)
             for tid in actionable_unresolved:

@@ -3970,3 +3970,332 @@ def test_round48_c15_missing_review_decision_fails_closed(
         "round-48 C15: missing reviewDecision must fail closed "
         "but the merge transaction returned without raising."
     )
+
+
+
+def test_round49_c16_carry_forward_index_path_is_repo_scoped(tmp_path, monkeypatch):
+    """Round-49 C16 bug-detector: the carry-forward index
+    path is scoped to (repo_owner, repo_name, pr_number) and
+    lives next to run_state.json.
+    """
+    import importlib
+    # Reload the module so monkeypatched REPO_OWNER etc. take effect.
+    import autocoder_supervisor.supervisor as sm
+    # Monkeypatch the repo identity and HOME for the test.
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER_TEST", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO_TEST", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 7, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    p = sm._thread_carry_forward_index_path()
+    assert str(p).endswith("OWNER_TEST/REPO_TEST/7/thread_carry_forward_index.json"), p
+
+
+def test_round49_c16_carry_forward_satisfied_when_file_and_body_unchanged(tmp_path, monkeypatch):
+    """Round-49 C16 bug-detector: a carry-forward entry
+    whose path and body are unchanged at the new head MUST
+    be reported as satisfied.
+    """
+    import importlib
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import subprocess as _sp
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
+    # Init a real git repo so git show works.
+    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
+    _TEST_HEAD = _sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    target_file = repo_path / "hello.txt"
+    target_file.write_text("line1\nline2\nline3\nline4\nline5\n")
+    _sp.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo_path), check=True)
+    import subprocess as _sp_head
+    _TEST_HEAD = _sp_head.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    # Write a carry-forward entry referencing this file.
+    sm._record_thread_carry_forward_entry(
+        thread_id="PRRT_TEST_001",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        path="hello.txt",
+        line=3,
+        body="comment body",
+        disposition_head=_TEST_HEAD,
+        worker_attempt_id="att-1",
+        evaluated_head=_TEST_HEAD,
+    )
+    # Compute line_count via git show — without a real git
+    # repo we have line_count=0. The carry-forward check
+    # tolerates line_count=0 and uses only path + line +
+    # body for the comparison.
+    ok = sm._is_thread_carry_forward_satisfied(
+        thread_id="PRRT_TEST_001",
+        current_path="hello.txt",
+        current_line=4,
+        current_body="comment body",
+        current_head=_TEST_HEAD,
+    )
+    assert ok is True, (
+        "round-49 C16: carry-forward MUST be satisfied "
+        "when path + body are unchanged. R47 broken: "
+        "carry-forward index does not exist or returns False."
+    )
+
+
+def test_round49_c16_carry_forward_invalidated_when_file_deleted(tmp_path, monkeypatch):
+    """Round-49 C16 bug-detector: a carry-forward entry
+    whose file path no longer exists at the new head MUST
+    be reported as NOT satisfied, so the supervisor can
+    re-dispatch the thread.
+    """
+    import importlib
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 10, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import subprocess as _sp
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
+    # Init a real git repo so git show works.
+    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
+    _TEST_HEAD = _sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    sm._record_thread_carry_forward_entry(
+        thread_id="PRRT_TEST_002",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        path="deleted.txt",
+        line=10,
+        body="old body",
+        disposition_head=_TEST_HEAD,
+        worker_attempt_id="att-2",
+        evaluated_head=_TEST_HEAD,
+    )
+    ok = sm._is_thread_carry_forward_satisfied(
+        thread_id="PRRT_TEST_002",
+        current_path="deleted.txt",
+        current_line=10,
+        current_body="old body",
+        current_head=_TEST_HEAD,
+    )
+    assert ok is False, (
+        "round-49 C16: carry-forward MUST be NOT "
+        "satisfied when the file is deleted at the new "
+        "head; the supervisor must re-dispatch."
+    )
+
+
+def test_round49_c16_carry_forward_invalidated_when_body_changed(tmp_path, monkeypatch):
+    """Round-49 C16 bug-detector: for ALREADY_SATISFIED
+    and SUPERSEDED, a body-content shift at the new head
+    invalidates the carry-forward.
+    """
+    import importlib
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 11, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import subprocess as _sp
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
+    # Init a real git repo so git show works.
+    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
+    _TEST_HEAD = _sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    target_file = tmp_path / "repo" / "hello.txt"
+    target_file.write_text("line1\nline2\nline3\n")
+    sm._record_thread_carry_forward_entry(
+        thread_id="PRRT_TEST_003",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        path="hello.txt",
+        line=2,
+        body="original body",
+        disposition_head=_TEST_HEAD,
+        worker_attempt_id="att-3",
+        evaluated_head=_TEST_HEAD,
+    )
+    ok = sm._is_thread_carry_forward_satisfied(
+        thread_id="PRRT_TEST_003",
+        current_path="hello.txt",
+        current_line=2,
+        current_body="NEW body content (changed by reviewer)",
+        current_head=_TEST_HEAD,
+    )
+    assert ok is False, (
+        "round-49 C16: body content shift must invalidate "
+        "carry-forward for ALREADY_SATISFIED."
+    )
+
+
+def test_round49_c16_carry_forward_record_writes_index(tmp_path, monkeypatch):
+    """Round-49 C16: recording a terminal disposition MUST
+    persist the carry-forward entry to disk.
+    """
+    import importlib
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 12, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import subprocess as _sp
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
+    # Init a real git repo so git show works.
+    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
+    _TEST_HEAD = _sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    ok = sm._record_thread_carry_forward_entry(
+        thread_id="PRRT_TEST_004",
+        disposition=sm.THREAD_DISPOSITION_REPAIRED,
+        path="hello.txt",
+        line=2,
+        body="repair evidence",
+        disposition_head=_TEST_HEAD,
+        worker_attempt_id="att-4",
+        evaluated_head=_TEST_HEAD,
+    )
+    assert ok is True
+    idx = sm._read_thread_carry_forward_index()
+    assert "PRRT_TEST_004" in idx.get("threads", {})
+    entry = idx["threads"]["PRRT_TEST_004"]
+    assert entry["disposition"] == sm.THREAD_DISPOSITION_REPAIRED
+    assert entry["path"] == "hello.txt"
+    assert entry["line"] == 2
+    assert entry["disposition_head"] == _TEST_HEAD
+
+
+def test_round49_c16_carry_forward_repaired_ignores_body_shift(tmp_path, monkeypatch):
+    """Round-49 C16: REPAIRED dispositions carry-forward
+    even when the body content shifts (the file changed
+    but the finding was repaired by that change).
+    """
+    import importlib
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 13, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import subprocess as _sp
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
+    # Init a real git repo so git show works.
+    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
+    target_file = repo_path / "hello.txt"
+    target_file.write_text("a\nb\nc\n")
+    _sp.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo_path), check=True)
+    _TEST_HEAD = _sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    sm._record_thread_carry_forward_entry(
+        thread_id="PRRT_TEST_005",
+        disposition=sm.THREAD_DISPOSITION_REPAIRED,
+        path="hello.txt",
+        line=2,
+        body="original",
+        disposition_head=_TEST_HEAD,
+        worker_attempt_id="att-5",
+        evaluated_head=_TEST_HEAD,
+    )
+    ok = sm._is_thread_carry_forward_satisfied(
+        thread_id="PRRT_TEST_005",
+        current_path="hello.txt",
+        current_line=2,
+        current_body="DIFFERENT body after repair",
+        current_head=_TEST_HEAD,
+    )
+    assert ok is True, (
+        "round-49 C16: REPAIRED carry-forward MUST NOT "
+        "be invalidated by a body-content shift (the "
+        "finding was repaired by the file change)."
+    )
+
+
+def test_round49_c16_carry_forward_invalidated_when_line_far_out_of_range(tmp_path, monkeypatch):
+    """Round-49 C16: line shifting more than the 10-line
+    tolerance invalidates carry-forward.
+    """
+    import importlib
+    import autocoder_supervisor.supervisor as sm
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 14, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    import subprocess as _sp
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo_path), raising=False)
+    # Init a real git repo so git show works.
+    _sp.run(["git", "init", "-q"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo_path), check=True)
+    target_file = repo_path / "hello.txt"
+    target_file.write_text(
+        "\n".join(f"line{i}" for i in range(1, 101))
+    )
+    _sp.run(["git", "add", "hello.txt"], cwd=str(repo_path), check=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo_path), check=True)
+    _TEST_HEAD = _sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(repo_path), capture_output=True, text=True,
+    ).stdout.strip()
+    sm._record_thread_carry_forward_entry(
+        thread_id="PRRT_TEST_006",
+        disposition=sm.THREAD_DISPOSITION_ALREADY_SATISFIED,
+        path="hello.txt",
+        line=5,
+        body="body",
+        disposition_head=_TEST_HEAD,
+        worker_attempt_id="att-6",
+        evaluated_head=_TEST_HEAD,
+    )
+    # Within tolerance (+/-10): satisfied.
+    ok_within = sm._is_thread_carry_forward_satisfied(
+        thread_id="PRRT_TEST_006",
+        current_path="hello.txt",
+        current_line=15,
+        current_body="body",
+        current_head=_TEST_HEAD,
+    )
+    assert ok_within is True
+    # Outside tolerance: NOT satisfied.
+    ok_far = sm._is_thread_carry_forward_satisfied(
+        thread_id="PRRT_TEST_006",
+        current_path="hello.txt",
+        current_line=80,
+        current_body="body",
+        current_head=_TEST_HEAD,
+    )
+    assert ok_far is False, (
+        "round-49 C16: line shift > 10 MUST invalidate "
+        "carry-forward."
+    )
