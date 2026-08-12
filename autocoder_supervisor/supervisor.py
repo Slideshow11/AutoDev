@@ -2955,6 +2955,84 @@ def _reap_worker(pid: int) -> tuple[Optional[int], Optional[int]]:
     return (None, None)
 
 
+def _build_worker_result_contract_suffix(
+    *, prompt_prefix, attempt_id_prefix,
+    directive_digest, directive_id, directive_path,
+    target_thread, prelaunch_head,
+):
+    """Round-50.1 Section 5: build the worker-visible canonical
+    result contract block that is appended to every worker's
+    prompt. The block MUST contain:
+      - the exact expected result artifact path;
+      - the exact attempt_id prefix;
+      - the directive digest and directive_id;
+      - the target thread identity;
+      - an explicit requirement to write the canonical result;
+      - produced/pushed SHA reporting requirements.
+    """
+    expected_result_path = (
+        "$STATE_DIR/worker_attempts/"
+        f"{attempt_id_prefix}-<PID>.worker_result.json"
+    )
+    return (
+        prompt_prefix
+        + "\n\n=== ROUND-50.1 WORKER RESULT CONTRACT ===\n"
+        + "You MUST write a canonical WorkerResultArtifact at:\n"
+        + f"  {expected_result_path}\n"
+        + "BEFORE exiting successfully. The schema is `autocoder.worker_result.v1`.\n"
+        + "Required fields (all must be present):\n"
+        + "  - schema_version: 'autocoder.worker_result.v1'\n"
+        + f"  - attempt_id: 'att-<TIMESTAMP>-<PID>'\n"
+        + f"  - claim_id: '{attempt_id_prefix}-<PID>'\n"
+        + f"  - directive_digest: '{directive_digest}'\n"
+        + f"  - directive_id (UUID): '{directive_id}'\n"
+        + f"  - directive_path: '{directive_path}'\n"
+        + "  - result_type: NO_CHANGES_REQUIRED | REPAIR_PUSHED | "
+        + "REPAIR_COMMIT_PRODUCED | COMMIT_PRODUCED_NOT_PUSHED | "
+        + "WORKER_EXECUTION_FAILED\n"
+        + "  - produced_commit_shas: <ordered list, [] for NO_CHANGES_REQUIRED>\n"
+        + "  - pushed_commit_shas: <ordered list, [] for NO_CHANGES_REQUIRED>\n"
+        + "  - completed_at: <ISO-8601 UTC timestamp>\n"
+        + "  - repo: '<owner>/<repo>'\n"
+        + "  - pr_number: <int>\n"
+        + "  - expected_branch: <str>\n"
+        + f"  - prelaunch_head: '{prelaunch_head}'\n"
+        + f"  - attempt_nonce: '{attempt_id_prefix}'\n"
+        + "  - no_changes_required_proof: <dict with findings[], "
+        + "required for NO_CHANGES_REQUIRED>\n"
+        + f"Target thread (Round-50.1 fix scope): {target_thread}\n"
+        + "Directive identity:\n"
+        + f"  - directive_id (UUID): {directive_id}\n"
+        + f"  - directive_sha256: {directive_digest}\n"
+        + f"  - directive_path: {directive_path}\n"
+        + "Your work is NOT complete until the canonical artifact is "
+        + "persisted at the path above with all required fields.\n"
+        + "If you commit/push:\n"
+        + "  - produced_commit_shas MUST list the produced SHAs in order.\n"
+        + "  - pushed_commit_shas MUST list the pushed SHAs in order.\n"
+        + "  - origin and live GitHub HEAD must equal your final commit.\n"
+        + "Failure to write the canonical artifact results in "
+        + "UNATTRIBUTED_HEAD_ADVANCE for any commit you push.\n"
+        + "===============================================\n"
+    )
+
+
+def _hash_file_sha256(path):
+    """Round-50.1 Section 8: compute the SHA-256 of a file
+    on disk. Used to fingerprint the legacy source artifact
+    so the canonical per-attempt artifact can record the
+    original input digest.
+    """
+    import hashlib as _hl
+    _p = Path(path)
+    if not _p.is_file():
+        return ""
+    try:
+        return _hl.sha256(_p.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def _round50_normalize_standalone_worker_result(
     raw_payload, attempt_id,
 ):
@@ -3062,6 +3140,7 @@ def _round50_ingest_worker_result_artifact(rec):
     # canonical worker-result contract lives in the
     # orchestration package.
     from autocoder_orchestration.worker_attempt import (
+        WorkerAttemptStore,
         WorkerResultArtifact,
         RESULT_TYPE_NO_CHANGES_REQUIRED,
     )
@@ -3231,7 +3310,35 @@ def _round50_ingest_worker_result_artifact(rec):
 
     # Persist canonical artifact to the per-attempt path so
     # subsequent polls recover state without re-parsing.
-    if source_surface != "result_artifact_path" and rpap_parsed is not None:
+    # Round-50.1 Section 8: the legacy standalone source
+    # artifact MUST NOT be overwritten in place. The canonical
+    # artifact is written to a NEW per-attempt path under
+    # WORKER_ATTEMPTS_DIR, distinct from the standalone file.
+    # The original legacy source path is recorded in the
+    # canonical artifact for forensic chain-of-custody.
+    if (
+        source_surface == "standalone_with_directive_sha256"
+        or source_surface == "standalone_with_directive_id"
+    ):
+        # Legacy standalone ingestion: write canonical to a
+        # NEW per-attempt path; preserve legacy source.
+        try:
+            canonical_target = Path(WORKER_ATTEMPTS_DIR) / (
+                f"{rec.attempt_id}.worker_result.json"
+            )
+            if parsed_artifact.no_changes_required_proof:
+                # Record legacy source path in the proof blob
+                # so the chain-of-custody is preserved.
+                parsed_artifact.no_changes_required_proof[
+                    "original_legacy_artifact_path"
+                ] = str(rpap_parsed)
+                parsed_artifact.no_changes_required_proof[
+                    "original_legacy_artifact_sha256"
+                ] = _hash_file_sha256(rpap_parsed)
+            parsed_artifact.write(canonical_target)
+        except Exception:
+            pass
+    elif source_surface != "result_artifact_path" and rpap_parsed is not None:
         try:
             parsed_artifact.write(rpap_parsed)
         except Exception:
@@ -3258,8 +3365,17 @@ def _round50_ingest_worker_result_artifact(rec):
             )
     try:
         WorkerAttemptStore(WORKER_ATTEMPTS_DIR).write(rec)
-    except Exception:
-        pass
+    except Exception as _we:
+        import traceback as _tb
+        _tb_str = "".join(_tb.format_exception(type(_we), _we, _we.__traceback__))[-1500:]
+        log(
+            "warning",
+            "round-50.1: WorkerAttemptStore.write failed",
+            attempt_id=rec.attempt_id,
+            error=str(_we)[:200],
+            traceback_summary=_tb_str,
+            worker_attempts_dir=str(WORKER_ATTEMPTS_DIR),
+        )
 
     log(
         "info",
@@ -3764,14 +3880,88 @@ def poll_worker_attempt(
             else:
                 # Worker has NOT recorded any
                 # pushed_commit_sha for this attempt.
-                # The head movement, if any, is
-                # UNATTRIBUTED. The worker attempt is
-                # terminal as UNATTRIBUTED_HEAD_ADVANCE.
+                # Round-50.1 Section 6: distinguish
+                #   WORKER_RESULT_MISSING (worker did push
+                #     but failed to write the canonical
+                #     WorkerResultArtifact; future retry
+                #     can claim this generation).
+                #   UNATTRIBUTED_HEAD_ADVANCE (no evidence
+                #     that this worker's process did the
+                #     push; external actor / recovery).
+                #   WORKER_EXITED_NO_PUSH (worker exited
+                #     cleanly, no remote head change).
                 if (
                     _live_head_for_classify
                     and _live_head_for_classify
                     != rec.prelaunch_head
                 ):
+                    # Heuristic: if the worker session
+                    # produced a non-trivial commit log
+                    # (the worker's own stdout shows
+                    # ``git commit`` + ``git push``), the
+                    # worker DID push and just failed to
+                    # report it. Treat that as RESULT_MISSING.
+                    _stdout_path = (
+                        Path(str(STATE_DIR)) / "worker_attempts"
+                        / f"{attempt_id}.stdout.log"
+                    )  # type: ignore[name-defined]
+                    _worker_pushed_but_unreported = False
+                    if _stdout_path.is_file():
+                        try:
+                            _tail = _stdout_path.read_text(
+                                encoding="utf-8",
+                                errors="replace",
+                            )[-4000:]
+                            if (
+                                "git push" in _tail
+                                or "git rev-parse HEAD" in _tail
+                                or "PUSH_VERIFIED" in _tail
+                            ):
+                                _worker_pushed_but_unreported = True
+                        except OSError:
+                            pass
+                    if _worker_pushed_but_unreported:
+                        # The worker pushed but did not write
+                        # the canonical artifact. Section 6:
+                        # classify as WORKER_RESULT_MISSING.
+                        try:
+                            rec.assert_can_transition_to(
+                                LIFECYCLE_WORKER_RESULT_MISSING,
+                            )
+                            rec.lifecycle = (
+                                LIFECYCLE_WORKER_RESULT_MISSING
+                            )
+                            rec.terminal_reason = (
+                                "remote head advanced to "
+                                f"{_live_head_for_classify[:12]!r} "
+                                "but worker did NOT write canonical "
+                                "WorkerResultArtifact. Commit is "
+                                "UNATTRIBUTED_HEAD_ADVANCE — "
+                                "retry needed to claim this "
+                                "generation."
+                            )
+                            log(
+                                "warning",
+                                "round-50.1: worker-result missing",
+                                attempt_id=attempt_id,
+                                pid=rec.pid,
+                                live_head=(
+                                    _live_head_for_classify[:12]
+                                ),
+                            )
+                            # Fall through to persist and
+                            # return.
+                            try:
+                                WorkerAttemptStore(
+                                    str(STATE_DIR) / "worker_attempts"  # type: ignore[name-defined]
+                                ).write(rec)
+                            except Exception:
+                                pass
+                            return
+                        except Exception:
+                            # Transition refused — fall
+                            # through to UNATTRIBUTED.
+                            pass
                     _classify_unattributed()
                 else:
                     _fallback_no_push()
@@ -5251,6 +5441,59 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # derived from the same prefix the worker-attempt record
     # will use.
     attempt_id_prefix = "att-" + now_iso().replace(":", "").replace("-", "")
+    # Round-50.1 Section 5: append the worker-visible canonical
+    # result contract to the prompt so the worker has every
+    # identifier it needs in its actual input (not just in a
+    # side file the worker never reads). The directive_sha256
+    # is preferred over the directive_id UUID for the
+    # directive_digest field (Section 9).
+    _directive_digest_for_prompt = (
+        getattr(resolved_directive, "directive_sha256", "")
+        or ""
+        if resolved_directive is not None
+        else ""
+    )
+    _directive_id_for_prompt = (
+        getattr(resolved_directive, "directive_id", "")
+        or ""
+        if resolved_directive is not None
+        else ""
+    )
+    _directive_path_for_prompt = (
+        str(getattr(resolved_directive, "path", "") or "")
+        if resolved_directive is not None
+        else ""
+    )
+    if not _directive_digest_for_prompt:
+        try:
+            from .directive_bridge import resolve_directive as _rd
+            _rd_obj = _rd(expected_head=str(live.get("head_sha", "")))
+            if _rd_obj is not None:
+                _directive_digest_for_prompt = (
+                    getattr(_rd_obj, "directive_sha256", "") or ""
+                )
+                _directive_id_for_prompt = (
+                    getattr(_rd_obj, "directive_id", "") or ""
+                )
+                _directive_path_for_prompt = (
+                    str(getattr(_rd_obj, "path", "") or "")
+                )
+        except Exception:
+            pass
+    _target_thread = ""
+    for _f in (rs.get("findings") or []):
+        if isinstance(_f, dict):
+            _target_thread = _f.get("finding_id") or ""
+            break
+    prompt = _build_worker_result_contract_suffix(
+        prompt_prefix=prompt,
+        attempt_id_prefix=attempt_id_prefix,
+        directive_digest=_directive_digest_for_prompt,
+        directive_id=_directive_id_for_prompt,
+        directive_path=_directive_path_for_prompt,
+        target_thread=_target_thread,
+        prelaunch_head=str(live.get("head_sha", "")),
+    )
     # Round-40: compute the canonical pending event ids ONCE,
     # before any branch consumes them. The previous design
     # referenced a local ``_pending_event_ids`` inside the
@@ -5490,6 +5733,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # record before acknowledging a worker repair push.
     try:
         from autocoder_orchestration.worker_attempt import (
+            LIFECYCLE_WORKER_RESULT_MISSING,
             LIFECYCLE_WORKER_RUNNING,
             WorkerAttemptRecord,
             WorkerAttemptStore,

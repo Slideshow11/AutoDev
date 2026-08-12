@@ -74,6 +74,23 @@ LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE = (
     "UNATTRIBUTED_HEAD_ADVANCE"
 )
 
+# Round-50.1 Section 6: the worker exited and the remote
+# head advanced, but the worker did NOT write the required
+# canonical WorkerResultArtifact. The supervisor MUST
+# classify this distinctly from WORKER_EXITED_NO_PUSH (which
+# means "no head movement, no result") and from
+# UNATTRIBUTED_HEAD_ADVANCE (which means "head moved but we
+# don't know whether a worker or an external actor pushed").
+# WORKER_RESULT_MISSING means: the worker DID push a commit
+# (head moved to a descendant of prelaunch_head during the
+# worker's lifetime) but failed to write the result artifact,
+# so we cannot attribute the commit to the worker. The
+# attempt becomes RETRY_PENDING so a future retry can write
+# the canonical result for the same generation.
+LIFECYCLE_WORKER_RESULT_MISSING = (
+    "WORKER_RESULT_MISSING"
+)
+
 # Terminal failure lifecycle values — the attempt is finished
 # but the work item is RETRY_PENDING.
 TERMINAL_FAILURE_LIFECYCLES = frozenset({
