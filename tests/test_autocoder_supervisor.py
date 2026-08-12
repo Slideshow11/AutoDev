@@ -5273,6 +5273,188 @@ def test_round50_1_standalone_ingestion_rejects_wrong_directive_id(tmp_path, mon
     assert ok is False
 
 
+
+
+def test_round50_1_standalone_ingestion_prefers_directive_sha256_over_uuid(tmp_path, monkeypatch):
+    """Round-50.1 Section 6: when a standalone file carries BOTH
+    a ``directive_id`` (UUID) and a ``directive_sha256`` (content
+    hash), the supervisor MUST prefer ``directive_sha256`` to
+    match the attempt's ``directive_digest``. The UUID alone
+    would always fail to match because directive_digest is the
+    SHA256 of the directive body.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json as _json
+    import subprocess as _sp
+
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", str(wa_dir), raising=False)
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo), raising=False)
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "hello.txt").write_text("x\n")
+    _sp.run(["git", "add", "hello.txt"], cwd=str(repo), check=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    # Standalone carries BOTH a UUID directive_id AND a SHA256
+    # directive_sha256. The attempt's directive_digest equals
+    # directive_sha256, NOT the UUID. Only the sha256 match
+    # should succeed.
+    directive_sha = "abcdef" * 8  # 48 hex chars
+    directive_uuid = "d89fe7b7-22b6-4f5a-97be-8cb4b6de4007"
+    artifact = {
+        "schema_version": "round-50-1-legacy",
+        "directive_id": directive_uuid,
+        "directive_sha256": directive_sha,
+        "round_index": 122,
+        "findings": [{
+            "finding_id": "thread:PRRT_TEST_Y",
+            "disposition": "ALREADY_SATISFIED",
+        }],
+    }
+    (repo / "round122_worker_attempt_result.json").write_text(
+        _json.dumps(artifact), encoding="utf-8"
+    )
+
+    from autocoder_orchestration.worker_attempt import WorkerAttemptRecord
+    rec = WorkerAttemptRecord(
+        schema_version="autocoder.worker_attempt.v1",
+        attempt_id="att-20260812T122307Z-11701",
+        claim_id="claim-test",
+        repo_owner="OWNER",
+        repo_name="REPO",
+        pr_number=9,
+        event_ids=(),
+        finding_ids=(),
+        directive_digest=directive_sha,  # matches directive_sha256
+        directive_path="(stub)",
+        prelaunch_head="07d34877" * 5,
+        expected_branch="feat/test",
+        pid=42424,
+        lease_id="lease-test",
+        started_at="2026-01-01T00:00:00Z",
+        last_progress_at="2026-01-01T00:00:00Z",
+        finished_at=None,
+        lifecycle="WORKER_RUNNING",
+        attempt_count=1,
+        stdout_path=None,
+        stderr_path=None,
+        exit_code=None,
+        signal=None,
+        result_artifact_path=None,
+        produced_commit_sha=None,
+        pushed_commit_sha=None,
+        origin_head_verified=False,
+        github_head_verified=False,
+        terminal_reason=None,
+        extra={"attempt_nonce": "att-20260812T122307Z-11701"},
+    )
+
+    # Ingestion must succeed via directive_sha256 match.
+    ok = sm._round50_ingest_worker_result_artifact(rec)
+    assert ok is True, (
+        "ingestion must succeed when directive_sha256 matches "
+        "directive_digest, even though directive_id (UUID) does not"
+    )
+
+
+def test_round50_1_standalone_ingestion_handles_missing_directive_sha256(tmp_path, monkeypatch):
+    """Round-50.1 Section 6: a standalone file that has only
+    ``directive_id`` (UUID) and NO ``directive_sha256`` MUST be
+    rejected. The supervisor MUST NOT match on a UUID, because
+    UUIDs are not content-addressable and would create
+    cross-attempt association ambiguity if the directive
+    changes.
+    """
+    import autocoder_supervisor.supervisor as sm
+    import json as _json
+    import subprocess as _sp
+
+    monkeypatch.setattr(sm, "REPO_OWNER", "OWNER", raising=False)
+    monkeypatch.setattr(sm, "REPO_NAME", "REPO", raising=False)
+    monkeypatch.setattr(sm, "PR_NUMBER", 9, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", str(wa_dir), raising=False)
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(sm, "REPO_DIR", str(repo), raising=False)
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+    _sp.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    (repo / "hello.txt").write_text("x\n")
+    _sp.run(["git", "add", "hello.txt"], cwd=str(repo), check=True)
+    _sp.run(["git", "commit", "-q", "-m", "init"], cwd=str(repo), check=True)
+
+    artifact = {
+        "directive_id": "abc-uuid-only-no-sha256",
+        "round_index": 122,
+        "findings": [],
+    }
+    (repo / "round122_worker_attempt_result.json").write_text(
+        _json.dumps(artifact), encoding="utf-8"
+    )
+
+    from autocoder_orchestration.worker_attempt import WorkerAttemptRecord
+    rec = WorkerAttemptRecord(
+        schema_version="autocoder.worker_attempt.v1",
+        attempt_id="att-X",
+        claim_id="c",
+        repo_owner="OWNER",
+        repo_name="REPO",
+        pr_number=9,
+        event_ids=(),
+        finding_ids=(),
+        directive_digest="different-sha",
+        directive_path="(stub)",
+        prelaunch_head="h",
+        expected_branch="feat/test",
+        pid=1,
+        lease_id="lease-test",
+        started_at="2026-01-01T00:00:00Z",
+        last_progress_at="2026-01-01T00:00:00Z",
+        finished_at=None,
+        lifecycle="WORKER_RUNNING",
+        attempt_count=1,
+        stdout_path=None,
+        stderr_path=None,
+        exit_code=None,
+        signal=None,
+        result_artifact_path=None,
+        produced_commit_sha=None,
+        pushed_commit_sha=None,
+        origin_head_verified=False,
+        github_head_verified=False,
+        terminal_reason=None,
+        extra={},
+    )
+
+    # The directive_id UUID does NOT match the directive_digest.
+    # Empty findings also fails the normalizer. Combined:
+    # ingestion must return False.
+    ok = sm._round50_ingest_worker_result_artifact(rec)
+    assert ok is False, (
+        "ingestion must reject a standalone file whose only "
+        "directive_id is a UUID that does not match the attempt's "
+        "directive_digest (which is a SHA256)"
+    )
+
+
+
+
 def test_round50_1_open_work_generation_lookup(tmp_path, monkeypatch):
     """Round-50.1 Section 12: an OPEN work generation
     persists. The drain emitter uses this to skip

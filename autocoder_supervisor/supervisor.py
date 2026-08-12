@@ -3008,7 +3008,15 @@ def _round50_normalize_standalone_worker_result(
         if not out_findings:
             return None
         head_exit = str(raw_payload.get("head_sha_at_exit") or raw_payload.get("head_sha_at_entry") or "")
-        directive = str(raw_payload.get("directive_id") or raw_payload.get("directive_sha256") or "")
+        # Prefer directive_sha256 (the content hash) over
+        # directive_id (a UUID handle). The attempt's
+        # directive_digest is a SHA256, not a UUID.
+        directive = str(
+            raw_payload.get("directive_sha256")
+            or raw_payload.get("directive_digest")
+            or raw_payload.get("directive_id")
+            or ""
+        )
         return {
             "findings": out_findings,
             "source": "round50_standalone_legacy_parser",
@@ -3114,11 +3122,17 @@ def _round50_ingest_worker_result_artifact(rec):
                 if not isinstance(_cand, dict):
                     continue
                 _cand_attempt_id = str(_cand.get("attempt_id") or "")
-                _cand_directive_id = str(
-                    _cand.get("directive_id")
-                    or _cand.get("directive_sha256")
-                    or ""
-                )
+                # When the file carries BOTH ``directive_id``
+                # (a UUID) and ``directive_sha256`` (the
+                # content hash), prefer ``directive_sha256``
+                # because the attempt's ``directive_digest``
+                # is the SHA256 of the directive body. The
+                # UUID is a contentless handle and only
+                # matches if both files happened to use the
+                # same UUID. Order: attempt_id → directive_sha256
+                # → directive_id.
+                _cand_directive_sha256 = str(_cand.get("directive_sha256") or "")
+                _cand_directive_uuid = str(_cand.get("directive_id") or "")
                 if (
                     _cand_attempt_id
                     and _cand_attempt_id == rec.attempt_id
@@ -3128,9 +3142,18 @@ def _round50_ingest_worker_result_artifact(rec):
                     rpap_parsed = _sp
                     break
                 if (
-                    _cand_directive_id
+                    _cand_directive_sha256
                     and rec.directive_digest
-                    and _cand_directive_id == rec.directive_digest
+                    and _cand_directive_sha256 == rec.directive_digest
+                ):
+                    raw_payload = _cand
+                    source_surface = "standalone_with_directive_sha256"
+                    rpap_parsed = _sp
+                    break
+                if (
+                    _cand_directive_uuid
+                    and rec.directive_digest
+                    and _cand_directive_uuid == rec.directive_digest
                 ):
                     raw_payload = _cand
                     source_surface = "standalone_with_directive_id"
@@ -3313,11 +3336,17 @@ def poll_worker_attempt(
         # at the worker-attempts-dir is mapped to the canonical
         # artifact via the legacy compatibility parser.
         try:
-            _round50_ingest_worker_result_artifact(rec)
+            _ingested = _round50_ingest_worker_result_artifact(rec)
+            log(
+                "info",
+                "round-50.1: worker-result ingestion called",
+                attempt_id=attempt_id,
+                ingested=_ingested,
+            )
         except Exception as _ingest_exc:
             log(
                 "warning",
-                "round-50.1: worker-result ingestion failed",
+                "round-50.1: worker-result ingestion raised",
                 attempt_id=attempt_id,
                 error=str(_ingest_exc)[:200],
             )
