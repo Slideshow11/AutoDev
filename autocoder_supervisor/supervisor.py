@@ -3182,10 +3182,17 @@ def _round50_ingest_worker_result_artifact(rec):
         if isinstance(_orch_root, dict):
             _rs = _orch_root.get("orchestration_state_root")
         elif _orch_root is not None:
+            # RUN_STATE may be a Path object or a string.
             try:
-                _rs = json.loads(_orch_root.read_text(encoding="utf-8")).get(
-                    "orchestration_state_root"
-                )
+                _rs_path = Path(_orch_root) if not isinstance(_orch_root, Path) else _orch_root
+                if _rs_path.is_file():
+                    _rs = json.loads(_rs_path.read_text(encoding="utf-8")).get(
+                        "orchestration_state_root"
+                    )
+                elif _rs_path.is_dir():
+                    # RUN_STATE is itself the orchestration
+                    # state root directory.
+                    _rs = str(_rs_path)
             except Exception:
                 pass
         if not _rs:
