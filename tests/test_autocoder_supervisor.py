@@ -5534,11 +5534,17 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
 
 def test_round51_c19_worker_wrapper_handles_no_envelope(tmp_path, monkeypatch):
     """Round-51/C19: if the worker emits no envelope, the
-    wrapper must still write a canonical artifact (with a
-    synthesized empty proof) so the supervisor's ingestion
-    path runs. The worker's stdout is captured for forensic
-    review; the lifecycle is WORKER_EXECUTION_FAILED by
-    default.
+    wrapper must still write a canonical artifact so the
+    supervisor's ingestion path runs.
+
+    Round-54/C22 §6 (fail-closed): the wrapper MUST NOT
+    synthesize an empty no-op proof. A missing envelope is
+    recorded with result_type = WORKER_EXECUTION_FAILED
+    (the default) and no_changes_required_proof = None.
+    The supervisor's C19 ingestion treats this as a worker
+    execution failure, NOT a no-change success. The
+    envelope_status extra field is set to "missing" for
+    forensic purposes.
     """
     import subprocess as _sp
     fake_worker = tmp_path / "fake_worker.sh"
@@ -5567,7 +5573,10 @@ def test_round51_c19_worker_wrapper_handles_no_envelope(tmp_path, monkeypatch):
     import json as _json
     artifact = _json.loads(artifact_path.read_text())
     assert artifact["result_type"] == "WORKER_EXECUTION_FAILED"
-    assert artifact["no_changes_required_proof"]["source"] == "round51_c19_no_envelope_fallback"
+    # C22 §6: no synthesized proof. The envelope_status extra
+    # field records the missing-envelope state for forensics.
+    assert artifact["no_changes_required_proof"] is None
+    assert artifact.get("extra", {}).get("envelope_status") == "missing"
 
 
 def test_round51_c19_worker_wrapper_preserves_exit_code(tmp_path, monkeypatch):

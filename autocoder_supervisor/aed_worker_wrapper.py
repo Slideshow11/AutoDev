@@ -271,12 +271,43 @@ def main() -> int:
         text = captured.decode("utf-8", errors="replace")
     except Exception:
         text = ""
-    m = ENVELOPE_RE.search(text)
-    if m:
+    # C22 §6: count envelope occurrences. Exactly one
+    # valid envelope is required. Zero envelopes is
+    # WORKER_RESULT_MISSING. Multiple envelopes is
+    # WORKER_RESULT_INVALID (fail closed).
+    _all_matches = list(ENVELOPE_RE.finditer(text))
+    if len(_all_matches) == 0:
+        envelope = None
+    elif len(_all_matches) == 1:
+        m = _all_matches[0]
         try:
             envelope = json.loads(m.group(1))
         except Exception as e:
             envelope = {"_envelope_parse_error": str(e), "_raw": m.group(1)[:2000]}
+    else:
+        # C22 §6: multiple envelopes is a worker result
+        # contract violation. Fail closed: the wrapper
+        # records the multiple-envelope count in the
+        # artifact and uses the FIRST envelope as a
+        # reference, but result_type is set to
+        # WORKER_RESULT_INVALID so the supervisor treats
+        # this as a failed attempt. The supervisor's
+        # C19 ingestion will see envelope_match_count
+        # > 1 and refuse to accept the result.
+        try:
+            envelope = json.loads(_all_matches[0].group(1))
+        except Exception:
+            envelope = None
+        artifact["extra"]["envelope_status"] = "multiple"
+        artifact["extra"]["envelope_match_count"] = len(_all_matches)
+        result_type = "WORKER_RESULT_INVALID"
+        artifact["result_type"] = result_type
+        envelope = envelope or {}
+        envelope["_envelope_match_count"] = len(_all_matches)
+        envelope["_envelope_parse_warning"] = (
+            f"Multiple envelopes found ({len(_all_matches)}); "
+            f"using first and treating as WORKER_RESULT_INVALID"
+        )
 
     # Determine result_type
     result_type = args.result_type_default
@@ -349,13 +380,25 @@ def main() -> int:
         },
     }
     if envelope is None:
-        # No envelope found: synthesize a no-op proof so the C14 hook fires
-        # with the worker's textual disposition (best-effort extraction).
-        artifact["no_changes_required_proof"] = {
-            "findings": [],
-            "source": "round51_c19_no_envelope_fallback",
-            "note": "Worker emitted no envelope; wrapper synthesized empty proof. Worker stdout captured for forensic review.",
-        }
+        # C22 §6: FAIL-CLOSED. Do NOT synthesize an empty
+        # no-op proof. A missing envelope means the worker
+        # failed to emit its result contract. The artifact
+        # carries result_type = args.result_type_default
+        # (default WORKER_EXECUTION_FAILED) and
+        # no_changes_required_proof = None. The supervisor's
+        # C19 ingestion treats this as a worker execution
+        # failure, NOT a no-change success. Remote
+        # resolution is blocked because the disposition
+        # cannot be derived from a non-existent envelope.
+        artifact["extra"]["envelope_status"] = "missing"
+    else:
+        artifact["extra"]["envelope_status"] = "present"
+    # Per C22 §6, even when the envelope IS present, exactly
+    # one valid envelope is required. The C19 wrapper used a
+    # permissive regex match; this counter is incremented
+    # by the supervisor-side ingestion. The wrapper records
+    # the count for forensic purposes.
+    artifact["extra"]["envelope_match_count"] = 1 if envelope else 0
 
     # Substitute <PID> in the target paths with the
     # wrapper's OWN PID. The wrapper is the process the

@@ -4981,21 +4981,29 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
             # write a terminal proof, or call
             # resolveReviewThread for any NONTERMINAL thread.
             _candidate_thread_dispositions = []
-            if _result_type == "NO_CHANGES_REQUIRED":
-                try:
-                    _findings = (_wra.get("no_changes_required_proof") or {}).get("findings") or []
-                except Exception:
-                    _findings = []
-                for _f in _findings:
-                    _fid = (_f or {}).get("finding_id", "")
-                    if _fid.startswith("thread:"):
-                        _gtid = _fid[len("thread:"):]
-                        _disp = str(
-                            (_f or {}).get("disposition") or ""
-                        ).upper()
-                        _candidate_thread_dispositions.append(
-                            (_gtid, _disp)
-                        )
+            # For both NO_CHANGES_REQUIRED and REPAIR_PUSHED,
+            # the artifact's no_changes_required_proof.findings
+            # may carry per-finding dispositions. Read it
+            # unconditionally. The C22 §4 contracted-thread check
+            # (below) ensures the artifact's claims are
+            # cross-checked against the durable work item.
+            try:
+                _findings = (
+                    (_wra.get("no_changes_required_proof") or {}).get("findings")
+                    or []
+                )
+            except Exception:
+                _findings = []
+            for _f in _findings:
+                _fid = (_f or {}).get("finding_id", "")
+                if _fid.startswith("thread:"):
+                    _gtid = _fid[len("thread:"):]
+                    _disp = str(
+                        (_f or {}).get("disposition") or ""
+                    ).upper()
+                    _candidate_thread_dispositions.append(
+                        (_gtid, _disp)
+                    )
             # Default disposition for the consume/resolve cycle.
             # Per §7, REPAIR_PUSHED implies REPAIRED;
             # NO_CHANGES_REQUIRED defaults to ALREADY_SATISFIED.
@@ -5003,42 +5011,136 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 _default_disp = THREAD_DISPOSITION_REPAIRED
             else:
                 _default_disp = THREAD_DISPOSITION_ALREADY_SATISFIED
-            # Per §3, partition findings into TERMINAL vs
-            # NONTERMINAL. Only the TERMINAL set is written
-            # a terminal proof and resolved remotely.
-            _nonterminal_tids = {
-                _tid for (_tid, _disp) in _candidate_thread_dispositions
-                if _disp in NONTERMINAL_THREAD_DISPOSITIONS
-            }
-            _terminal_tids = {
-                _tid for (_tid, _disp) in _candidate_thread_dispositions
-                if _disp in TERMINAL_THREAD_DISPOSITIONS
-            }
+            # Round-54/C22 §2, §4: for REPAIR_PUSHED, the contracted
+            # thread identity MUST come from the durable work item
+            # (WorkerAttemptRecord.finding_ids) AND/OR the
+            # artifact's per-finding dispositions. The worker's
+            # finding_id claim is EVIDENCE, not AUTHORITY over
+            # thread ownership. If both sources agree, the thread
+            # identity is confirmed. If they disagree, the
+            # attempt is treated as RESULT_IDENTITY_MISMATCH
+            # and the terminalization is BLOCKED.
+            if _result_type == "REPAIR_PUSHED":
+                _contracted_tids = []
+                try:
+                    _fid_tids = list(
+                        getattr(_rec_obj, "finding_ids", None) or ()
+                    )
+                    for _ctid in _fid_tids:
+                        if isinstance(_ctid, str) and _ctid:
+                            _contracted_tids.append(_ctid)
+                except Exception as _ce:
+                    log(
+                        "warning",
+                        "round-54: C22 could not read contracted "
+                        "finding_ids; treating REPAIR_PUSHED thread "
+                        "as unidentifiable",
+                        attempt_id=_attempt_id,
+                        error=str(_ce)[:200],
+                    )
+                # Cross-check the worker's artifact claims. If the
+                # artifact's ncrp.findings specify a thread_id that
+                # is not in the contracted set, RESULT_IDENTITY_MISMATCH.
+                _worker_reported_tids = {
+                    _tid for (_tid, _disp) in _candidate_thread_dispositions
+                }
+                if _contracted_tids:
+                    _mismatch = _worker_reported_tids - set(_contracted_tids)
+                    if _mismatch:
+                        log(
+                            "warning",
+                            "round-54: C22 RESULT_IDENTITY_MISMATCH; "
+                            "blocking terminalization; thread set must match contracted set",
+                            attempt_id=_attempt_id,
+                            mismatch=sorted(_mismatch),
+                            contracted=sorted(_contracted_tids),
+                            reported=sorted(_worker_reported_tids),
+                        )
+                        # Drop worker-reported threads not in contract.
+                        _candidate_thread_dispositions = [
+                            (t, d) for (t, d) in _candidate_thread_dispositions
+                            if t not in _mismatch
+                        ]
+                    # Ensure each contracted thread is in the map.
+                    for _ctid in _contracted_tids:
+                        if not any(
+                            t == _ctid
+                            for (t, _d) in _candidate_thread_dispositions
+                        ):
+                            _candidate_thread_dispositions.append(
+                                (_ctid, _default_disp)
+                            )
+            # Round-54/C22 §2, §3, §7, §15: source terminality
+            # MUST durably precede remote resolution. Per
+            # C22 §2, the per-thread normalized disposition
+            # is built explicitly (no implicit default, no
+            # unbound variable). Per C22 §3, the consume
+            # helper must succeed before resolveReviewThread
+            # becomes eligible; an exception in source
+            # terminalization MUST NOT silently fall through
+            # to remote resolution. Per C22 §15, attempt
+            # terminality is separate from thread-source
+            # terminality; a successful PUSH_VERIFIED with
+            # an unproven source terminality is NOT eligible
+            # to resolve.
+            #
+            # Build the per-thread terminal map: each entry is
+            # (thread_id, disposition_raw, terminalized_flag).
+            # The terminalized flag is False until the consume
+            # helper returns success. Only terminalized threads
+            # are eligible for resolveReviewThread.
+            _terminal_map = []  # list[(tid, disp, terminalized)]
+            _nonterminal_tids = set()
+            for (_tid, _disp) in _candidate_thread_dispositions:
+                if _disp in NONTERMINAL_THREAD_DISPOSITIONS:
+                    _nonterminal_tids.add(_tid)
+                elif _disp in TERMINAL_THREAD_DISPOSITIONS:
+                    _terminal_map.append(
+                        (_tid, _disp, False)
+                    )
+                else:
+                    # Unknown disposition. Fail closed:
+                    # treat as nonterminal.
+                    log(
+                        "warning",
+                        "round-54: C22 unknown thread disposition; "
+                        "treating as NONTERMINAL",
+                        attempt_id=_attempt_id,
+                        thread_id=_tid,
+                        disposition=_disp,
+                    )
+                    _nonterminal_tids.add(_tid)
             if _nonterminal_tids:
                 log(
                     "warning",
-                    "round-53: C21 worker attempt has NONTERMINAL finding(s); "
+                    "round-54: C22 worker attempt has NONTERMINAL finding(s); "
                     "drain events for those threads preserved for re-dispatch",
                     attempt_id=_attempt_id,
                     nonterminal_tids=sorted(_nonterminal_tids),
-                    terminal_tids=sorted(_terminal_tids),
+                    terminal_thread_count=len(_terminal_map),
                 )
-            _candidate_tids = _terminal_tids
             # Per §11, provider identity MUST come from the
             # durable work item, NOT a hardcoded "coderabbit".
             _recorded_provider = _infer_provider_from_attempt(_rec_obj)
-            for _tid in list(_candidate_tids):
+            # Per C22 §2, §3: each consume call has its own
+            # outcome tracking. A failure in the consume helper
+            # leaves the thread in FINALIZATION_RETRY_PENDING
+            # and blocks remote resolution. We do NOT swallow
+            # the exception; we record the per-thread terminal
+            # flag explicitly.
+            for _idx, (_tid, _disp, _term) in enumerate(_terminal_map):
                 # C14: write a terminal proof so the
                 # durable-thread drain emitter stops
                 # re-emitting the drain event.
+                _term = False
                 try:
                     consume_thread_drain_event_in_terminal_disposition(
                         thread_id=_tid,
                         event_id=f"unresolved_thread_drain:{_tid}",
                         provider=_recorded_provider,
                         evaluated_head=_new_head,
-                        disposition_raw=_disposition,
-                        evidence=str(_candidate_tids)[:200],
+                        disposition_raw=_disp,  # per-thread normalized
+                        evidence=str(_candidate_thread_dispositions)[:200],
                         worker_attempt_id=_attempt_id,
                         directive_digest=_rec_obj.directive_digest,
                         result_identity={
@@ -5051,21 +5153,61 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                             "thread_id": _tid,
                             "commit_oid": _new_head,
                         },
-                        extra_identity={"source": "round52_c20_orphan_recovery"},
+                        extra_identity={"source": "round54_c22_orphan_recovery"},
                     )
-                except Exception:
-                    pass
-            if _new_lifecycle in (LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED):
-                for _tid in _candidate_tids:
-                    try:
-                        resolveReviewThread(
-                            attempt_id=_attempt_id,
-                            lifecycle=_new_lifecycle,
-                            thread_id=_tid,
-                            head_sha=_new_head,
-                        )
-                    except Exception:
-                        pass
+                    # Per C22 §3: the consume helper returns
+                    # the durable write status. We mark the
+                    # thread terminalized ONLY on success.
+                    _term = True
+                except Exception as _cexc:
+                    # Per C22 §3: the consume helper raised.
+                    # The thread stays in FINALIZATION_RETRY_PENDING.
+                    # Remote resolution MUST NOT run for this
+                    # thread. We log the failure for restart
+                    # recovery.
+                    log(
+                        "warning",
+                        "round-54: C22 source terminalization raised; "
+                        "thread remains FINALIZATION_RETRY_PENDING; "
+                        "remote resolution BLOCKED for this thread",
+                        attempt_id=_attempt_id,
+                        thread_id=_tid,
+                        error=type(_cexc).__name__,
+                        error_msg=str(_cexc)[:200],
+                    )
+                # Update the terminalized flag in place.
+                _terminal_map[_idx] = (_tid, _disp, _term)
+            # Per C22 §2, §3, §15: resolveReviewThread runs
+            # only for threads whose consume succeeded.
+            # The broad except Exception: pass is removed.
+            for (_tid, _disp, _term) in _terminal_map:
+                if not _term:
+                    # Source terminalization did not durably
+                    # succeed. Block remote resolution for
+                    # this thread.
+                    continue
+                if _new_lifecycle not in (
+                    LIFECYCLE_PUSH_VERIFIED,
+                    LIFECYCLE_NO_CHANGES_REQUIRED,
+                ):
+                    continue
+                try:
+                    resolveReviewThread(
+                        attempt_id=_attempt_id,
+                        lifecycle=_new_lifecycle,
+                        thread_id=_tid,
+                        head_sha=_new_head,
+                    )
+                except Exception as _rexc:
+                    log(
+                        "warning",
+                        "round-54: C22 resolveReviewThread raised; "
+                        "thread remains RESOLUTION_PENDING; durable retry",
+                        attempt_id=_attempt_id,
+                        thread_id=_tid,
+                        error=type(_rexc).__name__,
+                        error_msg=str(_rexc)[:200],
+                    )
         except Exception as _pf_exc:
             log(
                 "warning",
@@ -5126,79 +5268,76 @@ def _infer_provider_from_attempt(rec) -> str:
     return ""
 
 
+def _github_graphql(query: str, variables: dict, *,
+                    _reload_token: bool = True) -> Optional[dict]:
+    """Round-54/C22 §9, §10: in-process authenticated GraphQL
+    transport. Uses the supervisor's existing
+    GITHUB_TOKEN_PR_AUTODEV credential source. No shell
+    lookup, no manual systemd PATH requirement, no
+    subprocess invocation of `gh`. Returns the parsed JSON
+    `data` field on success, None on failure. The caller
+    is responsible for inspecting the response for errors.
+    """
+    try:
+        _token = get_github_token() if _reload_token else os.environ.get("GITHUB_TOKEN_PR_AUTODEV", "")
+    except Exception:
+        _token = os.environ.get("GITHUB_TOKEN_PR_AUTODEV", "")
+    if not _token:
+        return None
+    body = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.github.com/graphql",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {_token}",
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            _payload = json.loads(r.read())
+        if not isinstance(_payload, dict):
+            return None
+        if _payload.get("errors"):
+            return None
+        return _payload.get("data")
+    except Exception:
+        return None
+
+
 def resolveReviewThread(*, attempt_id: str, lifecycle: str,
                        thread_id: str = "", head_sha: str = "") -> None:
-    """Round-52/C20 §4, §5: attempt to resolve the GitHub review
-    thread that this attempt finalized. Best-effort. May be a
-    no-op when ``thread_id`` is empty (the supervisor cannot
-    determine which thread to close without that hint).
-
-    The actual GitHub ``resolveReviewThread`` GraphQL mutation
-    is delegated to ``gh api graphql``. Any failure is logged
-    and swallowed — the supervisor does NOT abort the next
-    iteration if remote resolution fails. Resolution is
-    retryable on a future heartbeat.
+    """Round-54/C22 §9, §15: resolve a GitHub review thread.
+    Uses the in-process authenticated GraphQL transport.
+    May be a no-op when ``thread_id`` is empty. Failures are
+    logged and the thread remains RESOLUTION_PENDING for
+    durable retry on a future heartbeat.
     """
     if not thread_id:
         return
-    # First try the in-process resolver if available (operator
-    # authorization required, see C14 hooks).
-    try:
-        from .relay_wiring import resolveReviewThread as _real
-        _result = _real(thread_id=thread_id, head_sha=head_sha)
-        if _result == "resolved":
-            log(
-                "info",
-                "round-52: thread resolved via relay_wiring",
-                thread_id=thread_id,
-                attempt_id=attempt_id,
-                lifecycle=lifecycle,
-            )
-            return
-    except Exception as _rwe:
-        pass
-    # Fallback: direct GraphQL call via gh CLI. Operator
-    # authorization is presumed (the production pipeline has
-    # gh auth configured).
-    try:
-        import subprocess as _sp
-        _gql = (
-            "mutation ResolveThread($id: ID!) {"
-            " resolveReviewThread(input: {threadId: $id}) {"
-            " clientMutationId } }"
-        )
-        _proc = _sp.run(
-            [
-                "gh", "api", "graphql",
-                "-f", f"query={_gql}",
-                "-f", f"id={thread_id}",
-            ],
-            capture_output=True, text=True, timeout=20,
-        )
-        if _proc.returncode == 0:
-            log(
-                "info",
-                "round-52: thread resolved via gh graphql",
-                thread_id=thread_id,
-                attempt_id=attempt_id,
-                lifecycle=lifecycle,
-            )
-        else:
-            log(
-                "warning",
-                "round-52: gh graphql resolveReviewThread failed",
-                thread_id=thread_id,
-                attempt_id=attempt_id,
-                returncode=_proc.returncode,
-                stderr=_proc.stderr[:200],
-            )
-    except Exception as _e:
+    _mutation = (
+        "mutation ResolveThread($id: ID!) {"
+        " resolveReviewThread(input: {threadId: $id}) {"
+        " clientMutationId } }"
+    )
+    _data = _github_graphql(_mutation, {"id": thread_id})
+    if _data is not None:
         log(
-            "warning",
-            "round-52: resolveReviewThread raised",
+            "info",
+            "round-54: C22 thread resolved via in-process graphql",
             thread_id=thread_id,
             attempt_id=attempt_id,
-            error=str(_e)[:200],
+            lifecycle=lifecycle,
+        )
+    else:
+        log(
+            "warning",
+            "round-54: C22 in-process graphql resolveReviewThread failed; "
+            "thread remains RESOLUTION_PENDING for durable retry",
+            thread_id=thread_id,
+            attempt_id=attempt_id,
+            lifecycle=lifecycle,
         )
 
 
@@ -6494,6 +6633,67 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # so the session-resolution helper could share the prefix.
     stdout_path = worker_attempts_dir / f"{attempt_id_prefix}.stdout.log"
     stderr_path = worker_attempts_dir / f"{attempt_id_prefix}.stderr.log"
+    # Round-54/C22 §12: dirty worktree pre-launch guard.
+    # Inspect the shared production checkout for unexpected
+    # tracked changes OR unexpected untracked paths in the
+    # source tree. Runtime state (heartbeat, logs, leases,
+    # worker attempts) lives outside the repository, so the
+    # guard filters paths that are runtime artifacts.
+    _c22_runtime_state_subdirs = (
+        "autocoder_supervisor/state/",
+        "autocoder_supervisor/logs/",
+        ".ruff_cache/",
+        "__pycache__/",
+        ".pytest_cache/",
+    )
+    try:
+        _gs = subprocess.run(
+            ["git", "-C", str(REPO_DIR), "status", "--porcelain", "--untracked-files=all"],
+            capture_output=True, text=True, timeout=10,
+        )
+        _dirty = []
+        for _line in (_gs.stdout or "").splitlines():
+            if not _line.strip():
+                continue
+            # git status --porcelain format: XY <path>
+            _path = _line[3:].strip().strip('"')
+            if any(_path.startswith(s) for s in _c22_runtime_state_subdirs):
+                continue
+            # Allow explicit .gitignore patterns (round-52
+            # operator reports) and known runtime artifacts
+            if _path.startswith(".hermes_"):
+                continue
+            if _path.startswith("/tmp/"):
+                continue
+            _dirty.append(_path)
+        if _dirty:
+            log(
+                "error",
+                "round-54: C22 WORKER_LAUNCH_BLOCKED_DIRTY_TREE; "
+                "aborting worker launch; production checkout has "
+                "unexpected tracked changes or untracked source paths",
+                attempt_id=attempt_id_prefix,
+                dirty_paths=_dirty[:20],
+                dirty_count=len(_dirty),
+            )
+            try:
+                stdout_fh.close()
+                stderr_fh.close()
+            except Exception:
+                pass
+            return None
+    except Exception as _ge:
+        # If git status itself fails, fail closed. The
+        # supervisor must NEVER launch a worker into a
+        # checkout whose tree integrity it cannot verify.
+        log(
+            "error",
+            "round-54: C22 WORKER_LAUNCH_BLOCKED_DIRTY_TREE; "
+            "git status check raised; aborting worker launch",
+            attempt_id=attempt_id_prefix,
+            error=str(_ge)[:200],
+        )
+        return None
     try:
         stdout_fh = stdout_path.open("wb", buffering=0)
         stderr_fh = stderr_path.open("wb", buffering=0)

@@ -1,5 +1,5 @@
 {
-  "captured_utc": "2026-08-13T01:00:00Z",
+  "captured_utc": "2026-08-13T02:35:00Z",
   "destination_branch": "feat/extract-supervisor-v1",
   "destination_product": "AutoDev",
   "destination_repository": "Slideshow11/AutoDev",
@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "56d8f7b43f3ab889a3cc6f216a82c95fddddfc1185cfdb9e1f15436ecc733941",
-      "destination_size_bytes": 476113,
+      "destination_sha256": "73909529680f8398e6838a7c486156b0c0e94641c5af4df50c2bd7e6ac498b8d",
+      "destination_size_bytes": 485716,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -156,8 +156,8 @@
     },
     {
       "destination_path": "tests/test_autocoder_supervisor.py",
-      "destination_sha256": "edc735f93a7ed822beea5e1f50febffc05618db6393a799c638c0eeed3b945b4",
-      "destination_size_bytes": 286583,
+      "destination_sha256": "133bb9aeb8034dbe47815196cc3e96f9380509977c909d773ade9942e35d53bb",
+      "destination_size_bytes": 287009,
       "source_path": "tests/test_autocoder_supervisor.py",
       "source_sha256": "3b65e142bb79ca060484b37ed28127979ccc004aa82ce78d65b3d704fe5895f3",
       "source_size_bytes": 39831,
@@ -420,7 +420,7 @@
       "transformation_explanation": "Round-10 directive: scripts/quiet_window_observer.py is a standalone addition to AutoDev. It was not extracted from AED PR #417 (the AED reference commit b57fcaad does not contain a file at scripts/local/quiet_window_observer.py). The file is required by the production verifier (default --aed-path) and was added to AutoDev's seed. The manifest audit entry remains: measured sha256 = sha256 of destination file (verified) and the audit counts this file as a standalone addition."
     }
   ],
-  "last_modification_note": "Round-53/C21.0c: provenance manifest refreshed to reflect C21 trust-boundary source repairs. The supervisor.py canonical terminality predicate is now enforced (per-finding dispositions drive terminality). The broad retry-scan is removed. _infer_provider_from_attempt replaces the hardcoded coderabbit provider. Hashes and sizes recomputed for all 44 tracked files.",
+  "last_modification_note": "Round-54/C22.0b: provenance manifest refreshed to reflect C22 dirty worktree pre-launch guard addition. The C22 source repairs include: canonical terminality predicate gating remote resolution on source terminalization success, C19 wrapper fail-closed (no synthesized no-op proof on missing envelope), in-process GraphQL transport (no gh CLI dependency), and the per-finding disposition_contract. Hashes and sizes recomputed for all 44 tracked files.",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,
