@@ -40,6 +40,7 @@ path: the exact-file SHA-256 stored in the sidecar.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -2606,7 +2607,17 @@ def _refetch_and_validate_mutable_gates(
         # GitHubLiveFetchError.
         try:
             return fetcher()
-        except GitHubLiveFetchError:
+        except MergeGateFetchError as exc:
+            logging.getLogger(__name__).warning(
+                "merge gate fetch failed gate=%s err=%s; re-raising",
+                name, exc,
+            )
+            raise
+        except GitHubLiveFetchError as exc:
+            logging.getLogger(__name__).warning(
+                "live fetch error gate=%s err=%s; falling back to bound snapshot",
+                name, exc,
+            )
             if name == "pr_payload":
                 return inputs.live_pr_payload
             if name == "required_ci":
