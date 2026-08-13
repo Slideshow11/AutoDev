@@ -199,7 +199,24 @@ def main() -> int:
     stdout_log_path = Path(args.stdout_log_path)
     stdout_log_path.parent.mkdir(parents=True, exist_ok=True)
     stdout_log_fh = stdout_log_path.open("wb", buffering=0)
+    # Round-168 P2: bound the in-memory stdout buffer. The complete
+    # stdout is preserved on disk via stdout_log_fh; `captured` is
+    # only needed by the envelope parser below (which scans for a
+    # trailing envelope). A bounded tail keeps wrapper memory stable
+    # against noisy workers without changing envelope detection,
+    # since the envelope is always emitted at the end of the
+    # worker's final response. 1 MiB is far larger than any
+    # realistic envelope payload.
+    _CAPTURED_TAIL_MAX = 1 * 1024 * 1024
     captured = bytearray()
+
+    def _append_bounded(buf: bytearray, chunk: bytes, cap: int) -> None:
+        if cap <= 0:
+            return
+        buf.extend(chunk)
+        if len(buf) > cap:
+            # Drop the oldest bytes, keeping the most recent `cap`.
+            del buf[: len(buf) - cap]
 
     def _tee_pipe(fd):
         """Read from fd, write to log and capture buffer."""
@@ -208,12 +225,15 @@ def main() -> int:
                 chunk = os.read(fd, 65536)
                 if not chunk:
                     break
-                captured.extend(chunk)
+                _append_bounded(captured, chunk, _CAPTURED_TAIL_MAX)
                 try:
                     stdout_log_fh.write(chunk)
                 except OSError:
+                    # Disk-full or log-rotate removed the file; the
+                    # in-memory tail still gives envelope detection.
                     pass
         except OSError:
+            # Pipe closed / errno on read; the process likely exited.
             pass
 
     import threading
@@ -309,12 +329,17 @@ def main() -> int:
                 chunk = proc.stdout.read(65536)
                 if not chunk:
                     break
-                captured.extend(chunk)
+                # Round-168 P2: bound the in-memory buffer; the
+                # on-disk log keeps the full stdout.
+                _append_bounded(captured, chunk, _CAPTURED_TAIL_MAX)
                 try:
                     stdout_log_fh.write(chunk)
                 except OSError:
+                    # Disk write failure must not abort the reader.
                     pass
         except Exception:
+            # Pipe closed / read error; the worker subprocess
+            # likely exited. The on-disk log is authoritative.
             pass
 
     t = threading.Thread(target=_reader, daemon=True)
