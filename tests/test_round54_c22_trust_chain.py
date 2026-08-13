@@ -28,13 +28,14 @@ if str(PROJECT_ROOT) not in sys.path:
 # resolveReviewThread.
 # ---------------------------------------------------------------------------
 def _c22_make_running_dict(attempt_id, prelaunch_head, extra=None,
-                          result_artifact_path=None):
+                          result_artifact_path=None, event_ids=(),
+                          finding_ids=()):
     return {
         "schema_version": "autocoder.worker_attempt.v1",
         "attempt_id": attempt_id,
         "claim_id": f"lease-c22-{attempt_id[-6:]}",
         "repo_owner": "OWNER", "repo_name": "REPO", "pr_number": 5,
-        "event_ids": [], "finding_ids": [],
+        "event_ids": list(event_ids), "finding_ids": list(finding_ids),
         "directive_digest": "c22" + "0" * 60,
         "directive_path": "/tmp/c22/d.json",
         "prelaunch_head": prelaunch_head,
@@ -100,6 +101,7 @@ def test_round54_c22_consumer_uses_exact_per_thread_disposition(tmp_path, monkey
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        event_ids=["unresolved_thread_drain:PRRT_kwDOTtyQLc6Xsatisfied"],
     )
     artifact = _c22_make_artifact(
         attempt_id=attempt_id,
@@ -155,6 +157,7 @@ def test_round54_c22_consumer_uses_superseded_disposition(tmp_path, monkeypatch)
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        event_ids=["unresolved_thread_drain:PRRT_kwDOTtyQLc6Xsupersed"],
     )
     artifact = _c22_make_artifact(
         attempt_id=attempt_id,
@@ -207,6 +210,7 @@ def test_round54_c22_consumer_uses_repaired_disposition(tmp_path, monkeypatch):
         attempt_id=attempt_id,
         prelaunch_head=D,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        event_ids=["unresolved_thread_drain:PRRT_kwDOTtyQLc6Xrepaired"],
     )
     artifact = _c22_make_artifact(
         attempt_id=attempt_id,

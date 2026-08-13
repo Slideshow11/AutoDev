@@ -5011,65 +5011,96 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 _default_disp = THREAD_DISPOSITION_REPAIRED
             else:
                 _default_disp = THREAD_DISPOSITION_ALREADY_SATISFIED
-            # Round-54/C22 §2, §4: for REPAIR_PUSHED, the contracted
-            # thread identity MUST come from the durable work item
-            # (WorkerAttemptRecord.finding_ids) AND/OR the
-            # artifact's per-finding dispositions. The worker's
-            # finding_id claim is EVIDENCE, not AUTHORITY over
-            # thread ownership. If both sources agree, the thread
-            # identity is confirmed. If they disagree, the
-            # attempt is treated as RESULT_IDENTITY_MISMATCH
-            # and the terminalization is BLOCKED.
-            if _result_type == "REPAIR_PUSHED":
-                _contracted_tids = []
-                try:
-                    _fid_tids = list(
-                        getattr(_rec_obj, "finding_ids", None) or ()
-                    )
-                    for _ctid in _fid_tids:
-                        if isinstance(_ctid, str) and _ctid:
-                            _contracted_tids.append(_ctid)
-                except Exception as _ce:
+            # Round-54/C22 continuation §4, §6, §7: the
+            # contracted thread set comes from the durable
+            # work item (WorkerAttemptRecord.finding_ids AND
+            # event_ids). The worker's artifact is EVIDENCE
+            # about the work, not AUTHORITY over ownership.
+            # For ALL result types (REPAIR_PUSHED AND
+            # NO_CHANGES_REQUIRED):
+            #   - empty contracted set = RESULT_CONTRACT_INCOMPLETE
+            #     (fail closed: no consume, no resolve)
+            #   - worker-reported threads not in contracted set =
+            #     RESULT_IDENTITY_MISMATCH (fail closed: drop
+            #     worker-reported thread, no resolve)
+            _contracted_tids = []
+            try:
+                _fid_tids = list(
+                    getattr(_rec_obj, "finding_ids", None) or ()
+                )
+                for _ctid in _fid_tids:
+                    if isinstance(_ctid, str) and _ctid:
+                        _contracted_tids.append(_ctid)
+            except Exception as _ce:
+                log(
+                    "warning",
+                    "round-54: C22 could not read contracted "
+                    "finding_ids; thread identity unprovable",
+                    attempt_id=_attempt_id,
+                    error=str(_ce)[:200],
+                )
+            try:
+                _evt_tids = list(
+                    getattr(_rec_obj, "event_ids", None) or ()
+                )
+                for _eid in _evt_tids:
+                    if not isinstance(_eid, str):
+                        continue
+                    # unresolved_thread_drain:<thread_id>
+                    if _eid.startswith("unresolved_thread_drain:"):
+                        _tid_from_evt = _eid[len("unresolved_thread_drain:"):]
+                        if _tid_from_evt and _tid_from_evt not in _contracted_tids:
+                            _contracted_tids.append(_tid_from_evt)
+            except Exception:
+                pass
+            # Cross-check worker-reported threads.
+            _worker_reported_tids = {
+                _tid for (_tid, _disp) in _candidate_thread_dispositions
+            }
+            if _contracted_tids:
+                _mismatch = _worker_reported_tids - set(_contracted_tids)
+                if _mismatch:
                     log(
                         "warning",
-                        "round-54: C22 could not read contracted "
-                        "finding_ids; treating REPAIR_PUSHED thread "
-                        "as unidentifiable",
+                        "round-54: C22 RESULT_IDENTITY_MISMATCH; "
+                        "worker reported thread(s) not in contracted set; "
+                        "blocking those threads from terminalization",
                         attempt_id=_attempt_id,
-                        error=str(_ce)[:200],
+                        mismatch=sorted(_mismatch),
+                        contracted=sorted(_contracted_tids),
+                        reported=sorted(_worker_reported_tids),
                     )
-                # Cross-check the worker's artifact claims. If the
-                # artifact's ncrp.findings specify a thread_id that
-                # is not in the contracted set, RESULT_IDENTITY_MISMATCH.
-                _worker_reported_tids = {
-                    _tid for (_tid, _disp) in _candidate_thread_dispositions
-                }
-                if _contracted_tids:
-                    _mismatch = _worker_reported_tids - set(_contracted_tids)
-                    if _mismatch:
-                        log(
-                            "warning",
-                            "round-54: C22 RESULT_IDENTITY_MISMATCH; "
-                            "blocking terminalization; thread set must match contracted set",
-                            attempt_id=_attempt_id,
-                            mismatch=sorted(_mismatch),
-                            contracted=sorted(_contracted_tids),
-                            reported=sorted(_worker_reported_tids),
+                    _candidate_thread_dispositions = [
+                        (t, d) for (t, d) in _candidate_thread_dispositions
+                        if t not in _mismatch
+                    ]
+                for _ctid in _contracted_tids:
+                    if not any(
+                        t == _ctid
+                        for (t, _d) in _candidate_thread_dispositions
+                    ):
+                        _candidate_thread_dispositions.append(
+                            (_ctid, _default_disp)
                         )
-                        # Drop worker-reported threads not in contract.
-                        _candidate_thread_dispositions = [
-                            (t, d) for (t, d) in _candidate_thread_dispositions
-                            if t not in _mismatch
-                        ]
-                    # Ensure each contracted thread is in the map.
-                    for _ctid in _contracted_tids:
-                        if not any(
-                            t == _ctid
-                            for (t, _d) in _candidate_thread_dispositions
-                        ):
-                            _candidate_thread_dispositions.append(
-                                (_ctid, _default_disp)
-                            )
+            else:
+                # Empty contracted set. Per C22 continuation §7:
+                # RESULT_CONTRACT_INCOMPLETE. The worker's
+                # artifact claims are NOT authority over
+                # thread identity. Drop ALL worker-reported
+                # threads from the candidate set. No consume,
+                # no resolve. The attempt itself remains
+                # terminalized (the worker really did exit),
+                # but durable source terminalization is BLOCKED.
+                if _worker_reported_tids:
+                    log(
+                        "warning",
+                        "round-54: C22 RESULT_CONTRACT_INCOMPLETE; "
+                        "empty contracted thread set; worker-reported "
+                        "threads NOT trusted; blocking all terminalization",
+                        attempt_id=_attempt_id,
+                        reported=sorted(_worker_reported_tids),
+                    )
+                    _candidate_thread_dispositions = []
             # Round-54/C22 §2, §3, §7, §15: source terminality
             # MUST durably precede remote resolution. Per
             # C22 §2, the per-thread normalized disposition
@@ -5133,8 +5164,10 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 # durable-thread drain emitter stops
                 # re-emitting the drain event.
                 _term = False
+                _consumed = False
+                _terminalized = False
                 try:
-                    consume_thread_drain_event_in_terminal_disposition(
+                    _consume_result = consume_thread_drain_event_in_terminal_disposition(
                         thread_id=_tid,
                         event_id=f"unresolved_thread_drain:{_tid}",
                         provider=_recorded_provider,
@@ -5155,10 +5188,18 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                         },
                         extra_identity={"source": "round54_c22_orphan_recovery"},
                     )
-                    # Per C22 §3: the consume helper returns
-                    # the durable write status. We mark the
-                    # thread terminalized ONLY on success.
-                    _term = True
+                    # Per C22 continuation §9: the caller
+                    # MUST inspect consumed AND terminalized.
+                    # "no exception was raised" is insufficient.
+                    # If the helper returned a truthy dict,
+                    # use those flags. Otherwise treat as
+                    # partial failure.
+                    if isinstance(_consume_result, dict):
+                        _consumed = bool(_consume_result.get("consumed", False))
+                        _terminalized = bool(_consume_result.get("terminalized", False))
+                    elif _consume_result is True:
+                        _consumed = True
+                        _terminalized = True
                 except Exception as _cexc:
                     # Per C22 §3: the consume helper raised.
                     # The thread stays in FINALIZATION_RETRY_PENDING.
@@ -5175,6 +5216,10 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                         error=type(_cexc).__name__,
                         error_msg=str(_cexc)[:200],
                     )
+                # Per C22 §9: BOTH consumed AND terminalized
+                # must be True before remote resolution is
+                # eligible.
+                _term = _consumed and _terminalized
                 # Update the terminalized flag in place.
                 _terminal_map[_idx] = (_tid, _disp, _term)
             # Per C22 §2, §3, §15: resolveReviewThread runs
@@ -6582,8 +6627,17 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             _early_directive_id
             or f"lease-{_resolved_session_id}"
         )
+        # Round-54/C22 continuation §2: generate a stable
+        # result_contract_id BEFORE Popen. The wrapper
+        # receives this id via --result-contract-id and
+        # persists it in the artifact's extra dict. The
+        # supervisor validates the worker's envelope
+        # against this contract.
+        import uuid as _uuid
+        _result_contract_id = f"rc-{_uuid.uuid4().hex}"
         _wrapper_kwargs = {
             "attempt_id": attempt_id_prefix,  # actual attempt_id filled in after Popen
+            "result_contract_id": _result_contract_id,
             "directive_digest": _early_directive_digest,
             "directive_id": _early_directive_id,
             "directive_path": _early_directive_path,
@@ -6891,6 +6945,11 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
                     / f"{attempt_id}.worker_result.json"
                 ),
                 "attempt_nonce": attempt_id,
+                # Round-54/C22 continuation §2: persist
+                # the prelaunch result contract id so the
+                # supervisor can validate worker envelope
+                # identity against it.
+                "result_contract_id": _result_contract_id,
             },
         )
         WorkerAttemptStore(worker_attempts_dir).write(attempt)
@@ -6899,6 +6958,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             "worker attempt persisted",
             attempt_id=attempt_id,
             pid=proc.pid,
+            result_contract_id=_result_contract_id,
         )
     except Exception as exc:  # noqa: BLE001
         # Round-40 invariant: if WorkerAttemptRecord

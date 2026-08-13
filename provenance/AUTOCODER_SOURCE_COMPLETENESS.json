@@ -982,10 +982,10 @@
         "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
         "destination_path": "autocoder_supervisor/supervisor.py",
         "transformation_classification": "path_only",
-        "source_sha256": "c3ef4c982bde937dfa41590a24efba74ff0d674bbda46cbc446a1b89338242d4",
-        "destination_sha256": "c3ef4c982bde937dfa41590a24efba74ff0d674bbda46cbc446a1b89338242d4",
-        "source_size_bytes": 488816,
-        "destination_size_bytes": 488816,
+        "source_sha256": "906c832ee9b5a908b2e26d18daab7738992a6163ea5e5db0f73b4481822aec13",
+        "destination_sha256": "906c832ee9b5a908b2e26d18daab7738992a6163ea5e5db0f73b4481822aec13",
+        "source_size_bytes": 491678,
+        "destination_size_bytes": 491678,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null). Round-146 P1: per-PR iteration loop now rebinds AUTHORITATIVE_HEAD and rs to per-PR live state so capture_live_snapshot compares the secondary PR's live head against the per-PR head, not the canonical PR's AUTHORITATIVE_HEAD."
       },
       {

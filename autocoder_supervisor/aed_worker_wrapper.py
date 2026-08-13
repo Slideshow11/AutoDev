@@ -137,6 +137,14 @@ def main() -> int:
         default="Slideshow11/AutoDev",
     )
     parser.add_argument(
+        "--result-contract-id",
+        default="",
+        help="Round-54/C22 continuation §2: the prelaunch "
+        "result contract id the worker must echo in its "
+        "envelope. The wrapper validates the worker's "
+        "envelope against this contract.",
+    )
+    parser.add_argument(
         "--result-type-default",
         default="WORKER_EXECUTION_FAILED",
         help="Fallback result_type when the worker emits no envelope.",
@@ -271,48 +279,54 @@ def main() -> int:
         text = captured.decode("utf-8", errors="replace")
     except Exception:
         text = ""
-    # C22 §6: count envelope occurrences. Exactly one
-    # valid envelope is required. Zero envelopes is
-    # WORKER_RESULT_MISSING. Multiple envelopes is
-    # WORKER_RESULT_INVALID (fail closed).
+    # Round-54/C22 continuation §6 (defect 1): count
+    # envelope occurrences. Exactly one valid envelope is
+    # required. Zero envelopes is WORKER_RESULT_MISSING.
+    # Multiple envelopes is WORKER_RESULT_INVALID
+    # (fail closed). Capture the envelope AND the
+    # envelope_status / envelope_match_count as locals.
+    # The artifact dict does not exist yet — we must NOT
+    # write to artifact["extra"] here. Apply these locals
+    # AFTER the artifact is built below.
     _all_matches = list(ENVELOPE_RE.finditer(text))
-    if len(_all_matches) == 0:
-        envelope = None
-    elif len(_all_matches) == 1:
+    _envelope_match_count = len(_all_matches)
+    _envelope_status = "present" if _envelope_match_count == 1 else (
+        "missing" if _envelope_match_count == 0 else "multiple"
+    )
+    if _envelope_match_count == 1:
         m = _all_matches[0]
         try:
             envelope = json.loads(m.group(1))
+            if not isinstance(envelope, dict):
+                envelope = {"_envelope_parse_error": "envelope is not a dict",
+                            "_raw": m.group(1)[:2000]}
         except Exception as e:
             envelope = {"_envelope_parse_error": str(e), "_raw": m.group(1)[:2000]}
-    else:
-        # C22 §6: multiple envelopes is a worker result
-        # contract violation. Fail closed: the wrapper
-        # records the multiple-envelope count in the
-        # artifact and uses the FIRST envelope as a
-        # reference, but result_type is set to
-        # WORKER_RESULT_INVALID so the supervisor treats
-        # this as a failed attempt. The supervisor's
-        # C19 ingestion will see envelope_match_count
-        # > 1 and refuse to accept the result.
+    elif _envelope_match_count > 1:
+        # Multiple envelopes: WORKER_RESULT_INVALID.
+        # Use the first for forensic reference only.
         try:
-            envelope = json.loads(_all_matches[0].group(1))
+            _first = json.loads(_all_matches[0].group(1))
+            if isinstance(_first, dict):
+                envelope = {
+                    "_envelope_match_count": _envelope_match_count,
+                    "_envelope_parse_warning": (
+                        f"Multiple envelopes found ({_envelope_match_count}); "
+                        f"treating as WORKER_RESULT_INVALID"
+                    ),
+                }
+            else:
+                envelope = {"_envelope_parse_error": "first envelope not dict",
+                            "_raw": _all_matches[0].group(1)[:2000]}
         except Exception:
-            envelope = None
-        artifact["extra"]["envelope_status"] = "multiple"
-        artifact["extra"]["envelope_match_count"] = len(_all_matches)
-        result_type = "WORKER_RESULT_INVALID"
-        artifact["result_type"] = result_type
-        envelope = envelope or {}
-        envelope["_envelope_match_count"] = len(_all_matches)
-        envelope["_envelope_parse_warning"] = (
-            f"Multiple envelopes found ({len(_all_matches)}); "
-            f"using first and treating as WORKER_RESULT_INVALID"
-        )
+            envelope = {"_envelope_parse_error": "first envelope JSON parse failed",
+                        "_raw": _all_matches[0].group(1)[:2000]}
+    # Note: result_type is finalized AFTER the artifact is
+    # built, so we cannot overwrite WORKER_RESULT_INVALID
+    # from the envelope's result_type field. See
+    # _finalize_result_type() below.
 
-    # Determine result_type
-    result_type = args.result_type_default
-    if envelope and isinstance(envelope, dict):
-        result_type = envelope.get("result_type") or result_type
+    # The wrapper resolves the canonical attempt_id and
 
     # The wrapper resolves the canonical attempt_id and
     # claim_id by appending the wrapper's OWN PID (not
@@ -335,38 +349,67 @@ def main() -> int:
     # check — a clear signal of a misconfigured launch).
     _resolved_claim_id = args.claim_id or _resolved_attempt_id
 
+    # Round-54/C22 continuation §6: build the canonical
+    # WorkerResultArtifact. The envelope_status /
+    # envelope_match_count / result_type are derived from
+    # the envelope capture above, NOT from the envelope's
+    # result_type field. This prevents the worker from
+    # overwriting WORKER_RESULT_INVALID by including a
+    # valid result_type in the envelope body.
+    if _envelope_match_count > 1:
+        _final_result_type = "WORKER_RESULT_INVALID"
+    elif _envelope_match_count == 0:
+        _final_result_type = args.result_type_default
+    else:
+        # Exactly one envelope. The result_type comes
+        # from the envelope's body if present and valid,
+        # otherwise the default.
+        _final_result_type = args.result_type_default
+        if isinstance(envelope, dict) and "_envelope_parse_error" not in envelope:
+            _env_rt = envelope.get("result_type")
+            if _env_rt in (
+                "NO_CHANGES_REQUIRED", "REPAIR_PUSHED",
+                "REPAIR_COMMIT_PRODUCED", "COMMIT_PRODUCED_NOT_PUSHED",
+                "WORKER_EXECUTION_FAILED",
+            ):
+                _final_result_type = _env_rt
     # Build the canonical WorkerResultArtifact
     artifact = {
         "schema_version": "autocoder.worker_result.v1",
         "attempt_id": _resolved_attempt_id,
         "claim_id": _resolved_claim_id,
         "directive_digest": args.directive_digest,
-        "result_type": result_type,
+        "result_type": _final_result_type,
         "produced_commit_shas": (
             list(envelope.get("produced_commit_shas") or [])
-            if isinstance(envelope, dict)
+            if isinstance(envelope, dict) and _envelope_match_count == 1
             else []
         ),
         "pushed_commit_shas": (
             list(envelope.get("pushed_commit_shas") or [])
-            if isinstance(envelope, dict)
+            if isinstance(envelope, dict) and _envelope_match_count == 1
             else []
         ),
         "completed_at": (
             envelope.get("completed_at", now_iso())
-            if isinstance(envelope, dict)
+            if isinstance(envelope, dict) and _envelope_match_count == 1
             else now_iso()
         ),
         "no_changes_required_proof": (
             envelope.get("no_changes_required_proof")
-            if isinstance(envelope, dict) and envelope.get("no_changes_required_proof")
+            if (
+                isinstance(envelope, dict)
+                and _envelope_match_count == 1
+                and envelope.get("no_changes_required_proof")
+                and "_envelope_parse_error" not in envelope
+            )
             else None
         ),
         "tests_run": 0,
         "tests_passed": 0,
         "attempt_nonce": (
             envelope.get("attempt_nonce", args.attempt_id.rsplit("-", 1)[0])
-            if isinstance(envelope, dict)
+            if isinstance(envelope, dict) and _envelope_match_count == 1
             else args.attempt_id.rsplit("-", 1)[0]
         ),
         "repo": args.repo,
@@ -377,28 +420,19 @@ def main() -> int:
         "extra": {
             "worker_result_envelope_seen": envelope is not None,
             "worker_envelope_source": "round51_c19_wrapper",
+            "envelope_status": _envelope_status,
+            "envelope_match_count": _envelope_match_count,
+            # Round-54/C22 continuation §2: persist the
+            # prelaunch result contract for the supervisor
+            # to validate worker output against.
+            "result_contract_id": args.result_contract_id or "",
         },
     }
-    if envelope is None:
-        # C22 §6: FAIL-CLOSED. Do NOT synthesize an empty
-        # no-op proof. A missing envelope means the worker
-        # failed to emit its result contract. The artifact
-        # carries result_type = args.result_type_default
-        # (default WORKER_EXECUTION_FAILED) and
-        # no_changes_required_proof = None. The supervisor's
-        # C19 ingestion treats this as a worker execution
-        # failure, NOT a no-change success. Remote
-        # resolution is blocked because the disposition
-        # cannot be derived from a non-existent envelope.
-        artifact["extra"]["envelope_status"] = "missing"
-    else:
-        artifact["extra"]["envelope_status"] = "present"
-    # Per C22 §6, even when the envelope IS present, exactly
-    # one valid envelope is required. The C19 wrapper used a
-    # permissive regex match; this counter is incremented
-    # by the supervisor-side ingestion. The wrapper records
-    # the count for forensic purposes.
-    artifact["extra"]["envelope_match_count"] = 1 if envelope else 0
+    # Round-54/C22 continuation: envelope_status and
+    # envelope_match_count are set ABOVE during the
+    # artifact build (defect 1 fix: the wrapper no longer
+    # touches artifact before it exists). No additional
+    # post-processing is needed here.
 
     # Substitute <PID> in the target paths with the
     # wrapper's OWN PID. The wrapper is the process the
@@ -432,8 +466,12 @@ def main() -> int:
 
     # Print a one-line summary to stderr (visible to supervisor log)
     print(
-        f"aed_worker_wrapper: attempt={args.attempt_id} result_type={result_type} "
-        f"envelope_seen={envelope is not None} artifact={target} exit_code={exit_code}",
+        f"aed_worker_wrapper: attempt={args.attempt_id} "
+        f"result_type={_final_result_type} "
+        f"envelope_seen={envelope is not None} "
+        f"envelope_status={_envelope_status} "
+        f"envelope_match_count={_envelope_match_count} "
+        f"artifact={target} exit_code={exit_code}",
         file=sys.stderr,
         flush=True,
     )

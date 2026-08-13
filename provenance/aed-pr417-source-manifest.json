@@ -1,5 +1,5 @@
 {
-  "captured_utc": "2026-08-13T02:35:00Z",
+  "captured_utc": "2026-08-13T04:00:00Z",
   "destination_branch": "feat/extract-supervisor-v1",
   "destination_product": "AutoDev",
   "destination_repository": "Slideshow11/AutoDev",
@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "c3ef4c982bde937dfa41590a24efba74ff0d674bbda46cbc446a1b89338242d4",
-      "destination_size_bytes": 488816,
+      "destination_sha256": "906c832ee9b5a908b2e26d18daab7738992a6163ea5e5db0f73b4481822aec13",
+      "destination_size_bytes": 491678,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -156,8 +156,8 @@
     },
     {
       "destination_path": "tests/test_autocoder_supervisor.py",
-      "destination_sha256": "ab06d9f268b9d63f86a3ad5c5306203d991ff5c48501b0785276fffe9e372ad1",
-      "destination_size_bytes": 293848,
+      "destination_sha256": "17347f895aabe119dd724297b8d1174368a4185cbe238cfad6595e4a34c01052",
+      "destination_size_bytes": 294185,
       "source_path": "tests/test_autocoder_supervisor.py",
       "source_sha256": "3b65e142bb79ca060484b37ed28127979ccc004aa82ce78d65b3d704fe5895f3",
       "source_size_bytes": 39831,
@@ -420,7 +420,7 @@
       "transformation_explanation": "Round-10 directive: scripts/quiet_window_observer.py is a standalone addition to AutoDev. It was not extracted from AED PR #417 (the AED reference commit b57fcaad does not contain a file at scripts/local/quiet_window_observer.py). The file is required by the production verifier (default --aed-path) and was added to AutoDev's seed. The manifest audit entry remains: measured sha256 = sha256 of destination file (verified) and the audit counts this file as a standalone addition."
     }
   ],
-  "last_modification_note": "Round-54/C22.0b: provenance manifest refreshed to reflect C22 dirty worktree pre-launch guard addition. The C22 source repairs include: canonical terminality predicate gating remote resolution on source terminalization success, C19 wrapper fail-closed (no synthesized no-op proof on missing envelope), in-process GraphQL transport (no gh CLI dependency), and the per-finding disposition_contract. Hashes and sizes recomputed for all 44 tracked files.",
+  "last_modification_note": "Round-54/C22 CONTINUATION: provenance manifest refreshed. The C22 continuation source repairs include: multiple-envelope wrapper path no longer crashes, no result_type overwrite, prelaunch result_contract_id generation and validation, contracted thread ownership enforced for ALL result types (including NO_CHANGES_REQUIRED), empty contracted set is RESULT_CONTRACT_INCOMPLETE, consume helper return value inspected (consumed AND terminalized both required), no broad retry-scan of finalized records. Hashes and sizes recomputed for all 44 tracked files.",
   "schema": "autocoder.pr417.source_manifest.v1",
   "source_commit": "b57fcaad806c68b93668bcd318fa26ab15a8ab40",
   "source_pr": 417,

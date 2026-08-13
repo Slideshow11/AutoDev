@@ -5990,6 +5990,8 @@ def _c20_make_running_record(
     pushed_commit_sha: str = None,
     extra: dict = None,
     result_artifact_path: str = None,
+    event_ids=(),
+    finding_ids=(),
 ):
     """Construct a serialisable WorkerAttemptRecord dict in WORKER_RUNNING."""
     return {
@@ -5999,8 +6001,8 @@ def _c20_make_running_record(
         "repo_owner": "OWNER",
         "repo_name": "REPO",
         "pr_number": 5,
-        "event_ids": [],
-        "finding_ids": [],
+        "event_ids": list(event_ids),
+        "finding_ids": list(finding_ids),
         "directive_digest": "c20" + "0" * 60,
         "directive_path": "/tmp/c20/directive.json",
         "prelaunch_head": prelaunch_head,
@@ -6158,6 +6160,11 @@ def test_round52_c20_orphan_no_change_finalizes_without_lease(
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
         extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        # Round-54/C22 continuation §4: the contracted
+        # thread set is derived from event_ids (and
+        # finding_ids). Include PRRT_TEST in event_ids so
+        # the test reflects production reality.
+        event_ids=["unresolved_thread_drain:PRRT_TEST"],
     )
     artifact = _c20_make_artifact(
         attempt_id=attempt_id,
