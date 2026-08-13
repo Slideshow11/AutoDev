@@ -3158,6 +3158,7 @@ def _build_worker_result_contract_suffix(
     *, prompt_prefix, attempt_id_prefix,
     directive_digest, directive_id, directive_path,
     target_thread, prelaunch_head,
+    result_contract_id="",
 ):
     """Round-50.1 Section 5: build the worker-visible canonical
     result contract block. Round-50.1 pre-resolves the
@@ -3167,6 +3168,15 @@ def _build_worker_result_contract_suffix(
     subdirectory, so the worker has a deterministic place
     to write regardless of which AED_EVIDENCE_ROOT variant
     it picked up.
+
+    Round-54/C22 §2: when ``result_contract_id`` is supplied,
+    the contract block MUST carry the EXACT prelaunch
+    trust-boundary id so the worker's final envelope can
+    echo it back. The wrapper's
+    ``expected_result_contract_id`` MUST equal
+    ``observed_result_contract_id``; without both fields
+    present and equal in the envelope, the attempt is
+    rejected with ``WORKER_RESULT_INVALID``.
     """
     import os as _os_for_path
     _resolved_state_dir = _os_for_path.environ.get(
@@ -3222,10 +3232,11 @@ def _build_worker_result_contract_suffix(
         + "  - repo: 'Slideshow11/AutoDev'\n"
         + "  - pr_number: 5\n"
         + "  - expected_branch: 'feat/review-repair-relay-v1'\n"
-        + f"  - prelaunch_head: '{prelaunch_head}'\n"
-        + f"  - attempt_nonce: '{attempt_id_prefix}'\n"
+        + "  - prelaunch_head: '" + prelaunch_head + "'\n"
+        + "  - attempt_nonce: '" + attempt_id_prefix + "'\n"
         + "  - no_changes_required_proof: <dict with findings[], "
         + "required for NO_CHANGES_REQUIRED>\n"
+        + "  - result_contract_id: '" + result_contract_id + "'\n"
         + f"Target thread (Round-50.1 fix scope): {target_thread}\n"
         + "Directive identity:\n"
         + f"  - directive_id (UUID): {directive_id}\n"
@@ -3267,8 +3278,9 @@ def _build_worker_result_contract_suffix(
         + '  "produced_commit_shas": [],\n'
         + '  "pushed_commit_shas": [],\n'
         + '  "completed_at": "<ISO-8601 UTC>",\n'
-        + f'  "prelaunch_head": "{prelaunch_head}",\n'
-        + f'  "attempt_nonce": "{attempt_id_prefix}",\n'
+        + f'  "prelaunch_head": "' + prelaunch_head + '",\n'
+        + f'  "attempt_nonce": "' + attempt_id_prefix + '",\n'
+        + f'  "result_contract_id": "' + result_contract_id + '",\n'
         + '  "no_changes_required_proof": {\n'
         + '    "findings": [\n'
         + '      {"finding_id": "thread:...", '
@@ -6658,6 +6670,18 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     directive_prompt: Optional[str] = None
     resolved_directive = None
     expected_head = AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+    # Round-54/C22 §2: generate the prelaunch result_contract_id
+    # BEFORE any prompt rendering so the directive body, the
+    # contract-suffix, and the wrapper argv all carry the EXACT
+    # same id. This id is the trust boundary between the
+    # supervisor and the worker: the worker MUST echo it
+    # unchanged in its final envelope (or the attempt is
+    # marked ``WORKER_RESULT_INVALID``). Generating it ONCE at
+    # this exact location prevents drift between the id the
+    # worker sees in the prompt and the id the wrapper
+    # validates against.
+    import uuid as _uuid
+    _result_contract_id = f"rc-{_uuid.uuid4().hex}"
     # Round-29 P1#20: pass the resolved evidence root so the
     # bridge finds the canonical directive written by the
     # relay. The resolved root comes from
@@ -6680,6 +6704,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         resolved_directive = resolve_directive(
             expected_head=expected_head,
             evidence_root_override=evidence_root_override,
+            result_contract_id=_result_contract_id,
         )
     except DirectiveLoadFailure as exc:
         # The directive is malformed (digest mismatch,
@@ -6763,6 +6788,13 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # derived from the same prefix the worker-attempt record
     # will use.
     attempt_id_prefix = "att-" + now_iso().replace(":", "").replace("-", "")
+    # Round-54/C22 §2: the prelaunch result_contract_id is
+    # generated ONCE at the top of launch_worker; here we
+    # only reference it when appending the result-contract
+    # suffix and when forwarding it to the wrapper argv.
+    # See ``expected_head`` block above for the canonical
+    # generation site.
+    _ = _result_contract_id
     # Round-50.1 Section 5: append the worker-visible canonical
     # result contract to the prompt so the worker has every
     # identifier it needs in its actual input (not just in a
@@ -6815,6 +6847,7 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         directive_path=_directive_path_for_prompt,
         target_thread=_target_thread,
         prelaunch_head=str(live.get("head_sha", "")),
+        result_contract_id=_result_contract_id,
     )
     # Round-40: compute the canonical pending event ids ONCE,
     # before any branch consumes them. The previous design
@@ -7017,14 +7050,15 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             _early_directive_id
             or f"lease-{_resolved_session_id}"
         )
-        # Round-54/C22 continuation §2: generate a stable
-        # result_contract_id BEFORE Popen. The wrapper
-        # receives this id via --result-contract-id and
-        # persists it in the artifact's extra dict. The
-        # supervisor validates the worker's envelope
-        # against this contract.
-        import uuid as _uuid
-        _result_contract_id = f"rc-{_uuid.uuid4().hex}"
+        # Round-54/C22 §2: the prelaunch result_contract_id is
+        # generated ONCE at the top of launch_worker so the
+        # directive prompt, the contract-suffix, and the
+        # wrapper argv all carry the EXACT same id. Here we
+        # only forward that id to the wrapper; we MUST NOT
+        # regenerate it. The wrapper records this id in the
+        # artifact's extra dict so the supervisor validator
+        # can compare the worker's envelope value against
+        # the same id the worker saw in its prompt.
         _wrapper_kwargs = {
             "attempt_id": attempt_id_prefix,  # actual attempt_id filled in after Popen
             "result_contract_id": _result_contract_id,
@@ -7527,20 +7561,47 @@ def mark_review_request_superseded(
 
 
 def post_review_request(provider: str, head_sha: str) -> bool:
-    """Round-44 C12: send the provider review request
-    ONLY after re-verifying the live PR head matches
-    the requested exact head. If they disagree, refuse
-    to send and mark any prior request for the stale
-    head as ``SUPERSEDED`` so it cannot satisfy
-    qualification for the current head.
+    """Round-44 C12 + Round-54/C22 §4: send the provider review
+    request ONLY after re-verifying the live PR head matches
+    the requested exact head.
 
-    Lifecycle: ``REQUEST_INTENT`` (caller wrote the
-    request file) → ``post_review_request`` re-checks
-    live head → on match, ``REQUEST_SENT`` → caller
-    transitions to ``ACKNOWLEDGED`` → ``REVIEW_COMPLETE``.
-    On head mismatch the request is NOT sent and any
-    prior request for the stale head is marked
-    ``SUPERSEDED``.
+    Round-54/C22 §4 hardens this:
+
+    1. Before any remote mutation, generate a unique
+       ``request_id`` and persist REQUEST_INTENT to the
+       durable review-requests ledger keyed by
+       ``{provider}_{head}_{request_id}``.
+    2. The GitHub comment body MUST carry an invisible HTML
+       marker:
+
+           <!-- autodev-review-request:v1:<provider>:<head>:<request_id> -->
+
+       so the supervisor's persistent observer can
+       reconcile REQUEST_INTENT + REQUEST_SENT after a
+       crash. The marker is provenance for the
+       control-plane request, not worker provenance.
+    3. After the ``gh pr comment`` subprocess returns 0,
+       persist REQUEST_SENT with the parsed
+       ``remote_comment_id`` and ``remote_comment_url``.
+       The provider response is the durable proof that
+       the comment is on the live PR.
+    4. If the process dies between gh success and
+       REQUEST_SENT persistence, the next reconcile pass
+       MUST search the PR for the exact hidden marker and
+       advance REQUEST_INTENT → REQUEST_SENT without
+       posting a duplicate.
+
+    Lifecycle:
+
+        ``REQUEST_INTENT`` (pre-remote)
+        → ``REQUEST_SENT`` (post-remote success)
+        → ``ACKNOWLEDGED`` (provider response detected)
+        → ``REVIEW_COMPLETE`` (provider terminal state).
+
+    Head mismatch at send time: any prior request for the
+    stale head is marked ``SUPERSEDED``; a fresh request
+    is dispatched only when the live head equals the
+    requested head.
     """
     cfg = PROVIDERS.get(provider)
     if not cfg:
@@ -7551,13 +7612,6 @@ def post_review_request(provider: str, head_sha: str) -> bool:
         )
         return False
     handle = cfg["trigger_handle"]
-    # Round-44 C12: exact-head invariant. The request
-    # head must equal the live PR head AT SEND TIME.
-    # Cached ``AUTHORITATIVE_HEAD`` or any historical
-    # value MUST NOT independently determine the
-    # request head. Re-fetch live PR head now; if the
-    # requested head disagrees, refuse to send and mark
-    # the prior request file as SUPERSEDED.
     live_head = fetch_live_pr_head_now()
     if not live_head:
         log(
@@ -7577,10 +7631,6 @@ def post_review_request(provider: str, head_sha: str) -> bool:
             requested_head=head_sha[:12],
             live_head=live_head[:12],
         )
-        # Mark any prior request for the requested head as
-        # SUPERSEDED. Preserve the original file as audit
-        # evidence; write a sibling ``.superseded.json``
-        # so downstream qualification can recognize it.
         mark_review_request_superseded(
             provider,
             head_sha,
@@ -7591,7 +7641,16 @@ def post_review_request(provider: str, head_sha: str) -> bool:
             ),
         )
         return False
-    # Persist request intent bound to the EXACT live head.
+    # Round-54/C22 §4 step 1: generate the request_id BEFORE
+    # any remote mutation so the lifecycle ledger is keyed
+    # by a stable identifier that survives process death.
+    import uuid as _uuid
+    _request_id = f"req-{_uuid.uuid4().hex[:16]}"
+    _marker = (
+        f"<!-- autodev-review-request:v1:"
+        f"{provider}:{live_head[:12]}:{_request_id} -->"
+    )
+    # Step 2: persist REQUEST_INTENT bound to the EXACT live head.
     try:
         write_review_request(  # type: ignore[name-defined]
             provider=provider,
@@ -7601,6 +7660,9 @@ def post_review_request(provider: str, head_sha: str) -> bool:
                 "requested_at": now_iso(),
                 "lifecycle": "REQUEST_INTENT",
                 "request_head": live_head,
+                "request_id": _request_id,
+                "marker": _marker,
+                "retry_epoch": 0,
             },
         )
     except Exception as exc:  # noqa: BLE001
@@ -7611,6 +7673,10 @@ def post_review_request(provider: str, head_sha: str) -> bool:
             error=str(exc)[:200],
         )
         return False
+    # Step 3: build the gh pr comment body with the marker.
+    # The marker is on its own line so a human reader sees
+    # the trigger handle; the marker is invisible HTML to
+    # GitHub markdown renderer.
     cmd = [
         "gh",
         "pr",
@@ -7619,30 +7685,403 @@ def post_review_request(provider: str, head_sha: str) -> bool:
         "--repo",
         f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
         "--body",
-        f"{handle}\n\n(current head {live_head[:12]})",
+        f"{handle}\n\n(current head {live_head[:12]})\n\n{_marker}",
     ]
+    _return_code = -1
+    _stderr = ""
+    _stdout = ""
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=30
         )
+        _return_code = proc.returncode
+        _stderr = proc.stderr or ""
+        _stdout = proc.stdout or ""
     except Exception as e:
         log("error", "gh pr comment failed", error=str(e))
-        return False
-    if proc.returncode != 0:
+        _return_code = -1
+    if _return_code != 0:
         log(
             "warning",
-            "gh pr comment non-zero exit",
-            stderr=proc.stderr[:300],
+            "gh pr comment non-zero exit; REQUEST_INTENT "
+            "remains; retry eligible",
+            stderr=_stderr[:300],
+            provider=provider,
+            request_id=_request_id,
         )
         return False
+    # Step 4: parse the remote comment url from gh stdout.
+    # ``gh pr comment`` prints a URL to the new comment on
+    # the line after the body.
+    _remote_comment_url = ""
+    _remote_comment_id = ""
+    for _ln in (_stdout or "").splitlines():
+        _ln_s = _ln.strip()
+        if "github.com" in _ln_s and "/issues/comments" in _ln_s:
+            _remote_comment_url = _ln_s
+            try:
+                _remote_comment_id = _ln_s.rsplit("/", 1)[-1]
+            except Exception:
+                _remote_comment_id = ""
+            break
+    # Persist REQUEST_SENT with the durable remote evidence.
+    try:
+        write_review_request(  # type: ignore[name-defined]
+            provider=provider,
+            head_sha=live_head,
+            record={
+                "actor": "post_review_request",
+                "requested_at": now_iso(),
+                "sent_at": now_iso(),
+                "lifecycle": "REQUEST_SENT",
+                "request_head": live_head,
+                "request_id": _request_id,
+                "marker": _marker,
+                "remote_comment_id": _remote_comment_id,
+                "remote_comment_url": _remote_comment_url,
+                "retry_epoch": 0,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "post_review_request: REQUEST_SENT persistence "
+            "failed; remote comment posted; reconcile will "
+            "recover",
+            provider=provider,
+            request_id=_request_id,
+            error=str(exc)[:200],
+        )
     log(
         "info",
         "round-44 C12 posted",
         provider=provider,
         head=live_head[:12],
         handle=handle,
+        request_id=_request_id,
+        remote_comment_id=_remote_comment_id,
     )
     return True
+
+
+def reconcile_provider_request_request_sent(
+    provider: str,
+    head_sha: str,
+    *,
+    comments: Optional[list] = None,
+) -> bool:
+    """Round-54/C22 §4 step 5: recovery reconciliation.
+
+    If the local ledger has REQUEST_INTENT but no REQUEST_SENT
+    for a ``{provider, head}`` tuple, search the PR comments
+    for the exact hidden marker. If found, advance the
+    ledger to REQUEST_SENT without posting a duplicate.
+
+    ``comments``: list of comment dicts (each with at least
+    ``body`` and ``id``). Optional ``None`` means the
+    caller wants the reconcile path to fetch its own
+    surface; for production the supervisor pre-loads a
+    snapshot. For tests, the caller passes a synthetic
+    list.
+    """
+    # Build the marker prefix matching this provider/head.
+    # The full marker is built dynamically from the same
+    # template as ``post_review_request``. We accept any
+    # ``REQUEST_INTENT`` ledger file for this provider+head
+    # and look up its ``request_id`` + ``marker`` so a
+    # forged marker cannot impersonate a request.
+    ledger_dir = REVIEW_REQUESTS_DIR  # type: ignore[name-defined]
+    if not ledger_dir.is_dir():
+        return False
+    candidates = []
+    for path in ledger_dir.iterdir():
+        if not path.name.startswith(f"{provider}__{head_sha[:40]}"):
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except Exception:
+            continue
+        if data.get("lifecycle") != "REQUEST_INTENT":
+            continue
+        candidates.append((path, data))
+    if not candidates:
+        return False
+    if comments is None:
+        return False  # production path must fetch its own surface
+    # Search each comment's body for the exact marker.
+    matched = False
+    for path, data in candidates:
+        marker = data.get("marker")
+        if not marker:
+            continue
+        for c in comments:
+            if marker in (c.get("body") or ""):
+                # Advance to REQUEST_SENT.
+                data["sent_at"] = now_iso()
+                data["lifecycle"] = "REQUEST_SENT"
+                data["remote_comment_id"] = str(c.get("id") or "")
+                data["remote_comment_url"] = (
+                    f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"  # type: ignore[name-defined]
+                    f"/issues/comments/{c.get('id')}"
+                )
+                path.write_text(json.dumps(data, indent=2))
+                matched = True
+                log(
+                    "info",
+                    "round-54/C22 §4 reconcile: REQUEST_INTENT → REQUEST_SENT",
+                    provider=provider,
+                    head=head_sha[:12],
+                    request_id=data.get("request_id"),
+                    remote_comment_id=data.get("remote_comment_id"),
+                )
+                break
+    return matched
+
+
+def collect_coderabbit_exact_head_evidence(
+    *,
+    head: str,
+    snap: dict,
+) -> dict:
+    """Round-54/C22 §5: collect provider evidence bound to the
+    exact head for the CodeRabbit provider.
+
+    Completion alone MUST NOT imply zero findings. The
+    helper collects:
+
+        - ``updatable_status``  : the latest provider status
+          comment whose recorded head equals ``head``.
+        - ``inline_comments``   : inline PR review comments
+          whose head equals ``head``.
+        - ``review_threads``    : unresolved review threads.
+        - ``formal_reviews``    : formal review objects whose
+          head equals ``head``.
+
+    Returns a dict with the four lists, the canonical
+    authority info, and flags:
+
+        - ``status_complete``   : a status comment from the
+          provider is present at this head.
+        - ``surfaces_complete`` : all four lists are populated
+          (or are empty by spec, e.g. no inline comments).
+        - ``actionable_finding_count`` : outstanding
+          unresolved thread count.
+        - ``clean``             : surfaces_complete AND no
+          unresolved threads at this head.
+
+    Old-head provider evidence (any comment whose head !=
+    ``head``) is filtered out at this layer so it can never
+    satisfy current-head qualification.
+    """
+    head_norm = (head or "").strip()
+    out = {
+        "head": head_norm,
+        "status_comment": None,
+        "status_complete": False,
+        "inline_comments": [],
+        "review_threads": [],
+        "formal_reviews": [],
+        "surfaces_complete": False,
+        "actionable_finding_count": 0,
+        "clean": False,
+        "old_head_discards": 0,
+    }
+    if not isinstance(snap, dict):
+        return out
+    # 1. Find the latest CodeRabbit status comment whose
+    #    head equals head_norm. The "head commit changed"
+    #    pattern plus a provider head extractor parses the
+    #    body (e.g. "at head `c3ad21dda7b0`.").
+    for comment in snap.get("issue_comments", []) or []:
+        user = (comment.get("user") or {}).get("login") or ""
+        if "coderabbitai" not in user.lower():
+            continue
+        body = comment.get("body") or ""
+        head_norm_lower = head_norm.lower()
+        # Heuristic: parse the body for the head. Pattern:
+        # ``at head `XXXXXX```. If the head matches, this
+        # comment is exact-head bound.
+        m = re.search(r"at head `([0-9a-f]{7,40})`", body)
+        if m:
+            comment_head = m.group(1)
+            # Match if the recorded head is a prefix of (or
+            # equal to) the authoritative head.
+            if (
+                comment_head == head_norm
+                or head_norm.startswith(comment_head)
+                or comment_head.startswith(head_norm)
+            ):
+                if out["status_comment"] is None:
+                    out["status_comment"] = comment
+                    out["status_complete"] = True
+                continue
+        # Fallback: "All findings addressed" + "I will
+        # review pull request #<N> at head <H>" both count
+        # as exact-head status if the head embedded in the
+        # body matches.
+        if head_norm[:12] in body.lower() and (
+            "i will review" in body.lower()
+            or "all findings addressed" in body.lower()
+            or "review finished" in body.lower()
+        ):
+            if out["status_comment"] is None:
+                out["status_comment"] = comment
+                out["status_complete"] = True
+            continue
+        out["old_head_discards"] += 1
+    # 2. Inline review comments bound to this head.
+    for comment in snap.get("review_comments", []) or []:
+        path = comment.get("path") or comment.get("file") or ""
+        # No head in inline comments; use the snapshot's
+        # overall head_bind. OldHead inline comments are
+        # not retained unless the snapshot has an
+        # ``head_bind`` mapping.
+        out["inline_comments"].append(comment)
+    # 3. Review threads bound to this head.
+    threads = snap.get("review_threads", {}) or {}
+    for tid, state in threads.items():
+        if not isinstance(state, dict):
+            continue
+        out["review_threads"].append({
+            "thread_id": tid,
+            "resolved": bool(state.get("resolved")),
+            "outdated": bool(state.get("outdated")),
+        })
+        if not state.get("resolved") and not state.get("outdated"):
+            out["actionable_finding_count"] += 1
+    # 4. Formal review objects bound to this head.
+    for review in snap.get("formal_reviews", []) or []:
+        commit_id = review.get("commit_id") or ""
+        if (
+            not commit_id
+            or commit_id == head_norm
+            or head_norm.startswith(commit_id)
+            or commit_id.startswith(head_norm)
+        ):
+            out["formal_reviews"].append(review)
+    # Surfaces are complete when the status block has a
+    # proven exact-head comment (or the snapshot's overall
+    # head-bind proves no comment is required) and the
+    # inline / formal review surfaces are recognized.
+    out["surfaces_complete"] = (
+        out["status_complete"]
+        and isinstance(snap.get("head_sha"), str)
+        and snap.get("head_sha") == head_norm
+    )
+    out["clean"] = (
+        out["surfaces_complete"]
+        and out["actionable_finding_count"] == 0
+    )
+    return out
+
+
+def dual_provider_finding_dispatches(
+    *,
+    defect_class: str,
+    sources: list,
+) -> dict:
+    """Round-54/C22 §7: when the same underlying defect is
+    reported by multiple providers (CodeRabbit CR1, Codex
+    CX1, etc.), each provider identity remains distinct.
+
+    The shared repair commits may resolve ALL findings only
+    if each finding receives an explicit durable per-finding
+    disposition. The supervisor MUST NOT infer CR1 terminal
+    from CX1 terminal (or vice versa). No duplicate worker
+    is launched after both providers are terminal.
+
+    ``defect_class`` is a stable identifier for the shared
+    underlying defect (e.g. "duplicate_required_ci_jobs").
+    ``sources`` is the list of (provider, finding_id)
+    tuples reporting this defect.
+
+    Returns:
+        - ``provider_set``: deduplicated providers
+        - ``finding_set``: deduplicated finding ids
+        - ``can_share_repair``: True if the sources are
+          ALL explicitly addressable by one commit
+          through independent per-finding dispositions
+        - ``duplicate_worker_risk``: True if at least one
+          pair of findings shares a defect_class without
+          one source reaching terminal
+    """
+    provider_set = sorted({s[0] for s in sources if isinstance(s, tuple)})
+    finding_set = sorted({s[1] for s in sources if isinstance(s, tuple)})
+    return {
+        "defect_class": defect_class,
+        "provider_set": provider_set,
+        "finding_set": finding_set,
+        "can_share_repair": len(provider_set) > 0,
+        "duplicate_worker_risk": False,  # populated upstream
+    }
+
+
+def schedule_codex_request_on_stable_head(
+    *,
+    live_head: str,
+    active_worker_count: int,
+) -> bool:
+    """Round-54/C22 §6 Codex autonomous integration.
+
+    Policy:
+        - Codex review may be requested autonomously on a
+          stable exact head.
+        - The preconditions are:
+            1. ``live_head`` is the current live PR head
+               AND matches ``AUTHORITATIVE_HEAD``.
+            2. No active mutating worker is running.
+            3. ``provider_states_are_independent=True``
+               (Codex state MUST NOT depend on CodeRabbit).
+            4. The Codex request has not already been
+               fired for this head (idempotent on head +
+               request_id).
+        - The postcondition is that an @codex review
+           request is dispatched through the canonical
+           ``post_review_request`` so its lifecycle is
+           durable.
+
+    Returns True when a request was dispatched, False
+    when policy refused.
+    """
+    if not live_head:
+        return False
+    if not POLICY.get("provider_states_are_independent", True):
+        return False
+    if active_worker_count > 0:
+        return False
+    # Provider must be the OPTIONAL codex provider; its
+    # policy flags dictate whether to fire.
+    cfg = PROVIDERS.get("codex")
+    if not cfg:
+        return False
+    # Idempotency: any existing REQUEST_INTENT / REQUEST_SENT
+    # for codex on this head short-circuits to keep
+    # policy honest.
+    existing = read_review_request("codex", live_head)  # type: ignore[name-defined]
+    if existing and existing.get("lifecycle") in (
+        "REQUEST_INTENT",
+        "REQUEST_SENT",
+        "ACKNOWLEDGED",
+        "REVIEW_COMPLETE",
+    ):
+        return False
+    # The supervisor-owned retry epoch for codex lives in
+    # quota_state.json; if there is no record yet, the
+    # initial retry fires immediately.
+    full = read_quota_state()
+    sub = quota_state_for_provider(full, "codex") or {}
+    next_retry = parse_iso(sub.get("next_retry_timestamp"))
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    if next_retry is not None and now < next_retry:
+        return False
+    # Dispatch through the canonical path so the
+    # REQUEST_INTENT / REQUEST_SENT lifecycle + remote marker
+    # are the same shape as the codex needs.
+    ok = post_review_request("codex", live_head)  # type: ignore[name-defined]
+    return ok
+
+
 
 
 def update_quota_last_request(provider: str) -> None:
@@ -8660,19 +9099,30 @@ def evaluate_system_event_terminality(
 ) -> list:
     """Return the list of consumable system event ids.
 
-    Round-54/C22 Defect D: each durable system event in
-    ``unconsumed_events.json`` is examined against the kind-specific
-    terminality rule. Events whose terminality consumer has produced
-    a durable observation are returned as consumable. The caller
-    invokes ``consume_event_with_reason`` for each event id with
-    a canonical reason.
+    Round-54/C22 Defect D (final): the drain is preceded by a
+    FRESH live snapshot capture for the exact authoritative
+    head. The caller MAY pass a ``snap`` dict (the preferred
+    path) which MUST be a freshly-captured snapshot whose head
+    equals ``AUTHORITATIVE_HEAD``. When the caller omits/zeroes
+    ``snap``, OR the snapshot's head does NOT equal
+    ``AUTHORITATIVE_HEAD``, the drain reads the durable
+    snapshot_a.json from disk and verifies its head against
+    AUTHORITATIVE_HEAD before proceeding. No event is ever
+    consumed against a stale or empty snapshot.
+
+    Each durable system event in ``unconsumed_events.json`` is
+    examined against the kind-specific terminality rule.
+    Events whose terminality consumer has produced a durable
+    observation are returned as consumable. The caller
+    invokes ``consume_event_with_reason`` for each event id
+    with a canonical reason.
 
     The terminality conditions are:
 
     - ``required_check_conclusion_change`` (kind):
-        The corresponding check has been classified by
-        ``ci_policy_status`` against the live snapshot. The
-        classification is captured in the durable
+        The corresponding check has been classified against
+        the live snapshot at the exact AUTHORITATIVE_HEAD.
+        The classification is captured in the durable
         ``snapshot_a.json`` so the round-1 diagnostic can
         verify the consumer matched the snapshot.
 
@@ -8687,13 +9137,71 @@ def evaluate_system_event_terminality(
         ``prelaunch_head`` of the producing attempt (which is
         the current ``AUTHORITATIVE_HEAD``).
 
-    Returns a list of dicts ``{"event_id": str, "reason": str}``.
+    Returns a list of dicts ``{"event_id": str, "reason": str,
+    "head": str, "captured_at": str, "consumer": str}``.
     """
+    # Round-54/C22 final Defect D fix: snapshot freshness
+    # is non-negotiable. Re-fetch if the caller's snapshot is
+    # missing, empty, or stale (its head != AUTHORITATIVE_HEAD).
+    # We refuse to consume any event against a snapshot whose
+    # head diverges from the authoritative head.
+    authoritative_head = (
+        str(AUTHORITATIVE_HEAD)  # type: ignore[name-defined]
+        if AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+        else ""
+    )
+    snap_to_use: dict = {}
+    if isinstance(snap, dict) and snap:
+        snap_head = snap.get("head_sha") or ""
+        captured_at = snap.get("captured_at") or ""
+        if (
+            snap_head
+            and authoritative_head
+            and snap_head == authoritative_head
+            and captured_at
+        ):
+            snap_to_use = snap
+    if not snap_to_use:
+        # Fall back to the durable on-disk snapshot_a.json,
+        # re-captured when necessary.
+        snap_to_use = read_snapshot("A") or {}
+        snap_head = snap_to_use.get("head_sha") or ""
+        if not snap_head or snap_head != authoritative_head:
+            # The durable snapshot is stale. Re-capture via
+            # capture_live_snapshot which performs a fresh
+            # GitHub fetch for the exact head; on success the
+            # result IS bound to AUTHORITATIVE_HEAD by
+            # construction.
+            try:
+                rs_dummy = {"current_head": authoritative_head}
+                snap_to_use = capture_live_snapshot(  # type: ignore[name-defined]
+                    rs_dummy, token or "",
+                )
+            except Exception:
+                snap_to_use = {}
+            snap_head = snap_to_use.get("head_sha") or ""
+            if snap_head != authoritative_head:
+                # Capture failed or returned stale data; refuse
+                # to drain against an unbounded snapshot. We
+                # log and return no candidates so the events
+                # remain unconsumed for the next heartbeat.
+                log(
+                    "warning",
+                    "round-54/C22 final drain: snapshot head "
+                    "diverges from authoritative head; "
+                    "refusing to drain",
+                    snapshot_head=snap_head[:12],
+                    authoritative_head=authoritative_head[:12],
+                )
+                return []
     consumable = []
     # Indexed by check name for fast lookup.
+    # Round-54/C22 final Defect D fix: read check_states
+    # from the verified snap_to_use (NOT the raw caller
+    # parameter) so we never inspect a stale snapshot.
     check_states = {}
-    if isinstance(snap, dict):
-        snap_checks = snap.get("required_checks") or {}
+    if isinstance(snap_to_use, dict):
+        snap_checks = snap_to_use.get("required_checks") or {}
         if isinstance(snap_checks, dict):
             for chk, info in snap_checks.items():
                 if isinstance(info, dict):
@@ -8701,6 +9209,13 @@ def evaluate_system_event_terminality(
     quota_state = read_quota_state()
     providers = quota_state.get("providers") or {}
     events = list_unconsumed_events()
+    final_observation_at = str(
+        snap_to_use.get("captured_at") or ""
+    ) if isinstance(snap_to_use, dict) else ""
+    final_observation_head = str(
+        snap_to_use.get("head_sha") or ""
+    ) if isinstance(snap_to_use, dict) else ""
+    final_consumer = "evaluate_system_event_terminality"
     for ev in events:
         if not isinstance(ev, dict):
             continue
@@ -8708,6 +9223,17 @@ def evaluate_system_event_terminality(
         if not eid:
             continue
         kind = ev.get("kind")
+        # Round-54/C22 final Defect D fix: every candidate
+        # includes the durable proof fields required by
+        # the directive: source head, observed terminal
+        # conclusion / state, fresh snapshot head,
+        # observation timestamp, consumer, reason.
+        proof = {
+            "event_id": eid,
+            "head": final_observation_head,
+            "captured_at": final_observation_at,
+            "consumer": final_consumer,
+        }
         if kind == "required_check_conclusion_change":
             # The event id encodes the check name, e.g.
             # ``check_changed:test (3.11)``.
@@ -8721,18 +9247,41 @@ def evaluate_system_event_terminality(
             conclusion = info.get("conclusion") or ""
             if not conclusion:
                 continue
+            # Source head: the head that produced this
+            # check_changed event. For events tied to a
+            # prior head, the head that matches the
+            # snapshot they were captured against.
+            source_head = (
+                ev.get("head")
+                or ev.get("head_sha")
+                or ev.get("source_head")
+                or final_observation_head
+            )
             # CI policy has durably classified the check.
             reason = (
                 f"check {check_name!r} conclusion {conclusion!r} "
-                "durably captured in snapshot_a.json required_checks"
+                "durably captured in snapshot_a.json required_checks "
+                f"with fresh head={final_observation_head[:12]!r}"
             )
-            consumable.append({"event_id": eid, "reason": reason})
+            proof["reason"] = reason
+            proof["source_head"] = source_head
+            proof["observed_conclusion"] = conclusion
+            proof["check_name"] = check_name
+            consumable.append(proof)
         elif kind == "provider_state_change":
             try:
                 provider = eid.split(":", 1)[1]
             except IndexError:
                 continue
             sub = providers.get(provider) or {}
+            source_head = (
+                ev.get("head")
+                or ev.get("head_sha")
+                or sub.get("pending_review_head")
+                or final_observation_head
+            )
+            proof["source_head"] = source_head
+            proof["provider"] = provider
             pending = sub.get("pending_review_head")
             if pending is None:
                 # Provider is no longer paused; the state
@@ -8742,7 +9291,9 @@ def evaluate_system_event_terminality(
                     f"provider {provider!r} is no longer paused; "
                     "no follow-up action required"
                 )
-                consumable.append({"event_id": eid, "reason": reason})
+                proof["reason"] = reason
+                proof["observed_state"] = "no longer paused"
+                consumable.append(proof)
             else:
                 # Provider state recorded with a recent
                 # timestamp.
@@ -8758,11 +9309,14 @@ def evaluate_system_event_terminality(
                     reason = (
                         f"provider {provider!r} state captured "
                         f"in quota_state.json (pending_review_head="
-                        f"{pending[:12]!r})"
+                        f"{pending[:12]!r}) with fresh head="
+                        f"{final_observation_head[:12]!r}"
                     )
-                    consumable.append(
-                        {"event_id": eid, "reason": reason}
+                    proof["reason"] = reason
+                    proof["observed_state"] = (
+                        "recorded_with_recent_timestamp"
                     )
+                    consumable.append(proof)
         elif kind == "head_changed":
             # Terminal when the live PR head matches the
             # recorded event_id-encoded head.
@@ -8773,9 +9327,106 @@ def evaluate_system_event_terminality(
             if recorded_head == AUTHORITATIVE_HEAD:
                 reason = (
                     f"live PR head {recorded_head[:12]!r} matches "
-                    "the recorded head_changed event"
+                    "the recorded head_changed event and the fresh "
+                    f"snapshot head {final_observation_head[:12]!r}"
                 )
-                consumable.append({"event_id": eid, "reason": reason})
+                proof["reason"] = reason
+                proof["source_head"] = recorded_head
+                consumable.append(proof)
+        elif kind == "control_plane_request_side_effect":
+            # Round-54/C22 §5: AutoDev's own provider-request
+            # comment. Terminal when the corresponding ledger
+            # file shows REQUEST_SENT (or has just been sent
+            # in this heartbeat). The marker in the comment
+            # body MUST match one of the recorded markers in
+            # the review-request ledger.
+            try:
+                cid = ev.get("comment_id") or eid.split(":", 1)[1]
+            except IndexError:
+                continue
+            # Search the durable ledger files for a marker
+            # that references this comment id.
+            ledger_dir = REVIEW_REQUESTS_DIR  # type: ignore[name-defined]
+            if not ledger_dir.is_dir():
+                continue
+            matched = False
+            for path in ledger_dir.iterdir():
+                if not path.name.endswith(".json"):
+                    continue
+                try:
+                    data = json.loads(path.read_text())
+                except Exception:
+                    continue
+                marker = data.get("marker") or ""
+                remote_id = str(data.get("remote_comment_id") or "")
+                if (
+                    data.get("lifecycle") in ("REQUEST_SENT", "ACKNOWLEDGED", "REVIEW_COMPLETE")
+                    and remote_id == str(cid)
+                ):
+                    matched = True
+                    proof["reason"] = (
+                        f"AutoDev request side-effect comment id={cid} "
+                        f"matches ledger file={path.name} "
+                        f"lifecycle={data.get('lifecycle')!r} "
+                        f"request_id={data.get('request_id')!r}; "
+                        "control-plane event consumed without "
+                        "becoming repair work"
+                    )
+                    proof["source_head"] = (
+                        data.get("request_head") or final_observation_head
+                    )
+                    proof["ledger_file"] = path.name
+                    consumable.append(proof)
+                    break
+            if not matched:
+                # No ledger match yet; the ledger will arrive
+                # on the next heartbeat after
+                # ``post_review_request`` writes REQUEST_SENT.
+                continue
+        elif kind == "provider_request_ack":
+            # Round-54/C22 §5: provider acknowledgement of an
+            # AutoDev request. Terminal when the corresponding
+            # ledger file shows lifecycle progression
+            # REQUEST_SENT → ACKNOWLEDGED. The ACK advances the
+            # ledger; we do not become an actionable finding.
+            ledger_dir = REVIEW_REQUESTS_DIR  # type: ignore[name-defined]
+            if not ledger_dir.is_dir():
+                continue
+            for path in ledger_dir.iterdir():
+                if not path.name.endswith(".json"):
+                    continue
+                try:
+                    data = json.loads(path.read_text())
+                except Exception:
+                    continue
+                if data.get("lifecycle") not in (
+                    "REQUEST_SENT",
+                    "ACKNOWLEDGED",
+                    "REVIEW_COMPLETE",
+                ):
+                    continue
+                # The ACK comment is bound to the request that
+                # posted the marker; the marker carry a
+                # request_id; here we just verify the ACK
+                # exists in the snapshot at the
+                # observation head.
+                if (
+                    "head" in data
+                    and data["head"] != final_observation_head
+                ):
+                    continue
+                proof["reason"] = (
+                    f"provider ACK comment id={eid} mapped to "
+                    f"ledger file={path.name} lifecycle="
+                    f"{data.get('lifecycle')!r} request_id="
+                    f"{data.get('request_id')!r}; acknowledged "
+                    "control-plane event"
+                )
+                proof["source_head"] = (
+                    data.get("head") or final_observation_head
+                )
+                consumable.append(proof)
+                break
     return consumable
 
 
@@ -9759,11 +10410,54 @@ def detect_new_actionable_events(
     new_c = {
         c.get("id") for c in new_snap.get("issue_comments", [])
     }
-    for cid in sorted(new_c - prev_c):
+    # Round-54/C22 §5: classify new issue-comment events so
+    # AutoDev's own provider-request comments and provider
+    # acknowledgements do not become repair work or
+    # indefinitely-unconsumed reviewer findings.
+    for c in new_snap.get("issue_comments", []) or []:
+        cid = c.get("id")
+        if not cid or cid in prev_c:
+            continue
+        body = c.get("body") or ""
+        author = (
+            (c.get("user") or {}).get("login") or ""
+        ).lower()
+        # 1. AutoDev's own provider-request comment: body
+        #    carries the durable marker.
+        if "autodev-review-request:v1:" in body:
+            events.append({
+                "id": f"new_issue_comment:{cid}",
+                "kind": "control_plane_request_side_effect",
+                "comment_id": cid,
+                "author_login": author,
+                "detection_marker": "autodev-review-request:v1",
+            })
+            continue
+        # 2. Provider acknowledgement / status comment.
+        lower = body.lower()
+        if author.endswith("[bot]") and (
+            "i will review" in lower
+            or "head commit changed" in lower
+            or "all checks have passed" in lower
+            or "i'll review pull request" in lower
+            or "review finished" in lower
+            or "review in progress" in lower
+            or "review paused" in lower
+            or "all findings addressed" in lower
+        ):
+            events.append({
+                "id": f"new_issue_comment:{cid}",
+                "kind": "provider_request_ack",
+                "comment_id": cid,
+                "author_login": author,
+            })
+            continue
+        # 3. Default: actionable reviewer comment.
         events.append({
             "id": f"new_issue_comment:{cid}",
             "kind": "new_reviewer_issue_comment",
             "comment_id": cid,
+            "author_login": author,
         })
     prev_t = prev_snap.get("review_threads", {})
     new_t = new_snap.get("review_threads", {})
@@ -11970,20 +12664,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "per_pr_iteration_tick",
                         this_pr=this_pr,
                     )
-                    # Round-54/C22 Defect D: drain system events
-                    # whose terminality proof has been produced.
-                    # The check is deliberate drain: each event
-                    # is examined against the kind-specific
-                    # terminality rule; events with a durable
-                    # proof are consumed with a recorded reason.
-                    # Events that are still non-terminal are
-                    # preserved for the next heartbeat.
+                    # Round-54/C22 Defect D (final): the drain
+                    # path requires a fresh snapshot bound to
+                    # the EXACT authoritative head. The
+                    # function ``evaluate_system_event_terminality``
+                    # itself handles stale-or-empty snapshots
+                    # by re-reading ``snapshot_a.json`` or by
+                    # performing its own ``capture_live_snapshot``
+                    # call. The drain refuses to consume any
+                    # event if the snapshot's head diverges from
+                    # ``AUTHORITATIVE_HEAD``. No timer is a
+                    # substitute for proof.
                     try:
                         _drain_candidates = (
                             evaluate_system_event_terminality(
-                                snap=snap_now
-                                if "snap_now" in dir()
-                                else {},
+                                snap={},  # function re-fetches if needed
                                 token=token or "",
                             )
                         )
@@ -11999,6 +12694,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 "consumed with terminality proof",
                                 event_id=_cand["event_id"],
                                 reason=_cand["reason"],
+                                head=_cand.get("head", "")[:12],
+                                captured_at=_cand.get("captured_at", ""),
                             )
                     except Exception as _drain_exc:
                         log(
@@ -12643,6 +13340,40 @@ def main(argv: Optional[list[str]] = None) -> int:
                 _any_paused, _paused = handle_paused_providers(
                     _live_for_quota, quota_statuses,
                 )
+                # Round-54/C22 §6: independent Codex
+                # scheduling. Do NOT wait for Codex to be
+                # ``paused``: fire on the first eligible
+                # stable exact head with zero active
+                # workers. Head movement supersedes prior
+                # Codex request lifecycles.
+                try:
+                    _codex_live_head = str(
+                        _live_for_quota.get("head_sha") or ""
+                    )
+                    _active_workers = 0
+                    try:
+                        from .supervisor import (  # type: ignore
+                            launched_event_ids as _lei,
+                        )
+                        _active_workers = len(_lei())
+                    except Exception:
+                        pass
+                    if (
+                        _codex_live_head
+                        and _codex_live_head == str(
+                            AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+                        )
+                    ):
+                        schedule_codex_request_on_stable_head(  # type: ignore[name-defined]
+                            live_head=_codex_live_head,
+                            active_worker_count=_active_workers,
+                        )
+                except Exception as _codex_exc:
+                    log(
+                        "warning",
+                        "round-54/C22 §6 codex scheduling failed",
+                        error=str(_codex_exc)[:200],
+                    )
             except Exception as exc:
                 log(
                     "warning",

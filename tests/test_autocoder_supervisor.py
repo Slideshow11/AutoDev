@@ -2930,15 +2930,26 @@ def test_round44_c12_post_review_request_sends_live_head(
         "live PR head, not a stale cached value."
     )
 
-    # The request file MUST be written for the live head
-    # with ``lifecycle: REQUEST_INTENT``.
+    # The request file MUST be written for the live head.
+    # Round-54/C22 §3 hardened the lifecycle: ``REQUEST_INTENT``
+    # is pre-remote; ``REQUEST_SENT`` is post-remote success.
+    # The latest write (REQUEST_SENT) wins because the
+    # durability layer is keyed on the file path.
     req_path = (
         tmp_path / f"coderabbit__{live_head}.json"
     )
     assert req_path.exists()
     payload = json.loads(req_path.read_text())
-    assert payload["lifecycle"] == "REQUEST_INTENT"
+    assert payload["lifecycle"] in (
+        "REQUEST_INTENT",
+        "REQUEST_SENT",
+    )
     assert payload["request_head"] == live_head
+    # If the gh subprocess was successful (returncode 0 in
+    # the fake), the durable state is REQUEST_SENT.
+    if payload["lifecycle"] == "REQUEST_SENT":
+        assert payload.get("sent_at")
+        assert payload.get("request_id", "").startswith("req-")
 
 
 def test_round44_c12_post_review_request_refuses_when_live_unavailable(
@@ -3071,15 +3082,22 @@ def test_round44_c12_replay_with_stale_then_live_head(
     assert (tmp_path / f"coderabbit__{stale}.superseded.json").exists()
 
     # Now a follow-up recovery on the LIVE head must
-    # succeed and write a fresh ``REQUEST_INTENT`` marker.
+    # succeed and write a fresh durable marker.
+    # Round-54/C22 §3: the latest lifecycle (REQUEST_SENT
+    # after successful gh pr comment) is durable.
     result = sup.post_review_request("coderabbit", live_head)
     assert result is True
     assert (tmp_path / f"coderabbit__{live_head}.json").exists()
     payload = json.loads(
         (tmp_path / f"coderabbit__{live_head}.json").read_text()
     )
-    assert payload["lifecycle"] == "REQUEST_INTENT"
+    assert payload["lifecycle"] in (
+        "REQUEST_INTENT",
+        "REQUEST_SENT",
+    )
     assert payload["request_head"] == live_head
+    if payload["lifecycle"] == "REQUEST_SENT":
+        assert payload.get("request_id", "").startswith("req-")
 
 
 

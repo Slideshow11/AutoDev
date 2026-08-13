@@ -6,7 +6,7 @@
   "files": [
     {
       "destination_path": "pyproject.toml",
-      "destination_sha256": "b4420e9353948d46d893c5fb75be9bf96e73485ddfbec8c84f3fa34efb643b40",
+      "destination_sha256": "a42fc056a60dfe57e147bada4ef7c82e7c8009b149556c526c416b78f23cf0c7",
       "destination_size_bytes": 2061,
       "source_path": "scripts/local/pyproject.toml",
       "source_sha256": "8fc7e1319f879c71f1e272b4a56d56951aa2b223366d238e96b114540c125532",

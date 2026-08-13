@@ -319,6 +319,7 @@ def resolve_directive(
     expected_head: Optional[str] = None,
     directive_path: Optional[str] = None,
     evidence_root_override: Optional[str] = None,
+    result_contract_id: Optional[str] = None,
 ) -> Optional[ResolvedDirective]:
     """Resolve the relay-authored directive, if present and valid.
 
@@ -338,6 +339,13 @@ def resolve_directive(
     ``AED_EVIDENCE_ROOT`` so the bridge finds the canonical
     directive.json written by the relay even when the
     operator did not set the env var.
+
+    Round-54/C22 §2: ``result_contract_id`` is the
+    supervisor-owned prelaunch trust id the worker MUST echo
+    in its final envelope. The bridge renders the contract id
+    into the directive body so the worker's prompt
+    unambiguously carries the EXACT string the wrapper will
+    validate against.
     """
     path = _resolve_directive_path(
         directive_path, evidence_root_override=evidence_root_override,
@@ -352,7 +360,10 @@ def resolve_directive(
                 f"!= expected {expected_head!r}",
                 path,
             )
-    prompt = render_directive_prompt(directive)
+    prompt = render_directive_prompt(
+        directive,
+        result_contract_id=result_contract_id,
+    )
     stored_sha = directive["_sha256"]
     return ResolvedDirective(
         path=path, prompt=prompt, directive_sha256=stored_sha,
@@ -363,6 +374,7 @@ def resolve_worker_prompt(
     *,
     expected_head: Optional[str] = None,
     directive_path: Optional[str] = None,
+    result_contract_id: Optional[str] = None,
 ) -> Optional[str]:
     """Return the relay's worker prompt when a directive is on disk.
 
@@ -372,10 +384,16 @@ def resolve_worker_prompt(
 
     The supervisor's main loop logs the consultation site so
     the absence is observable.
+
+    Round-54/C22 §2: ``result_contract_id``, when supplied, is
+    rendered into the directive body so the worker sees the EXACT
+    string it MUST echo in its final envelope.
     """
     try:
         resolved = resolve_directive(
-            expected_head=expected_head, directive_path=directive_path,
+            expected_head=expected_head,
+            directive_path=directive_path,
+            result_contract_id=result_contract_id,
         )
     except DirectiveLoadFailure:
         return None

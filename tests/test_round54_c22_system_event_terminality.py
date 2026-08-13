@@ -82,6 +82,11 @@ def _bootstrap_temp_state(tmp_path: Path):
     sup_mod._TERMINALITY_PATH = _P(
         str(sup_mod.STATE_DIR / "consumed_event_terminality.json")
     )
+    # Round-54/C22 Defect D (final): the drain path verifies
+    # the snapshot head matches AUTHORITATIVE_HEAD before
+    # allowing consumption. Bind AUTHORITATIVE_HEAD so the
+    # bootstrap state is consistent for tests.
+    sup_mod.AUTHORITATIVE_HEAD = "abc" * 14
     return sup_mod
 
 
@@ -132,9 +137,11 @@ def test_processed_check_event_consumed_with_reason(tmp_path):
         "required_check_conclusion_change",
     )
     snap = {
+        "head_sha": "abc" * 14,
+        "captured_at": "2026-08-13T22:00:00Z",
         "required_checks": {
             "test (3.11)": {"conclusion": "success"},
-        }
+        },
     }
     candidates = sup_mod.evaluate_system_event_terminality(
         snap=snap, token="dummy"
@@ -229,9 +236,11 @@ def test_supervisor_restart_preserves_nonterminal_event(tmp_path):
     # Snapshot has no test (3.12) conclusion: the event is
     # non-terminal.
     snap = {
+        "head_sha": "abc" * 14,
+        "captured_at": "2026-08-13T22:00:00Z",
         "required_checks": {
             # No test (3.12) entry.
-        }
+        },
     }
     candidates = sup_mod.evaluate_system_event_terminality(
         snap=snap, token="dummy"
@@ -256,7 +265,10 @@ def test_stale_head_event_superseded_by_newer_head(tmp_path):
         "head_changed",
     )
     # Currently the live head matches the recorded head.
-    snap = {"head_sha": "abc" * 14}
+    snap = {
+        "head_sha": "abc" * 14,
+        "captured_at": "2026-08-13T22:00:00Z",
+    }
     candidates = sup_mod.evaluate_system_event_terminality(
         snap=snap, token="dummy"
     )
@@ -264,7 +276,11 @@ def test_stale_head_event_superseded_by_newer_head(tmp_path):
     # Move the live head forward.
     sup_mod.AUTHORITATIVE_HEAD = "def" * 14
     candidates = sup_mod.evaluate_system_event_terminality(
-        snap={"head_sha": "def" * 14}, token="dummy"
+        snap={
+            "head_sha": "def" * 14,
+            "captured_at": "2026-08-13T22:00:00Z",
+        },
+        token="dummy",
     )
     # The stale head_changed event is NOT terminal again
     # because the recorded head (abc) does not match the
@@ -292,7 +308,11 @@ def test_age_alone_never_consumes_event(tmp_path):
     very_old = (datetime.now(timezone.utc) - timedelta(days=30)).timestamp()
     os.utime(sup_mod.UNCONSUMED_EVENTS_PATH, (very_old, very_old))
     # Snapshot has no conclusion for this check.
-    snap = {"required_checks": {}}
+    snap = {
+        "head_sha": "abc" * 14,
+        "captured_at": "2026-08-13T22:00:00Z",
+        "required_checks": {},
+    }
     candidates = sup_mod.evaluate_system_event_terminality(
         snap=snap, token="dummy"
     )
@@ -326,7 +346,10 @@ def test_provider_pause_event_with_retry_owner_nonterminal(tmp_path):
         }
     }))
     candidates = sup_mod.evaluate_system_event_terminality(
-        snap={}, token="dummy"
+        snap={
+            "head_sha": "abc" * 14,
+            "captured_at": "2026-08-13T22:00:00Z",
+        }, token="dummy"
     )
     assert len(candidates) == 1
     assert candidates[0]["event_id"] == "provider_state:coderabbit"
@@ -351,6 +374,8 @@ def test_all_terminal_events_gone_readiness_may_proceed(tmp_path):
     _seed_event(sup_mod, "provider_state:coderabbit", "provider_state_change")
     # Pop the snapshot with all conclusions.
     snap = {
+        "head_sha": "abc" * 14,
+        "captured_at": "2026-08-13T22:00:00Z",
         "required_checks": {
             "test (3.11)": {"conclusion": "success"},
             "test (3.12)": {"conclusion": "success"},
@@ -358,7 +383,7 @@ def test_all_terminal_events_gone_readiness_may_proceed(tmp_path):
             "committed-state-scan": {"conclusion": "success"},
             "package-smoke": {"conclusion": "success"},
             "provenance": {"conclusion": "success"},
-        }
+        },
     }
     recent = (datetime.now(timezone.utc) - timedelta(minutes=10))
     sup_mod.QUOTA_PATH.write_text(json.dumps({

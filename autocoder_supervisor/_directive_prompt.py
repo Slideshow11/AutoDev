@@ -23,6 +23,10 @@ Template placeholders:
 - ``{directive_sha256}`` — ``str`` (64 lowercase hex)
 - ``{summary}`` — ``str``
 - ``{directive_json}`` — ``str`` (pretty-printed JSON)
+- ``{result_contract_id}`` — ``str`` (Round-54/C22 §2 result
+   contract id. ``NONE`` when not provided for the
+   backward-compatible path; explicit value is required by
+   the production supervisor pipeline.)
 
 The template is intentionally a single string constant. The
 two implementations are paired by the byte-identical-output
@@ -32,7 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+from typing import Any, Optional
 
 
 # The canonical template. Both the relay and the bridge render
@@ -45,7 +49,8 @@ DIRECTIVE_PROMPT_TEMPLATE = (
     "PR {pr_number} ({repo}).\n\n"
     "Authoritative head: {head_sha}\n"
     "Directive ID: {directive_id}\n"
-    "Directive SHA-256: {directive_sha256}\n\n"
+    "Directive SHA-256: {directive_sha256}\n"
+    "Result contract id: {result_contract_id}\n\n"
     "The relay has already collected exact-head CI and CodeRabbit evidence. "
     "Your job is to apply every P1 finding and the required CI failures. "
     "P2 findings are preferred but not blocking — apply them when "
@@ -92,7 +97,51 @@ DIRECTIVE_PROMPT_TEMPLATE = (
     "nothing left to commit. A 'verify all P1 findings are still intact' "
     "commit with no new source edit is NOT convergence and IS a regression: "
     "it changes the head, invalidates exact-head evidence, resets the quiet "
-    "window, can trigger provider auto-pause, and creates infinite churn.\n"
+    "window, can trigger provider auto-pause, and creates infinite churn.\n\n"
+    "============================================================\n"
+    "ROUND-54/C22 RESULT CONTRACT — REQUIRED FOR VALID ENVELOPE\n"
+    "============================================================\n"
+    "The exact prelaunch result contract id is:\n\n"
+    "    {result_contract_id}\n\n"
+    "Your final worker envelope MUST contain a field named exactly\n"
+    "``result_contract_id`` whose value is the EXACT string above.\n"
+    "If you omit the field, or echo a different value, the wrapper\n"
+    "will fail the attempt closed (``WORKER_RESULT_INVALID``) and the\n"
+    "head movement will be classified as UNATTRIBUTED_HEAD_ADVANCE —\n"
+    "even if the commit was successfully pushed. The contract is the\n"
+    "trust boundary between the supervisor and the worker; it is NOT\n"
+    "optional.\n\n"
+    "Required final envelope schema (camel/snake as shown; do not\n"
+    "rename fields):\n\n"
+    "===WORKER_RESULT_ENVELOPE===\n"
+    "{{\n"
+    '  "schema_version": "autocoder.worker_envelope.v1",\n'
+    '  "attempt_id": "att-<TIMESTAMP>-<PID>",\n'
+    '  "claim_id": "att-<TIMESTAMP>-<PID>",\n'
+    '  "directive_digest": "<sha256 hex>",\n'
+    '  "directive_id": "<uuid>",\n'
+    '  "result_type": "NO_CHANGES_REQUIRED | REPAIR_PUSHED | REPAIR_COMMIT_PRODUCED | COMMIT_PRODUCED_NOT_PUSHED | WORKER_EXECUTION_FAILED",\n'
+    '  "produced_commit_shas": ["<sha>", ...] | [],\n'
+    '  "pushed_commit_shas": ["<sha>", ...] | [],\n'
+    '  "completed_at": "<ISO-8601 UTC>",\n'
+    '  "prelaunch_head": "<40-char hex>",\n'
+    '  "result_contract_id": "{result_contract_id}",\n'
+    '  "attempt_nonce": "att-<TIMESTAMP>",\n'
+    '  "no_changes_required_proof": {{\n'
+    '    "findings": [\n'
+    '      {{"finding_id": "thread:...", "disposition": "ALREADY_SATISFIED|REPAIRED|SUPERSEDED|STILL_ACTIONABLE|INCOMPLETE_EVIDENCE"}},\n'
+    '      ...\n'
+    '    ],\n'
+    '    "source": "round50_envelope_parser"\n'
+    '  }}\n'
+    "}}\n"
+    "===END_ENVELOPE===\n\n"
+    "The wrapper captures your stdout, parses the envelope, and\n"
+    "writes the canonical WorkerResultArtifact to disk. The\n"
+    "supervisor-side validator cross-checks:\n"
+    "  expected_result_contract_id == wrapper CLI --result-contract-id\n"
+    "  observed_result_contract_id == envelope.result_contract_id\n"
+    "MUST be equal, or the attempt is invalid.\n"
 )
 
 
@@ -111,7 +160,11 @@ def compute_directive_sha256(directive: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def render_directive_prompt(directive: dict) -> str:
+def render_directive_prompt(
+    directive: dict,
+    *,
+    result_contract_id: Optional[str] = None,
+) -> str:
     """Render the canonical worker prompt from a directive dict.
 
     The caller is responsible for validating the directive
@@ -123,6 +176,15 @@ def render_directive_prompt(directive: dict) -> str:
     to the relay's ``build_worker_prompt`` output (the relay
     serializes from ``to_dict()`` which does not include
     ``_sha256``).
+
+    Round-54/C22 §2: ``result_contract_id`` is the trust-boundary
+    value the worker MUST echo verbatim in its final envelope. The
+    supervisor-generated ``result_contract_id`` is passed in
+    here so the directive body and the contract spec section both
+    contain the exact same string; the worker has no excuse to
+    miss it. When omitted for backward compatibility with the
+    relay's pure-directive render, the placeholder shows ``NONE``,
+    but production callers MUST supply a real id.
     """
     # Strip the persisted _sha256 from the embedded JSON so the
     # bridge prompt matches the relay's to_dict() shape.
@@ -137,6 +199,7 @@ def render_directive_prompt(directive: dict) -> str:
         head_sha=directive["head_sha"],
         directive_id=directive["directive_id"],
         directive_sha256=compute_directive_sha256(directive),
+        result_contract_id=result_contract_id if result_contract_id else "NONE",
         summary=directive["summary"],
         directive_json=payload,
     )

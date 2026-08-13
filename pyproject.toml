@@ -46,3 +46,25 @@ dependencies = [
 where = ["."]
 include = ["autocoder_supervisor*", "autocoder_lifecycle*", "autocoder_orchestration*"]
 exclude = ["tests*", "provenance*", "docs*", "examples*", "service*"]  # noqa: E501
+
+# Round-54/C22 §10: route pytest's per-test temporary
+# directories OUTSIDE the production checkout. The
+# supervisor's dirty-tree pre-launch guard treats any
+# unknown path under the checkout as a possible source
+# contamination. ``rootdir`` is the production checkout;
+# pytest-of-max and similar defaults land at <rootdir>/pytest-of-max
+# which then trips the guard. ``--basetemp`` redirects
+# the pytest tmpdir base to ``/tmp/autodev-pytest`` so the
+# production checkout is never dirtied by tests.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--basetemp=/tmp/autodev-pytest",
+    "-p",
+    "no:cacheprovider",
+    "-ra",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+junit_family = "xunit2"
