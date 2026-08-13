@@ -5429,12 +5429,14 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
 
     # Build a fake worker that emits the envelope then exits.
     fake_worker = tmp_path / "fake_worker.sh"
+    _contract_id = "rc-testcontract000000000000000000000000000000ab"
     envelope = {
         "schema_version": "autocoder.worker_envelope.v1",
         "attempt_id": "att-20260812T120000Z",  # no PID; wrapper appends it
         "claim_id": "att-20260812T120000Z",    # wrapper appends PID
         "directive_digest": "deadbeef" * 8,
         "directive_id": "test-uuid",
+        "result_contract_id": _contract_id,
         "result_type": "NO_CHANGES_REQUIRED",
         "produced_commit_shas": [],
         "pushed_commit_shas": [],
@@ -5476,6 +5478,7 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
             "--stdout-log-path", str(stdout_log),
             "--repo", "OWNER/REPO",
             "--pr-number", "9",
+            "--result-contract-id", _contract_id,
             "--", str(fake_worker),
         ],
         capture_output=True, text=True,
@@ -5523,6 +5526,14 @@ def test_round51_c19_worker_wrapper_captures_envelope_and_writes_canonical_artif
     assert artifact["claim_id"] == artifact["attempt_id"], (
         f"claim_id must equal attempt_id; got claim_id={artifact['claim_id']!r}, attempt_id={artifact['attempt_id']!r}"
     )
+    # Round-54/C22 §5/§6/§7: observed result_contract_id from the
+    # worker's envelope MUST equal the expected id passed via
+    # --result-contract-id. The artifact surfaces both so the
+    # supervisor can validate the worker's identity.
+    assert artifact["extra"]["expected_result_contract_id"] == _contract_id
+    assert artifact["extra"]["observed_result_contract_id"] == _contract_id
+    assert artifact["extra"]["result_contract_match"] is True
+    assert artifact["extra"]["result_contract_mismatch_reason"] == ""
 
     # Stdout log must be preserved for forensic chain-of-custody
     assert stdout_log.exists()

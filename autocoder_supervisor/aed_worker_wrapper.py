@@ -229,8 +229,9 @@ def main() -> int:
                 try:
                     stdout_log_fh.write(chunk)
                 except OSError:
-                    # Disk-full or log-rotate removed the file; the
-                    # in-memory tail still gives envelope detection.
+                    # Disk capacity exhaustion or log rotation
+                    # removed the file; the in-memory tail still
+                    # gives envelope detection.
                     pass
         except OSError:
             # Pipe closed / errno on read; the process likely exited.
@@ -440,6 +441,80 @@ def main() -> int:
     # from the envelope's result_type field. See
     # _finalize_result_type() below.
 
+    # Round-54/C22 continuation §5/§6/§7/§8: result-contract
+    # identity validation. The wrapper knows what it EXPECTS
+    # via CLI args. It must independently verify that the
+    # worker returned the SAME expected identity — not that
+    # the supervisor passed it. When the worker omits
+    # ``result_contract_id`` entirely, or echoes a different
+    # value, the wrapper MUST fail closed with
+    # ``WORKER_RESULT_INVALID`` and surface both the expected
+    # and observed values for forensic audit. The supervisor
+    # later reads ``extra.observed_result_contract_id`` and
+    # ``extra.expected_result_contract_id`` to decide whether
+    # to attempt push verification, consume the event, or
+    # resolve the GitHub thread.
+    _expected_result_contract_id = args.result_contract_id or ""
+    _observed_result_contract_id = ""
+    _result_contract_mismatch_reason = ""
+    if (
+        _envelope_match_count == 1
+        and isinstance(envelope, dict)
+        and "_envelope_parse_error" not in envelope
+        and "_envelope_parse_warning" not in envelope
+    ):
+        _observed_result_contract_id = (
+            envelope.get("result_contract_id") or ""
+        )
+        if not isinstance(_observed_result_contract_id, str):
+            _observed_result_contract_id = str(_observed_result_contract_id)
+        if not _expected_result_contract_id:
+            # Supervisor did not pass an expected contract id.
+            # Without an expected identity there is nothing to
+            # compare against; the wrapper cannot prove worker
+            # identity and MUST fail closed (C22 §6 / §8.L).
+            _result_contract_mismatch_reason = (
+                "no expected result_contract_id passed via "
+                "--result-contract-id; cannot verify worker "
+                "identity"
+            )
+        elif not _observed_result_contract_id:
+            _result_contract_mismatch_reason = (
+                "worker envelope omitted result_contract_id"
+            )
+        elif _observed_result_contract_id != _expected_result_contract_id:
+            _result_contract_mismatch_reason = (
+                "worker envelope result_contract_id does not "
+                "match expected prelaunch contract id"
+            )
+    elif _envelope_match_count == 1 and (
+        not isinstance(envelope, dict)
+        or "_envelope_parse_error" in envelope
+        or "_envelope_parse_warning" in envelope
+    ):
+        # Exactly one envelope match but it failed to parse
+        # cleanly OR was flagged as multiple by the parser.
+        # Either way we cannot prove worker identity.
+        _result_contract_mismatch_reason = (
+            "envelope did not parse to a clean dict; cannot "
+            "extract observed result_contract_id"
+        )
+    elif _envelope_match_count > 1:
+        _result_contract_mismatch_reason = (
+            "multiple envelopes detected; cannot validate a "
+            "single observed result_contract_id"
+        )
+    else:
+        _result_contract_mismatch_reason = (
+            "no envelope detected; no observed "
+            "result_contract_id"
+        )
+    _result_contract_match = (
+        not _result_contract_mismatch_reason
+        and bool(_observed_result_contract_id)
+        and _observed_result_contract_id == _expected_result_contract_id
+    )
+
     # The wrapper resolves the canonical attempt_id and
 
     # The wrapper resolves the canonical attempt_id and
@@ -474,10 +549,17 @@ def main() -> int:
         _final_result_type = "WORKER_RESULT_INVALID"
     elif _envelope_match_count == 0:
         _final_result_type = args.result_type_default
+    elif not _result_contract_match:
+        # C22 §5/§7/§8: identity mismatch between expected
+        # prelaunch contract and observed worker envelope.
+        # Fail closed: do NOT trust the worker's
+        # ``result_type`` claim when we cannot prove the
+        # worker is the one the supervisor launched.
+        _final_result_type = "WORKER_RESULT_INVALID"
     else:
-        # Exactly one envelope. The result_type comes
-        # from the envelope's body if present and valid,
-        # otherwise the default.
+        # Exactly one envelope AND result-contract match.
+        # The result_type comes from the envelope's body if
+        # present and valid, otherwise the default.
         _final_result_type = args.result_type_default
         if isinstance(envelope, dict) and "_envelope_parse_error" not in envelope:
             _env_rt = envelope.get("result_type")
@@ -536,10 +618,21 @@ def main() -> int:
             "worker_envelope_source": "round51_c19_wrapper",
             "envelope_status": _envelope_status,
             "envelope_match_count": _envelope_match_count,
-            # Round-54/C22 continuation §2: persist the
-            # prelaunch result contract for the supervisor
-            # to validate worker output against.
+            # Round-54/C22 continuation §2/§5/§6/§7: persist
+            # the prelaunch result contract AND the observed
+            # worker-reported contract id so the supervisor can
+            # validate worker output identity against the
+            # prelaunch contract. The two fields are distinct:
+            # ``expected_result_contract_id`` is what the
+            # supervisor passed via --result-contract-id;
+            # ``observed_result_contract_id`` is what the
+            # worker actually emitted in its envelope. They
+            # MUST match for a canonical valid attempt.
             "result_contract_id": args.result_contract_id or "",
+            "expected_result_contract_id": _expected_result_contract_id,
+            "observed_result_contract_id": _observed_result_contract_id,
+            "result_contract_match": _result_contract_match,
+            "result_contract_mismatch_reason": _result_contract_mismatch_reason,
         },
     }
     # Round-54/C22 continuation: envelope_status and
