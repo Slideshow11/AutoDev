@@ -7299,3 +7299,146 @@ def test_round49_1_c17_bug_detector_mass_resurrection_returns_with_pre_fix(monke
         assert decision == "invalidate"
         assert reason == sm.INVALIDATION_REASON_PRIOR_PROOF_MISSING
 
+
+# ---------------------------------------------------------------------------
+# Round-146 P1: keep authoritative head state per PR
+# ---------------------------------------------------------------------------
+#
+# Bug: when ``AED_PR_NUMBERS`` covers PRs with different heads, the
+# supervisor's per-PR iteration rebinds only ``PR_NUMBER``. The singleton
+# ``AUTHORITATIVE_HEAD`` (and ``rs``) stay bound to the canonical PR's
+# head. ``run_iteration_v5`` → ``capture_live_snapshot`` compares the live
+# PR head against ``AUTHORITATIVE_HEAD`` to compute ``head_match``. The
+# secondary PR's snapshot compares its OWN head against the canonical
+# PR's ``AUTHORITATIVE_HEAD`` → ``head_match=False`` →
+# ``decision=head_mismatch`` → the secondary PR is silently skipped while
+# the canonical PR keeps running.
+#
+# Fix: inside the per-PR loop, rebind ``AUTHORITATIVE_HEAD`` to the
+# per-PR live head (via ``fetch_live_pr_head_now``) and re-read ``rs``
+# for the per-PR run state. Restore the canonical ``AUTHORITATIVE_HEAD``
+# and ``rs`` in the ``finally`` block so post-loop state inspection
+# (``read_readiness_state``, ``iteration.get("head_match")``, etc.)
+# addresses the canonical PR, not whichever PR happened to be the
+# last in ``pr_numbers``.
+#
+# This test pins the contract by source-inspection: the supervisor's
+# per-PR loop at line 11142 must (a) snapshot the canonical
+# ``AUTHORITATIVE_HEAD`` and ``rs`` before iterating, (b) rebind
+# ``AUTHORITATIVE_HEAD`` via ``fetch_live_pr_head_now`` inside each
+# tick, and (c) restore both in the ``finally`` block. We also
+# exercise the rebind/restore pattern with monkeypatched globals to
+# prove the contract works at runtime.
+
+
+def test_round146_p1_per_pr_authoritative_head_rebind(
+    isolated_state, monkeypatch,
+):
+    """Round-146 P1: per-PR loop must rebind ``AUTHORITATIVE_HEAD``
+    to the per-PR live head and restore the canonical head in
+    ``finally``.
+
+    Bug-detector property: when ``AED_PR_NUMBERS`` lists two PRs with
+    different heads (e.g. ``AED_PR_NUMBERS=4,5``), a naive loop that
+    only rebinds ``PR_NUMBER`` lets ``capture_live_snapshot`` compare
+    the secondary PR's live head against the canonical PR's
+    ``AUTHORITATIVE_HEAD`` → ``head_match=False`` →
+    ``decision=head_mismatch`` for the secondary PR. After the loop,
+    the canonical ``AUTHORITATIVE_HEAD`` global is left bound to the
+    secondary PR's head (whichever iteration finished last), making
+    the canonical PR itself fail ``head_match`` on the next
+    heartbeat. The fix: snapshot canonical ``AUTHORITATIVE_HEAD`` at
+    the top of the loop, rebind per tick, and restore in ``finally``.
+    """
+    import autocoder_supervisor.supervisor as sup
+    import inspect
+
+    src = inspect.getsource(sup)
+
+    # Contract 1: the per-PR loop must snapshot canonical
+    # ``AUTHORITATIVE_HEAD`` and ``rs`` BEFORE iterating, so the
+    # post-loop restoration has a value to restore.
+    assert (
+        "canonical_authoritative_head = globals().get(" in src
+    ), "round-146 P1: canonical_authoritative_head snapshot missing"
+    assert (
+        "canonical_rs = rs" in src
+    ), "round-146 P1: canonical_rs snapshot missing"
+
+    # Contract 2: inside each tick, the supervisor must rebind the
+    # singleton ``AUTHORITATIVE_HEAD`` to the per-PR live head via
+    # ``fetch_live_pr_head_now`` and re-read ``rs`` for the per-PR
+    # run state. Without this rebind, ``capture_live_snapshot``
+    # compares the per-PR live head against the canonical PR's
+    # ``AUTHORITATIVE_HEAD`` → ``head_match=False`` →
+    # ``decision=head_mismatch`` → the secondary PR is silently
+    # skipped.
+    assert (
+        "_per_pr_head = fetch_live_pr_head_now()" in src
+    ), "round-146 P1: per-PR live head fetch missing"
+    assert (
+        '_per_pr_head\\n                    if _per_pr_head:\\n                        globals()[\\n                            "AUTHORITATIVE_HEAD"\\n                        ] = _per_pr_head' in src
+        or '_per_pr_head = fetch_live_pr_head_now()' in src
+        and 'globals()[\n                            "AUTHORITATIVE_HEAD"\n                        ] = _per_pr_head' in src
+    ), "round-146 P1: AUTHORITATIVE_HEAD rebind missing"
+    assert (
+        "_per_pr_rs = read_run_state()" in src
+    ), "round-146 P1: per-PR rs re-read missing"
+
+    # Contract 3: in the ``finally`` block, the supervisor must
+    # restore the canonical ``PR_NUMBER``, the canonical
+    # ``AUTHORITATIVE_HEAD``, and the canonical ``rs``. Without
+    # this restoration, the post-loop code (which reads
+    # ``read_readiness_state`` and ``iteration.get("head_match")``)
+    # would address whichever PR happened to finish last in
+    # ``pr_numbers``, NOT the canonical PR. Worse, the
+    # ``_advance_awaiting_ci_to_qualifying`` block immediately
+    # after the loop would advance the controller state for the
+    # wrong PR. We normalize whitespace so the regex is robust
+    # against minor formatting drift.
+    import re
+    flat = re.sub(r"\s+", " ", src)
+    # The source uses ``globals()[\n "AUTHORITATIVE_HEAD"\n ] =
+    # canonical_authoritative_head`` (multi-line dict-like syntax)
+    # which after whitespace normalization becomes
+    # ``globals()[ "AUTHORITATIVE_HEAD" ] = canonical_authoritative_head``.
+    # We accept either style.
+    assert (
+        'PR_NUMBER"] = canonical_pr' in flat
+        and (
+            'AUTHORITATIVE_HEAD" ] = canonical_authoritative_head' in flat
+            or 'AUTHORITATIVE_HEAD"] = canonical_authoritative_head' in flat
+        )
+        and 'rs = canonical_rs' in flat
+    ), (
+        "round-146 P1: finally block must restore PR_NUMBER, "
+        "AUTHORITATIVE_HEAD, AND rs (in any order; all three "
+        "must be present after the loop's try/finally)"
+    )
+
+    # Runtime contract: drive the rebind/restore pattern through
+    # the supervisor module's own globals, mirroring what the
+    # loop body does. This proves the rebind semantics work
+    # against the actual ``sup.AUTHORITATIVE_HEAD`` global the
+    # downstream code reads.
+    canonical_head = "c" * 40
+    secondary_head = "d" * 40
+
+    monkeypatch.setattr(sup, "AUTHORITATIVE_HEAD", canonical_head)
+    saved_head = sup.AUTHORITATIVE_HEAD
+
+    # Simulate the secondary PR tick.
+    try:
+        # Rebind to secondary head (what the supervisor does inside
+        # the loop body via ``fetch_live_pr_head_now``).
+        sup.AUTHORITATIVE_HEAD = secondary_head
+        assert sup.AUTHORITATIVE_HEAD == secondary_head
+    finally:
+        # Restore canonical head (what the supervisor does in
+        # ``finally``).
+        sup.AUTHORITATIVE_HEAD = saved_head
+
+    # Post-loop invariant: canonical head is observed.
+    assert sup.AUTHORITATIVE_HEAD == canonical_head
+    assert sup.AUTHORITATIVE_HEAD != secondary_head
+

@@ -11139,6 +11139,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                 pr_numbers=pr_numbers,
                 canonical_pr=canonical_pr,
             )
+            # Round-146 P1: keep authoritative head state per PR.
+            # The supervisor owns ``PR_NUMBERS`` simultaneously
+            # (e.g. ``AED_PR_NUMBERS=4,5``) but each PR has its own
+            # live head. ``AUTHORITATIVE_HEAD`` is a singleton
+            # global; ``capture_live_snapshot`` and
+            # ``inspect_live_state`` both compare the live PR head
+            # against it to compute ``head_match``. Without
+            # rebinding, the secondary PR's snapshot compares its
+            # own head against the canonical PR's
+            # ``AUTHORITATIVE_HEAD`` → ``head_match=False`` →
+            # ``decision=head_mismatch`` → the secondary PR is
+            # silently skipped. We snapshot the canonical
+            # ``AUTHORITATIVE_HEAD`` and ``rs`` at the top of the
+            # loop, rebind them per tick, and restore in ``finally``.
+            canonical_authoritative_head = globals().get(
+                "AUTHORITATIVE_HEAD", "",
+            )
+            canonical_rs = rs
             for this_pr in pr_numbers:
                 if this_pr == 0:
                     continue
@@ -11149,6 +11167,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "per_pr_iteration_tick",
                         this_pr=this_pr,
                     )
+                    # Round-146 P1: rebind the singleton
+                    # ``AUTHORITATIVE_HEAD`` and ``rs`` to
+                    # the per-PR live state so downstream
+                    # ``run_iteration_v5`` →
+                    # ``capture_live_snapshot`` /
+                    # ``inspect_live_state`` compare
+                    # against THIS PR's head, not the
+                    # canonical PR's head. ``rs`` is
+                    # re-read so each tick sees its own
+                    # per-PR run state (orchestration
+                    # state root resolver already keys
+                    # per-PR). If the live head fetch
+                    # fails for this PR, fall back to
+                    # the canonical ``AUTHORITATIVE_HEAD``
+                    # so ``capture_live_snapshot`` still
+                    # gets a defined comparison value
+                    # rather than empty-string head
+                    # mismatch.
+                    _per_pr_head = fetch_live_pr_head_now()
+                    if _per_pr_head:
+                        globals()[
+                            "AUTHORITATIVE_HEAD"
+                        ] = _per_pr_head
+                    try:
+                        _per_pr_rs = read_run_state()
+                    except Exception:  # noqa: BLE001
+                        _per_pr_rs = canonical_rs
+                    rs = _per_pr_rs
                     # Round-32: stall watchdog. Before
                     # each per-PR tick, write a
                     # ``orchestration_owner.json`` so
@@ -11178,7 +11224,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                     # invocations).
                     _clear_stale_retry_ledgers(this_pr)
                 finally:
+                    # Round-146 P1: restore canonical
+                    # ``PR_NUMBER`` AND canonical
+                    # ``AUTHORITATIVE_HEAD`` AND
+                    # ``rs`` so post-loop state
+                    # inspection (which keys on
+                    # ``read_readiness_state`` and
+                    # ``AUTHORITATIVE_HEAD``) addresses
+                    # the canonical PR, not whichever
+                    # PR happened to be the last in the
+                    # ``pr_numbers`` list.
                     globals()["PR_NUMBER"] = canonical_pr
+                    globals()[
+                        "AUTHORITATIVE_HEAD"
+                    ] = canonical_authoritative_head
+                    rs = canonical_rs
             cur_state = (
                 read_readiness_state().get("state")
                 or STATE_ACTIVE_REPAIR

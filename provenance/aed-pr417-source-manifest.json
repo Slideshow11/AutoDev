@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "73909529680f8398e6838a7c486156b0c0e94641c5af4df50c2bd7e6ac498b8d",
-      "destination_size_bytes": 485716,
+      "destination_sha256": "c3ef4c982bde937dfa41590a24efba74ff0d674bbda46cbc446a1b89338242d4",
+      "destination_size_bytes": 488816,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -156,13 +156,13 @@
     },
     {
       "destination_path": "tests/test_autocoder_supervisor.py",
-      "destination_sha256": "133bb9aeb8034dbe47815196cc3e96f9380509977c909d773ade9942e35d53bb",
-      "destination_size_bytes": 287009,
+      "destination_sha256": "ab06d9f268b9d63f86a3ad5c5306203d991ff5c48501b0785276fffe9e372ad1",
+      "destination_size_bytes": 293848,
       "source_path": "tests/test_autocoder_supervisor.py",
       "source_sha256": "3b65e142bb79ca060484b37ed28127979ccc004aa82ce78d65b3d704fe5895f3",
       "source_size_bytes": 39831,
       "transformation_classification": "path_only",
-      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. The test file is no longer byte-identical to the AED source."
+      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. Round-146 P1 added test_round146_p1_per_pr_authoritative_head_rebind. The test file is no longer byte-identical to the AED source."
     },
     {
       "destination_path": "tests/test_autocoder_supervisor_packaging.py",
