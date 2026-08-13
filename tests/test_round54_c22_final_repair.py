@@ -147,7 +147,7 @@ def test_B_worker_envelope_with_correct_rc(tmp_path):
             "expected_branch": "feat/review-repair-relay-v1",
             "pr_number": 5,
             "repo": "Slideshow11/AutoDev",
-            "cwd": "/home/max/AutoDev",
+            "cwd": "$REPO",
         },
         ["echo", "test"],
     )
