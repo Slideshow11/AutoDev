@@ -45,6 +45,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -446,11 +447,32 @@ def main() -> int:
             return path_str.replace("<PID>", str(_wrapper_pid))
         return path_str
 
-    # Write the canonical artifact
+    # Write the canonical artifact atomically: write to a sibling temp
+    # file in the same directory, flush+fsync, then os.replace the
+    # final target. This prevents the supervisor from observing a
+    # truncated/partial JSON file when it polls the expected path
+    # mid-write (round-164 P2).
+    def _atomic_write_json(path: Path, payload: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.write(payload)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
     target = Path(_resolve_pid(args.result_artifact_path))
-    target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        target.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+        _atomic_write_json(target, json.dumps(artifact, indent=2))
     except OSError as e:
         print(f"aed_worker_wrapper: failed to write {target}: {e}", file=sys.stderr)
         return 1
@@ -459,8 +481,7 @@ def main() -> int:
     if args.orch_result_artifact_path:
         orch_target = Path(_resolve_pid(args.orch_result_artifact_path))
         try:
-            orch_target.parent.mkdir(parents=True, exist_ok=True)
-            orch_target.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+            _atomic_write_json(orch_target, json.dumps(artifact, indent=2))
         except OSError:
             pass
 
