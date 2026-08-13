@@ -142,8 +142,10 @@ def main() -> int:
         default="",
         help="Round-54/C22 continuation §2: the prelaunch "
         "result contract id the worker must echo in its "
-        "envelope. The wrapper validates the worker's "
-        "envelope against this contract.",
+        "envelope. The wrapper records this contract id "
+        "in artifact['extra']['result_contract_id'] for "
+        "the supervisor to validate the worker's envelope "
+        "against.",
     )
     parser.add_argument(
         "--result-type-default",
