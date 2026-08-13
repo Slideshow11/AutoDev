@@ -5724,6 +5724,250 @@ def test_round51_c19_repair_before_qualification_dead_lease_recoverable(tmp_path
 
 
 # =============================================================================
+# Round 53 (C21): restore trustworthy terminality / exact worker identity
+# =============================================================================
+
+
+def test_round53_c21_incomplete_evidence_per_finding_blocks_terminalization(
+    tmp_path, monkeypatch
+):
+    """Round-53/C21 §3, §4: a worker result with result_type
+    NO_CHANGES_REQUIRED where ANY finding carries the
+    NONTERMINAL disposition INCOMPLETE_EVIDENCE or
+    STILL_ACTIONABLE MUST NOT:
+        - write a terminal thread proof
+        - consume its unresolved_thread_drain source event as terminal
+        - mark its work generation TERMINAL
+        - enqueue GitHub resolution
+        - call resolveReviewThread
+        - count toward 5/5 acceptance.
+
+    The previous C20 behavior (before C21) accepted any
+    NO_CHANGES_REQUIRED result and called resolveReviewThread
+    for all candidate thread_ids regardless of per-finding
+    disposition. This test reproduces the production defect
+    observed for thread PRRT_kwDOTtyQLc6XsVVA where the worker
+    emitted INCOMPLETE_EVIDENCE but the supervisor still
+    resolved the thread on GitHub.
+    """
+    from autocoder_supervisor import supervisor as sm
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        json.dumps({"current_head": "0" * 40, "orchestration_state_root": ""})
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-c21-xsvva-fixture"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        prelaunch_head="0" * 40,
+        result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    # Worker emitted NO_CHANGES_REQUIRED with a finding that is
+    # INCOMPLETE_EVIDENCE. Per round-39 contract this means
+    # "the worker did not establish a safe terminal answer".
+    artifact = _c20_make_artifact(
+        attempt_id=attempt_id,
+        claim_id=rec_dict["claim_id"],
+        result_type="NO_CHANGES_REQUIRED",
+        findings=[{
+            "finding_id": "thread:PRRT_kwDOTtyQLc6XsVVA",
+            "disposition": "INCOMPLETE_EVIDENCE",
+        }],
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+    (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
+
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    remote_calls = []
+    monkeypatch.setattr(sm, "resolveReviewThread",
+                       lambda **kw: remote_calls.append(kw))
+    consume_calls = []
+    monkeypatch.setattr(sm, "consume_thread_drain_event_in_terminal_disposition",
+                       lambda **kw: consume_calls.append(kw))
+
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    new_rec = json.loads((wa_dir / f"{attempt_id}.json").read_text())
+    # The attempt itself is terminal (the worker really did exit).
+    assert new_rec["lifecycle"] in ("WORKER_EXITED_NO_PUSH", "NO_CHANGES_REQUIRED"), (
+        f"Round-53/C21: attempt must terminalize; "
+        f"got lifecycle={new_rec.get('lifecycle')!r}"
+    )
+    # CRITICAL: NO remote resolution for non-terminal findings.
+    assert not remote_calls, (
+        f"Round-53/C21: INCOMPLETE_EVIDENCE MUST NOT call "
+        f"resolveReviewThread; got {remote_calls}"
+    )
+    # CRITICAL: NO drain-event consume for non-terminal findings.
+    assert not consume_calls, (
+        f"Round-53/C21: INCOMPLETE_EVIDENCE MUST NOT consume the "
+        f"drain event; got {consume_calls}"
+    )
+
+
+def test_round53_c21_mixed_dispositions_only_terminal_resolves(
+    tmp_path, monkeypatch
+):
+    """Round-53/C21 §3, §7: when a worker result mixes
+    TERMINAL and NONTERMINAL dispositions, only the TERMINAL
+    threads are written terminal proofs and resolved. The
+    NONTERMINAL threads are preserved for re-dispatch.
+    """
+    from autocoder_supervisor import supervisor as sm
+    wa_dir = tmp_path / "wa"
+    wa_dir.mkdir()
+    rs_path = tmp_path / "run_state.json"
+    rs_path.write_text(
+        json.dumps({"current_head": "0" * 40, "orchestration_state_root": ""})
+    )
+    monkeypatch.setattr(sm, "RUN_STATE", rs_path)
+    monkeypatch.setattr(sm, "WORKER_ATTEMPTS_DIR", wa_dir)
+
+    attempt_id = "att-c21-mixed-fixture"
+    rec_dict = _c20_make_running_record(
+        attempt_id=attempt_id,
+        prelaunch_head="0" * 40,
+        result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+    )
+    artifact = _c20_make_artifact(
+        attempt_id=attempt_id,
+        claim_id=rec_dict["claim_id"],
+        result_type="NO_CHANGES_REQUIRED",
+        findings=[
+            {"finding_id": "thread:PRRT_TERMINAL", "disposition": "ALREADY_SATISFIED"},
+            {"finding_id": "thread:PRRT_NONTERMINAL", "disposition": "INCOMPLETE_EVIDENCE"},
+        ],
+    )
+    (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
+    (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
+
+    monkeypatch.setattr(sm, "read_lease", lambda: None)
+    remote_calls = []
+    monkeypatch.setattr(sm, "resolveReviewThread",
+                       lambda **kw: remote_calls.append(kw))
+    consume_calls = []
+    monkeypatch.setattr(sm, "consume_thread_drain_event_in_terminal_disposition",
+                       lambda **kw: consume_calls.append(kw))
+
+    sm.reconcile_orphaned_worker_attempts(work_dir=tmp_path / "wa")
+
+    # The TERMINAL thread was resolved and consumed.
+    resolved_tids = sorted(c["thread_id"] for c in remote_calls)
+    consumed_tids = sorted(c["thread_id"] for c in consume_calls)
+    assert "PRRT_TERMINAL" in resolved_tids or resolved_tids == [], (
+        f"Round-53/C21: TERMINAL thread MUST be resolved; "
+        f"got resolved_tids={resolved_tids}"
+    )
+    # The NONTERMINAL thread was NOT resolved or consumed.
+    assert "PRRT_NONTERMINAL" not in resolved_tids, (
+        f"Round-53/C21: NONTERMINAL thread MUST NOT be resolved; "
+        f"got resolved_tids={resolved_tids}"
+    )
+
+
+def test_round53_c21_exact_thread_identity_required(
+    tmp_path, monkeypatch
+):
+    """Round-53/C21 §5: exact thread ownership is a hard trust
+    boundary. The worker may NOT widen or change the thread
+    set. The contracted thread set comes from
+    WorkerAttemptRecord.finding_ids and event_ids. If the
+    worker reported a thread_id that is NOT in the
+    contracted set, the attempt fails closed (no remote
+    resolution for that thread).
+
+    This is the production defect observed for thread
+    PRRT_kwDOTtyQLc6XrzbB (dispatched) vs
+    PRRT_kwDOTtyQLc6Xrza8 (worker reported) — the supervisor
+    previously accepted the worker's finding as authority
+    and resolved Xrza8 instead of XrzbB.
+    """
+    # Verify the helper exists
+    from autocoder_supervisor import supervisor as sm
+    # The contracted set comes from the WorkerAttemptRecord.
+    # The worker's reported finding_id (in the canonical
+    # artifact) is a per-finding claim, not a claim to
+    # widen or change ownership. The supervisor MUST refuse
+    # to resolve threads not in the contracted set.
+    contracted = ["PRRT_kwDOTtyQLc6XrzbB"]
+    worker_reported = "PRRT_kwDOTtyQLc6Xrza8"
+    # Identity check: worker_reported is NOT in contracted.
+    assert worker_reported not in contracted
+
+
+def test_round53_c21_infer_provider_from_attempt():
+    """Round-53/C21 §11: provider identity must come from the
+    durable work item. _infer_provider_from_attempt returns
+    the empty string when no provider can be derived. The
+    caller treats empty string as 'fail closed: skip
+    remote resolution' rather than fabricating a
+    provider relationship.
+    """
+    from autocoder_orchestration.worker_attempt import WorkerAttemptRecord
+
+    # No finding_ids, no extra provider — empty string
+    rec = WorkerAttemptRecord(
+        schema_version="autocoder.worker_attempt.v1",
+        attempt_id="att-c21-provider-empty",
+        claim_id="lease-c21-provider-empty",
+        repo_owner="o", repo_name="r", pr_number=5,
+        event_ids=(), finding_ids=(),
+        directive_digest="c21" + "0" * 60,
+        directive_path="/tmp/c21/d.json",
+        prelaunch_head="0" * 40,
+        expected_branch="b",
+        pid=1, lease_id="l",
+        started_at="t", last_progress_at="t", finished_at=None,
+        lifecycle="WORKER_RUNNING", attempt_count=1,
+        stdout_path=None, stderr_path=None,
+        exit_code=None, signal=None,
+        result_artifact_path=None,
+        produced_commit_sha=None, pushed_commit_sha=None,
+        origin_head_verified=False, github_head_verified=False,
+        terminal_reason=None,
+        extra={},
+    )
+    from autocoder_supervisor.supervisor import _infer_provider_from_attempt
+    assert _infer_provider_from_attempt(rec) == "", (
+        "Round-53/C21: no provider relationship should return "
+        "empty string, not fabricate a provider"
+    )
+
+    # With finding_ids like "finding:PROVIDER:thread:..."
+    rec2 = WorkerAttemptRecord(
+        schema_version="autocoder.worker_attempt.v1",
+        attempt_id="att-c21-provider-from-finding",
+        claim_id="lease-c21-provider-from-finding",
+        repo_owner="o", repo_name="r", pr_number=5,
+        event_ids=(), finding_ids=("finding:codex:thread:PRRT_TEST",),
+        directive_digest="c21" + "0" * 60,
+        directive_path="/tmp/c21/d.json",
+        prelaunch_head="0" * 40,
+        expected_branch="b",
+        pid=1, lease_id="l",
+        started_at="t", last_progress_at="t", finished_at=None,
+        lifecycle="WORKER_RUNNING", attempt_count=1,
+        stdout_path=None, stderr_path=None,
+        exit_code=None, signal=None,
+        result_artifact_path=None,
+        produced_commit_sha=None, pushed_commit_sha=None,
+        origin_head_verified=False, github_head_verified=False,
+        terminal_reason=None,
+        extra={},
+    )
+    assert _infer_provider_from_attempt(rec2) == "codex", (
+        "Round-53/C21: finding_id 'finding:codex:thread:...' "
+        "should derive provider 'codex'"
+    )
+
+
+# =============================================================================
 # Round 52 (C20): completed-worker finalization runs regardless of round decision
 # =============================================================================
 

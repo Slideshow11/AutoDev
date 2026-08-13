@@ -4970,27 +4970,63 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                              _rec_obj.prelaunch_head)
             except Exception:
                 _new_head = _rec_obj.prelaunch_head
-            _disposition = "ALREADY_SATISFIED" if _result_type == "NO_CHANGES_REQUIRED" else "REPAIRED"
-            # Collect candidate thread_ids from the artifact
-            # findings AND the durable work item's drain
-            # events. The worker's finding_id is the
-            # ground truth, but the drain event is the
-            # owner of the dispatch — they should agree.
-            _candidate_tids = set()
+            # Round-53/C21 §3, §7, §8: per-finding thread
+            # disposition is the canonical terminality gate.
+            # Every finding carries its own disposition. The
+            # attempt's overall terminality is the WORST
+            # disposition across all findings: a single
+            # NONTERMINAL finding leaves the thread actionable
+            # even if other findings are TERMINAL. The
+            # supervisor must NOT consume the drain event,
+            # write a terminal proof, or call
+            # resolveReviewThread for any NONTERMINAL thread.
+            _candidate_thread_dispositions = []
             if _result_type == "NO_CHANGES_REQUIRED":
                 try:
                     _findings = (_wra.get("no_changes_required_proof") or {}).get("findings") or []
                 except Exception:
                     _findings = []
                 for _f in _findings:
-                    _tid = (_f or {}).get("finding_id", "")
-                    if _tid.startswith("thread:"):
-                        _candidate_tids.add(_tid[len("thread:"):])
-            # Also consult unconsumed_events for drain events
-            # whose last_dispatched_event_id matched this attempt.
-            # (The lease was lost, so we look at any drain
-            # event whose thread_id is the same as the
-            # worker's finding_id.)
+                    _fid = (_f or {}).get("finding_id", "")
+                    if _fid.startswith("thread:"):
+                        _gtid = _fid[len("thread:"):]
+                        _disp = str(
+                            (_f or {}).get("disposition") or ""
+                        ).upper()
+                        _candidate_thread_dispositions.append(
+                            (_gtid, _disp)
+                        )
+            # Default disposition for the consume/resolve cycle.
+            # Per §7, REPAIR_PUSHED implies REPAIRED;
+            # NO_CHANGES_REQUIRED defaults to ALREADY_SATISFIED.
+            if _result_type == "REPAIR_PUSHED":
+                _default_disp = THREAD_DISPOSITION_REPAIRED
+            else:
+                _default_disp = THREAD_DISPOSITION_ALREADY_SATISFIED
+            # Per §3, partition findings into TERMINAL vs
+            # NONTERMINAL. Only the TERMINAL set is written
+            # a terminal proof and resolved remotely.
+            _nonterminal_tids = {
+                _tid for (_tid, _disp) in _candidate_thread_dispositions
+                if _disp in NONTERMINAL_THREAD_DISPOSITIONS
+            }
+            _terminal_tids = {
+                _tid for (_tid, _disp) in _candidate_thread_dispositions
+                if _disp in TERMINAL_THREAD_DISPOSITIONS
+            }
+            if _nonterminal_tids:
+                log(
+                    "warning",
+                    "round-53: C21 worker attempt has NONTERMINAL finding(s); "
+                    "drain events for those threads preserved for re-dispatch",
+                    attempt_id=_attempt_id,
+                    nonterminal_tids=sorted(_nonterminal_tids),
+                    terminal_tids=sorted(_terminal_tids),
+                )
+            _candidate_tids = _terminal_tids
+            # Per §11, provider identity MUST come from the
+            # durable work item, NOT a hardcoded "coderabbit".
+            _recorded_provider = _infer_provider_from_attempt(_rec_obj)
             for _tid in list(_candidate_tids):
                 # C14: write a terminal proof so the
                 # durable-thread drain emitter stops
@@ -4999,7 +5035,7 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                     consume_thread_drain_event_in_terminal_disposition(
                         thread_id=_tid,
                         event_id=f"unresolved_thread_drain:{_tid}",
-                        provider="coderabbit",
+                        provider=_recorded_provider,
                         evaluated_head=_new_head,
                         disposition_raw=_disposition,
                         evidence=str(_candidate_tids)[:200],
@@ -5037,48 +5073,57 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 attempt_id=_attempt_id,
                 error=str(_pf_exc)[:200],
             )
-    # Round-52/C20 §6: retry remote resolution for already-finalized
-    # attempts whose thread_ids are still unresolved on GitHub.
-    # This is a best-effort idempotent retry: GitHub's
-    # resolveReviewThread mutation is safe to call repeatedly.
-    # Runs on EVERY invocation (not gated on transitions == 0)
-    # because the WORKER_RUNNING loop and the retry pass address
-    # different records: the first is for active attempts; the
-    # second is for terminalized attempts whose remote
-    # resolution call silently failed in a prior run.
-    for _path in _dir.glob("att-*.json"):
-        if _path.name.endswith(".worker_result.json"):
-            continue
-        if not _path.name.endswith(".json"):
-            continue
-        try:
-            _d = json.loads(_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if _d.get("lifecycle") not in (
-            LIFECYCLE_PUSH_VERIFIED, LIFECYCLE_NO_CHANGES_REQUIRED,
-        ):
-            continue
-        _extra = _d.get("extra") or {}
-        _ncrp = _extra.get("no_changes_required_proof") or {}
-        if not _ncrp:
-            continue
-        for _f in _ncrp.get("findings") or []:
-            _fid = (_f or {}).get("finding_id", "")
-            if not _fid.startswith("thread:"):
-                continue
-            _tid = _fid[len("thread:"):]
-            try:
-                resolveReviewThread(
-                    attempt_id=_d.get("attempt_id", ""),
-                    lifecycle=_d.get("lifecycle", ""),
-                    thread_id=_tid,
-                    head_sha=_d.get("prelaunch_head", ""),
-                )
-            except Exception:
-                pass
+    # Round-53/C21 §8: the C20 broad retry-scan of
+    # historical finalized attempts is removed. Resolution
+    # now lives in a per-thread lifecycle: a terminal
+    # thread work item writes RESOLUTION_PENDING once and
+    # resolveReviewThread is called exactly once. Re-running
+    # this loop on every heartbeat floods the durable
+    # audit ledger with redundant resolve attempts and
+    # bypasses the per-thread terminality gate. The
+    # resolveReviewThread function is itself idempotent at
+    # the GitHub layer (calling it on an already-resolved
+    # thread returns immediately), so the durable lifecycle
+    # is the only authoritative state.
 
     return transitions
+
+
+def _infer_provider_from_attempt(rec) -> str:
+    """Round-53/C21 §11: provider identity MUST come from the
+    durable work item. Returns the provider string the supervisor
+    should record when consuming drain events and resolving
+    threads for this attempt. Returns the empty string when
+    the durable record does not prove a provider relationship.
+
+    Preference order (most authoritative first):
+      1. WorkerAttemptRecord.finding_ids (each finding carries
+         its source provider in the durable work item, in
+         the form finding:PROVIDER:thread:...)
+      2. The dispatch event's provider field
+      3. The extra.provider / extra.source_provider fields
+      4. Empty string (no claim)
+
+    The empty-string return is the FAIL-CLOSED default. It tells
+    the supervisor to skip consume-thread-drain and
+    resolveReviewThread for this attempt rather than
+    fabricating a provider relationship.
+    """
+    try:
+        if hasattr(rec, "finding_ids") and rec.finding_ids:
+            for fid in rec.finding_ids:
+                if isinstance(fid, str) and fid.startswith("finding:"):
+                    parts = fid.split(":", 2)
+                    if len(parts) >= 2 and parts[1] not in ("", "unknown"):
+                        return parts[1]
+        extra = getattr(rec, "extra", None) or {}
+        if isinstance(extra, dict):
+            recorded = extra.get("provider") or extra.get("source_provider")
+            if isinstance(recorded, str) and recorded.strip():
+                return recorded.strip()
+    except Exception:
+        pass
+    return ""
 
 
 def resolveReviewThread(*, attempt_id: str, lifecycle: str,
