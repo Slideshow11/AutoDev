@@ -43,21 +43,37 @@ export AED_AED_RUN_ID
 
 echo "Launch environment validated: AED_PR_NUMBERS=$AED_PR_NUMBERS AED_REPO_OWNER=$AED_REPO_OWNER AED_REPO_NAME=$AED_REPO_NAME AED_AED_RUN_ID=$AED_AED_RUN_ID"
 
-# 1. Find any running supervisor.
-PID=$(pgrep -f "$SUP_DIR/supervisor.py" || true)
-if [ -n "$PID" ]; then
-    echo "Stopping supervisor PID $PID"
-    kill -TERM "$PID" 2>/dev/null || true
-    # Wait for the lock file to be released.
-    for _ in $(seq 1 30); do
-        if [ ! -f "$LOCK" ]; then
-            break
+# 1. Find any running supervisor and stop it cleanly.
+#    pgrep -f may return multiple PIDs (one per newline); iterating and failing
+#    closed (without `|| true`) is required so we never start a second owner
+#    while an old one is still alive or a stale lock remains.
+PIDS=$(pgrep -f "$SUP_DIR/supervisor.py" || true)
+if [ -n "$PIDS" ]; then
+    echo "Stopping supervisor PIDs: $PIDS"
+    # Send TERM to every matching PID individually; refuse to proceed if any
+    # termination fails or any PID refuses to exit within the grace window.
+    for PID in $PIDS; do
+        if ! kill -TERM "$PID" 2>/dev/null; then
+            echo "ERROR: kill -TERM $PID failed" >&2
+            exit 1
         fi
-        sleep 1
     done
 fi
 
-# 2. Start a new supervisor with multi-PR.
+# 2. Wait for the lock file to be released (max 30 s), regardless of whether
+#    a PID was found. A stale lock with no live owner must also be cleared
+#    before we attempt to start a new supervisor.
+WAITED=0
+while [ -f "$LOCK" ] && [ "$WAITED" -lt 30 ]; do
+    sleep 1
+    WAITED=$((WAITED + 1))
+done
+if [ -f "$LOCK" ]; then
+    echo "ERROR: lock $LOCK still present after 30 s; refusing to start a second supervisor" >&2
+    exit 1
+fi
+
+# 3. Start a new supervisor with multi-PR.
 echo "Starting supervisor with AED_PR_NUMBERS=$AED_PR_NUMBERS"
 cd "$SUP_DIR"
 nohup python3 "$SUP_DIR/supervisor.py" > "$SUP_DIR/logs/supervisor.out" 2>&1 &
