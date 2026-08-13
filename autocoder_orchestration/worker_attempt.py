@@ -74,6 +74,16 @@ LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE = (
     "UNATTRIBUTED_HEAD_ADVANCE"
 )
 
+# Round-54/C22: the worker attempt produced an artifact
+# whose launch identity / launch context / result contract
+# does not cross-check against the supervisor-owned
+# ``WorkerAttemptRecord``. The artifact is retained for
+# forensic chain-of-custody but the attempt is terminal
+# without producing any worker provenance. The finding
+# remains RETRY_PENDING so a future retry can produce a
+# valid artifact.
+LIFECYCLE_WORKER_RESULT_INVALID = "WORKER_RESULT_INVALID"
+
 # Round-50.1 Section 6: the worker exited and the remote
 # head advanced, but the worker did NOT write the required
 # canonical WorkerResultArtifact. The supervisor MUST
@@ -106,11 +116,18 @@ TERMINAL_FAILURE_LIFECYCLES = frozenset({
 # is external. The worker's finding remains
 # RETRY_PENDING (the next dispatch cycle will inspect
 # the new head).
+# Round-54/C22: ``WORKER_RESULT_INVALID`` is a terminal
+# state — the attempt is finished because the artifact
+# failed the supervisor-side launch-identity / launch-context
+# / result-contract validation. The artifact is preserved
+# for forensic chain-of-custody; the finding remains
+# RETRY_PENDING.
 TERMINAL_LIFECYCLES = frozenset({
     LIFECYCLE_TERMINAL_REPAIRED,
     LIFECYCLE_NO_CHANGES_REQUIRED,
     LIFECYCLE_WORKER_EXITED_NO_PUSH,
     LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
+    LIFECYCLE_WORKER_RESULT_INVALID,
 })
 
 
@@ -155,6 +172,16 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
         # PUSH_VERIFIED — the live head is an external
         # commit and the finding remains RETRY_PENDING.
         LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
+        # Round-54/C22: the worker produced an artifact whose
+        # launch identity / launch context / result contract
+        # does not cross-check against the supervisor-owned
+        # prelaunch values. The artifact is preserved for
+        # forensic chain-of-custody but the attempt is
+        # terminal WITHOUT consuming source work or
+        # advancing the canonical controller. The finding
+        # remains RETRY_PENDING so a future retry can produce
+        # a valid artifact.
+        LIFECYCLE_WORKER_RESULT_INVALID,
     }),
     LIFECYCLE_COMMIT_PRODUCED: frozenset({
         LIFECYCLE_PUSH_VERIFIED,
@@ -300,6 +327,13 @@ RESULT_TYPE_REPAIR_PUSHED = "REPAIR_PUSHED"
 RESULT_TYPE_NO_CHANGES_REQUIRED = "NO_CHANGES_REQUIRED"
 RESULT_TYPE_WORKER_EXECUTION_FAILED = "WORKER_EXECUTION_FAILED"
 RESULT_TYPE_COMMIT_PRODUCED_NOT_PUSHED = "COMMIT_PRODUCED_NOT_PUSHED"
+# Round-54/C22: worker produced an artifact that fails the
+# supervisor-side launch-identity / result-contract / launch-context
+# cross-check. The artifact is preserved for forensic chain-of-custody
+# but the attempt MUST NOT be promoted to NO_CHANGES_REQUIRED,
+# REPAIR_PUSHED, or any state that consumes source work /
+# advances the canonical controller / resolves threads.
+RESULT_TYPE_WORKER_RESULT_INVALID = "WORKER_RESULT_INVALID"
 
 # Result artifact schema version. Bump when the schema
 # changes. The supervisor refuses to read artifacts
@@ -420,8 +454,18 @@ class WorkerResultArtifact:
         artifact to advance the controller state. The
         artifact is the SOLE source of truth for the
         worker's produced/pushed SHAs.
+
+        Round-54/C22 hardening: every claim the worker
+        writes into the artifact is cross-checked against
+        the supervisor-owned ``WorkerAttemptRecord`` (the
+        prelaunch invariants). Legacy-shape artifacts that
+        omit the launch-contract fields are rejected
+        unconditionally — the worker author cannot be
+        permitted to redefine the launch context by
+        omitting a field it never wanted to validate.
         """
         errors: list[str] = []
+        # --- Identity cross-check (round-42) -----------------------
         if self.attempt_id != rec.attempt_id:
             errors.append(
                 f"attempt_id mismatch: result={self.attempt_id} "
@@ -438,8 +482,96 @@ class WorkerResultArtifact:
                 f"{self.directive_digest} record="
                 f"{rec.directive_digest}"
             )
-        # NO_CHANGES_REQUIRED must have ZERO produced
-        # and ZERO pushed commits.
+        # --- Launch-context cross-check (round-54/C22) ------------
+        # These fields are bound by the supervisor at launch and
+        # are the supervisor's evidence that the worker was
+        # supposed to operate against the exact PR/branch/head.
+        # The artifact's claim of these fields MUST equal the
+        # launch record. A missing/empty artifact value for any
+        # of these is a fail-closed signal: the worker was
+        # either an older wrapper that did not carry the field
+        # or an externally-authored artifact that has no
+        # evidence of being a valid attempt.
+        _rec_repo_owner = getattr(rec, "repo_owner", None) or ""
+        _rec_repo_name = getattr(rec, "repo_name", None) or ""
+        expected_repo = (
+            f"{_rec_repo_owner}/{_rec_repo_name}"
+            if _rec_repo_owner and _rec_repo_name
+            else ""
+        )
+        if self.repo != expected_repo:
+            errors.append(
+                f"repo mismatch: result={self.repo!r} "
+                f"record={expected_repo!r}"
+            )
+        if self.pr_number != getattr(rec, "pr_number", None):
+            errors.append(
+                f"pr_number mismatch: result={self.pr_number!r} "
+                f"record={rec.pr_number!r}"
+            )
+        if self.expected_branch != getattr(rec, "expected_branch", None):
+            errors.append(
+                f"expected_branch mismatch: result={self.expected_branch!r} "
+                f"record={getattr(rec, 'expected_branch', None)!r}"
+            )
+        if self.prelaunch_head != getattr(rec, "prelaunch_head", None):
+            errors.append(
+                f"prelaunch_head mismatch: result={self.prelaunch_head!r} "
+                f"record={getattr(rec, 'prelaunch_head', None)!r}"
+            )
+        # --- Result-contract cross-check (round-54/C22) -----------
+        # The prelaunch result_contract_id is supervisor-owned
+        # and persisted on the attempt record. The artifact's
+        # expected_result_contract_id and observed_result_contract_id
+        # MUST be present and MUST match the supervisor-owned
+        # prelaunch id. ``result_contract_match`` MUST be
+        # exactly True. Missing/empty fields or any mismatch
+        # is fail-closed.
+        prelaunch_rcid = (
+            rec.extra.get("result_contract_id")
+            if isinstance(rec.extra, dict)
+            else None
+        )
+        if not prelaunch_rcid:
+            errors.append(
+                "attempt record has no supervisor-owned "
+                "result_contract_id in extra.result_contract_id"
+            )
+        else:
+            extra = self.extra if isinstance(self.extra, dict) else {}
+            obs_rcid = extra.get("observed_result_contract_id", "")
+            exp_rcid = extra.get("expected_result_contract_id", "")
+            match = extra.get("result_contract_match", None)
+            if not obs_rcid or not exp_rcid:
+                errors.append(
+                    "artifact missing required contract fields "
+                    "(expected_result_contract_id/observed_result_contract_id); "
+                    "legacy artifact shape is not accepted"
+                )
+            else:
+                if exp_rcid != obs_rcid:
+                    errors.append(
+                        f"artifact-internal contract mismatch: "
+                        f"expected={exp_rcid!r} observed={obs_rcid!r}"
+                    )
+                if exp_rcid != prelaunch_rcid:
+                    errors.append(
+                        f"artifact expected_result_contract_id does not "
+                        f"match supervisor-owned prelaunch id: "
+                        f"artifact={exp_rcid!r} prelaunch={prelaunch_rcid!r}"
+                    )
+                if obs_rcid != prelaunch_rcid:
+                    errors.append(
+                        f"artifact observed_result_contract_id does not "
+                        f"match supervisor-owned prelaunch id: "
+                        f"artifact={obs_rcid!r} prelaunch={prelaunch_rcid!r}"
+                    )
+                if match is not True:
+                    errors.append(
+                        f"artifact result_contract_match is not True: "
+                        f"got {match!r}"
+                    )
+        # --- NO_CHANGES_REQUIRED shape invariant (round-42) ---------
         if self.result_type == RESULT_TYPE_NO_CHANGES_REQUIRED:
             if self.produced_commit_shas:
                 errors.append(

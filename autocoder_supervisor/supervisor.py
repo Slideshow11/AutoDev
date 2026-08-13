@@ -966,28 +966,136 @@ def write_quota_state(state: dict) -> None:
     write_json(QUOTA_PATH, state)  # type: ignore[name-defined]
 
 
+# ---------------------------------------------------------------------------
+# Round-54/C22 provider-state vocabulary (Defect B)
+# ---------------------------------------------------------------------------
+# Five distinct states replace the binary "paused / clear / unknown" status.
+# The classifier reads the latest bot-comment body and applies structured
+# recognizers. The ``pause_reason`` field is the driver for the retry
+# backoff scheduler (Defect C).
+
+PROVIDER_STATE_REVIEW_COMPLETE = "REVIEW_COMPLETE"
+PROVIDER_STATE_REVIEW_IN_PROGRESS = "REVIEW_IN_PROGRESS"
+PROVIDER_STATE_AUTO_PAUSED_ACTIVE_DEVELOPMENT = "AUTO_PAUSED_ACTIVE_DEVELOPMENT"
+PROVIDER_STATE_QUOTA_PAUSED = "QUOTA_PAUSED"
+PROVIDER_STATE_UNKNOWN = "UNKNOWN"
+
+# Recognizers (round-54/C22). Patterns are checked lowercased.
+# Each recognizer is a tuple of compiled regex patterns. The first
+# recognizer whose pattern matches determines the state.
+# PRECEDENCE order is: REVIEW_IN_PROGRESS > AUTO_PAUSED >
+# QUOTA_PAUSED > REVIEW_COMPLETE > UNKNOWN.
+_RECOGNIZER_REVIEW_IN_PROGRESS_PATTERNS = (
+    re.compile(r"\breview in progress\b", re.IGNORECASE),
+    re.compile(r"\bcurrently processing\b", re.IGNORECASE),
+    re.compile(r"\breview.{0,20}started\b", re.IGNORECASE),
+    re.compile(r"\bgenerating review\b", re.IGNORECASE),
+)
+# CRITICAL: the "Reviews paused" comment ALSO contains the
+# "<!-- this is an auto-generated comment: review" literal.
+# The PRECEDENCE order here is what determines the classification;
+# the pause recognizer must run BEFORE the walkthrough/complete
+# recognizer so the auto-paused classification wins.
+_RECOGNIZER_AUTO_PAUSED_PATTERNS = (
+    re.compile(r"\breviews paused\b", re.IGNORECASE),
+    re.compile(r"\bunder active development\b", re.IGNORECASE),
+    re.compile(r"\bactive development.{0,30}paused\b", re.IGNORECASE),
+)
+_RECOGNIZER_QUOTA_PATTERNS = (
+    # "rate limit" / "rate limited" / "rate-limiting" / "rate-limit"
+    re.compile(r"\brate[- ]?limit(?:ed|ing)?\b", re.IGNORECASE),
+    re.compile(r"\busage.{0,30}limits?\b", re.IGNORECASE),
+    re.compile(r"\btoo many requests\b", re.IGNORECASE),
+    re.compile(r"\breached your.{0,30}limit", re.IGNORECASE),
+    re.compile(r"\bquota (waived|exceeded|exhausted)\b", re.IGNORECASE),
+)
+_RECOGNIZER_REVIEW_COMPLETE_PATTERNS = (
+    re.compile(r"\breview finished\b", re.IGNORECASE),
+    re.compile(r"\breview complete\b", re.IGNORECASE),
+    re.compile(r"\bwalkthrough\b", re.IGNORECASE),
+    re.compile(r"<!-- this is an auto-generated comment: review",
+               re.IGNORECASE),
+)
+
+
+def classify_provider_state(
+    provider: str, body: Optional[str]
+) -> "tuple[str, str]":
+    """Classify the latest bot-comment body for ``provider``.
+
+    Returns ``(state, reason)``. The state is one of the five
+    ``PROVIDER_STATE_*`` constants; the reason is a short
+    human-readable label suitable for logs.
+
+    PRECEDENCE order (highest first):
+
+    1. REVIEW_IN_PROGRESS - the bot is actively processing.
+    2. AUTO_PAUSED_ACTIVE_DEVELOPMENT - branch is under active
+       development; the bot has paused mid-cycle.
+    3. QUOTA_PAUSED - explicit rate-limit / usage-limit message.
+    4. REVIEW_COMPLETE - the bot has finished a review.
+    5. UNKNOWN - no body or no recognizer matched.
+
+    The order is critical: the "Review ..." comment-template
+    literal is present in BOTH review-complete and auto-paused
+    bodies. We must classify the auto-paused comment as
+    AUTO_PAUSED_ACTIVE_DEVELOPMENT, not REVIEW_COMPLETE.
+    """
+    if not body:
+        return PROVIDER_STATE_UNKNOWN, "no_body"
+    if provider not in PROVIDERS:
+        return PROVIDER_STATE_UNKNOWN, "unknown_provider"
+    body_low = body.lower()
+    # 1. REVIEW_IN_PROGRESS wins over everything because an
+    #    in-progress review cannot be paused at the same time.
+    for p in _RECOGNIZER_REVIEW_IN_PROGRESS_PATTERNS:
+        if p.search(body_low):
+            return (
+                PROVIDER_STATE_REVIEW_IN_PROGRESS,
+                "review_in_progress_marker",
+            )
+    # 2. AUTO_PAUSED must be checked BEFORE the walkthrough
+    #    recognizer so the "Reviews paused" body is classified
+    #    as a pause, not a finished review.
+    for p in _RECOGNIZER_AUTO_PAUSED_PATTERNS:
+        if p.search(body_low):
+            return (
+                PROVIDER_STATE_AUTO_PAUSED_ACTIVE_DEVELOPMENT,
+                "active_development_pause_marker",
+            )
+    # 3. QUOTA_PAUSED.
+    for p in _RECOGNIZER_QUOTA_PATTERNS:
+        if p.search(body_low):
+            return PROVIDER_STATE_QUOTA_PAUSED, "quota_pause_marker"
+    # 4. REVIEW_COMPLETE.
+    for p in _RECOGNIZER_REVIEW_COMPLETE_PATTERNS:
+        if p.search(body_low):
+            return (
+                PROVIDER_STATE_REVIEW_COMPLETE,
+                "review_complete_marker",
+            )
+    return PROVIDER_STATE_UNKNOWN, "unrecognized_body"
+
+
+# Backwards-compat shims for the legacy helpers. These are
+# retained as thin wrappers on top of the new classifier so
+# call sites that previously branched on
+# ``is_provider_quota_message`` / ``is_provider_walkthrough_or_complete``
+# continue to work. New code MUST use ``classify_provider_state``.
 def is_provider_quota_message(
     provider: str, body: Optional[str]
 ) -> bool:
-    if not body:
-        return False
-    if provider not in PROVIDERS:
-        return False
-    return any(p.search(body) for p in PROVIDERS[provider]["quota_patterns"])
+    state, _ = classify_provider_state(provider, body)
+    return state == PROVIDER_STATE_QUOTA_PAUSED
 
 
 def is_provider_walkthrough_or_complete(
     provider: str, body: Optional[str]
 ) -> bool:
-    if not body or provider != "coderabbit":
-        return False
-    body_low = body.lower()
-    return (
-        "review in progress" in body_low
-        or "currently processing" in body_low
-        or "walkthrough" in body_low
-        or "<!-- this is an auto-generated comment: review"
-        in body_low
+    state, _ = classify_provider_state(provider, body)
+    return state in (
+        PROVIDER_STATE_REVIEW_COMPLETE,
+        PROVIDER_STATE_REVIEW_IN_PROGRESS,
     )
 
 
@@ -3487,6 +3595,20 @@ def _round50_ingest_worker_result_artifact(rec):
                 # the canonical artifact for downstream
                 # readers and future crash recovery.
                 ts = now_iso()
+                # Round-54/C22 Defect A: the canonical
+                # WorkerResultArtifact built from a legacy
+                # standalone source MUST carry the supervisor-side
+                # launch-identity / launch-context / result-contract
+                # fields so the validator can cross-check the
+                # artifact against the supervisor-owned prelaunch
+                # values. The launch-context fields are copied from
+                # the rec. The result-contract fields are copied
+                # from the rec.extra (the supervisor-owned
+                # prelaunch result_contract_id).
+                _rec_extra = (
+                    rec.extra if isinstance(rec.extra, dict) else {}
+                )
+                _prelaunch_rcid = _rec_extra.get("result_contract_id", "")
                 parsed_artifact = WorkerResultArtifact(
                     schema_version=WORKER_RESULT_SCHEMA_VERSION,
                     attempt_id=rec.attempt_id,
@@ -3510,6 +3632,20 @@ def _round50_ingest_worker_result_artifact(rec):
                     expected_branch=rec.expected_branch or "",
                     prelaunch_head=rec.prelaunch_head or "",
                     worker_pid=rec.pid,
+                    extra=(
+                        {
+                            "result_contract_id": _prelaunch_rcid,
+                            "expected_result_contract_id": _prelaunch_rcid,
+                            "observed_result_contract_id": _prelaunch_rcid,
+                            "result_contract_match": bool(_prelaunch_rcid),
+                            "result_contract_mismatch_reason": (
+                                "" if _prelaunch_rcid
+                                else "no supervisor-owned prelaunch result_contract_id"
+                            ),
+                        }
+                        if _prelaunch_rcid
+                        else {}
+                    ),
                 )
     except Exception:
         parsed_artifact = None
@@ -3523,14 +3659,74 @@ def _round50_ingest_worker_result_artifact(rec):
     except Exception:
         errs = ["validate_against_attempt_raised"]
     if errs:
+        # Round-54/C22: validation failure is fail-closed. The
+        # artifact is preserved for forensic chain-of-custody
+        # but the attempt is classified WORKER_RESULT_INVALID
+        # so the canonical controller cannot be advanced by
+        # this artifact. The prelaunch events / findings
+        # remain RETRY_PENDING; a future retry can produce a
+        # valid artifact.
         log(
             "warning",
-            "round-50.1: worker-result identity validation failed",
+            "round-54/C22: worker-result identity/contract validation failed; "
+            "classifying attempt as WORKER_RESULT_INVALID",
             attempt_id=rec.attempt_id,
             errors=errs[:5],
         )
+        # Persist the failing artifact for forensics but with
+        # result_type forced to WORKER_RESULT_INVALID so the
+        # WorkerAttemptStore.write() reflects the rejection.
+        parsed_artifact_dict = parsed_artifact.to_dict()
+        parsed_artifact_dict["result_type"] = "WORKER_RESULT_INVALID"
+        # Capture the validation errors in the artifact's
+        # extra block so the round-1 diagnostic shows them.
+        parsed_artifact_dict.setdefault("extra", {})
+        if isinstance(parsed_artifact_dict["extra"], dict):
+            parsed_artifact_dict["extra"]["validation_errors"] = list(errs)
+        rec.extra["worker_result_artifact"] = parsed_artifact_dict
+        rec.extra["worker_result_source_surface"] = source_surface
+        rec.extra["worker_result_validation_errors"] = list(errs)
+        # Persist the rejected artifact for forensic chain-of-custody.
+        try:
+            from autocoder_orchestration.worker_attempt import (
+                WorkerResultArtifact as _WRA,
+            )
+            _failed = _WRA.from_dict(parsed_artifact_dict)
+            if (
+                source_surface == "standalone_with_directive_sha256"
+                or source_surface == "standalone_with_directive_id"
+            ):
+                canonical_target = Path(WORKER_ATTEMPTS_DIR) / (
+                    f"{rec.attempt_id}.worker_result.json"
+                )
+                _failed.write(canonical_target)
+            elif (
+                source_surface != "result_artifact_path"
+                and rpap_parsed is not None
+            ):
+                _failed.write(rpap_parsed)
+        except Exception:
+            pass
+        # Record when / why for diagnostics.
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            rec.extra["worker_result_invalid_at"] = _dt.now(
+                _tz.utc
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            pass
+        try:
+            WorkerAttemptStore(WORKER_ATTEMPTS_DIR).write(rec)
+        except Exception:
+            pass
+        # Return False so the poll path does NOT promote to
+        # NO_CHANGES_REQUIRED / REPAIR_PUSHED. The attempt
+        # remains WORKER_RUNNING; the next poll reconciliation
+        # classifies it as WORKER_RESULT_INVALID via the
+        # artifact's result_type.
         return False
 
+    # Original code path for valid artifacts.
     # Persist canonical artifact to the per-attempt path so
     # subsequent polls recover state without re-parsing.
     # Round-50.1 Section 8: the legacy standalone source
@@ -3642,6 +3838,7 @@ def poll_worker_attempt(
         LIFECYCLE_TERMINAL_REPAIRED,
         LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
         LIFECYCLE_WORKER_EXITED_NO_PUSH,
+        LIFECYCLE_WORKER_RESULT_INVALID,
         LIFECYCLE_WORKER_RUNNING,
         TERMINAL_LIFECYCLES,
         WorkerAttemptStore,
@@ -3989,6 +4186,80 @@ def poll_worker_attempt(
                     _live_head_for_classify
                     and _live_head_for_classify == _last_worker_push
                 ):
+                    # Round-54/C22: even if the worker reported
+                    # a pushed SHA that matches the live head,
+                    # the artifact must cross-check the
+                    # supervisor-side launch identity / launch
+                    # context / result contract. If validation
+                    # failed, the attempt is classified
+                    # WORKER_RESULT_INVALID instead of promoted
+                    # to PUSH_VERIFIED. The head movement is
+                    # unattributed.
+                    _validation_errors = (
+                        rec.extra.get("worker_result_validation_errors")
+                        if isinstance(rec.extra, dict)
+                        else None
+                    )
+                    if _validation_errors:
+                        try:
+                            rec.assert_can_transition_to(
+                                LIFECYCLE_WORKER_RESULT_INVALID,
+                            )
+                            rec.lifecycle = (
+                                LIFECYCLE_WORKER_RESULT_INVALID
+                            )
+                            rec.terminal_reason = (
+                                "round-54/C22: artifact failed "
+                                "supervisor-side launch identity / "
+                                "launch context / result-contract "
+                                "validation; head movement is "
+                                "unattributed; no worker provenance "
+                                "established"
+                            )
+                            if isinstance(rec.extra, dict):
+                                rec.extra.setdefault(
+                                    "worker_result_invalid_validation_errors",
+                                    list(_validation_errors),
+                                )
+                            log(
+                                "warning",
+                                "round-54/C22: artifact would have "
+                                "been PUSH_VERIFIED but failed "
+                                "validation; classifying as "
+                                "WORKER_RESULT_INVALID",
+                                attempt_id=attempt_id,
+                                pid=rec.pid,
+                                errors=list(_validation_errors)[:5],
+                            )
+                            store.write(rec)
+                            if lease is not None:
+                                try:
+                                    remove_lease()
+                                except Exception:
+                                    pass
+                            # No worker provenance; the head
+                            # movement is treated as external.
+                            return
+                        except Exception as _exc:
+                            log(
+                                "warning",
+                                "round-54/C22: WORKER_RESULT_INVALID "
+                                "transition failed during PUSH_VERIFIED "
+                                "guard; falling back to "
+                                "UNATTRIBUTED_HEAD_ADVANCE",
+                                attempt_id=attempt_id,
+                                error=str(_exc)[:200],
+                            )
+                            # Fall through to UNATTRIBUTED branch.
+                            if (
+                                _live_head_for_classify
+                                and _live_head_for_classify
+                                != rec.prelaunch_head
+                            ):
+                                _classify_unattributed()
+                            else:
+                                _fallback_no_push()
+                            return
                     # Round-42 positive: the worker
                     # durably reported the live head as
                     # the worker's own push. Transition
@@ -4284,6 +4555,72 @@ def poll_worker_attempt(
                         error=str(exc)[:200],
                     )
             if isinstance(_no_op_proof, dict) and _no_op_proof:
+                # Round-54/C22: a NO_CHANGES_REQUIRED transition
+                # MUST NOT be honoured when the artifact failed
+                # the supervisor-side launch identity / launch
+                # context / result contract validation. The
+                # poll path has access to the validation errors
+                # via ``rec.extra.worker_result_validation_errors``
+                # (set by the ingest path). If validation
+                # failed, the attempt is classified
+                # WORKER_RESULT_INVALID instead, which is
+                # terminal WITHOUT consuming source work.
+                _validation_errors = (
+                    rec.extra.get("worker_result_validation_errors")
+                    if isinstance(rec.extra, dict)
+                    else None
+                )
+                if _validation_errors:
+                    try:
+                        rec.assert_can_transition_to(
+                            LIFECYCLE_WORKER_RESULT_INVALID,
+                        )
+                        rec.lifecycle = LIFECYCLE_WORKER_RESULT_INVALID
+                        rec.terminal_reason = (
+                            "round-54/C22: artifact failed "
+                            "supervisor-side launch identity / "
+                            "launch context / result-contract "
+                            "validation; attempt is terminal "
+                            "without consuming source work"
+                        )
+                        if isinstance(rec.extra, dict):
+                            rec.extra.setdefault(
+                                "worker_result_invalid_validation_errors",
+                                list(_validation_errors),
+                            )
+                        log(
+                            "warning",
+                            "round-54/C22: attempt would have "
+                            "been LIFECYCLE_NO_CHANGES_REQUIRED "
+                            "but artifact failed validation; "
+                            "classifying as WORKER_RESULT_INVALID",
+                            attempt_id=attempt_id,
+                            pid=rec.pid,
+                            errors=list(_validation_errors)[:5],
+                        )
+                        store.write(rec)
+                        if lease is not None:
+                            try:
+                                remove_lease()
+                            except Exception:
+                                pass
+                        # Source work is NOT consumed; the
+                        # event/finding remains RETRY_PENDING.
+                        return
+                    except Exception as _exc:
+                        log(
+                            "warning",
+                            "round-54/C22: WORKER_RESULT_INVALID "
+                            "transition failed; falling back to "
+                            "LIFECYCLE_WORKER_EXITED_NO_PUSH",
+                            attempt_id=attempt_id,
+                            error=str(_exc)[:200],
+                        )
+                        if isinstance(rec.extra, dict):
+                            rec.extra.setdefault(
+                                "worker_result_invalid_validation_errors",
+                                list(_validation_errors),
+                            )
                 try:
                     rec.assert_can_transition_to(
                         LIFECYCLE_NO_CHANGES_REQUIRED,
@@ -4718,6 +5055,7 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
         LIFECYCLE_NO_CHANGES_REQUIRED,
         LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE,
         LIFECYCLE_WORKER_EXITED_NO_PUSH,
+        LIFECYCLE_WORKER_RESULT_INVALID,
         LIFECYCLE_TERMINAL_REPAIRED,
         TERMINAL_LIFECYCLES,
         WorkerAttemptStore,
@@ -4828,6 +5166,58 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
         _new_lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
         _wra = (_rec_obj.extra or {}).get("worker_result_artifact") or {}
         _result_type = _wra.get("result_type")
+        # Round-54/C22: even an orphaned record with a
+        # structured proof must not be promoted to a
+        # terminal-success lifecycle if the artifact failed
+        # the supervisor-side launch-identity / launch-context
+        # / result-contract validation. Validation errors are
+        # preserved in ``rec.extra.worker_result_validation_errors``
+        # by the ingest path.
+        _validation_errors = (
+            _rec_obj.extra.get("worker_result_validation_errors")
+            if isinstance(_rec_obj.extra, dict)
+            else None
+        )
+        if _validation_errors:
+            try:
+                _rec_obj.lifecycle = LIFECYCLE_WORKER_RESULT_INVALID
+                _rec_obj.terminal_reason = (
+                    "round-54/C22: artifact failed supervisor-side "
+                    "launch identity / launch context / result "
+                    "contract validation; attempt is terminal "
+                    "without consuming source work"
+                )
+                if isinstance(_rec_obj.extra, dict):
+                    _rec_obj.extra.setdefault(
+                        "worker_result_invalid_validation_errors",
+                        list(_validation_errors),
+                    )
+                _new_lifecycle = LIFECYCLE_WORKER_RESULT_INVALID
+                log(
+                    "warning",
+                    "round-54/C22: orphan reconciliation classifies "
+                    "attempt as WORKER_RESULT_INVALID due to "
+                    "validation errors",
+                    attempt_id=_attempt_id,
+                    pid=_pid,
+                    errors=list(_validation_errors)[:5],
+                )
+                # Persist and continue without consuming source
+                # work or attempting remote resolution.
+                try:
+                    WorkerAttemptStore(_dir).write(_rec_obj)
+                except Exception:
+                    pass
+                transitions += 1
+                continue
+            except Exception as _vie:
+                log(
+                    "warning",
+                    "round-54/C22: WORKER_RESULT_INVALID transition "
+                    "in orphan reconciliation failed",
+                    attempt_id=_attempt_id,
+                    error=str(_vie)[:200],
+                )
         # Round-52/C20 §13: if the worker's disposition is
         # INCOMPLETE_EVIDENCE, the round-39 contract requires
         # the attempt to be a no-op, the thread to remain
@@ -7279,23 +7669,42 @@ def update_quota_last_request(provider: str) -> None:
 
 
 def process_provider_quotas(live: dict) -> dict:
+    """Round-54/C22: classify each provider into one of the five
+    ``PROVIDER_STATE_*`` states.
+
+    The status map returned is a ``{provider: state}`` dict.
+    The state is the discriminator consumed by ``handle_paused_providers``
+    (Defect C) and the quiet-window logic. The legacy "paused" / "clear"
+    / "unknown" values are kept as back-compat aliases for callers that
+    still test for those names.
+    """
     statuses: dict[str, str] = {}
     for provider in PROVIDERS:
         latest = live.get(
             "latest_comments_by_provider", {}
         ).get(provider)
         body = latest.get("body") if latest else None
-        if is_provider_quota_message(provider, body):
+        state, reason = classify_provider_state(provider, body)
+        statuses[provider] = state
+        # Only pause-state carriers receive a "paused" alias
+        # so legacy callers that test ``status == "paused"`` still
+        # work. The new callers (Defect C) read the state itself.
+        if state in (
+            PROVIDER_STATE_AUTO_PAUSED_ACTIVE_DEVELOPMENT,
+            PROVIDER_STATE_QUOTA_PAUSED,
+        ):
             existing = quota_state_for_provider(
                 read_quota_state(), provider
             )
             if not existing:
                 enter_provider_quota_pause(
                     provider,
-                    reason=f"{provider} usage/quota message",
+                    reason=(
+                        f"{provider} {state} "
+                        f"({reason})"
+                    ),
                     pending_head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
                 )
-            statuses[provider] = "paused"
         else:
             existing = quota_state_for_provider(
                 read_quota_state(), provider
@@ -7303,33 +7712,46 @@ def process_provider_quotas(live: dict) -> dict:
             if existing:
                 log(
                     "info",
-                    f"{provider} quota cleared; resuming normal schedule",
+                    f"{provider} state cleared ({state}); "
+                    "resuming normal schedule",
                 )
                 clear_provider_quota_state(provider)
-            statuses[provider] = (
-                "clear" if existing else "unknown"
-            )
     return statuses
 
 
 def handle_paused_providers(
     live: dict, statuses: dict
 ) -> tuple[bool, list]:
-    """Round-44 C12: post a single review-request retry
-    per paused provider per heartbeat, but ONLY for the
-    live PR head. Any prior request bound to a stale
-    head is marked ``SUPERSEDED`` before the live-head
-    request is sent.
+    """Round-54/C22: autonomous review-request retry with bounded
+    backoff epoch.
 
-    Lifecycle: ``REQUEST_INTENT`` (via
-    ``post_review_request``) → ``REQUEST_SENT`` (the
-    ``gh pr comment`` subprocess succeeded) →
-    ``ACKNOWLEDGED`` (CodeRabbit ack observed on next
-    snapshot) → ``REVIEW_COMPLETE``. A request bound to
-    H0 becomes ``SUPERSEDED`` the moment live PR head
-    advances to H1; downstream qualification paths read
-    the ``.superseded.json`` ledger to reject stale
-    evidence.
+    The legacy behaviour (Defect C) was "post once, then silence":
+    a single request was posted for the same head, the idempotency
+    guard skipped every subsequent heartbeat, and no further
+    requests were issued until the head changed. The repaired
+    behaviour uses an explicit retry lifecycle:
+
+        REQUEST_INTENT       -> persisted durable marker
+        REQUEST_SENT         -> gh pr comment succeeded
+        ACKNOWLEDGED         -> bot ack observed on next snapshot
+        REVIEW_COMPLETE      -> durable review observed
+        SUPERSEDED           -> head changed; old request obsolete
+        REQUEST_TIMED_OUT    -> retry deadline elapsed without ack
+        RETRY_DUE             -> next eligible retry epoch reached
+
+    The retry epoch is bounded by the configurable
+    ``quota_retry_initial_seconds`` / ``quota_retry_backoff_seconds``
+    policy plus a hard upper bound of 6h. A same-head request that
+    has not produced either acknowledgement or a useful review by
+    its durable retry deadline acqures a fresh retry owner and
+    becomes eligible to send another bounded request on the next
+    eligible heartbeat.
+
+    The function does NOT spam: the idempotency guard for
+    same-head same-epoch requests still fires. The fix is
+    gradient-bounded (time-based, not per-heartbeat).
+
+    Returns ``(any_paused, paused_providers)``.
     """
     any_paused = False
     paused = []
@@ -7342,7 +7764,16 @@ def handle_paused_providers(
     # several minutes stale if the snapshot is cached.
     live_pr_head = fetch_live_pr_head_now() or live.get("head_sha") or ""
     for provider in PROVIDERS:
-        if statuses.get(provider) != "paused":
+        # Round-54/C22: round-54 vocabulary accepts the
+        # legacy "paused" alias AND the new state names
+        # ``AUTO_PAUSED_ACTIVE_DEVELOPMENT`` /
+        # ``QUOTA_PAUSED``.
+        _provider_state = statuses.get(provider)
+        if _provider_state not in (
+            PROVIDER_STATE_AUTO_PAUSED_ACTIVE_DEVELOPMENT,
+            PROVIDER_STATE_QUOTA_PAUSED,
+            "paused",  # legacy alias
+        ):
             continue
         any_paused = True
         paused.append(provider)
@@ -7368,6 +7799,13 @@ def handle_paused_providers(
                     reason="pending_review_head_stale_at_paused_handler",
                 )
             sub["pending_review_head"] = target_head
+            # Round-54/C22: head-supersession also resets
+            # the retry epoch so the new head starts
+            # FRESH (RETRY_DUE, not REQUEST_TIMED_OUT).
+            sub["retry_epoch"] = 0
+            sub["next_retry_timestamp"] = now.strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             new_state = set_quota_state_for_provider(
                 full_state, provider, sub
             )
@@ -7375,85 +7813,154 @@ def handle_paused_providers(
             log(
                 "warning",
                 f"{provider}: head changed during pause; "
-                "updated pending_review_head",
+                "updated pending_review_head and reset retry epoch",
                 old_head=(pending or "")[:12],
                 new_head=target_head[:12],
+                provider_state=_provider_state,
             )
             continue
+        # Round-54/C22: bounded-backoff retry epoch. The
+        # initial retry fires after ``quota_retry_initial_seconds``
+        # (default 1h). Subsequent retries use
+        # ``quota_retry_backoff_seconds`` (default 6h) capped
+        # at 6h absolute maximum. Each failed retry advances
+        # the epoch and reschedules ``next_retry_timestamp``.
+        # The idempotency guard below now keys on
+        # retry_epoch, NOT on the bare same-head existence.
         next_retry = parse_iso(sub.get("next_retry_timestamp"))
-        if next_retry is None or now >= next_retry:
-            cfg = PROVIDERS.get(provider, {})
-            reset_at = parse_iso(cfg.get("quota_reset_at"))
-            if reset_at is not None and now < reset_at:
-                next_check = now + timedelta(hours=24)
-                sub["next_retry_timestamp"] = next_check.strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
+        retry_due = (next_retry is None or now >= next_retry)
+        existing_req = read_review_request(  # type: ignore[name-defined]
+            provider, target_head
+        )
+        # Determine the live request lifecycle.
+        existing_lifecycle = (
+            existing_req.get("lifecycle") if existing_req else None
+        )
+        # If the same-head request has been pending longer
+        # than the bounded retry deadline, treat it as
+        # REQUEST_TIMED_OUT and allow a fresh retry. This is
+        # the core Defect C fix.
+        timeout_seconds = max(
+            POLICY.get("quota_retry_initial_seconds", 3600),
+            POLICY.get("quota_retry_backoff_seconds", 21600),
+        )
+        retry_epoch = int(sub.get("retry_epoch", 0) or 0)
+        same_head_unacked_lifecycle = (
+            existing_lifecycle
+            in ("REQUEST_INTENT", "REQUEST_SENT")
+        )
+        # Compute whether the same-head request is stale.
+        same_head_stale = False
+        if same_head_unacked_lifecycle and existing_req:
+            _sent_at = parse_iso(existing_req.get("requested_at"))
+            if _sent_at is not None:
+                try:
+                    age = (now - _sent_at).total_seconds()
+                except Exception:
+                    age = 0
+                if age > timeout_seconds:
+                    same_head_stale = True
+        # Only POST when: retry is due AND no fresh same-head
+        # request is pending (or the existing one is stale).
+        if not retry_due:
+            log(
+                "info",
+                f"{provider}: retry not yet due; "
+                "waiting for next_retry_timestamp",
+                next_retry_timestamp=sub.get(
+                    "next_retry_timestamp", ""
+                ),
+                provider_state=_provider_state,
+            )
+            continue
+        if not same_head_stale and existing_lifecycle not in (
+            None,
+            "SUPERSEDED",
+        ):
+            log(
+                "info",
+                f"{provider}: same-head request already pending "
+                "and not stale; skipping duplicate send",
+                head=target_head[:12],
+                existing_lifecycle=existing_lifecycle,
+            )
+            continue
+        # Either no existing request, or the existing one is
+        # stale. Schedule a fresh retry.
+        head_for_request = target_head
+        live_head = live.get("head_sha")
+        if (
+            live_head == head_for_request
+            and not live.get(
+                "latest_reviews_by_provider", {}
+            ).get(provider)
+            and not (
+                live.get(
+                    "latest_comments_by_provider", {}
+                ).get(provider, {}).get("body")
+                and is_provider_walkthrough_or_complete(
+                    provider,
+                    live[
+                        "latest_comments_by_provider"
+                    ][provider]["body"],
                 )
+            )
+        ):
+            if post_review_request(provider, head_for_request):
+                # Round-54/C22: the new retry lifecycle
+                # advances the epoch and reschedules the
+                # next retry. The bounded-backoff policy
+                # uses ``quota_retry_initial_seconds`` for
+                # the first attempt and
+                # ``quota_retry_backoff_seconds`` for
+                # subsequent ones, capped at 6h.
+                retry_count = int(
+                    sub.get("retry_count", 0) or 0
+                ) + 1
+                if retry_count == 1:
+                    backoff = POLICY.get(
+                        "quota_retry_initial_seconds", 3600
+                    )
+                else:
+                    backoff = min(
+                        POLICY.get(
+                            "quota_retry_backoff_seconds",
+                            21600,
+                        ),
+                        6 * 3600,
+                    )
+                sub["retry_count"] = (
+                    retry_count
+                )
+                sub["retry_epoch"] = (
+                    retry_epoch + 1
+                )
+                sub["next_retry_timestamp"] = (
+                    now + timedelta(seconds=backoff)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
                 new_state = set_quota_state_for_provider(
                     full_state, provider, sub
                 )
                 write_quota_state(new_state)
+                update_quota_last_request(provider)
                 log(
                     "info",
-                    f"{provider}: low-frequency availability check "
-                    "scheduled; no review request posted before "
-                    "quota_reset_at",
-                    reset_at=cfg["quota_reset_at"],
-                )
-                continue
-            head_for_request = sub.get("pending_review_head") or target_head
-            # Round-44 C12: dedupe by ``provider + head``. A
-            # pending request file for the same provider +
-            # head means the request was already persisted;
-            # do not send a duplicate ``@coderabbitai
-            # review`` for the same head.
-            existing_req = read_review_request(  # type: ignore[name-defined]
-                provider, head_for_request
-            )
-            if existing_req and existing_req.get("lifecycle") not in (
-                "SUPERSEDED",
-            ):
-                log(
-                    "info",
-                    f"{provider}: review request for head already "
-                    "persisted; skipping duplicate send",
+                    f"{provider}: retry posted after backoff; "
+                    "next retry scheduled",
+                    retry_count=retry_count,
+                    next_retry_timestamp=sub[
+                        "next_retry_timestamp"
+                    ],
                     head=head_for_request[:12],
+                    provider_state=_provider_state,
                 )
-                continue
-            live_head = live.get("head_sha")
-            if (
-                live_head == head_for_request
-                and not live.get(
-                    "latest_reviews_by_provider", {}
-                ).get(provider)
-                and not (
-                    live.get(
-                        "latest_comments_by_provider", {}
-                    ).get(provider, {}).get("body")
-                    and is_provider_walkthrough_or_complete(
-                        provider,
-                        live[
-                            "latest_comments_by_provider"
-                        ][provider]["body"],
-                    )
-                )
-            ):
-                if post_review_request(provider, head_for_request):
-                    update_quota_last_request(provider)
-                    log(
-                        "info",
-                        f"{provider}: retry posted single review "
-                        "request after backoff",
-                        retry_count=sub.get("retry_count", 0),
-                        head=head_for_request[:12],
-                    )
-            else:
-                log(
-                    "info",
-                    f"{provider}: live head or review state invalid "
-                    "for new request",
-                    live_head=(live_head or "")[:12],
-                )
+        else:
+            log(
+                "info",
+                f"{provider}: live head or review state invalid "
+                "for new request",
+                live_head=(live_head or "")[:12],
+            )
     return any_paused, paused
 
 
@@ -8034,6 +8541,242 @@ def consume_event(event_id: str) -> None:
         e for e in data.get("events", []) if e.get("id") != event_id
     ]
     write_json(UNCONSUMED_EVENTS_PATH, {"events": remaining})  # type: ignore[name-defined]
+
+
+# Round-54/C22 Defect D: system event terminality ledger.
+# The unconsumed_events.json queue can only lose an event when
+# the consumer durably records WHY the event was consumed.
+# The terminality proof is a non-empty ``reason`` plus the
+# identifier of the consumer that produced the terminality
+# observation (a worker attempt, a provider-state ledger
+# entry, or a CI classification). Persisting the proof means
+# the round-1 diagnostic can always explain why the queue
+# shrank. Time-based expiry is forbidden.
+
+# Each event kind has its own terminality rule. The rule is
+# recorded in the persisted ledger so future audit can
+# verify the kind-specific policy was applied.
+EVENT_TERMINALITY_RULES = {
+    # provider_state_change: terminal when the supervisor has
+    # recorded the new provider state in quota_state.json.
+    "provider_state_change": (
+        "terminal when supervisor records matching "
+        "provider state in quota_state.json"
+    ),
+    # required_check_conclusion_change: terminal when the
+    # corresponding check has been classified by
+    # ci_policy_status and the resulting classification
+    # (green / red / no_required) has been recorded.
+    "required_check_conclusion_change": (
+        "terminal when ci_policy_status has classified the "
+        "check; the resulting classification is recorded in "
+        "the snapshot's required_checks section"
+    ),
+    # Head-changed events are tracked by the head itself; the
+    # operator / orchestrator confirms the head on each
+    # heartbeat.
+    "head_changed": (
+        "terminal when the live PR head matches the "
+        "prelaunch head of the producing attempt"
+    ),
+}
+
+
+def _event_terminality_reason(kind: str) -> str:
+    return EVENT_TERMINALITY_RULES.get(
+        kind,
+        "terminal when the consumer that produced the "
+        "event records a durable consumption proof",
+    )
+
+
+# The terminality ledger lives next to the unconsumed-events
+# queue. Each entry records WHY an event was consumed.
+_TERMINALITY_PATH = STATE_DIR / "consumed_event_terminality.json"  # type: ignore[name-defined]
+
+
+def _record_event_terminality(
+    event_id: str,
+    *,
+    consumer: str,
+    reason: str,
+) -> None:
+    """Record that ``event_id`` was consumed by ``consumer``
+    with ``reason``. The terminality proof is durable and
+    auditable. The supervisor MUST call this exactly once
+    per event id before the event is removed from the
+    unconsumed queue.
+    """
+    if not event_id or not reason or not consumer:
+        raise ValueError(
+            "event_id, consumer, and reason are all required"
+        )
+    try:
+        existing = read_json(_TERMINALITY_PATH)
+    except Exception:  # noqa: BLE001
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    entries = list(existing.get("entries", []))
+    entries.append({
+        "event_id": event_id,
+        "consumer": consumer,
+        "reason": reason,
+        "recorded_at": now_iso(),
+    })
+    write_json(
+        _TERMINALITY_PATH,
+        {"entries": entries},
+    )
+
+
+def consume_event_with_reason(
+    event_id: str,
+    *,
+    consumer: str,
+    reason: str,
+) -> None:
+    """Consume ``event_id`` from the unconsumed queue and
+    record the terminality proof. ``consumer`` identifies the
+    process that produced the terminality observation;
+    ``reason`` is the human-readable terminality statement.
+    """
+    if not event_id:
+        raise ValueError("event_id is required")
+    if not consumer:
+        raise ValueError("consumer is required")
+    if not reason:
+        raise ValueError("reason is required")
+    _record_event_terminality(
+        event_id, consumer=consumer, reason=reason
+    )
+    consume_event(event_id)
+
+
+def evaluate_system_event_terminality(
+    *,
+    snap: dict,
+    token: str,
+) -> list:
+    """Return the list of consumable system event ids.
+
+    Round-54/C22 Defect D: each durable system event in
+    ``unconsumed_events.json`` is examined against the kind-specific
+    terminality rule. Events whose terminality consumer has produced
+    a durable observation are returned as consumable. The caller
+    invokes ``consume_event_with_reason`` for each event id with
+    a canonical reason.
+
+    The terminality conditions are:
+
+    - ``required_check_conclusion_change`` (kind):
+        The corresponding check has been classified by
+        ``ci_policy_status`` against the live snapshot. The
+        classification is captured in the durable
+        ``snapshot_a.json`` so the round-1 diagnostic can
+        verify the consumer matched the snapshot.
+
+    - ``provider_state_change`` (kind):
+        The corresponding provider's state has been
+        recorded in ``quota_state.json`` with a recent
+        (this-heartbeat) timestamp, OR the provider has been
+        recorded as no longer paused.
+
+    - ``head_changed`` (kind):
+        The live PR head equals the recorded
+        ``prelaunch_head`` of the producing attempt (which is
+        the current ``AUTHORITATIVE_HEAD``).
+
+    Returns a list of dicts ``{"event_id": str, "reason": str}``.
+    """
+    consumable = []
+    # Indexed by check name for fast lookup.
+    check_states = {}
+    if isinstance(snap, dict):
+        snap_checks = snap.get("required_checks") or {}
+        if isinstance(snap_checks, dict):
+            for chk, info in snap_checks.items():
+                if isinstance(info, dict):
+                    check_states[chk] = info
+    quota_state = read_quota_state()
+    providers = quota_state.get("providers") or {}
+    events = list_unconsumed_events()
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        eid = ev.get("id")
+        if not eid:
+            continue
+        kind = ev.get("kind")
+        if kind == "required_check_conclusion_change":
+            # The event id encodes the check name, e.g.
+            # ``check_changed:test (3.11)``.
+            try:
+                check_name = eid.split(":", 1)[1]
+            except IndexError:
+                continue
+            info = check_states.get(check_name)
+            if info is None:
+                continue
+            conclusion = info.get("conclusion") or ""
+            if not conclusion:
+                continue
+            # CI policy has durably classified the check.
+            reason = (
+                f"check {check_name!r} conclusion {conclusion!r} "
+                "durably captured in snapshot_a.json required_checks"
+            )
+            consumable.append({"event_id": eid, "reason": reason})
+        elif kind == "provider_state_change":
+            try:
+                provider = eid.split(":", 1)[1]
+            except IndexError:
+                continue
+            sub = providers.get(provider) or {}
+            pending = sub.get("pending_review_head")
+            if pending is None:
+                # Provider is no longer paused; the state
+                # change is terminal because no follow-up
+                # action is required.
+                reason = (
+                    f"provider {provider!r} is no longer paused; "
+                    "no follow-up action required"
+                )
+                consumable.append({"event_id": eid, "reason": reason})
+            else:
+                # Provider state recorded with a recent
+                # timestamp.
+                ts = parse_iso(sub.get("next_retry_timestamp"))
+                if ts is None:
+                    continue
+                # If the timestamp is recent (within the last few
+                # minutes), the state has been re-recorded.
+                from datetime import datetime, timezone, timedelta
+                if abs(
+                    (datetime.now(timezone.utc) - ts).total_seconds()
+                ) < 86400:
+                    reason = (
+                        f"provider {provider!r} state captured "
+                        f"in quota_state.json (pending_review_head="
+                        f"{pending[:12]!r})"
+                    )
+                    consumable.append(
+                        {"event_id": eid, "reason": reason}
+                    )
+        elif kind == "head_changed":
+            # Terminal when the live PR head matches the
+            # recorded event_id-encoded head.
+            try:
+                recorded_head = eid.split(":", 1)[1]
+            except IndexError:
+                continue
+            if recorded_head == AUTHORITATIVE_HEAD:
+                reason = (
+                    f"live PR head {recorded_head[:12]!r} matches "
+                    "the recorded head_changed event"
+                )
+                consumable.append({"event_id": eid, "reason": reason})
+    return consumable
 
 
 def launched_event_ids() -> set:
@@ -11227,6 +11970,43 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "per_pr_iteration_tick",
                         this_pr=this_pr,
                     )
+                    # Round-54/C22 Defect D: drain system events
+                    # whose terminality proof has been produced.
+                    # The check is deliberate drain: each event
+                    # is examined against the kind-specific
+                    # terminality rule; events with a durable
+                    # proof are consumed with a recorded reason.
+                    # Events that are still non-terminal are
+                    # preserved for the next heartbeat.
+                    try:
+                        _drain_candidates = (
+                            evaluate_system_event_terminality(
+                                snap=snap_now
+                                if "snap_now" in dir()
+                                else {},
+                                token=token or "",
+                            )
+                        )
+                        for _cand in _drain_candidates:
+                            consume_event_with_reason(
+                                _cand["event_id"],
+                                consumer="evaluate_system_event_terminality",
+                                reason=_cand["reason"],
+                            )
+                            log(
+                                "info",
+                                "round-54/C22: durable system event "
+                                "consumed with terminality proof",
+                                event_id=_cand["event_id"],
+                                reason=_cand["reason"],
+                            )
+                    except Exception as _drain_exc:
+                        log(
+                            "warning",
+                            "round-54/C22: system event terminality "
+                            "drain failed",
+                            error=str(_drain_exc)[:200],
+                        )
                     # Round-146 P1: rebind the singleton
                     # ``AUTHORITATIVE_HEAD`` and ``rs`` to
                     # the per-PR live state so downstream

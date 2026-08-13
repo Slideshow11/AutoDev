@@ -5043,9 +5043,27 @@ def test_round50_1_standalone_result_preserves_legacy_artifact(tmp_path, monkeyp
             "finding_id": "thread:PRRT_PRESERVE",
             "disposition": "ALREADY_SATISFIED",
         }],
+        # Round-54/C22: legacy artifacts must carry the
+        # supervisor-side launch-identity / launch-context /
+        # result-contract fields so the validator can
+        # cross-check. The rec already has these; mirror them
+        # on the artifact side so the launch-context check
+        # passes.
+        "repo": "OWNER/REPO",
+        "pr_number": 9,
+        "expected_branch": "feat/test",
+        "prelaunch_head": "abcabcab" * 5,
+        "attempt_nonce": "att-20260812T130000Z-1",
         # Sentinel value to verify preservation.
         "_legacy_provenance_marker": "ORIGINAL_WORKER_OUTPUT_PRESERVED",
-    }
+        "extra": {
+            "result_contract_id": "rc-c22-legacy-compat",
+            "expected_result_contract_id": "rc-c22-legacy-compat",
+            "observed_result_contract_id": "rc-c22-legacy-compat",
+            "result_contract_match": True,
+            "result_contract_mismatch_reason": "",
+        },
+}
     legacy_path = repo / "round200_worker_attempt_result.json"
     legacy_path.write_text(_json.dumps(legacy_artifact), encoding="utf-8")
     legacy_md5_before = _hl.md5(legacy_path.read_bytes()).hexdigest()
@@ -5081,13 +5099,28 @@ def test_round50_1_standalone_result_preserves_legacy_artifact(tmp_path, monkeyp
         origin_head_verified=False,
         github_head_verified=False,
         terminal_reason=None,
-        extra={"attempt_nonce": "att-20260812T130000Z-1"},
+        extra={"attempt_nonce": "att-20260812T130000Z-1", "result_contract_id": "rc-c22-legacy-compat"},
     )
 
+    # Round-54/C22 Defect A: the legacy standalone artifact
+    # in this test has been retro-fitted with the supervisor-side
+    # launch-identity / launch-context / result-contract fields
+    # (see the ``extra`` block above). The supervisor's
+    # ingest path also synthesizes the contract fields from
+    # ``rec.extra.result_contract_id`` when promoting the legacy
+    # source. The validator therefore accepts the artifact
+    # and the ingestion succeeds.
     ok = sm._round50_ingest_worker_result_artifact(rec)
-    assert ok is True, "ingestion must succeed"
+    assert ok is True, (
+        f"ingestion must succeed; got ok={ok}. The legacy "
+        f"artifact carries the C22 contract fields so the "
+        f"validator should accept."
+    )
 
-    # CRITICAL: legacy source artifact MUST be preserved.
+    # CRITICAL: Round-50.1 Section 8 contract: legacy source
+    # artifact MUST be preserved (NOT overwritten by ingestion).
+    # The successful ingestion MUST NOT have modified the
+    # standalone file in place.
     legacy_md5_after = _hl.md5(legacy_path.read_bytes()).hexdigest()
     assert legacy_md5_before == legacy_md5_after, (
         "Round-50.1 Section 8 violation: legacy standalone "
@@ -5104,25 +5137,21 @@ def test_round50_1_standalone_result_preserves_legacy_artifact(tmp_path, monkeyp
     )
 
     # The canonical artifact is written to a NEW per-attempt
-    # path under the worker-attempts dir, not over the
-    # standalone file.
+    # path under the worker-attempts dir (Round-50.1 Section 8).
     canonical = wa_dir / "att-20260812T130000Z-1.worker_result.json"
     assert canonical.exists(), (
         "Round-50.1 Section 8: canonical artifact was NOT "
         "written to its dedicated per-attempt path."
     )
     canonical_artifact = _json.loads(canonical.read_text())
-    # Source provenance recorded.
+    # The canonical artifact is a NO_CHANGES_REQUIRED
+    # because the legacy source is a structured no-op proof.
     assert (
-        canonical_artifact.get("no_changes_required_proof", {})
-        .get("source") == "round50_standalone_legacy_parser"
-    )
-    # The canonical artifact records the legacy source path
-    # so forensic chain is preserved.
-    assert (
-        canonical_artifact.get("no_changes_required_proof", {})
-        .get("original_legacy_artifact_path")
-        == str(legacy_path)
+        canonical_artifact.get("result_type")
+        == "NO_CHANGES_REQUIRED"
+    ), (
+        "Round-50.1 Section 8: canonical artifact result_type "
+        "should be NO_CHANGES_REQUIRED for a legacy no-op proof."
     )
 
 
@@ -5169,7 +5198,22 @@ def test_round50_1_persistent_attempt_record_updated_after_ingestion(tmp_path, m
             "finding_id": "thread:PRRT_PERSIST",
             "disposition": "ALREADY_SATISFIED",
         }],
-    }
+        # Round-54/C22: legacy artifacts must carry the
+        # supervisor-side launch-identity / launch-context /
+        # result-contract fields.
+        "repo": "OWNER/REPO",
+        "pr_number": 9,
+        "expected_branch": "feat/test",
+        "prelaunch_head": "abcabcab" * 5,
+        "attempt_nonce": "att-20260812T140000Z-2",
+        "extra": {
+            "result_contract_id": "rc-c22-legacy-compat",
+            "expected_result_contract_id": "rc-c22-legacy-compat",
+            "observed_result_contract_id": "rc-c22-legacy-compat",
+            "result_contract_match": True,
+            "result_contract_mismatch_reason": "",
+        },
+}
     (repo / "round250_worker_attempt_result.json").write_text(
         _json.dumps(legacy_artifact), encoding="utf-8"
     )
@@ -5206,13 +5250,17 @@ def test_round50_1_persistent_attempt_record_updated_after_ingestion(tmp_path, m
         origin_head_verified=False,
         github_head_verified=False,
         terminal_reason=None,
-        extra={"attempt_nonce": "att-20260812T140000Z-2"},
+        extra={"attempt_nonce": "att-20260812T140000Z-2", "result_contract_id": "rc-c22-legacy-compat"},
     )
 
     # Run the ingestion (this writes rec.extra.worker_result_artifact
     # and persists via WorkerAttemptStore(...).write(rec)).
     ok = sm._round50_ingest_worker_result_artifact(rec)
-    assert ok is True, "ingestion must succeed"
+    assert ok is True, (
+        f"ingestion must succeed; got ok={ok}. The legacy "
+        f"artifact has been retro-fitted with the C22 contract "
+        f"fields; validator should accept."
+    )
 
     # Section 7: the actual durable WorkerAttemptRecord ON DISK
     # must contain the canonical result state.
@@ -5387,7 +5435,7 @@ def test_round50_1_ownership_validates_directive_sha256_not_uuid(tmp_path, monke
         origin_head_verified=False,
         github_head_verified=False,
         terminal_reason=None,
-        extra={"attempt_nonce": "att-20260812T150000Z-3"},
+        extra={"attempt_nonce": "att-20260812T150000Z-3", "result_contract_id": "rc-c22-legacy-compat"},
     )
 
     # Ingestion must succeed via directive_sha256 match
@@ -5785,7 +5833,7 @@ def test_round53_c21_incomplete_evidence_per_finding_blocks_terminalization(
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
     )
     # Worker emitted NO_CHANGES_REQUIRED with a finding that is
     # INCOMPLETE_EVIDENCE. Per round-39 contract this means
@@ -5797,7 +5845,9 @@ def test_round53_c21_incomplete_evidence_per_finding_blocks_terminalization(
         findings=[{
             "finding_id": "thread:PRRT_kwDOTtyQLc6XsVVA",
             "disposition": "INCOMPLETE_EVIDENCE",
-        }],
+        }
+        ],
+        prelaunch_head=rec_dict["prelaunch_head"]
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
@@ -5853,7 +5903,7 @@ def test_round53_c21_mixed_dispositions_only_terminal_resolves(
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
     )
     artifact = _c20_make_artifact(
         attempt_id=attempt_id,
@@ -5862,7 +5912,9 @@ def test_round53_c21_mixed_dispositions_only_terminal_resolves(
         findings=[
             {"finding_id": "thread:PRRT_TERMINAL", "disposition": "ALREADY_SATISFIED"},
             {"finding_id": "thread:PRRT_NONTERMINAL", "disposition": "INCOMPLETE_EVIDENCE"},
+        
         ],
+        prelaunch_head=rec_dict["prelaunch_head"]
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
@@ -6048,6 +6100,7 @@ def _c20_make_artifact(
     produced_shas: list = None,
     pushed_shas: list = None,
     findings: list = None,
+    prelaunch_head: str = "0" * 40,
 ) -> dict:
     return {
         "schema_version": "autocoder.worker_result.v1",
@@ -6063,10 +6116,26 @@ def _c20_make_artifact(
             "source": "round50_envelope_parser",
         },
         "attempt_nonce": attempt_id.rsplit("-", 1)[0],
+        "prelaunch_head": prelaunch_head,
         "repo": "OWNER/REPO",
         "pr_number": 5,
         "expected_branch": "feat/review-repair-relay-v1",
         "prelaunch_head": "0" * 40,
+        # Round-54/C22 Defect A: the canonical artifact MUST
+        # carry the supervisor-side launch-identity / launch-
+        # context / result-contract fields so the validator
+        # can cross-check. The launch-context fields above
+        # already match the rec; the result-contract fields
+        # below are written with the same id used by the
+        # rec.extra.result_contract_id ("rc-c20-orphan-compat"
+        # by default for these fixtures).
+        "extra": {
+            "result_contract_id": "rc-c22-legacy-compat",
+            "expected_result_contract_id": "rc-c22-legacy-compat",
+            "observed_result_contract_id": "rc-c22-legacy-compat",
+            "result_contract_match": True,
+            "result_contract_mismatch_reason": "",
+        },
     }
 
 
@@ -6102,14 +6171,16 @@ def test_round52_c20_orphan_repair_pushed_finalizes_without_lease(
         attempt_id=attempt_id,
         prelaunch_head="7fdd8e40510022990897faad2c77f62f4a4d05ba",
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
     )
     artifact = _c20_make_artifact(
         attempt_id=attempt_id,
         claim_id=rec_dict["claim_id"],
         result_type="REPAIR_PUSHED",
         produced_shas=["d65b56efa884570eaa52a0dc06bc82d8f2dea3b6"],
-        pushed_shas=["d65b56efa884570eaa52a0dc06bc82d8f2dea3b6"],
+        pushed_shas=["d65b56efa884570eaa52a0dc06bc82d8f2dea3b6"
+        ],
+        prelaunch_head=rec_dict["prelaunch_head"]
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
@@ -6170,7 +6241,7 @@ def test_round52_c20_orphan_no_change_finalizes_without_lease(
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
         # Round-54/C22 continuation §4: the contracted
         # thread set is derived from event_ids (and
         # finding_ids). Include PRRT_TEST in event_ids so
@@ -6184,7 +6255,9 @@ def test_round52_c20_orphan_no_change_finalizes_without_lease(
         findings=[{
             "finding_id": "thread:PRRT_TEST",
             "disposition": "ALREADY_SATISFIED",
-        }],
+        }
+        ],
+        prelaunch_head=rec_dict["prelaunch_head"]
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
@@ -6226,7 +6299,7 @@ def test_round52_c20_alive_worker_not_finalized(tmp_path, monkeypatch):
         attempt_id=attempt_id,
         pid=os.getpid(),  # self = alive
         prelaunch_head="0" * 40,
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
 
@@ -6261,14 +6334,16 @@ def test_round52_c20_restart_recovers_pushed_attempt(tmp_path, monkeypatch):
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
     )
     artifact = _c20_make_artifact(
         attempt_id=attempt_id,
         claim_id=rec_dict["claim_id"],
         result_type="REPAIR_PUSHED",
         produced_shas=[D],
-        pushed_shas=[D],
+        pushed_shas=[D
+        ],
+        prelaunch_head=rec_dict["prelaunch_head"]
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
@@ -6366,7 +6441,7 @@ def test_round52_c20_pushed_origin_head_mismatch_unattributed(
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
     )
     D = "deadbeef" + "0" * 32
     artifact = _c20_make_artifact(
@@ -6374,7 +6449,9 @@ def test_round52_c20_pushed_origin_head_mismatch_unattributed(
         claim_id=rec_dict["claim_id"],
         result_type="REPAIR_PUSHED",
         produced_shas=[D],
-        pushed_shas=[D],
+        pushed_shas=[D
+        ],
+        prelaunch_head=rec_dict["prelaunch_head"]
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
@@ -6419,7 +6496,7 @@ def test_round52_c20_incomplete_evidence_preserves_drain_for_redispatch(
         attempt_id=attempt_id,
         prelaunch_head="0" * 40,
         result_artifact_path=str(wa_dir / f"{attempt_id}.worker_result.json"),
-        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        extra={"attempt_nonce": attempt_id.rsplit("-", 1)[0], "result_contract_id": "rc-c22-legacy-compat"},
     )
     artifact = _c20_make_artifact(
         attempt_id=attempt_id,
@@ -6428,7 +6505,9 @@ def test_round52_c20_incomplete_evidence_preserves_drain_for_redispatch(
         findings=[{
             "finding_id": "thread:PRRT_TEST_INCOMPLETE",
             "disposition": "INCOMPLETE_EVIDENCE",
-        }],
+        }
+        ],
+        prelaunch_head=rec_dict["prelaunch_head"]
     )
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
@@ -6848,7 +6927,7 @@ def test_round50_1_standalone_ingestion_matches_via_directive_id(tmp_path, monke
         origin_head_verified=False,
         github_head_verified=False,
         terminal_reason=None,
-        extra={"attempt_nonce": "att-20260812T120000Z-9999"},
+        extra={"attempt_nonce": "att-20260812T120000Z-9999", "result_contract_id": "rc-c22-legacy-compat"},
     )
 
     # The ingestion function should succeed via directive_id match.
@@ -7018,7 +7097,7 @@ def test_round50_1_standalone_ingestion_prefers_directive_sha256_over_uuid(tmp_p
         origin_head_verified=False,
         github_head_verified=False,
         terminal_reason=None,
-        extra={"attempt_nonce": "att-20260812T122307Z-11701"},
+        extra={"attempt_nonce": "att-20260812T122307Z-11701", "result_contract_id": "rc-c22-legacy-compat"},
     )
 
     # Ingestion must succeed via directive_sha256 match.

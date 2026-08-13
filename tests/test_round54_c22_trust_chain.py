@@ -54,7 +54,10 @@ def _c22_make_running_dict(attempt_id, prelaunch_head, extra=None,
         "origin_head_verified": False,
         "github_head_verified": False,
         "terminal_reason": None,
-        "extra": extra or {"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        "extra": extra or {
+            "attempt_nonce": attempt_id.rsplit("-", 1)[0],
+            "result_contract_id": "rc-c22-test-contract",
+        },
     }
 
 
@@ -78,6 +81,13 @@ def _c22_make_artifact(attempt_id, claim_id, result_type, findings=None,
         "repo": "OWNER/REPO", "pr_number": 5,
         "expected_branch": "feat/review-repair-relay-v1",
         "prelaunch_head": prelaunch_head or ("0" * 40),
+        "extra": {
+            "result_contract_id": "rc-c22-test-contract",
+            "expected_result_contract_id": "rc-c22-test-contract",
+            "observed_result_contract_id": "rc-c22-test-contract",
+            "result_contract_match": True,
+            "result_contract_mismatch_reason": "",
+        },
     }
 
 

@@ -82,7 +82,10 @@ def _c22c_running_record(*, attempt_id, claim_id, finding_ids=(),
         "origin_head_verified": False,
         "github_head_verified": False,
         "terminal_reason": None,
-        "extra": {"attempt_nonce": attempt_id.rsplit("-", 1)[0]},
+        "extra": {
+            "attempt_nonce": attempt_id.rsplit("-", 1)[0],
+            "result_contract_id": "rc-c22-test-contract",
+        },
     }
 
 
@@ -107,8 +110,17 @@ def _c22c_artifact(*, attempt_id, claim_id, result_type, findings=None,
         "expected_branch": "feat/review-repair-relay-v1",
         "prelaunch_head": prelaunch_head or ("0" * 40),
         "worker_pid": 999999,
-        "extra": {"worker_result_envelope_seen": True,
-                 "worker_envelope_source": "round51_c19_wrapper"},
+        "extra": {
+            "worker_result_envelope_seen": True,
+            "worker_envelope_source": "round51_c19_wrapper",
+            "envelope_status": "present",
+            "envelope_match_count": 1,
+            "result_contract_id": "rc-c22-test-contract",
+            "expected_result_contract_id": "rc-c22-test-contract",
+            "observed_result_contract_id": "rc-c22-test-contract",
+            "result_contract_match": True,
+            "result_contract_mismatch_reason": "",
+        },
     }
 
 
