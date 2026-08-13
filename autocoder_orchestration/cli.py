@@ -1097,7 +1097,25 @@ def cmd_merge(args: argparse.Namespace) -> int:
                     f"gh graphql reviewThreads page {page_count} "
                     f"returned no data: {thread_proc.stdout[:200]!r}"
                 )
-            all_nodes.extend(page.get("nodes", []))
+            # Round-171 P1: ``nodes`` MUST be a list. Missing
+            # ``nodes`` / ``pageInfo`` is a partial response —
+            # the merge guard MUST NOT accept it as empty.
+            # Top-level GraphQL ``errors`` (with nonempty data)
+            # is also a partial response; refuse it.
+            top_errors = td.get("errors")
+            if isinstance(top_errors, list) and top_errors:
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"returned partial response with errors: "
+                    f"{thread_proc.stdout[:200]!r}"
+                )
+            if not isinstance(page.get("nodes"), list):
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"omitted ``nodes`` (partial response): "
+                    f"{thread_proc.stdout[:200]!r}"
+                )
+            all_nodes.extend(page["nodes"])
             page_info = page.get("pageInfo", {})
             has_next = bool(page_info.get("hasNextPage"))
             # If hasNextPage is set but endCursor is missing,

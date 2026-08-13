@@ -2464,6 +2464,15 @@ def _fetch_and_validate_merge_oid(
         # Malformed OID: treat as AMBIGUOUS. ``local_main_sha``
         # substitution is forbidden.
         return None
+    # Round-171 P1: ensure the server merge commit is fetched
+    # into the local repository BEFORE the ``git cat-file -t``
+    # reachability check. Without this fetch, a remote merge
+    # commit that hasn't been pulled into the local repo would
+    # appear as AMBIGUOUS even though the merge itself succeeded.
+    # A failed fetch is non-fatal — the subsequent cat-file check
+    # will still report the OID as unreachable in that case,
+    # which preserves the original AMBIGUOUS semantics.
+    _ensure_merge_oid_fetched(oid, repository_checkout)
     # Positively verify the OID is reachable in the local
     # repository. An OID that the server reports but the
     # local repo cannot resolve is AMBIGUOUS — the merge
@@ -3119,6 +3128,45 @@ def _is_valid_sha(oid: Any) -> bool:
     if not isinstance(oid, str):
         return False
     return bool(_HEX_SHA_RE.match(oid))
+
+
+def _ensure_merge_oid_fetched(oid: str, repository_checkout: Any) -> None:
+    """Best-effort fetch of a specific server-reported merge OID
+    into the local repository at ``repository_checkout``.
+
+    Round-171 P1: the OID-reachability check
+    (``_oid_reachable_in_local_repo``) is performed
+    immediately after the merge has succeeded remotely.
+    When the local repository has not yet fetched the
+    merge commit (e.g. ``gh`` ran outside the
+    ``repository_checkout``), the cat-file probe would
+    falsely report the OID as unreachable, causing an
+    AMBIGUOUS outcome. This helper issues a bounded
+    ``git fetch origin <oid>`` to materialise the OID
+    locally. A failed fetch is non-fatal; the caller
+    re-checks reachability and treats a still-missing
+    OID as AMBIGUOUS, preserving the original semantics.
+    """
+    if not isinstance(oid, str) or not _is_valid_sha(oid):
+        return
+    if not repository_checkout:
+        return
+    repo_path = str(repository_checkout)
+    if not os.path.isdir(repo_path):
+        return
+    try:
+        subprocess.run(
+            ["git", "-C", repo_path, "fetch", "origin", oid],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # Best-effort: a failed fetch leaves the OID
+        # absent locally, which the subsequent
+        # reachability probe will report as AMBIGUOUS.
+        return
 
 
 def _oid_reachable_in_local_repo(oid: str, repository_checkout: Any) -> bool:
