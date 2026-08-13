@@ -396,9 +396,20 @@ class WorkerResultArtifact:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+        # json.loads can yield dict, list, str, int, float, bool, or None.
+        # Anything non-mapping here cannot carry schema_version and would
+        # raise AttributeError on data.get(...), contradicting the
+        # documented contract that malformed artifacts return None.
+        if not isinstance(data, dict):
+            return None
         if data.get("schema_version") != WORKER_RESULT_SCHEMA_VERSION:
             return None
-        return cls.from_dict(data)
+        try:
+            return cls.from_dict(data)
+        except (TypeError, ValueError):
+            # Unknown / missing dataclass fields or wrong field types
+            # surface from from_dict as TypeError or ValueError.
+            return None
 
     def validate_against_attempt(
         self, rec: "WorkerAttemptRecord",
