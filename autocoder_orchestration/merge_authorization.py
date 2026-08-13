@@ -285,6 +285,16 @@ class MergeAuthorization:
             )
 
     def to_dict(self) -> dict:
+        # Round-188 P1: serialize the configured required CI policy so
+        # ``execute_guarded_merge_transaction()`` — which independently
+        # re-reads the authorization artifact — sees the same
+        # ``required_ci_jobs`` the CLI bound at authorize-time. Without
+        # this emission, ``from_dict`` reconstructs the tuple from
+        # ``payload.get("required_ci_jobs", ())`` (i.e. ``()``) and the
+        # cross-binding guard silently drops the run's custom required
+        # jobs (e.g. ``security-scan``). The CLI also rebinds the field
+        # from ``ctx.required_ci_jobs`` at execute-time, so both sides
+        # agree after this round-trip.
         return {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
@@ -302,6 +312,7 @@ class MergeAuthorization:
             "author": self.author,
             "next_wave_authorization": self.next_wave_authorization,
             "notes": self.notes,
+            "required_ci_jobs": list(self.required_ci_jobs),
         }
 
     @classmethod
