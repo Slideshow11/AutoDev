@@ -232,7 +232,74 @@ def main() -> int:
             start_new_session=True,
         )
     except Exception as e:
+        # Round-167 P2: write a WORKER_EXECUTION_FAILED artifact and
+        # close stdout_log_fh before returning. The supervisor ingests
+        # the canonical artifact at args.result_artifact_path; a bare
+        # return 127 leaves no worker result and the launch failure is
+        # unobservable. Also close stdout_log_fh to avoid a file-handle
+        # leak on this failure path.
         print(f"aed_worker_wrapper: failed to launch: {e}", file=sys.stderr)
+        try:
+            stdout_log_fh.close()
+        except Exception:
+            pass
+        _wrapper_pid = os.getpid()
+        _resolved_attempt_id = f"{args.attempt_id}-{_wrapper_pid}"
+        _resolved_claim_id = args.claim_id or _resolved_attempt_id
+        _failure_artifact = {
+            "schema_version": "autocoder.worker_result.v1",
+            "attempt_id": _resolved_attempt_id,
+            "claim_id": _resolved_claim_id,
+            "directive_digest": args.directive_digest,
+            "result_type": "WORKER_EXECUTION_FAILED",
+            "produced_commit_shas": [],
+            "pushed_commit_shas": [],
+            "completed_at": now_iso(),
+            "no_changes_required_proof": None,
+            "tests_run": 0,
+            "tests_passed": 0,
+            "attempt_nonce": args.attempt_id.rsplit("-", 1)[0],
+            "repo": args.repo,
+            "pr_number": args.pr_number,
+            "expected_branch": args.expected_branch,
+            "prelaunch_head": args.prelaunch_head,
+            "worker_pid": _wrapper_pid,
+            "extra": {
+                "launch_failure": str(e),
+                "worker_result_envelope_seen": False,
+                "worker_envelope_source": "round167_p2_launch_failure",
+                "envelope_status": "missing",
+                "envelope_match_count": 0,
+                "result_contract_id": args.result_contract_id or "",
+            },
+        }
+        def _resolve_pid_lf(path_str: str) -> str:
+            if "<PID>" in path_str:
+                return path_str.replace("<PID>", str(_wrapper_pid))
+            return path_str
+        try:
+            target = Path(_resolve_pid_lf(args.result_artifact_path))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=target.name + ".", suffix=".tmp", dir=str(target.parent)
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                    tmp.write(json.dumps(_failure_artifact, indent=2))
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmp_path, target)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except OSError as write_err:
+            print(
+                f"aed_worker_wrapper: failed to write launch-failure artifact: {write_err}",
+                file=sys.stderr,
+            )
         return 127
 
     # Read in a thread (blocking)
