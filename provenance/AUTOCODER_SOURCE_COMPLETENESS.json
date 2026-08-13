@@ -7727,9 +7727,9 @@
         "destination_path": "autocoder_orchestration/cli.py",
         "transformation_classification": "standalone_source_addition",
         "source_sha256": null,
-        "destination_sha256": "a347262895e6efee284d0cafc9e43c0a19a83e62057547d4faceb7cbba89f0fe",
+        "destination_sha256": "bdba1bfa5c161bfba7c9b90624c146ea0c199d54f42d9749d9e782bc39825943",
         "source_size_bytes": null,
-        "destination_size_bytes": 70885,
+        "destination_size_bytes": 70203,
         "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive."
       },
       {
