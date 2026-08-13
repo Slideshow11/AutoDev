@@ -6116,11 +6116,10 @@ def _c20_make_artifact(
             "source": "round50_envelope_parser",
         },
         "attempt_nonce": attempt_id.rsplit("-", 1)[0],
-        "prelaunch_head": prelaunch_head,
         "repo": "OWNER/REPO",
         "pr_number": 5,
         "expected_branch": "feat/review-repair-relay-v1",
-        "prelaunch_head": "0" * 40,
+        "prelaunch_head": prelaunch_head,
         # Round-54/C22 Defect A: the canonical artifact MUST
         # carry the supervisor-side launch-identity / launch-
         # context / result-contract fields so the validator
@@ -6182,6 +6181,8 @@ def test_round52_c20_orphan_repair_pushed_finalizes_without_lease(
         ],
         prelaunch_head=rec_dict["prelaunch_head"]
     )
+    print(f"DEBUG TEST artifact['prelaunch_head']={artifact.get('prelaunch_head')!r}", file=__import__('sys').stderr)
+    print(f"DEBUG TEST rec_dict['prelaunch_head']={rec_dict.get('prelaunch_head')!r}", file=__import__('sys').stderr)
     (wa_dir / f"{attempt_id}.json").write_text(json.dumps(rec_dict, indent=2))
     (wa_dir / f"{attempt_id}.worker_result.json").write_text(json.dumps(artifact, indent=2))
 

@@ -136,7 +136,7 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "906c832ee9b5a908b2e26d18daab7738992a6163ea5e5db0f73b4481822aec13",
+      "destination_sha256": "cd8ae6ff5d69fd09e76240c08992d5c007c936bc089356914e5c5077ada69597",
       "destination_size_bytes": 491678,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
@@ -156,10 +156,10 @@
     },
     {
       "destination_path": "tests/test_autocoder_supervisor.py",
-      "destination_sha256": "8047c5ae6dc714fad51709469a17b7b4a083c4fa33b6d5bbc1771c7f2b705c60",
+      "destination_sha256": "d51b2e21a4a2bb39619acc70de848a9adbdc4ee28a74ccac25914ca7e7781260",
       "destination_size_bytes": 294878,
       "source_path": "tests/test_autocoder_supervisor.py",
-      "source_sha256": "3b65e142bb79ca060484b37ed28127979ccc004aa82ce78d65b3d704fe5895f3",
+      "source_sha256": "d51b2e21a4a2bb39619acc70de848a9adbdc4ee28a74ccac25914ca7e7781260",
       "source_size_bytes": 39831,
       "transformation_classification": "path_only",
       "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. Round-146 P1 added test_round146_p1_per_pr_authoritative_head_rebind. The test file is no longer byte-identical to the AED source."
@@ -169,7 +169,7 @@
       "destination_sha256": "aa67c0acebbfe337b7c7fba1bfbc156d08d6a1ed01bf47a4091b0acc36384da0",
       "destination_size_bytes": 13130,
       "source_path": "tests/test_autocoder_supervisor_packaging.py",
-      "source_sha256": "16ed9018162e191a6df5fdc9be7151615fa156382a2f0518a9f80e60fffba26c",
+      "source_sha256": "aa67c0acebbfe337b7c7fba1bfbc156d08d6a1ed01bf47a4091b0acc36384da0",
       "source_size_bytes": 11444,
       "transformation_classification": "path_only",
       "transformation_explanation": "Updated SOURCE_PKG and SOURCE_MANIFEST to point at the standalone package and pyproject.toml at the repository root. Test semantics unchanged."
@@ -351,9 +351,9 @@
       "destination_size_bytes": 43134,
       "source_path": null,
       "source_sha256": null,
+      "source_size_bytes": null,
       "transformation_classification": "standalone_addition",
-      "transformation_explanation": "Round-10 directive: scripts/independent_verifier_v2.py is a standalone addition to AutoDev. The AED source commit b57fcaad does not contain an independent verifier script at any path. The verifier was introduced in AutoDev to perform the FRESH strict qualification cycle (>=180 seconds) on PR #4. The production verifier embeds every required gate, fails closed on any drift, and the optimized-Python refuse guard is the module-import __debug__ callback.",
-      "source_size_bytes": null
+      "transformation_explanation": "Round-10 directive: scripts/independent_verifier_v2.py is a standalone addition to AutoDev. The AED source commit b57fcaad does not contain an independent verifier script at any path. The verifier was introduced in AutoDev to perform the FRESH strict qualification cycle (>=180 seconds) on PR #4. The production verifier embeds every required gate, fails closed on any drift, and the optimized-Python refuse guard is the module-import __debug__ callback."
     },
     {
       "destination_path": "tests/test_pr4_round3_review.py",
@@ -375,7 +375,7 @@
     },
     {
       "destination_path": "autocoder_orchestration/cli.py",
-      "destination_sha256": "3c69666640b9e92c7653be8c33cb8ff65b994c20b7f9aa4f9535b6b6a2a87887",
+      "destination_sha256": "bdba1bfa5c161bfba7c9b90624c146ea0c199d54f42d9749d9e782bc39825943",
       "destination_size_bytes": 69279,
       "source_path": null,
       "source_sha256": null,
