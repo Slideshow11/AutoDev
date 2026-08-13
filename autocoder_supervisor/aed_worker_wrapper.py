@@ -352,10 +352,29 @@ def main() -> int:
             exit_code = rc
             break
         if time.time() - start > args.timeout:
+            # Round-169 P2: terminate the entire child
+            # process group, not just the direct child.
+            # ``start_new_session=True`` above puts the
+            # worker in its own process group whose pgid
+            # equals ``proc.pid``; ``proc.kill()`` only
+            # signals the direct child, leaving worker
+            # subprocesses free to mutate the checkout or
+            # push commits after the wrapper reports a
+            # timeout. Signal SIGKILL on the group and
+            # wait for the child to exit before the
+            # timeout artifact is written.
             try:
-                proc.kill()
+                import signal as _signal
+                os.killpg(proc.pid, _signal.SIGKILL)
+                proc.wait(timeout=5)
             except Exception:
-                pass
+                # Fall back to direct child kill if the
+                # group is already gone or wait times out.
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             exit_code = -9
             break
         time.sleep(0.5)
