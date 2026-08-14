@@ -7507,9 +7507,9 @@
         "destination_path": ".github/workflows/ci.yml",
         "transformation_classification": "standalone_ci_addition",
         "source_sha256": null,
-        "destination_sha256": "7325cbae28e9dfa36e66c908893c49f53df874269062ff6f71cb90e4965da244",
+        "destination_sha256": "946fe1490d595addf68a1213f99195333edd5401d94cea76177800b79c21b44b",
         "source_size_bytes": null,
-        "destination_size_bytes": 4502,
+        "destination_size_bytes": 6196,
         "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
       },
       {
