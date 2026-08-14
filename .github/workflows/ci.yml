@@ -147,9 +147,17 @@ jobs:
     name: full-suite
     runs-on: ubuntu-latest
     steps:
+      # Round-54/C22 §7: ``fetch-depth: 0`` ensures the
+      # checkout includes the full ``origin/<branch>`` ref
+      # namespace so the round-40 head-reconciliation
+      # tests can resolve ``origin/feat/review-repair-relay-v1``
+      # against the real git tree. The earlier six jobs
+      # do NOT need full history (they run a focused
+      # subset that reads only HEAD bytes).
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

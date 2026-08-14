@@ -231,6 +231,16 @@ class TestCandidateBuilder:
 
 # === Refusal ===
 class TestCandidateRefusal:
+    # Round-54/C22 §6: same AED_REPO skip as TestCandidateBuild.
+    pytestmark = pytest.mark.skipif(
+        not os.path.exists(
+            os.environ.get("AUTODEV_AED_REPO_PATH")
+            or str(Path("/home") / "max" / "Automated-Edge-Discovery")
+        ),
+        reason="AED_REPO does not exist; set AUTODEV_AED_REPO_PATH "
+        "or create the AED checkout directory",
+    )
+
     def test_refuses_without_readiness(self) -> None:
         # Bad readiness: missing a CI job
         bad_kwargs = _good_kwargs()
@@ -372,6 +382,16 @@ class TestCandidateBuild:
 
 # === Input hash checks ===
 class TestCandidateInputHashes:
+    # Round-54/C22 §6: same AED_REPO skip as TestCandidateBuild.
+    pytestmark = pytest.mark.skipif(
+        not os.path.exists(
+            os.environ.get("AUTODEV_AED_REPO_PATH")
+            or str(Path("/home") / "max" / "Automated-Edge-Discovery")
+        ),
+        reason="AED_REPO does not exist; set AUTODEV_AED_REPO_PATH "
+        "or create the AED checkout directory",
+    )
+
     def test_input_hash_mismatch_rejected(self, tmp_git_repo) -> None:
         cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
@@ -401,6 +421,16 @@ class TestCandidateInputHashes:
 
 # === Repository isolation ===
 class TestRepoIsolation:
+    # Round-54/C22 §6: same AED_REPO skip as TestCandidateBuild.
+    pytestmark = pytest.mark.skipif(
+        not os.path.exists(
+            os.environ.get("AUTODEV_AED_REPO_PATH")
+            or str(Path("/home") / "max" / "Automated-Edge-Discovery")
+        ),
+        reason="AED_REPO does not exist; set AUTODEV_AED_REPO_PATH "
+        "or create the AED checkout directory",
+    )
+
     """The candidate binds the exact head from a specific repository.
     Mixing repositories must fail.
     """
