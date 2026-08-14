@@ -101,60 +101,6 @@
   "occurrences": [
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 1,
-      "line": 57,
-      "line_sha256": "3a4689fa7b65af35667abfcec29b2e97e4f3338f9cb315527e334be44794183b",
-      "purpose": "Occurrence in autocoder_supervisor/supervisor.py line 57; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 2,
-      "line": 2657,
-      "line_sha256": "df0f9b8bc4810aa421d9603cd615471e7e26d89f6a9d72c3db630cd1ae828972",
-      "purpose": "Occurrence in autocoder_supervisor/supervisor.py line 2657; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 3,
-      "line": 2659,
-      "line_sha256": "436eb2da97419e57f492882e514bc64dec31bb35cad0dc5c47c05672fa7d3bdf",
-      "purpose": "Occurrence in autocoder_supervisor/supervisor.py line 2659; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_449b11820b0f",
-      "ordinal": 1,
-      "line": 7673,
-      "line_sha256": "af3db392fa43b3ca245dfc0eea8c5ee419bd0a29bbe32fe39a02ea59e8e23ba5",
-      "purpose": "Occurrence in autocoder_supervisor/supervisor.py line 7673; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_d1f885fa5e5a",
-      "ordinal": 1,
-      "line": 691,
-      "line_sha256": "86f5d9d27ae88140583c9ad15aa354ff6c5d6a47bdae53bce9f6fc1adf172349",
-      "purpose": "Occurrence in autocoder_supervisor/supervisor.py line 691; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_d1f885fa5e5a",
-      "ordinal": 2,
-      "line": 700,
-      "line_sha256": "8a60ba7ddc7b5b87a8ff84441af591f7ed19f74cd240c7c2fa7ee3cb3a60d2ac",
-      "purpose": "Occurrence in autocoder_supervisor/supervisor.py line 700; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
       "path": "tests/test_autocoder_supervisor.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 1,
@@ -872,6 +818,87 @@
       "line": 273,
       "line_sha256": "3a53e60f3a0429e071890b3e3020cc1026735c09262e38af258d2795bbf016ec",
       "purpose": "Pre-canary round-281 \u00a79 fingerprint test or production source; tests/test_autocoder_orchestration_candidate.py line 273; encoding=utf-8; approved by review."
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 57,
+      "line_sha256": "3a4689fa7b65af35667abfcec29b2e97e4f3338f9cb315527e334be44794183b",
+      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 57; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 1,
+      "line": 796,
+      "line_sha256": "86f5d9d27ae88140583c9ad15aa354ff6c5d6a47bdae53bce9f6fc1adf172349",
+      "purpose": "Pre-canary closure-IV: legitimate reference to 'oauth_token:' in production source code; line 796; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 2,
+      "line": 805,
+      "line_sha256": "8a60ba7ddc7b5b87a8ff84441af591f7ed19f74cd240c7c2fa7ee3cb3a60d2ac",
+      "purpose": "Pre-canary closure-IV: legitimate reference to 'oauth_token:' in production source code; line 805; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 2870,
+      "line_sha256": "df0f9b8bc4810aa421d9603cd615471e7e26d89f6a9d72c3db630cd1ae828972",
+      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 2870; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 2872,
+      "line_sha256": "436eb2da97419e57f492882e514bc64dec31bb35cad0dc5c47c05672fa7d3bdf",
+      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 2872; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_449b11820b0f",
+      "ordinal": 1,
+      "line": 9125,
+      "line_sha256": "af3db392fa43b3ca245dfc0eea8c5ee419bd0a29bbe32fe39a02ea59e8e23ba5",
+      "purpose": "Pre-canary closure-IV: legitimate reference to 'sk-' in production source code; line 9125; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 9675,
+      "line_sha256": "52f782830becc7e470b07df987b01466b3c4cfa89663dcbb6e4add99fdcbf267",
+      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 9675; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/hermes_fingerprint.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 142,
+      "line_sha256": "4be19daa12b57719db4b6c17db6ab6287c9a740b352d103196e6bf63ec689b78",
+      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 142; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/hermes_fingerprint.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 153,
+      "line_sha256": "0ef2c19415a24b6552c3a60cdfe2f0b04a676754d8d03d5e7de471f73a23d82d",
+      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 153; encoding=utf-8; approved by review"
     }
   ]
 }

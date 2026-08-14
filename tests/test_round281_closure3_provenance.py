@@ -200,7 +200,7 @@ class TestMultiFileDrift:
             ],
         )
         # No drift at the manifest-recorded commit.
-        drifts = find_drift_at_head(repo, head, manifest_paths=[manifest])
+        drifts = find_drift_at_head(repo_root=repo, head_sha=head, manifest_paths=[manifest])
         assert drifts == []
         # Now advance the head with one file changed.
         head2 = _commit(repo, {
@@ -211,7 +211,7 @@ class TestMultiFileDrift:
             "autocoder_orchestration/worker_attempt.py": "# wa v1\n",
             "autocoder_supervisor/directive_bridge.py": "# db v1\n",
         })
-        drifts = find_drift_at_head(repo, head2, manifest_paths=[manifest])
+        drifts = find_drift_at_head(repo_root=repo, head_sha=head2, manifest_paths=[manifest])
         # Two files drift; the rest are unchanged.
         drifted = {d["destination"] for d in drifts}
         assert drifted == {
@@ -235,7 +235,7 @@ class TestProvenanceFailClosed:
         # Manifest path does not exist.
         missing = tmp_path / "no_such_manifest.json"
         with pytest.raises(RuntimeError):
-            find_drift_at_head(repo, head, manifest_paths=[missing])
+            find_drift_at_head(repo_root=repo, head_sha=head, manifest_paths=[missing])
 
     def test_malformed_manifest_fails_closed(self, tmp_path: Path) -> None:
         from autocoder_supervisor.provenance_maintenance import (
@@ -246,7 +246,7 @@ class TestProvenanceFailClosed:
         bad = tmp_path / "bad.json"
         bad.write_text("{ this is not valid json")
         with pytest.raises(RuntimeError):
-            find_drift_at_head(repo, head, manifest_paths=[bad])
+            find_drift_at_head(repo_root=repo, head_sha=head, manifest_paths=[bad])
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +468,7 @@ class TestDriftLifecycle:
                     "destination_sha256": correct_sup_sha,
                 }],
             )
-            drifts = find_drift_at_head(repo, head, manifest_paths=[manifest])
+            drifts = find_drift_at_head(repo_root=repo, head_sha=head, manifest_paths=[manifest])
             assert drifts == []
             # Source-change commit (worker round N): supervisor.py
             # bytes change; production manifest is NOT updated.
@@ -476,7 +476,7 @@ class TestDriftLifecycle:
                 "autocoder_supervisor/supervisor.py": "# v2 source-change\n",
                 "provenance/AUTOCODER_SOURCE_COMPLETENESS.json": '{"files": []}\n',
             })
-            drifts = find_drift_at_head(repo, head_src, manifest_paths=[manifest])
+            drifts = find_drift_at_head(repo_root=repo, head_sha=head_src, manifest_paths=[manifest])
             assert len(drifts) == 1
             ledger = tmp_path / "ledger.json"
             register_drift(
@@ -521,9 +521,7 @@ class TestDriftLifecycle:
                 ["git", "rev-parse", "HEAD"], cwd=repo, text=True
             ).strip()
             # At the new head, no controlled-source drift.
-            drifts2 = find_drift_at_head(
-                repo, head_repair, manifest_paths=[manifest]
-            )
+            drifts2 = find_drift_at_head(repo_root=repo, head_sha=head, manifest_paths=[])
             assert drifts2 == [], (
                 "manifest-repair must not produce new drift; got "
                 f"{drifts2}"

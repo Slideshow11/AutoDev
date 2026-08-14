@@ -2373,11 +2373,13 @@ def test_round33_cooldown_deferred_event_preserved_through_clear(
     from autocoder_supervisor import supervisor as sup
 
     # Persist a cooldown-deferred event directly using the
-    # real writer.
+    # real writer. Use ``isolated_state`` so the test does
+    # NOT write to production state (Closure IV §10: tests
+    # must use temporary isolated state directories).
     sup._mark_cooldown_deferred(
-        [{"id": "EID_COOLDOWN", "kind": "new_unresolved_current_thread"}]
+        [{"id": "EID_TEST_SENTINEL", "kind": "new_unresolved_current_thread"}]
     )
-    assert "EID_COOLDOWN" in sup._cooldown_deferred_ids()
+    assert "EID_TEST_SENTINEL" in sup._cooldown_deferred_ids()
 
     # Simulate the quiet-window post-loop clear with a
     # cooldown-deferred event in pre_unconsumed_ids.
@@ -2389,12 +2391,12 @@ def test_round33_cooldown_deferred_event_preserved_through_clear(
     unconsumed_path = state_dir / "unconsumed_events.json"
     unconsumed_path.write_text(json.dumps({
         "events": [
-            {"id": "EID_COOLDOWN", "kind": "new_unresolved_current_thread"},
+            {"id": "EID_TEST_SENTINEL", "kind": "new_unresolved_current_thread"},
             {"id": "EID_OTHER", "kind": "new_unresolved_current_thread"},
         ],
     }))
     # Pre-unconsumed includes both.
-    pre_unconsumed_ids = {"EID_COOLDOWN", "EID_OTHER"}
+    pre_unconsumed_ids = {"EID_TEST_SENTINEL", "EID_OTHER"}
     # Re-run the post-loop clear logic (mirrors the
     # active_repair_quiet_window final block).
     cooldown_deferred = sup._cooldown_deferred_ids()
@@ -2406,7 +2408,7 @@ def test_round33_cooldown_deferred_event_preserved_through_clear(
     unconsumed_path.write_text(json.dumps(payload))
     after = sup.list_unconsumed_events()
     after_ids = {e.get("id") for e in after}
-    assert "EID_COOLDOWN" in after_ids, (
+    assert "EID_TEST_SENTINEL" in after_ids, (
         "cooldown-deferred event MUST survive the post-loop clear; "
         "without this the event is silently lost when cooldown expires."
     )

@@ -9661,87 +9661,84 @@ _COOLDOWN_DEFERRED_PATH = STATE_DIR / "cooldown_deferred_events.json"  # type: i
 def _check_provenance_drift_and_register(
     *, new_head_sha: str, attempt_id: str
 ) -> None:
-    """Pre-canary round-281 §6 + Closure III: canonical autonomous
-    provenance maintenance production wiring.
+    """Pre-canary round-281 §6 + Closure III + IV: canonical
+    autonomous provenance maintenance production wiring.
 
-    This helper is the SINGLE entry point that runs after every
-    verified REPAIR_PUSHED, irrespective of whether the
-    verification came from normal completion or orphan
+    This helper is the SINGLE entry point that runs after
+    every verified REPAIR_PUSHED, irrespective of whether
+    the verification came from normal completion or orphan
     reconciliation. It:
 
-      1. Enumerates the controlled-source destination set from
-         the canonical provenance manifests (no hand-maintained
-         partial list).
-      2. Compares every controlled destination's bytes at
+      1. Resolves the canonical manifest paths from the
+         supervisor's explicit REPO_DIR (not from the
+         module's __file__ — the production runtime lives
+         under /home/max/.hermes/aed-supervisor/ while the
+         canonical manifests live in the source-controlled
+         checkout).
+      2. Enumerates the controlled-source destination set
+         via the STRICT helper (fail-closed on missing /
+         unreadable / malformed manifests).
+      3. Compares every controlled destination's bytes at
          ``new_head_sha`` against the manifest records.
-      3. On any drift, durably records the drift via the atomic
-         JSON write helper. The drift record carries a real
-         lifecycle (DETECTED -> ... -> TERMINAL or SUPERSEDED).
-      4. Fail-closes on any internal failure: a raised
+         DELETION of a controlled file IS recorded as a
+         drift; operational failures raise so the caller's
+         fail-closed path activates.
+      4. On any drift, durably records the drift via the
+         atomic JSON write helper. The drift record carries
+         a real lifecycle (DETECTED -> ... -> TERMINAL or
+         SUPERSEDED).
+      5. Fail-closes on any internal failure: a raised
          exception is logged AND the caller's drift block
-         considers the lease un-finalized. The supervisor MUST
-         NOT swallow the exception and continue; otherwise the
-         readiness pipeline would advance with an undetected
-         drift.
+         considers the lease un-finalized. The supervisor
+         MUST NOT swallow the exception and continue.
 
     The supervisor does NOT itself commit (that requires
-    worker-round authority); it only registers durable work for
-    the next worker round.
+    worker-round authority); it only registers durable work
+    for the next worker round.
     """
     from .provenance_maintenance import (
         find_drift_at_head,
         register_drift,
-        _PROVENANCE_MANIFEST_PATH,
-        _PROVENANCE_MANIFEST_PATH_AED,
+        resolve_manifest_paths,
+        ProvenanceCheckError,
+        ManifestEnumerationError,
         AtomicWriteError,
     )
-    import json as _pjson
     src_root = Path(str(REPO_DIR))  # type: ignore[name-defined]
     drift_ledger = (
         STATE_DIR  # type: ignore[name-defined]
         / "provenance_drift_pending.json"
     )
-    manifests = [
-        src_root / "provenance" / "AUTOCODER_SOURCE_COMPLETENESS.json",
-        src_root / "provenance" / "aed-pr417-source-manifest.json",
-    ]
-    # Filter out missing manifests; only iterate those that exist.
-    manifests = [m for m in manifests if m.exists()]
-    # If BOTH canonical manifests are missing, the source-of-truth
-    # is broken. Fail closed.
-    if not manifests:
-        raise RuntimeError(
-            "round-281 §6 + Closure III: no canonical provenance "
-            "manifests found; cannot evaluate drift at head "
-            f"{new_head_sha}"
-        )
-    # The canonical helper returns the drift list; an exception
-    # propagates to the caller (which decides how to handle
-    # fail-closed behavior).
+    # Resolve the canonical manifest paths from the
+    # supervisor's explicit REPO_DIR. Both manifests MUST
+    # exist; missing or unreadable manifests fail closed.
+    manifests = list(resolve_manifest_paths(src_root))
+    for mp in manifests:
+        if not mp.exists():
+            raise ProvenanceCheckError(
+                f"required manifest does not exist: {mp}"
+            )
+    # Canonical helper: drift detection with deletion-as-drift
+    # semantics and fail-closed on git-show or manifest errors.
     drifts = find_drift_at_head(
         repo_root=src_root,
         head_sha=new_head_sha,
         manifest_paths=manifests,
     )
     if not drifts:
-        # No drift; the manifests are consistent with the new
-        # head. No durable work to register.
         return
     # Drift was detected. Register it durably via the atomic
-    # write helper. The helper raises AtomicWriteError on any
-    # failure; we propagate so the caller can decide.
+    # write helper.
     register_drift(
         head_sha=new_head_sha,
         attempt_id=attempt_id,
         drifts=drifts,
     )
-    # Log at INFO level so operators can audit via the supervisor
-    # log without seeing a warning for normal-detected drift.
     log(
         "info",
-        "round-281 §6 + Closure III: provenance drift detected "
-        "after verified REPAIR_PUSHED; durable drift record "
-        "registered for next worker round",
+        "round-281 §6 + Closure III + IV: provenance drift "
+        "detected after verified REPAIR_PUSHED; durable "
+        "drift record registered for next worker round",
         attempt_id=attempt_id,
         pushed_commit_sha=new_head_sha[:12] + "...",
         drift_count=len(drifts),
@@ -13598,34 +13595,65 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # with the attempt_id; otherwise we treat the head
                 # advance as unrelated / manual and only rebind
                 # AUTHORITATIVE_HEAD.
-                attempt_id_for_ack: Optional[str] = None
+                # Round-45: typed head-advance classification.
+                # Optional[str] conflates three semantically
+                # distinct states (NO_MATCHING_WORKER,
+                # VERIFIED_WORKER_AND_PROVENANCE_OK,
+                # VERIFIED_WORKER_BUT_PROVENANCE_CHECK_FAILED).
+                # Closure IV §2 — do NOT collapse these into a
+                # single Optional[str]. Use HeadAdvanceResult.
+                from .provenance_maintenance import (
+                    HeadAdvanceResult,
+                    HEAD_ADVANCE_UNRELATED,
+                    HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED,
+                    HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED,
+                    HEAD_ADVANCE_WORKER_PUSH_INVALID,
+                    register_provenance_block,
+                )
+                ha_result = HeadAdvanceResult(
+                    state=HEAD_ADVANCE_UNRELATED,
+                )
                 try:
                     active = find_active_worker_attempt_for_head(
                         old_head,
                     )
                     if active is not None:
-                        attempt_id_for_ack = active.get(
+                        _attempt_id_for_ack = active.get(
                             "attempt_id"
                         )
-                        # Verify the new head matches the attempt's
-                        # produced_commit_sha (or pushed_commit_sha)
-                        # AND that origin/<branch> resolves to it.
-                        if attempt_id_for_ack:
+                        _claim_id_for_ack = active.get("claim_id")
+                        _rcid_for_ack = active.get(
+                            "result_contract_id"
+                        )
+                        _produced_for_ack = (
+                            active.get("produced_commit_sha")
+                            or active.get("pushed_commit_sha")
+                        )
+                        if _attempt_id_for_ack:
                             v = verify_push_against_attempt(
-                                attempt_id=attempt_id_for_ack,
+                                attempt_id=_attempt_id_for_ack,
                                 new_head_sha=live_head,
                             )
                             if (
                                 v is None
                                 or not v.get("github_head_verified")
                             ):
-                                attempt_id_for_ack = None
+                                ha_result = HeadAdvanceResult(
+                                    state=(
+                                        HEAD_ADVANCE_WORKER_PUSH_INVALID
+                                    ),
+                                    attempt_id=_attempt_id_for_ack,
+                                    claim_id=_claim_id_for_ack,
+                                    result_contract_id=_rcid_for_ack,
+                                    produced_sha=_produced_for_ack,
+                                    pushed_sha=live_head,
+                                )
                             else:
                                 # Mark the attempt PUSH_VERIFIED so
                                 # mark_head_advanced_public can
                                 # acknowledge the push.
                                 finalize_worker_attempt_pushed(
-                                    attempt_id=attempt_id_for_ack,
+                                    attempt_id=_attempt_id_for_ack,
                                     pushed_commit_sha=live_head,
                                     produced_commit_sha=(
                                         v.get("produced_commit_sha")
@@ -13634,46 +13662,104 @@ def main(argv: Optional[list[str]] = None) -> int:
                                     origin_head_verified=True,
                                     github_head_verified=True,
                                 )
-                                # Pre-canary round-281 §6 +
-                                # Closure III: SAME canonical
-                                # provenance-drift helper as the
-                                # orphan-recovery path. Drift
-                                # failures fail closed; the
-                                # attempt_id_for_ack is left
-                                # populated and the lease is
-                                # NOT marked terminal until the
-                                # drift (if any) is durably
-                                # registered.
+                                # Provenance check. Fail-closed
+                                # semantics: a verified worker
+                                # push whose provenance check
+                                # fails is BLOCKED, not
+                                # UNRELATED. The attempt identity
+                                # is preserved.
                                 try:
                                     _check_provenance_drift_and_register(
                                         new_head_sha=str(live_head),
                                         attempt_id=str(
-                                            attempt_id_for_ack
+                                            _attempt_id_for_ack
                                         ),
+                                    )
+                                    ha_result = HeadAdvanceResult(
+                                        state=(
+                                            HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED
+                                        ),
+                                        attempt_id=_attempt_id_for_ack,
+                                        claim_id=_claim_id_for_ack,
+                                        result_contract_id=_rcid_for_ack,
+                                        produced_sha=(
+                                            v.get("produced_commit_sha")
+                                            or live_head
+                                        ),
+                                        pushed_sha=live_head,
+                                        origin_head_verified=True,
+                                        github_head_verified=True,
                                     )
                                 except Exception as _drift_exc:
-                                    # Fail closed: do NOT ack the
-                                    # head advance as a verified
-                                    # repair. The next round will
-                                    # reconcile; the attempt
-                                    # record stays in
-                                    # WORKER_RUNNING until the
-                                    # drift is durable.
+                                    # Closure IV §2 — verified
+                                    # worker push whose provenance
+                                    # check failed. Preserve
+                                    # attempt identity. Record
+                                    # provenance-block durably.
+                                    # The lease is NOT marked
+                                    # terminal; readiness stays
+                                    # FALSE; no qualifying; no
+                                    # generation count.
+                                    try:
+                                        register_provenance_block(
+                                            head_sha=str(live_head),
+                                            attempt_id=str(
+                                                _attempt_id_for_ack
+                                            ),
+                                            error=str(_drift_exc)[:300],
+                                        )
+                                    except Exception as _pe:
+                                        log(
+                                            "error",
+                                            "round-281 §6 + Closure IV: "
+                                            "provenance-block record "
+                                            "FAILED; lease stays "
+                                            "WORKER_RUNNING; readiness "
+                                            "stays FALSE",
+                                            attempt_id=str(
+                                                _attempt_id_for_ack
+                                            ),
+                                            error=str(_pe)[:200],
+                                        )
                                     log(
                                         "error",
-                                        "round-281 §6 + Closure III: "
+                                        "round-281 §6 + Closure IV: "
                                         "provenance drift check FAILED; "
-                                        "treating head advance as "
-                                        "unverified pending drift "
-                                        "resolution",
+                                        "VERIFIED worker push is "
+                                        "BLOCKED pending drift "
+                                        "resolution; readiness FALSE; "
+                                        "NO qualifying; NO generation "
+                                        "count",
                                         old_head=(
-                                            old_head[:12] if old_head else ""
+                                            old_head[:12]
+                                            if old_head
+                                            else ""
                                         ),
                                         new_head=live_head[:12],
-                                        attempt_id=str(attempt_id_for_ack),
+                                        attempt_id=str(
+                                            _attempt_id_for_ack
+                                        ),
                                         error=str(_drift_exc)[:200],
                                     )
-                                    attempt_id_for_ack = None
+                                    ha_result = HeadAdvanceResult(
+                                        state=(
+                                            HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED
+                                        ),
+                                        attempt_id=_attempt_id_for_ack,
+                                        claim_id=_claim_id_for_ack,
+                                        result_contract_id=_rcid_for_ack,
+                                        produced_sha=(
+                                            v.get("produced_commit_sha")
+                                            or live_head
+                                        ),
+                                        pushed_sha=live_head,
+                                        origin_head_verified=True,
+                                        github_head_verified=True,
+                                        provenance_status="ERROR",
+                                        provenance_error=str(
+                                            _drift_exc
+                                        )[:300],
+                                    )
                 except Exception as exc:
                     log(
                         "warning",
@@ -13683,15 +13769,25 @@ def main(argv: Optional[list[str]] = None) -> int:
                         old_head=old_head[:12] if old_head else "",
                         new_head=live_head[:12],
                     )
-                    attempt_id_for_ack = None
-                if attempt_id_for_ack is not None:
+                    ha_result = HeadAdvanceResult(
+                        state=HEAD_ADVANCE_UNRELATED,
+                    )
+                # Closure IV §2: the head-advance classification
+                # drives the qualifying / no-qualifying decision.
+                # States that block qualifying:
+                #   HEAD_ADVANCE_UNRELATED
+                #   HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED
+                #   HEAD_ADVANCE_WORKER_PUSH_INVALID
+                # Only HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED
+                # enters the qualifying path.
+                if ha_result.is_provenance_verified:
                     try:
                         from .relay_wiring import (
                             mark_head_advanced_public,
                         )
                         ack = mark_head_advanced_public(
                             old_head, live_head,
-                            attempt_id=attempt_id_for_ack,
+                            attempt_id=ha_result.attempt_id,
                         )
                         if ack:
                             log(
@@ -13700,7 +13796,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 "verified worker repair push",
                                 old_head=old_head[:12] if old_head else "",
                                 new_head=live_head[:12],
-                                attempt_id=attempt_id_for_ack,
+                                attempt_id=ha_result.attempt_id,
                             )
                         else:
                             log(
@@ -13710,7 +13806,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 "repair_pushed",
                                 old_head=old_head[:12] if old_head else "",
                                 new_head=live_head[:12],
-                                attempt_id=attempt_id_for_ack,
+                                attempt_id=ha_result.attempt_id,
                             )
                     except Exception as exc:
                         log(
@@ -13720,16 +13816,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                             old_head=old_head[:12] if old_head else "",
                             new_head=live_head[:12],
                             error=str(exc),
-                            attempt_id=attempt_id_for_ack,
+                            attempt_id=ha_result.attempt_id,
                         )
-                    # Round-41: after a verified worker push,
-                    # the controller is in AWAITING_CI. Drive
-                    # ``_advance_awaiting_ci_to_qualifying`` so
-                    # the controller advances to
-                    # QUALIFYING_READINESS. The new CI policy
-                    # evaluation (NO_REQUIRED_CHECKS for the
-                    # empty-policy case) allows qualification
-                    # without GitHub check-runs.
                     try:
                         _advance_awaiting_ci_to_qualifying()
                     except Exception as exc:  # noqa: BLE001
@@ -13747,11 +13835,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 else:
                     log(
                         "info",
-                        "head rebind without worker provenance; "
-                        "AUTHORITATIVE_HEAD updated but "
-                        "report_repair_pushed NOT called",
+                        "head rebind without provenance verification; "
+                        "AUTHORITATIVE_HEAD updated but no qualifying",
+                        head_advance_state=ha_result.state,
                         old_head=old_head[:12] if old_head else "",
                         new_head=live_head[:12],
+                        attempt_id=ha_result.attempt_id or "(none)",
                     )
                 # Persist the rebind in the supervisor's
                 # run_state.json so a restart picks it up.
@@ -13774,31 +13863,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "AUTHORITATIVE_HEAD rebinding",
                     old_head=old_head[:12] if old_head else "",
                     new_head=live_head[:12],
-                    verified_worker_push=(
-                        attempt_id_for_ack is not None
-                    ),
+                    verified_worker_push=ha_result.is_worker_push,
+                    head_advance_state=ha_result.state,
                 )
-                # Round-37: when the head advance was NOT a
-                # verified worker push (e.g. a manual/Humphry
-                # commit), the controller may be stuck in
-                # AWAITING_CI from the previous round's
-                # transition. Drive
-                # ``report_ci_pass`` directly so the
-                # controller advances to
-                # QUALIFYING_READINESS without depending on
-                # GitHub check-runs (which may be absent).
-                try:
-                    if attempt_id_for_ack is None:
-                        _advance_awaiting_ci_to_qualifying()
-                except Exception as exc:  # noqa: BLE001
+                # Closure IV §2 — round-37 fallback only fires
+                # when the head advance is genuinely UNRELATED
+                # (manual/operator commit). A verified worker
+                # push whose provenance check FAILED is BLOCKED,
+                # not UNRELATED — it MUST NOT enter the
+                # qualifying path. A worker push that is invalid
+                # (no origin verification) is also not UNRELATED.
+                if ha_result.state == HEAD_ADVANCE_UNRELATED:
                     try:
-                        log(
-                            "warning",
-                            "round-37 awaiting_ci advance failed",
-                            error=str(exc),
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass
+                        _advance_awaiting_ci_to_qualifying()
+                    except Exception as exc:  # noqa: BLE001
+                        try:
+                            log(
+                                "warning",
+                                "round-37 awaiting_ci advance failed",
+                                error=str(exc),
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
 
             if args.dry_sim:
                 # --dry-sim: print the decision and skip every
