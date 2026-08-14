@@ -156,7 +156,7 @@ jobs:
       - name: Install pytest + hermes runtime deps
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest
+          python3 -m pip install pytest build
       - name: Run full repository pytest suite
         # The full suite is the source-of-truth for
         # production readiness. All round-54/C22 tests
