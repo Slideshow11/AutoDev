@@ -86,6 +86,7 @@ from .context import (
 )
 from .store import (
     StateStore,
+    StateCorruption,
     ProcessIdentity,
     current_process_identity,
 )
@@ -381,7 +382,7 @@ class FindingLedger:
                     continue
                 # The last write wins per finding_id.
                 out[fid] = entry
-        except (OSError, KeyError, AttributeError):
+        except (OSError, KeyError, AttributeError, StateCorruption):
             return {}
         return out
 

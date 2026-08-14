@@ -896,6 +896,7 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
         author=args.author,
         next_wave_authorization=None,
         notes=args.notes,
+        required_ci_jobs=tuple(ctx.required_ci_jobs or ()),
     )
     auth_payload = auth.to_dict()
     auth_payload["_sha256"] = auth.compute_sha256()
