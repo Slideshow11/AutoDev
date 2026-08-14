@@ -952,12 +952,12 @@ def generate_pre_canary_evidence(
             else:
                 os.environ[k] = prior
 
-    # Write atomically to canonical + mirror.
+    # Write atomically to canonical + mirror (if mirror dir exists).
     _atomic_write(_Path(state_dir) / "pre_canary_evidence.json", evidence)
-    _atomic_write(
-        _Path("/home/max/.hermes/aed-supervisor/pre_canary_evidence.json"),
-        evidence,
-    )
+    mirror_path = _Path("/home/max/.hermes/aed-supervisor/pre_canary_evidence.json")
+    mirror_parent = mirror_path.parent
+    if mirror_parent.exists():
+        _atomic_write(mirror_path, evidence)
     return evidence
 
 
