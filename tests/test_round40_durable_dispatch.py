@@ -62,13 +62,21 @@ def _round54_c22_subprocess_patch(monkeypatch, request):
     # checkout so ``git rev-parse origin/<branch>`` succeeds
     # against a real git tree.
     # The production-checkout path is resolved at runtime
-    # from the autouse fixture's pre-bound value (set up
-    # in the supervisor's runtime state_dir parent). This
-    # avoids hardcoding the production home literal in the test
-    # fixture (which the committed-state scanner would
-    # otherwise flag as a credential-path false positive).
-    _checkout = Path("/home") / "max" / "AutoDev"
-    if _checkout.is_dir():
+    # from the autouse fixture so the test runs against
+    # the actual repository the test was launched from.
+    # Walking up from the test file's location lands on the
+    # checkout root regardless of the host environment
+    # (CI uses a runner home path, local dev uses
+    # ~/AutoDev/). This avoids hardcoding the production
+    # home literal in the test fixture (which the
+    # committed-state scanner would otherwise flag as a
+    # credential-path false positive).
+    _checkout = Path(__file__).resolve()
+    for _parent in range(5):
+        if (_checkout / ".git").is_dir():
+            break
+        _checkout = _checkout.parent
+    if _checkout.is_dir() and (_checkout / ".git").is_dir():
         monkeypatch.setattr(_sup, "REPO_DIR", _checkout)
     print(f"  after override REPO_DIR={_sup.REPO_DIR}")
     _captured_cmd: list = []
