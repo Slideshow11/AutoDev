@@ -176,8 +176,8 @@
     },
     {
       "destination_path": ".github/workflows/ci.yml",
-      "destination_sha256": "6a342c2f17ff2a2ad90786482981a55bf583b3ed6fa48a06e4b8595f72ccf6f9",
-      "destination_size_bytes": 6202,
+      "destination_sha256": "ed146d5a11e1d2a770494f41a9bcf84721a7fffda5b3ddb9dfacbef69b6bddb3",
+      "destination_size_bytes": 6615,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_ci_addition",
