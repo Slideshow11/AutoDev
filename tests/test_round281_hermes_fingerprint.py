@@ -80,9 +80,18 @@ def test_fingerprint_changes_when_config_changes(
     tmp_path, monkeypatch,
 ) -> None:
     # Construct a hermetic env where we control every input.
+    # Re-import the module fresh inside the test so the
+    # monkeypatched _CANONICAL_INPUTS is the one actually used.
+    import importlib
     import hashlib
-    from autocoder_supervisor import hermes_fingerprint as hf
-    # Replace the canonical input list with a hermetic one.
+    import sys as _sys
+    if "autocoder_supervisor.hermes_fingerprint" in _sys.modules:
+        del _sys.modules["autocoder_supervisor.hermes_fingerprint"]
+    if "autocoder_supervisor" in _sys.modules:
+        for k in list(_sys.modules.keys()):
+            if k.startswith("autocoder_supervisor.hermes_fingerprint"):
+                del _sys.modules[k]
+    import autocoder_supervisor.hermes_fingerprint as hf  # noqa: E402
     cfg = tmp_path / "config.yaml"
     cfg.write_text("a: 1\n")
     profile = tmp_path / "profile.yaml"
@@ -102,14 +111,14 @@ def test_fingerprint_changes_when_config_changes(
     )
     monkeypatch.setattr(hf, "_AED_ENV_VARS", ("AED_PR_NUMBER",))
     monkeypatch.setenv("AED_PR_NUMBER", "5")
-    fp1 = compute_hermes_acceptance_fingerprint()
+    fp1 = hf.compute_hermes_acceptance_fingerprint()
     # Mutate the config.
     sup.write_text("# sup v2 — changed\n")
-    fp2 = compute_hermes_acceptance_fingerprint()
+    fp2 = hf.compute_hermes_acceptance_fingerprint()
     assert fp1["fingerprint"] != fp2["fingerprint"]
     # Mutate an env var.
     monkeypatch.setenv("AED_PR_NUMBER", "99")
-    fp3 = compute_hermes_acceptance_fingerprint()
+    fp3 = hf.compute_hermes_acceptance_fingerprint()
     assert fp2["fingerprint"] != fp3["fingerprint"]
 
 
