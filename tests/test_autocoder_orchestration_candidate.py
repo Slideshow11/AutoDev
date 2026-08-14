@@ -123,6 +123,17 @@ def _good_cert(expected_head: str = HEAD) -> ReadinessCertificate:
 
 
 def _builder_kwargs() -> dict:
+    # Round-54/C22 §6 fix: the AED-side repo path is
+    # platform-specific and may not exist in CI. The
+    # test class TestCandidateBuild is gated on the
+    # AED_REPO environment variable (or the local
+    # AUTO-DISCOVERY checkout directory) so a missing
+    # AED checkout does NOT cause a failure.
+    import os as _os
+    from pathlib import Path as _P
+    _aed_root = _os.environ.get("AUTODEV_AED_REPO_PATH") or str(
+        _P("/home") / "max" / "Automated-Edge-Discovery"
+    )
     return dict(
         run_id="r1",
         repo="o/r",
@@ -146,7 +157,7 @@ def _builder_kwargs() -> dict:
         ],
         aed_source_paths=["aed_lifecycle/__init__.py"],
         aed_source_commit=AED_HEAD,
-        aed_repo_root=str("/home" + "/" + "max" + "/" + "Automated-Edge-Discovery"),
+        aed_repo_root=_aed_root,
     )
 
 
@@ -296,6 +307,22 @@ def tmp_git_repo(tmp_path):
 
 
 class TestCandidateBuild:
+    # Round-54/C22 §6: the AED-side candidate build
+    # requires a checkout of the upstream AUTO-DISCOVERY
+    # repository. CI does not check that out; local
+    # dev environments may or may not have it. Skip the
+    # entire class when the AED repo is missing so the
+    # full-suite job is not gate-blocked by a hard-coded
+    # path that depends on a side checkout.
+    pytestmark = pytest.mark.skipif(
+        not os.path.exists(
+            os.environ.get("AUTODEV_AED_REPO_PATH")
+            or str(Path("/home") / "max" / "Automated-Edge-Discovery")
+        ),
+        reason="AED_REPO does not exist; set AUTODEV_AED_REPO_PATH "
+        "or create the AED checkout directory",
+    )
+
     def test_build_from_exact_head(self, tmp_git_repo) -> None:
         cert = _good_cert(tmp_git_repo.head_full())
         kwargs = _builder_kwargs()
