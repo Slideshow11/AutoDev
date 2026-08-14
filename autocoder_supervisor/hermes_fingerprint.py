@@ -1139,6 +1139,18 @@ def _read_observed_static_scope(
                 hermes_in_path = _sh.which("hermes")
                 if hermes_in_path:
                     out["hermes_binary_path"] = hermes_in_path
+                # Last-resort fallback: standard installation
+                # locations used in production + CI.
+                else:
+                    for _hpath in [
+                        "/home/max/.local/bin/hermes",
+                        "/home/max/.hermes/hermes-agent/venv/bin/hermes",
+                        "/usr/local/bin/hermes",
+                        "/usr/bin/hermes",
+                    ]:
+                        if _os.path.exists(_hpath):
+                            out["hermes_binary_path"] = _hpath
+                            break
         except Exception:
             pass
 
