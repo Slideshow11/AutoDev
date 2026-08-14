@@ -101,174 +101,30 @@
   "occurrences": [
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_autocoder_supervisor.py",
-      "token_id": "tok_3b122b9d4638",
+      "path": "INVARIANTS.md",
+      "token_id": "tok_d1f885fa5e5a",
       "ordinal": 1,
-      "line": 1015,
-      "line_sha256": "10870d39f862840c8b63cbcc0492a613fa429ee8ab760df8c60cc35b465638e0",
-      "purpose": "Occurrence in tests/test_autocoder_supervisor.py line 1015; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "line": 277,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Pre-canary closure: legitimate reference to 'oauth_token:' in committed text; line 277; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_autocoder_supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 2,
-      "line": 2001,
-      "line_sha256": "381d146e1809815208ab82b5b73c23a09df8f26035206862fe7b4c1a36c733eb",
-      "purpose": "Occurrence in tests/test_autocoder_supervisor.py line 2001; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_autocoder_supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 3,
-      "line": 3884,
-      "line_sha256": "a7177de9f9e953bbd22627b7771ef89363af8b1854a8704901d146afe4b7722a",
-      "purpose": "Occurrence in tests/test_autocoder_supervisor.py line 3884; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_autocoder_supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 4,
-      "line": 4007,
-      "line_sha256": "a7177de9f9e953bbd22627b7771ef89363af8b1854a8704901d146afe4b7722a",
-      "purpose": "Occurrence in tests/test_autocoder_supervisor.py line 4007; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_autocoder_supervisor.py",
-      "token_id": "tok_b670eb5d70a6",
+      "path": "INVARIANTS.md",
+      "token_id": "tok_a184fed6cfdd",
       "ordinal": 1,
-      "line": 1022,
-      "line_sha256": "ead33203ba392ea9227ede7067969b231639f45f1083f9a380585070983de8ea",
-      "purpose": "Occurrence in tests/test_autocoder_supervisor.py line 1022; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "line": 277,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Pre-canary closure: legitimate reference to 'password=' in committed text; line 277; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round32_quiet_window_handoff.py",
-      "token_id": "tok_3b122b9d4638",
+      "path": "INVARIANTS.md",
+      "token_id": "tok_9bf3261bcf56",
       "ordinal": 1,
-      "line": 41,
-      "line_sha256": "537b47d903d4bbeee2d2f87d8f2ba40b4f9fa242b79815a72fd2bfae5f3cd2cb",
-      "purpose": "Occurrence in tests/test_round32_quiet_window_handoff.py line 41; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_stderr_fix.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 1,
-      "line": 4,
-      "line_sha256": "6825b21d475e0387dac3aa9694f82b51e183df8875c3354fddcc6c3511e709bc",
-      "purpose": "Occurrence in tests/test_round38_stderr_fix.py line 4; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 1,
-      "line": 296,
-      "line_sha256": "22f1015cf4d390c04e594e85c0e835810a43bb4ebbc4f2bd74160916c2cf9d3e",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 296; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 2,
-      "line": 305,
-      "line_sha256": "3f1e615e3e43b5fd4392435e4945c5d828af8f55f58b2fe123292fb71c6d1d43",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 305; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 3,
-      "line": 306,
-      "line_sha256": "9f4ba33099f5b942f82735a99e9230d681549ea467f3caa5e5e58e8959a26d6e",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 306; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 4,
-      "line": 326,
-      "line_sha256": "73cbf12fc17871f7e58594953c111c7fca1e6c42510cadded8bd89d689700fd3",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 326; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 5,
-      "line": 332,
-      "line_sha256": "e51fc2088fcb95298ec564511bf83b176b4f89782509252313ca4958e6b88947",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 332; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 6,
-      "line": 384,
-      "line_sha256": "a85df8764cf1d7475fb2612d02c8c9c3964ba4d0793bd202f49286ea644337de",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 384; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 7,
-      "line": 384,
-      "line_sha256": "a85df8764cf1d7475fb2612d02c8c9c3964ba4d0793bd202f49286ea644337de",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 384; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 8,
-      "line": 388,
-      "line_sha256": "4c7587cb2eeb8171f5372915c01cd0441ab4ec03f858b883006518f2004135f1",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 388; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 9,
-      "line": 390,
-      "line_sha256": "d90d49ea8ac34fe6546abbb663d8d9c514a2813b2539c55497e95a65868eb1f4",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 390; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_1caf8e22a84d",
-      "ordinal": 10,
-      "line": 390,
-      "line_sha256": "d90d49ea8ac34fe6546abbb663d8d9c514a2813b2539c55497e95a65868eb1f4",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 390; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round38_worker_session.py",
-      "token_id": "tok_b670eb5d70a6",
-      "ordinal": 1,
-      "line": 297,
-      "line_sha256": "1357416c68292646b240b39b7ecd2ffe25a2e3a6f04713e29f1a608de7668307",
-      "purpose": "Occurrence in tests/test_round38_worker_session.py line 297; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "scripts/restart_supervisor_multir.sh",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 1,
-      "line": 15,
-      "line_sha256": "375f554376cb172f6fc82f4c34d84f1ef8319618cc31a7f3e03472d5c0c9ab3d",
-      "purpose": "Occurrence in scripts/restart_supervisor_multir.sh line 15; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "line": 277,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Pre-canary closure: legitimate reference to 'secret=' in committed text; line 277; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -277,7 +133,7 @@
       "ordinal": 1,
       "line": 33,
       "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 33; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 33; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -286,7 +142,7 @@
       "ordinal": 2,
       "line": 335,
       "line_sha256": "2f6554caf40f3da89fb1e0de130ffc67c0e4a0737e5a83dd6194180a8a0c00f6",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 335; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 335; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -295,7 +151,7 @@
       "ordinal": 3,
       "line": 971,
       "line_sha256": "d4f96c46f3c591135f11766f9e4d6460f26f8e5bcf6077b4fb0411bf7a7203f6",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 971; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 971; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -304,7 +160,7 @@
       "ordinal": 4,
       "line": 979,
       "line_sha256": "84eb379aeed6aaa9e2e7c25e56336d77a569250be87136d3cdd30d0a55dd173f",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 979; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 979; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -313,7 +169,7 @@
       "ordinal": 5,
       "line": 985,
       "line_sha256": "55bd33f356a9cfa1cd8c527f1e80610db413c82d87b63f6a2f922d21e22d338a",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 985; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 985; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -322,7 +178,7 @@
       "ordinal": 6,
       "line": 985,
       "line_sha256": "55bd33f356a9cfa1cd8c527f1e80610db413c82d87b63f6a2f922d21e22d338a",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 985; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 985; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -331,7 +187,7 @@
       "ordinal": 7,
       "line": 989,
       "line_sha256": "71d9eedbdca8b3c6b9d3b7de29120f085ec346a2263bf081c1646659c79bc292",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 989; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 989; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -340,7 +196,7 @@
       "ordinal": 8,
       "line": 989,
       "line_sha256": "71d9eedbdca8b3c6b9d3b7de29120f085ec346a2263bf081c1646659c79bc292",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 989; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 989; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -349,7 +205,7 @@
       "ordinal": 1,
       "line": 33,
       "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 33; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/root/' in committed text; line 33; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -358,7 +214,7 @@
       "ordinal": 2,
       "line": 335,
       "line_sha256": "2f6554caf40f3da89fb1e0de130ffc67c0e4a0737e5a83dd6194180a8a0c00f6",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 335; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/root/' in committed text; line 335; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -367,7 +223,7 @@
       "ordinal": 1,
       "line": 33,
       "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 33; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/Users/' in committed text; line 33; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -376,7 +232,7 @@
       "ordinal": 2,
       "line": 335,
       "line_sha256": "2f6554caf40f3da89fb1e0de130ffc67c0e4a0737e5a83dd6194180a8a0c00f6",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 335; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/Users/' in committed text; line 335; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -385,7 +241,7 @@
       "ordinal": 1,
       "line": 33,
       "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 33; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '/~/.hermes/' in committed text; line 33; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -394,7 +250,7 @@
       "ordinal": 1,
       "line": 33,
       "line_sha256": "5aae3fb84ff69f447c3a4f5be1d06040fc6d2213b95e11931a8081a46a1122d2",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 33; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 33; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -403,7 +259,7 @@
       "ordinal": 2,
       "line": 336,
       "line_sha256": "73523fdbb81efcb6ad3c3e766d52577c91448a159a137b176e576792acca5ed1",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 336; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 336; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -412,7 +268,7 @@
       "ordinal": 1,
       "line": 34,
       "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 34; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 34; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -421,7 +277,7 @@
       "ordinal": 2,
       "line": 336,
       "line_sha256": "73523fdbb81efcb6ad3c3e766d52577c91448a159a137b176e576792acca5ed1",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 336; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 336; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -430,7 +286,7 @@
       "ordinal": 3,
       "line": 369,
       "line_sha256": "ca111e29c7d93e6fc99bda07066a5f90b1d2ef0eab818ca23fbfa7a80f4fa013",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 369; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 369; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -439,7 +295,7 @@
       "ordinal": 4,
       "line": 395,
       "line_sha256": "e74fdb6589040b891b8551df1f834a9bd9244babe59cf3313d56022a50c62c9f",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 395; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 395; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -448,7 +304,7 @@
       "ordinal": 5,
       "line": 523,
       "line_sha256": "c36fdc7b0ac97f299388c3d1940809b63a000d8a763c81d4798e4c9aa8c94d9f",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 523; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 523; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -457,7 +313,7 @@
       "ordinal": 6,
       "line": 798,
       "line_sha256": "e0286c951c0e35cb5ed8b459ce857fbb837ba85c1ea9ddefd8fb430eb07d7eeb",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 798; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 798; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -466,7 +322,7 @@
       "ordinal": 7,
       "line": 821,
       "line_sha256": "0b4aabf615a2e5e78ddb2a40209f06269ce46025f38495084580b4100abc6c46",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 821; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 821; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -475,7 +331,7 @@
       "ordinal": 8,
       "line": 845,
       "line_sha256": "807399cde213762ed30f59c09f897f6bef10942241e3e08f1759b97aba870271",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 845; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 845; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -484,7 +340,7 @@
       "ordinal": 9,
       "line": 868,
       "line_sha256": "5a5ae8973e0e6d6d87a8b41a55c691b440744dab1a91bb613af301bbcf0bcc42",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 868; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 868; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -493,7 +349,7 @@
       "ordinal": 10,
       "line": 892,
       "line_sha256": "5b2ed03aaa4beaa6fd18e0c5af5ed94b7c50408ab8586ca0b7d6a95930615278",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 892; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 892; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -502,7 +358,7 @@
       "ordinal": 1,
       "line": 34,
       "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 34; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghs_' in committed text; line 34; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -511,7 +367,7 @@
       "ordinal": 2,
       "line": 336,
       "line_sha256": "73523fdbb81efcb6ad3c3e766d52577c91448a159a137b176e576792acca5ed1",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 336; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'ghs_' in committed text; line 336; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -520,7 +376,7 @@
       "ordinal": 1,
       "line": 34,
       "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 34; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'sk-' in committed text; line 34; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -529,7 +385,7 @@
       "ordinal": 2,
       "line": 337,
       "line_sha256": "a21e6084999bfdad4c94e91a19f390cbcf89588ee8fed5062bf2e7656a4df367",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 337; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'sk-' in committed text; line 337; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -538,7 +394,7 @@
       "ordinal": 1,
       "line": 34,
       "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 34; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '-----BEGIN' in committed text; line 34; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -547,7 +403,7 @@
       "ordinal": 2,
       "line": 337,
       "line_sha256": "a21e6084999bfdad4c94e91a19f390cbcf89588ee8fed5062bf2e7656a4df367",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 337; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to '-----BEGIN' in committed text; line 337; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -556,7 +412,7 @@
       "ordinal": 1,
       "line": 34,
       "line_sha256": "0ba127607f6b13c57a28cbd069c852b877c79af46912933db3a1d9f092f3efed",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 34; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'aws_access_key_id' in committed text; line 34; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -565,7 +421,7 @@
       "ordinal": 2,
       "line": 338,
       "line_sha256": "1e7e2c709696e96fc084e600a881e35c5724d2580cd02f2a05ec331cc4ae00ab",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 338; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'aws_access_key_id' in committed text; line 338; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -574,7 +430,7 @@
       "ordinal": 1,
       "line": 35,
       "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 35; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'aws_secret_access_key' in committed text; line 35; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -583,7 +439,7 @@
       "ordinal": 2,
       "line": 338,
       "line_sha256": "1e7e2c709696e96fc084e600a881e35c5724d2580cd02f2a05ec331cc4ae00ab",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 338; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'aws_secret_access_key' in committed text; line 338; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -592,7 +448,7 @@
       "ordinal": 1,
       "line": 35,
       "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 35; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'oauth_token:' in committed text; line 35; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -601,7 +457,7 @@
       "ordinal": 2,
       "line": 339,
       "line_sha256": "eac9c23f4f8e96d21ff84ce2b63813ce842c948e56853b558bef6a48c4701def",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 339; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'oauth_token:' in committed text; line 339; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -610,7 +466,7 @@
       "ordinal": 1,
       "line": 35,
       "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 35; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'xoxa-' in committed text; line 35; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -619,7 +475,7 @@
       "ordinal": 1,
       "line": 35,
       "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 35; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'xoxb-' in committed text; line 35; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -628,7 +484,7 @@
       "ordinal": 1,
       "line": 35,
       "line_sha256": "839a5b77aa969e8fc58512cd3b41baf344f4c14632d296e56853cb2994e11ce8",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 35; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'xoxp-' in committed text; line 35; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -637,7 +493,7 @@
       "ordinal": 1,
       "line": 36,
       "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 36; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'xoxs-' in committed text; line 36; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -646,7 +502,7 @@
       "ordinal": 1,
       "line": 36,
       "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 36; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'password=' in committed text; line 36; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -655,7 +511,7 @@
       "ordinal": 1,
       "line": 36,
       "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 36; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'secret=' in committed text; line 36; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -664,133 +520,52 @@
       "ordinal": 1,
       "line": 36,
       "line_sha256": "5d54fbd66bdf0b2bf90a68ecfbdf9f0ad8c74ba73337e91296f39305e2de4323",
-      "purpose": "Occurrence in tests/test_extraction_provenance.py line 36; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "purpose": "Pre-canary closure: legitimate reference to 'Authorization: Bearer ' in committed text; line 36; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/INVARIANTS.md",
-      "token_id": "tok_d1f885fa5e5a",
+      "path": "tests/test_autocoder_supervisor.py",
+      "token_id": "tok_3b122b9d4638",
       "ordinal": 1,
-      "line": 276,
-      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
-      "purpose": "Occurrence in autocoder_supervisor/INVARIANTS.md line 276; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "line": 1015,
+      "line_sha256": "10870d39f862840c8b63cbcc0492a613fa429ee8ab760df8c60cc35b465638e0",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 1015; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/INVARIANTS.md",
-      "token_id": "tok_a184fed6cfdd",
-      "ordinal": 1,
-      "line": 276,
-      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
-      "purpose": "Occurrence in autocoder_supervisor/INVARIANTS.md line 276; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "path": "tests/test_autocoder_supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 2001,
+      "line_sha256": "381d146e1809815208ab82b5b73c23a09df8f26035206862fe7b4c1a36c733eb",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 2001; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/INVARIANTS.md",
-      "token_id": "tok_9bf3261bcf56",
-      "ordinal": 1,
-      "line": 276,
-      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
-      "purpose": "Occurrence in autocoder_supervisor/INVARIANTS.md line 276; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "path": "tests/test_autocoder_supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 3904,
+      "line_sha256": "a7177de9f9e953bbd22627b7771ef89363af8b1854a8704901d146afe4b7722a",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 3904; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "INVARIANTS.md",
-      "token_id": "tok_d1f885fa5e5a",
-      "ordinal": 1,
-      "line": 277,
-      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
-      "purpose": "Occurrence in INVARIANTS.md line 277; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "path": "tests/test_autocoder_supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 4027,
+      "line_sha256": "a7177de9f9e953bbd22627b7771ef89363af8b1854a8704901d146afe4b7722a",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 4027; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "INVARIANTS.md",
-      "token_id": "tok_a184fed6cfdd",
-      "ordinal": 1,
-      "line": 277,
-      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
-      "purpose": "Occurrence in INVARIANTS.md line 277; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "INVARIANTS.md",
-      "token_id": "tok_9bf3261bcf56",
-      "ordinal": 1,
-      "line": 277,
-      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
-      "purpose": "Occurrence in INVARIANTS.md line 277; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "provenance/EXTRACTION.md",
+      "path": "tests/test_autocoder_supervisor.py",
       "token_id": "tok_b670eb5d70a6",
       "ordinal": 1,
-      "line": 172,
-      "line_sha256": "1a416e1b9e9ebf2c1d1edfba7d76f24c3ea16afc95f187a2a9c95c17a129c507",
-      "purpose": "Occurrence in provenance/EXTRACTION.md line 172; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/config.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 1,
-      "line": 12,
-      "line_sha256": "c3bb43a6ccf91a4f4e64da06d247c1c994528da62e243d1f8b39b027260021be",
-      "purpose": "Occurrence in autocoder_supervisor/config.py line 12; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/config.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 2,
-      "line": 90,
-      "line_sha256": "819caa3a517ae3dc75d509aaf945af46d9b1999b54a359b837676cc601ebbe2a",
-      "purpose": "Occurrence in autocoder_supervisor/config.py line 90; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/config.py",
-      "token_id": "tok_0fe68e7a8a47",
-      "ordinal": 1,
-      "line": 90,
-      "line_sha256": "819caa3a517ae3dc75d509aaf945af46d9b1999b54a359b837676cc601ebbe2a",
-      "purpose": "Occurrence in autocoder_supervisor/config.py line 90; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/config.py",
-      "token_id": "tok_46dc943e3424",
-      "ordinal": 1,
-      "line": 15,
-      "line_sha256": "523a37fd5abd227763504e078aeec9940ff6141776dc3b300ecb24eb6ff78ece",
-      "purpose": "Occurrence in autocoder_supervisor/config.py line 15; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/config.py",
-      "token_id": "tok_46dc943e3424",
-      "ordinal": 2,
-      "line": 95,
-      "line_sha256": "b72c0833bb9cf7b37ca9359c25550f921fa19c7911142c8f3ff13e4e97195630",
-      "purpose": "Occurrence in autocoder_supervisor/config.py line 95; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/config.py",
-      "token_id": "tok_4d925b8ea5a5",
-      "ordinal": 1,
-      "line": 69,
-      "line_sha256": "4be8e2a24629574b07994c4ff4c15cee5fae5d08c3d4e0dfb2ef091c1ca496db",
-      "purpose": "Occurrence in autocoder_supervisor/config.py line 69; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": ".github/workflows/ci.yml",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 1,
-      "line": 100,
-      "line_sha256": "c14913ccd1adfbd002a09154daad42efc1187eb97588e62610ae3ba71ae8ea6f",
-      "purpose": "Occurrence in .github/workflows/ci.yml line 100; encoding=utf-8; approved by review. See token-id registry in this file for the corresponding token."
+      "line": 1022,
+      "line_sha256": "ead33203ba392ea9227ede7067969b231639f45f1083f9a380585070983de8ea",
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 1022; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -799,106 +574,115 @@
       "ordinal": 1,
       "line": 257,
       "line_sha256": "bffe2e85da522b49fc5b293438b61be63924e29c4cda965a7e3e77cd66c446aa",
-      "purpose": "Pre-canary round-281 \u00a79 fingerprint test or production source; tests/test_round281_deferred_event_audit.py line 257; encoding=utf-8; approved by review."
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 257; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_autocoder_orchestration_candidate.py",
-      "token_id": "tok_3b122b9d4638",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
       "ordinal": 1,
-      "line": 127,
-      "line_sha256": "2514add77b358589d5e527bb4719772681c617af99ac40901f2679ff262607ad",
-      "purpose": "Pre-canary round-281 \u00a79 fingerprint test or production source; tests/test_autocoder_orchestration_candidate.py line 127; encoding=utf-8; approved by review."
+      "line": 296,
+      "line_sha256": "22f1015cf4d390c04e594e85c0e835810a43bb4ebbc4f2bd74160916c2cf9d3e",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 296; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_autocoder_orchestration_candidate.py",
-      "token_id": "tok_3b122b9d4638",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
       "ordinal": 2,
-      "line": 273,
-      "line_sha256": "3a53e60f3a0429e071890b3e3020cc1026735c09262e38af258d2795bbf016ec",
-      "purpose": "Pre-canary round-281 \u00a79 fingerprint test or production source; tests/test_autocoder_orchestration_candidate.py line 273; encoding=utf-8; approved by review."
+      "line": 305,
+      "line_sha256": "3f1e615e3e43b5fd4392435e4945c5d828af8f55f58b2fe123292fb71c6d1d43",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 305; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 1,
-      "line": 57,
-      "line_sha256": "3a4689fa7b65af35667abfcec29b2e97e4f3338f9cb315527e334be44794183b",
-      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 57; encoding=utf-8; approved by review"
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_d1f885fa5e5a",
-      "ordinal": 1,
-      "line": 796,
-      "line_sha256": "86f5d9d27ae88140583c9ad15aa354ff6c5d6a47bdae53bce9f6fc1adf172349",
-      "purpose": "Pre-canary closure-IV: legitimate reference to 'oauth_token:' in production source code; line 796; encoding=utf-8; approved by review"
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_d1f885fa5e5a",
-      "ordinal": 2,
-      "line": 805,
-      "line_sha256": "8a60ba7ddc7b5b87a8ff84441af591f7ed19f74cd240c7c2fa7ee3cb3a60d2ac",
-      "purpose": "Pre-canary closure-IV: legitimate reference to 'oauth_token:' in production source code; line 805; encoding=utf-8; approved by review"
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 2,
-      "line": 2870,
-      "line_sha256": "df0f9b8bc4810aa421d9603cd615471e7e26d89f6a9d72c3db630cd1ae828972",
-      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 2870; encoding=utf-8; approved by review"
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_3b122b9d4638",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
       "ordinal": 3,
-      "line": 2872,
-      "line_sha256": "436eb2da97419e57f492882e514bc64dec31bb35cad0dc5c47c05672fa7d3bdf",
-      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 2872; encoding=utf-8; approved by review"
+      "line": 306,
+      "line_sha256": "9f4ba33099f5b942f82735a99e9230d681549ea467f3caa5e5e58e8959a26d6e",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 306; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_449b11820b0f",
-      "ordinal": 1,
-      "line": 9125,
-      "line_sha256": "af3db392fa43b3ca245dfc0eea8c5ee419bd0a29bbe32fe39a02ea59e8e23ba5",
-      "purpose": "Pre-canary closure-IV: legitimate reference to 'sk-' in production source code; line 9125; encoding=utf-8; approved by review"
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/supervisor.py",
-      "token_id": "tok_3b122b9d4638",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
       "ordinal": 4,
-      "line": 9675,
-      "line_sha256": "52f782830becc7e470b07df987b01466b3c4cfa89663dcbb6e4add99fdcbf267",
-      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 9675; encoding=utf-8; approved by review"
+      "line": 326,
+      "line_sha256": "73cbf12fc17871f7e58594953c111c7fca1e6c42510cadded8bd89d689700fd3",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 326; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/hermes_fingerprint.py",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 5,
+      "line": 332,
+      "line_sha256": "e51fc2088fcb95298ec564511bf83b176b4f89782509252313ca4958e6b88947",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 332; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 6,
+      "line": 384,
+      "line_sha256": "a85df8764cf1d7475fb2612d02c8c9c3964ba4d0793bd202f49286ea644337de",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 384; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 7,
+      "line": 384,
+      "line_sha256": "a85df8764cf1d7475fb2612d02c8c9c3964ba4d0793bd202f49286ea644337de",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 384; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 8,
+      "line": 388,
+      "line_sha256": "4c7587cb2eeb8171f5372915c01cd0441ab4ec03f858b883006518f2004135f1",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 388; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 9,
+      "line": 390,
+      "line_sha256": "d90d49ea8ac34fe6546abbb663d8d9c514a2813b2539c55497e95a65868eb1f4",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 390; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_1caf8e22a84d",
+      "ordinal": 10,
+      "line": 390,
+      "line_sha256": "d90d49ea8ac34fe6546abbb663d8d9c514a2813b2539c55497e95a65868eb1f4",
+      "purpose": "Pre-canary closure: legitimate reference to 'gho_' in committed text; line 390; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round38_worker_session.py",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 1,
+      "line": 297,
+      "line_sha256": "1357416c68292646b240b39b7ecd2ffe25a2e3a6f04713e29f1a608de7668307",
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 297; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round38_stderr_fix.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 1,
-      "line": 142,
-      "line_sha256": "4be19daa12b57719db4b6c17db6ab6287c9a740b352d103196e6bf63ec689b78",
-      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 142; encoding=utf-8; approved by review"
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "autocoder_supervisor/hermes_fingerprint.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 2,
-      "line": 153,
-      "line_sha256": "0ef2c19415a24b6552c3a60cdfe2f0b04a676754d8d03d5e7de471f73a23d82d",
-      "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 153; encoding=utf-8; approved by review"
+      "line": 4,
+      "line_sha256": "6825b21d475e0387dac3aa9694f82b51e183df8875c3354fddcc6c3511e709bc",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 4; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -907,7 +691,7 @@
       "ordinal": 1,
       "line": 248,
       "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 248; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 248; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -916,7 +700,7 @@
       "ordinal": 2,
       "line": 249,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 249; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 249; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -925,7 +709,7 @@
       "ordinal": 3,
       "line": 250,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 250; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 250; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -934,7 +718,7 @@
       "ordinal": 4,
       "line": 251,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 251; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 251; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -943,7 +727,7 @@
       "ordinal": 5,
       "line": 271,
       "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 271; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 271; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -952,7 +736,7 @@
       "ordinal": 6,
       "line": 272,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 272; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 272; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -961,7 +745,7 @@
       "ordinal": 7,
       "line": 273,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 273; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 273; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -970,7 +754,7 @@
       "ordinal": 8,
       "line": 274,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 274; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 274; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -979,7 +763,7 @@
       "ordinal": 9,
       "line": 294,
       "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 294; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 294; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -988,7 +772,7 @@
       "ordinal": 10,
       "line": 295,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 295; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 295; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -997,7 +781,7 @@
       "ordinal": 11,
       "line": 296,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 296; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 296; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1006,7 +790,7 @@
       "ordinal": 12,
       "line": 297,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 297; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 297; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1015,7 +799,7 @@
       "ordinal": 13,
       "line": 317,
       "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 317; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 317; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1024,7 +808,7 @@
       "ordinal": 14,
       "line": 318,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 318; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 318; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1033,7 +817,7 @@
       "ordinal": 15,
       "line": 319,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 319; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 319; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1042,7 +826,7 @@
       "ordinal": 16,
       "line": 320,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 320; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 320; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1051,7 +835,7 @@
       "ordinal": 17,
       "line": 340,
       "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 340; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 340; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1060,7 +844,7 @@
       "ordinal": 18,
       "line": 341,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 341; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 341; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1069,7 +853,7 @@
       "ordinal": 19,
       "line": 342,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 342; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 342; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1078,7 +862,7 @@
       "ordinal": 20,
       "line": 343,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 343; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 343; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1087,7 +871,7 @@
       "ordinal": 21,
       "line": 364,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 364; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 364; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1096,7 +880,7 @@
       "ordinal": 22,
       "line": 365,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 365; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 365; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1105,7 +889,7 @@
       "ordinal": 23,
       "line": 366,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 366; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 366; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1114,7 +898,7 @@
       "ordinal": 24,
       "line": 386,
       "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 386; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 386; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1123,7 +907,7 @@
       "ordinal": 25,
       "line": 387,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 387; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 387; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1132,7 +916,7 @@
       "ordinal": 26,
       "line": 388,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 388; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 388; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1141,7 +925,7 @@
       "ordinal": 27,
       "line": 389,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 389; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 389; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1150,7 +934,7 @@
       "ordinal": 28,
       "line": 408,
       "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 408; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 408; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1159,7 +943,7 @@
       "ordinal": 29,
       "line": 409,
       "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 409; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 409; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1168,7 +952,7 @@
       "ordinal": 30,
       "line": 410,
       "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 410; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 410; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1177,25 +961,223 @@
       "ordinal": 31,
       "line": 411,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 411; encoding=utf-8"
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 411; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round281_closure5_failclosed.py",
+      "path": "tests/test_autocoder_orchestration_candidate.py",
       "token_id": "tok_3b122b9d4638",
-      "ordinal": 32,
-      "line": 700,
-      "line_sha256": "b4a3195c59db4329475bb44a3e86c5fc9027f0c61fb8ec69ff701e5a20c082a1",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 700; encoding=utf-8"
+      "ordinal": 1,
+      "line": 127,
+      "line_sha256": "2514add77b358589d5e527bb4719772681c617af99ac40901f2679ff262607ad",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 127; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round281_closure5_failclosed.py",
+      "path": "tests/test_autocoder_orchestration_candidate.py",
       "token_id": "tok_3b122b9d4638",
-      "ordinal": 33,
-      "line": 752,
-      "line_sha256": "b4a3195c59db4329475bb44a3e86c5fc9027f0c61fb8ec69ff701e5a20c082a1",
-      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 752; encoding=utf-8"
+      "ordinal": 2,
+      "line": 273,
+      "line_sha256": "3a53e60f3a0429e071890b3e3020cc1026735c09262e38af258d2795bbf016ec",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 273; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round32_quiet_window_handoff.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 41,
+      "line_sha256": "537b47d903d4bbeee2d2f87d8f2ba40b4f9fa242b79815a72fd2bfae5f3cd2cb",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 41; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": ".github/workflows/ci.yml",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 100,
+      "line_sha256": "c14913ccd1adfbd002a09154daad42efc1187eb97588e62610ae3ba71ae8ea6f",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 100; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "provenance/EXTRACTION.md",
+      "token_id": "tok_b670eb5d70a6",
+      "ordinal": 1,
+      "line": 172,
+      "line_sha256": "1a416e1b9e9ebf2c1d1edfba7d76f24c3ea16afc95f187a2a9c95c17a129c507",
+      "purpose": "Pre-canary closure: legitimate reference to 'ghp_' in committed text; line 172; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "scripts/restart_supervisor_multir.sh",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 15,
+      "line_sha256": "375f554376cb172f6fc82f4c34d84f1ef8319618cc31a7f3e03472d5c0c9ab3d",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 15; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 57,
+      "line_sha256": "3a4689fa7b65af35667abfcec29b2e97e4f3338f9cb315527e334be44794183b",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 57; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 2870,
+      "line_sha256": "df0f9b8bc4810aa421d9603cd615471e7e26d89f6a9d72c3db630cd1ae828972",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 2870; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 2872,
+      "line_sha256": "436eb2da97419e57f492882e514bc64dec31bb35cad0dc5c47c05672fa7d3bdf",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 2872; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 9675,
+      "line_sha256": "52f782830becc7e470b07df987b01466b3c4cfa89663dcbb6e4add99fdcbf267",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 9675; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_449b11820b0f",
+      "ordinal": 1,
+      "line": 9125,
+      "line_sha256": "af3db392fa43b3ca245dfc0eea8c5ee419bd0a29bbe32fe39a02ea59e8e23ba5",
+      "purpose": "Pre-canary closure: legitimate reference to 'sk-' in committed text; line 9125; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 1,
+      "line": 796,
+      "line_sha256": "86f5d9d27ae88140583c9ad15aa354ff6c5d6a47bdae53bce9f6fc1adf172349",
+      "purpose": "Pre-canary closure: legitimate reference to 'oauth_token:' in committed text; line 796; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/supervisor.py",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 2,
+      "line": 805,
+      "line_sha256": "8a60ba7ddc7b5b87a8ff84441af591f7ed19f74cd240c7c2fa7ee3cb3a60d2ac",
+      "purpose": "Pre-canary closure: legitimate reference to 'oauth_token:' in committed text; line 805; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/INVARIANTS.md",
+      "token_id": "tok_d1f885fa5e5a",
+      "ordinal": 1,
+      "line": 276,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Pre-canary closure: legitimate reference to 'oauth_token:' in committed text; line 276; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/INVARIANTS.md",
+      "token_id": "tok_a184fed6cfdd",
+      "ordinal": 1,
+      "line": 276,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Pre-canary closure: legitimate reference to 'password=' in committed text; line 276; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/INVARIANTS.md",
+      "token_id": "tok_9bf3261bcf56",
+      "ordinal": 1,
+      "line": 276,
+      "line_sha256": "96387b69bbd0a74fefd4c4ddda20c2129fa328fcd1cb1feb1e5bb5de087812e2",
+      "purpose": "Pre-canary closure: legitimate reference to 'secret=' in committed text; line 276; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 12,
+      "line_sha256": "c3bb43a6ccf91a4f4e64da06d247c1c994528da62e243d1f8b39b027260021be",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 12; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 90,
+      "line_sha256": "819caa3a517ae3dc75d509aaf945af46d9b1999b54a359b837676cc601ebbe2a",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 90; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_0fe68e7a8a47",
+      "ordinal": 1,
+      "line": 90,
+      "line_sha256": "819caa3a517ae3dc75d509aaf945af46d9b1999b54a359b837676cc601ebbe2a",
+      "purpose": "Pre-canary closure: legitimate reference to '/root/' in committed text; line 90; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_46dc943e3424",
+      "ordinal": 1,
+      "line": 15,
+      "line_sha256": "523a37fd5abd227763504e078aeec9940ff6141776dc3b300ecb24eb6ff78ece",
+      "purpose": "Pre-canary closure: legitimate reference to '/Users/' in committed text; line 15; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_46dc943e3424",
+      "ordinal": 2,
+      "line": 95,
+      "line_sha256": "b72c0833bb9cf7b37ca9359c25550f921fa19c7911142c8f3ff13e4e97195630",
+      "purpose": "Pre-canary closure: legitimate reference to '/Users/' in committed text; line 95; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/config.py",
+      "token_id": "tok_4d925b8ea5a5",
+      "ordinal": 1,
+      "line": 69,
+      "line_sha256": "4be8e2a24629574b07994c4ff4c15cee5fae5d08c3d4e0dfb2ef091c1ca496db",
+      "purpose": "Pre-canary closure: legitimate reference to '-----BEGIN' in committed text; line 69; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/hermes_fingerprint.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 161,
+      "line_sha256": "4be19daa12b57719db4b6c17db6ab6287c9a740b352d103196e6bf63ec689b78",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 161; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "autocoder_supervisor/hermes_fingerprint.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 172,
+      "line_sha256": "0ef2c19415a24b6552c3a60cdfe2f0b04a676754d8d03d5e7de471f73a23d82d",
+      "purpose": "Pre-canary closure: legitimate reference to '/home/' in committed text; line 172; encoding=utf-8"
     }
   ]
 }
