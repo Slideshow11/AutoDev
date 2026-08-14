@@ -63,7 +63,13 @@ def test_static_inputs_are_well_defined() -> None:
 def test_static_fingerprint_is_deterministic() -> None:
     from autocoder_supervisor.hermes_fingerprint import (
         compute_static_hermes_environment_fingerprint,
+        _default_static_inputs,
     )
+    if not all(p.exists() for _, p in _default_static_inputs()):
+        pytest.skip(
+            "operator runtime area absent in CI; "
+            "fingerprint canonical inputs require $OPERATOR_HOME"
+        )
     a = compute_static_hermes_environment_fingerprint()
     b = compute_static_hermes_environment_fingerprint()
     assert a["fingerprint"] == b["fingerprint"]
