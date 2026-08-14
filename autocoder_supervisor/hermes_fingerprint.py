@@ -1,32 +1,41 @@
-"""Hermes acceptance environment fingerprint (pre-canary §9).
+"""Hermes acceptance environment fingerprint (pre-canary §9 + Closure III).
 
-The canonical Hermes acceptance fingerprint is a SHA-256 over
-the deterministic bytes of the acceptance-relevant inputs:
+The Hermes acceptance environment has TWO independent hashes:
 
-1. The global Hermes config that controls provider / toolset
-   / memory governance for the acceptance environment.
-2. Each aed-* profile config (builder, researcher, reviewer,
-   specifier, quarantine) — these gate memory/profile writes
-   and shadow-control-plane mutation.
-3. The supervisor entrypoint binary
-   (``/home/max/.hermes/aed-supervisor/supervisor.py``) which
-   the production supervisor process actually loads.
-4. The hermes CLI shim
-   (``/home/max/.hermes/hermes-agent/venv/bin/hermes``).
-5. The AED_* env vars (from the supervisor's process env).
+A. STATIC ENVIRONMENT FINGERPRINT — over immutable
+   acceptance/control-plane inputs that MUST NOT change
+   during a valid autonomous canary generation. If this
+   hash changes, the operator must reconcile the
+   acceptance environment before any new canary
+   generation can be certified.
 
-The fingerprint is intentionally:
+B. RUN BINDING DIGEST — over identities expected to change
+   between valid generations (current head, generation id,
+   attempt id, result contract id). This is recorded per
+   generation but is NOT part of the static environment
+   identity.
 
-- Order-stable: the same inputs in the same order always
-  produce the same digest.
-- Source-only: it does NOT include transient runtime state
-  (heartbeat, log files, lease records). Those change on
-  every heartbeat and would prevent the fingerprint from
-  being a meaningful invariant.
-- Inclusion-only: every input that controls acceptance
-  behavior MUST be included; adding new acceptance-relevant
-  config without updating the fingerprint is a governance
-  defect.
+The static fingerprint MUST include:
+
+- global Hermes config bytes
+- all aed-* profile config bytes
+- Hermes CLI/shim bytes
+- frozen supervisor/runtime source bytes
+- worker wrapper/result-contract runtime bytes
+- provider/control-plane configuration that affects
+  acceptance
+- security/tool restriction configuration
+- other truly immutable acceptance behavior inputs
+
+The run-binding MUST include:
+
+- current authoritative GitHub head
+- generation id
+- attempt id
+- result contract id
+- worker session identity where appropriate
+
+Dynamic head identity MUST NOT appear in the static hash.
 """
 from __future__ import annotations
 
@@ -35,59 +44,69 @@ import os
 from pathlib import Path
 
 
-# Canonical input list — order matters; this list defines the
-# canonical fingerprint contract. Adding a new acceptance-relevant
-# input requires updating this list AND regenerating the canonical
-# fingerprint under operator authority.
-_CANONICAL_INPUTS: list[tuple[str, Path | None]] = [
-    ("global_config", Path("/home/max/.hermes/config.yaml")),
-    (
-        "profile_aed_builder_config",
-        Path("/home/max/.hermes/profiles/aed-builder/config.yaml"),
-    ),
-    (
-        "profile_aed_reviewer_config",
-        Path("/home/max/.hermes/profiles/aed-reviewer/config.yaml"),
-    ),
-    (
-        "profile_aed_specifier_config",
-        Path("/home/max/.hermes/profiles/aed-specifier/config.yaml"),
-    ),
-    (
-        "profile_aed_researcher_config",
-        Path("/home/max/.hermes/profiles/aed-researcher/config.yaml"),
-    ),
-    (
-        "profile_aed_quarantine_config",
-        Path("/home/max/.hermes/profiles/aed-quarantine/config.yaml"),
-    ),
-    (
-        "supervisor_entrypoint",
-        Path("/home/max/.hermes/aed-supervisor/supervisor.py"),
-    ),
-    (
-        "hermes_cli_shim",
-        Path("/home/max/.hermes/hermes-agent/venv/bin/hermes"),
-    ),
-]
+# ---------------------------------------------------------------------------
+# Static environment inputs (immutable acceptance/control-plane)
+# ---------------------------------------------------------------------------
 
-# AED_* env vars that control acceptance behavior.
-_AED_ENV_VARS: tuple[str, ...] = (
-    "AED_PR_NUMBER",
-    "AED_PR_NUMBERS",
-    "AED_REPO_OWNER",
-    "AED_REPO_NAME",
+
+# Each entry is (label, Path). These paths are resolved from the
+# canonical locations; a missing path means the acceptance
+# environment is broken (fail closed).
+def _default_static_inputs() -> list[tuple[str, Path]]:
+    home = Path(os.environ.get("OPERATOR_HOME") or str(Path.home()))
+    return [
+        ("global_config", home / ".hermes/config.yaml"),
+        (
+            "profile_aed_builder_config",
+            home / ".hermes/profiles/aed-builder/config.yaml",
+        ),
+        (
+            "profile_aed_reviewer_config",
+            home / ".hermes/profiles/aed-reviewer/config.yaml",
+        ),
+        (
+            "profile_aed_specifier_config",
+            home / ".hermes/profiles/aed-specifier/config.yaml",
+        ),
+        (
+            "profile_aed_researcher_config",
+            home / ".hermes/profiles/aed-researcher/config.yaml",
+        ),
+        (
+            "profile_aed_quarantine_config",
+            home / ".hermes/profiles/aed-quarantine/config.yaml",
+        ),
+        # The frozen supervisor runtime binary. The static
+        # hash MUST change when this file changes. A new
+        # commit bumps the bytes; the operator is responsible
+        # for freezing the new bytes as the next 5/5
+        # environment fingerprint.
+        (
+            "supervisor_entrypoint",
+            home / ".hermes/aed-supervisor/supervisor.py",
+        ),
+        # Frozen Hermes CLI shim.
+        (
+            "hermes_cli_shim",
+            home / ".hermes/hermes-agent/venv/bin/hermes",
+        ),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Run-binding inputs (dynamic identities)
+# ---------------------------------------------------------------------------
+
+
+# Per-generation run binding. The supervisor passes these in
+# explicitly when invoking the helper.
+_RUN_BINDING_KEYS: tuple[str, ...] = (
     "AED_AUTHORITATIVE_HEAD",
-    "AED_HEARTBEAT_SECONDS",
+    "AED_PR_NUMBER",
     "AED_SESSION_ID",
-    "AED_SESSION_NAME",
-    "AED_HERMES_BIN",
-    "AED_SUPERVISOR_HOME",
-    "AED_SUPERVISOR_STATE_DIR",
-    "AED_SUPERVISOR_LOG_PATH",
-    "AED_SUPERVISOR_HEARTBEAT_PATH",
-    "AED_SUPERVISOR_LOCK_PATH",
-    "AED_SUPERVISOR_WORKING_CHECKOUT",
+    "AED_GENERATION_ID",
+    "AED_ATTEMPT_ID",
+    "AED_RESULT_CONTRACT_ID",
 )
 
 
@@ -97,18 +116,20 @@ def _sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
-def compute_hermes_acceptance_fingerprint() -> dict:
-    """Recompute the canonical Hermes acceptance fingerprint.
+def compute_static_hermes_environment_fingerprint(
+    *, inputs: list[tuple[str, Path]] | None = None,
+) -> dict:
+    """Recompute the static environment fingerprint.
 
-    Returns a dict with these keys:
-      - ``inputs``: ordered list of (label, path, sha256_or_text)
-      - ``fingerprint``: the SHA-256 of the canonical concatenation
-      - ``missing``: list of inputs whose file is missing
+    The static fingerprint is over immutable acceptance
+    inputs only. A missing input MUST fail closed.
     """
-    parts: list[tuple[str, str, str]] = []
-    missing: list[str] = []
-    for label, path in _CANONICAL_INPUTS:
-        if path is None:
+    parts = inputs if inputs is not None else _default_static_inputs()
+    h = hashlib.sha256()
+    missing = []
+    for label, path in parts:
+        if not isinstance(path, Path):
+            missing.append(f"{label}: not a Path")
             continue
         if not path.exists():
             missing.append(f"{label}:{path}")
@@ -118,37 +139,77 @@ def compute_hermes_acceptance_fingerprint() -> dict:
         except OSError as e:
             missing.append(f"{label}:{path}:{e}")
             continue
-        parts.append((label, str(path), sha))
-    # Env vars (text, not bytes — they must be deterministic
-    # for the fingerprint to be reproducible).
-    env_parts: list[tuple[str, str, str]] = []
-    for var in _AED_ENV_VARS:
-        val = os.environ.get(var, "")
-        env_parts.append((f"env:{var}", var, val))
-    # Canonical concatenation: ordered, newline-separated.
-    h = hashlib.sha256()
-    for label, path, sha in parts:
         h.update(f"file\t{label}\t{path}\t{sha}\n".encode("utf-8"))
-    for label, var, val in sorted(env_parts):
-        h.update(f"env\t{label}\t{val}\n".encode("utf-8"))
+    if missing:
+        # Fail closed: the acceptance environment is
+        # incomplete. The static fingerprint cannot be
+        # computed.
+        raise RuntimeError(
+            "static acceptance environment fingerprint "
+            "missing inputs: " + "; ".join(missing)
+        )
     return {
-        "inputs": parts + env_parts,
+        "inputs": list(parts),
         "fingerprint": h.hexdigest(),
-        "missing": missing,
     }
 
 
-# The previous canonical fingerprint known to the operator.
-# Operators may set this via env or rely on the literal.
+def compute_run_binding_digest(
+    *, binding: dict | None = None,
+) -> dict:
+    """Recompute the run-binding digest over dynamic identities.
+
+    The binding may be passed explicitly (production) or read
+    from environment variables (CI convenience).
+    """
+    if binding is None:
+        binding = {k: os.environ.get(k, "") for k in _RUN_BINDING_KEYS}
+    h = hashlib.sha256()
+    keys = sorted(binding.keys())
+    for k in keys:
+        h.update(f"binding\t{k}\t{binding[k]}\n".encode("utf-8"))
+    return {
+        "binding": binding,
+        "digest": h.hexdigest(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Deprecated: compute_hermes_acceptance_fingerprint
+#
+# Kept for backward compatibility. New code should call
+# compute_static_hermes_environment_fingerprint instead.
+# ---------------------------------------------------------------------------
+
+
+def _suppressed_legacy_static_inputs() -> list[tuple[str, Path]]:
+    """The legacy fingerprint incorrectly included
+    AED_AUTHORITATIVE_HEAD in the static hash. This list is the
+    legacy shape; the new static-only helper above does NOT
+    include it.
+    """
+    inputs = _default_static_inputs()
+    return inputs
+
+
+# Previous canonical Hermes fingerprint recorded before the
+# static/dynamic split. This was over the old shape that
+# included AED_AUTHORITATIVE_HEAD.
 PREVIOUS_CANONICAL_HERMES_FINGERPRINT = os.environ.get(
     "PREVIOUS_HERMES_FINGERPRINT",
     "1f0ce69102f4412e3236fc85151cbec8d23ae43e51b4bec4175bbe712f52c38b",
 )
 
 
+# A 16-hex token used by tests to scope monkeypatched input
+# lists without colliding with production state.
+_TEST_TOKEN = "01J0E6XR9X0F4QZ8Y2V5K3M7NS"
+
+
 __all__ = [
-    "compute_hermes_acceptance_fingerprint",
+    "compute_static_hermes_environment_fingerprint",
+    "compute_run_binding_digest",
     "PREVIOUS_CANONICAL_HERMES_FINGERPRINT",
-    "_CANONICAL_INPUTS",
-    "_AED_ENV_VARS",
+    "_RUN_BINDING_KEYS",
+    "_TEST_TOKEN",
 ]
