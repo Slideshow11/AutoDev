@@ -1184,45 +1184,36 @@
       "path": "tests/test_round281_closure6_relational.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 1,
-      "line": 319,
+      "line": 338,
       "line_sha256": "761abd3911f8a7c4001b43f55f9042996432fe8410f9b2944354350c895e84fb",
-      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 319; encoding=utf-8"
+      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 338; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
       "path": "tests/test_round281_closure7_trust_root.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 1,
-      "line": 350,
+      "line": 372,
       "line_sha256": "47df0462f2f444e721b124ec3ee8291e466c3abe5809a18ec07d194d3f6c9651",
-      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 350; encoding=utf-8"
+      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 372; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
       "path": "tests/test_round281_closure7_trust_root.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 2,
-      "line": 638,
-      "line_sha256": "2cbd3c254a581e33b97b62c039f6e755d95b073dc41772dfa08154c85add43f1",
-      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 638; encoding=utf-8"
+      "line": 713,
+      "line_sha256": "25a115884448a9d8783940cb9031880703cee00dd014494dbae8492ea44da35c",
+      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 713; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
       "path": "tests/test_round281_closure7_trust_root.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 3,
-      "line": 685,
-      "line_sha256": "25a115884448a9d8783940cb9031880703cee00dd014494dbae8492ea44da35c",
-      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 685; encoding=utf-8"
-    },
-    {
-      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
-      "path": "tests/test_round281_closure7_trust_root.py",
-      "token_id": "tok_3b122b9d4638",
-      "ordinal": 4,
-      "line": 707,
+      "line": 735,
       "line_sha256": "8bb8bb51176c5764785d231fb1c65239c6f61bee9b37ad981f8464db7796e11b",
-      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 707; encoding=utf-8"
+      "purpose": "Pre-canary closure-VII: legitimate reference to '/home/' in committed text; line 735; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
