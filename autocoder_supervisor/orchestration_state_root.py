@@ -262,22 +262,51 @@ def _verify_orchestration_state_root(
             # ``repo_owner`` alone, ``repo_name`` alone, or
             # ``repo`` combined. The resolver accepts ANY
             # of these — combined, owner-only, or name-only.
-            got_raw = parsed.get("repo_owner") or ""
+            #
+            # Round-275 P1#3: both the ``repo_owner`` AND the
+            # ``repo_name`` components MUST match when the
+            # expected value is ``owner/name``. Accepting
+            # either component alone lets a candidate run for
+            # a same-owner-different-name repository (or a
+            # same-name-different-owner repository) bind to a
+            # run authorized for a different PR. The cross-
+            # binding guard now requires both components to
+            # match whenever both are present in the candidate
+            # context; a missing ``repo_owner`` OR
+            # ``repo_name`` falls back to the combined-field
+            # match only when both are absent.
+            got_owner = parsed.get("repo_owner") or ""
+            got_name = parsed.get("repo_name") or ""
             got_combined = parsed.get("repo") or ""
             exp_owner, _, exp_name = expected_repo.partition("/")
-            matches = (
-                got_raw == expected_repo
-                or got_raw == f"{exp_owner}/{exp_name}"
-                or got_combined == expected_repo
-                or (exp_owner and exp_name and (
-                    got_raw == exp_owner
-                    or got_raw == exp_name
-                ))
-            )
+            # When the candidate has BOTH owner and name fields
+            # populated, both MUST independently match. Otherwise
+            # a candidate context for a same-owner different-
+            # name repo (or vice versa) would falsely satisfy
+            # the guard.
+            if exp_owner and exp_name and got_owner and got_name:
+                matches = (
+                    got_owner == exp_owner
+                    and got_name == exp_name
+                )
+            else:
+                # Fall back to the legacy combined/owner/name
+                # tolerant match when either component is
+                # missing from the candidate context. This
+                # preserves back-compat with run_context.json
+                # documents that only carry the combined
+                # ``repo`` field or a single component.
+                matches = (
+                    got_combined == expected_repo
+                    or got_combined == f"{exp_owner}/{exp_name}"
+                    or got_owner == expected_repo
+                    or got_owner == f"{exp_owner}/{exp_name}"
+                )
             if not matches:
                 raise OrchestrationRootUnverified(
                     f"orchestration run_context.json at {rc_path} "
-                    f"identifies repo_owner={got_raw!r}, "
+                    f"identifies repo_owner={got_owner!r}, "
+                    f"repo_name={got_name!r}, "
                     f"repo={got_combined!r}; expected "
                     f"repo={expected_repo!r}; source={source}. "
                     f"Refusing to bind to a stale run."

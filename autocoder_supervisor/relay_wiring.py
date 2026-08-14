@@ -511,7 +511,6 @@ def mark_head_advanced_public(
     from autocoder_orchestration.worker_attempt import (
         LIFECYCLE_PUSH_VERIFIED,
         LIFECYCLE_TERMINAL_REPAIRED,
-        default_store,
     )
     from .orchestration_state_root import (
         resolve_orchestration_state_root,
@@ -549,11 +548,37 @@ def mark_head_advanced_public(
     # We import the helper from the supervisor module so the
     # path is computed identically to the one the
     # launch/poll/finalize paths use.
+    #
+    # Round-275 P2#7 (Data Integrity): when the supervisor's
+    # canonical store cannot be constructed (helper raises,
+    # supervisor module missing, etc.) we MUST fail closed.
+    # The previous behaviour fell through to ``default_store()``
+    # which uses a different root and reintroduces the
+    # cross-root provenance failure this change was meant to
+    # remove. The provenance check is now mandatory: any
+    # failure to bind the canonical store returns ``False``
+    # so the supervisor's heartbeat loop stops bouncing a
+    # head advance through a divergent store root.
     try:
         from .supervisor import _worker_attempt_store
         store = _worker_attempt_store()
-    except Exception:
-        store = default_store()
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: canonical worker_attempt_store "
+                "unavailable; refusing to fall back to default_store() to "
+                "preserve cross-root provenance",
+                attempt_id=attempt_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
     attempt = store.read(attempt_id)
     if attempt is None:
         try:
@@ -701,7 +726,36 @@ def mark_head_advanced_public(
         except ImportError:
             pass
         return False
-    loop.mark_head_advanced(old_head_sha, new_head_sha)
+    # Round-275 P2#6 (Stability): ``loop.mark_head_advanced``
+    # may raise a typed ``ControllerError`` or any
+    # downstream exception when the state-store write
+    # fails, when the rebind sequence raises, or when the
+    # underlying controller refactor breaks the contract.
+    # The supervisor's caller (the heartbeat loop) treats
+    # this helper as best-effort — an unhandled exception
+    # propagates out of the supervisor's heart-beat
+    # machinery and kills the entire loop. We log the
+    # failure and return ``False`` so the supervisor can
+    # continue polling; the next round re-attempts the
+    # transition from the durable state.
+    try:
+        loop.mark_head_advanced(old_head_sha, new_head_sha)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            from .supervisor import log
+            log(
+                "error",
+                "mark_head_advanced_public: loop.mark_head_advanced "
+                "raised; supervisor continues polling",
+                attempt_id=attempt_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+                old_head=old_head_sha[:12] if old_head_sha else "",
+                new_head=new_head_sha[:12],
+            )
+        except ImportError:
+            pass
+        return False
     # On success, mark the attempt TERMINAL_REPAIRED so it is
     # never re-acknowledged (idempotent).
     try:

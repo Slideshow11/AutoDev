@@ -364,6 +364,62 @@ class MergeAuthorization:
 SUPPORTED_MERGE_RECORD_SCHEMAS = ("autocoder.merge_record.v2",)
 
 
+# Round-275 P1#2: canonical mapping from ``gh pr checks``
+# plain-text status buckets (lowercase: ``pass``, ``fail``,
+# ``pending``, ``skipping``, ``cancelled``, ...) to the
+# merge-gate taxonomy (``SUCCESS`` / ``FAILURE`` / ``PENDING``
+# / ``MISSING``). The gate compares against ``SUCCESS``
+# exclusively; ``FAILURE`` / ``PENDING`` / ``MISSING`` all
+# fail closed. Anything unrecognised maps to ``MISSING``
+# so the gate rejects rather than accepts on bucket drift.
+_GH_CHECK_BUCKET_NORMALIZATION = {
+    "pass": "SUCCESS",
+    "passing": "SUCCESS",
+    "success": "SUCCESS",
+    "succeeded": "SUCCESS",
+    "fail": "FAILURE",
+    "failed": "FAILURE",
+    "failure": "FAILURE",
+    "error": "FAILURE",
+    "errored": "FAILURE",
+    "pending": "PENDING",
+    "queued": "PENDING",
+    "requested": "PENDING",
+    "waiting": "PENDING",
+    "in_progress": "PENDING",
+    "running": "PENDING",
+    "skipped": "PENDING",
+    "skipping": "PENDING",
+    "cancelled": "PENDING",
+    "canceled": "PENDING",
+    "neutral": "PENDING",
+    "stale": "PENDING",
+}
+
+
+def _normalize_gh_check_bucket(raw: str) -> str:
+    """Return the canonical ``gh pr checks`` bucket.
+
+    The installed ``gh`` 2.96.0 ``gh pr checks`` plain-text
+    output emits lowercase bucket values (``pass``,
+    ``fail``, ``pending``, ``skipping``, ``cancelled``,
+    ...). The merge gate compares against the uppercase
+    ``SUCCESS`` taxonomy. Round-275 P1#2 wires this
+    normalization so a passing check round-trips to
+    ``SUCCESS`` and the gate accepts it.
+
+    Unknown buckets map to ``MISSING`` so the gate fails
+    closed rather than accepting a bucket value the gate
+    cannot recognise.
+    """
+    if not isinstance(raw, str):
+        return "MISSING"
+    bucket = raw.strip().lower()
+    if not bucket:
+        return "MISSING"
+    return _GH_CHECK_BUCKET_NORMALIZATION.get(bucket, "MISSING")
+
+
 @dataclass
 class MergeRecord:
     """Post-merge evidence record written by the merge executor."""
@@ -779,15 +835,26 @@ def fetch_live_required_ci(
         # ``<name>\t<state>\t<...>``. The columns are
         # implementation-defined; we use a tolerant parser
         # that extracts the first two tab-separated fields.
+        #
+        # Round-275 P1#2: the installed ``gh`` 2.96.0 emits
+        # status buckets such as ``pass``, ``fail``,
+        # ``pending``, ``skipping``, ``cancelled`` (lowercase
+        # ``gh pr checks`` plain-text output). The earlier
+        # ``.upper()`` produced ``PASS``/``FAIL``/``PENDING``,
+        # which the merge gate then rejected as not
+        # ``SUCCESS``. Normalize the bucket values to the
+        # canonical ``SUCCESS``/``FAILURE``/``PENDING``/
+        # ``MISSING`` taxonomy the gate expects.
         parsed: Dict[str, Dict[str, Any]] = {}
         for line in text.splitlines():
             parts = line.split("\t")
             if len(parts) < 2:
                 continue
             name = parts[0].strip()
-            state = parts[1].strip().upper()
+            raw_state = parts[1].strip().lower()
             if not name:
                 continue
+            state = _normalize_gh_check_bucket(raw_state)
             parsed[name] = {"state": state, "head_sha": ""}
         # Round-27: enumerate the configured required checks.
         # A missing required check is recorded as MISSING so

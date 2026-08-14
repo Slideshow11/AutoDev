@@ -342,6 +342,108 @@ def _reconcile_authoritative_head_at_boot() -> str:
     return globals().get("AUTHORITATIVE_HEAD", "")
 
 
+def _reconcile_orchestration_state_root_at_boot() -> str:
+    """Round-275 P1#1: wire ``persist_orchestration_state_root``
+    into the supervisor boot path.
+
+    The orchestration root resolver
+    (``resolve_orchestration_state_root``) fails closed when
+    neither ``AED_ORCHESTRATION_STATE_ROOT`` nor
+    ``RUN_STATE['orchestration_state_root']`` yields a
+    positive root. ``persist_orchestration_state_root`` is
+    the canonical write path the resolver's contract
+    expects, but until this round no production caller
+    invoked it. As a result, every fresh deployment landed
+    in ``OrchestrationRootMissing`` because the handoff
+    never persisted the orch root into RUN_STATE.
+
+    The supervisor's boot path is the SINGLE natural
+    handoff point: the supervisor reads
+    ``AED_ORCHESTRATION_STATE_ROOT`` (the operator's
+    explicit override) at process start, then either:
+
+      (a) takes the env-var path verbatim (no write needed),
+      (b) reads ``RUN_STATE['orchestration_state_root']``
+          (already persisted by an earlier supervisor
+          lifetime — no write needed), or
+      (c) discovers no recorded root and the env var is set
+          — the supervisor MUST persist the env-var value
+          into RUN_STATE so subsequent boots and the relay
+          subprocess see the same canonical binding.
+
+    Returns the resolved state-root string (empty when the
+    resolver fails closed; the caller treats empty as
+    "no orch state root at boot", which is the same
+    behaviour as before this round).
+    """
+    from .orchestration_state_root import (
+        OrchestrationRootError,
+        persist_orchestration_state_root,
+        resolve_orchestration_state_root,
+    )
+    # (b) already persisted? Then the resolver returns it
+    # without touching the disk and the supervisor stays
+    # in steady-state. We do NOT need to call persist
+    # here.
+    try:
+        existing = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+        if existing:
+            return existing
+    except OrchestrationRootError:
+        # (c) no recorded root AND the env var is unset.
+        # Nothing to persist yet — defer until the operator
+        # sets ``AED_ORCHESTRATION_STATE_ROOT`` explicitly.
+        pass
+    # (c) env var is set but the supervisor hasn't
+    # recorded it yet. Persist the env-var value into
+    # RUN_STATE so subsequent boots and the relay
+    # subprocess see the same canonical binding.
+    env_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    if not env_root:
+        return ""
+    try:
+        persist_orchestration_state_root(
+            state_root=str(env_root),
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
+            repo_name=str(REPO_NAME),  # type: ignore[name-defined]
+            run_id=str(
+                globals().get("RUN_ID")  # type: ignore[name-defined]
+                or f"PR-{PR_NUMBER}"  # type: ignore[name-defined]
+            ),
+            pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+        log(
+            "info",
+            "round-275 wired orchestration_state_root into RUN_STATE "
+            "from AED_ORCHESTRATION_STATE_ROOT",
+            state_root=env_root,
+        )
+        return str(env_root)
+    except OrchestrationRootError as exc:
+        log(
+            "warning",
+            "round-275 persist_orchestration_state_root failed; "
+            "supervisor continues with in-memory state_root",
+            state_root=env_root,
+            error=str(exc),
+        )
+        return ""
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-275 persist_orchestration_state_root raised "
+            "unexpected exception",
+            state_root=env_root,
+            error=str(exc)[:200],
+        )
+        return ""
+
+
 def _default_policy(cfg: SupervisorConfig) -> dict[str, Any]:
     return {
         "human_boundary": cfg.human_boundary,
@@ -12383,6 +12485,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     # lifetime, BEFORE the heartbeat loop, so the rest of
     # the supervisor sees a single, reconciled value.
     _reconcile_authoritative_head_at_boot()
+    # Round-275 P1#1: persist the orchestration state root
+    # into RUN_STATE so the relay subprocess and subsequent
+    # boots see the same canonical binding. The handoff
+    # writes only when ``AED_ORCHESTRATION_STATE_ROOT`` is
+    # set; a missing env var leaves RUN_STATE untouched and
+    # the resolver fails closed exactly as before.
+    _reconcile_orchestration_state_root_at_boot()
 
     log(
         "info",
