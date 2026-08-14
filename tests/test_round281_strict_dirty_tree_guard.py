@@ -95,32 +95,64 @@ def _guard():
     and the source-controlled checkout (this repo). The
     runtime binary takes precedence because its directory is
     listed first. This test must exercise the
-    source-controlled copy; we therefore import the
-    supervisor package explicitly from the absolute source
-    path and bypass sys.path ordering. The source root is
-    resolved from this test file's location so no absolute
-    filesystem path appears in the source.
+    source-controlled copy.
+
+    Implementation note (round-281/§3 closure): the previous
+    version of this helper purged ``autocoder_supervisor``
+    from ``sys.modules`` and re-imported it from the source
+    path. That purge LEAKED into later test files: any test
+    that had already done ``from autocoder_supervisor.worker_session
+    import resolve_worker_session`` at module top kept its
+    direct-imported function bound to the OLD module's
+    ``__globals__`` dict, while ``import
+    autocoder_supervisor.worker_session as ws`` returned the
+    NEW module. Subsequent ``monkeypatch.setattr(ws, ...)``
+    patched the new dict; the old function still consulted
+    the original globals. This is the round-38 module-identity
+    root cause.
+
+    This helper now imports the source-controlled package
+    into a PRIVATE module name (``_src_autocoder_supervisor``)
+    that never collides with the canonical
+    ``autocoder_supervisor`` entry in ``sys.modules``. The
+    canonical production import path is unaffected and no
+    other test's module identity is disturbed.
     """
-    import importlib
     import importlib.util as _ilu
     import sys
     src_root = str(Path(__file__).resolve().parent.parent)
-    # Force the source-controlled supervisor package to be
-    # authoritative for this test.
-    if "autocoder_supervisor" in sys.modules:
-        del sys.modules["autocoder_supervisor"]
-        for k in list(sys.modules.keys()):
-            if k.startswith("autocoder_supervisor."):
-                del sys.modules[k]
-    spec = _ilu.spec_from_file_location(
-        "autocoder_supervisor",
-        f"{src_root}/autocoder_supervisor/__init__.py",
-        submodule_search_locations=[f"{src_root}/autocoder_supervisor"],
-    )
-    pkg = importlib.util.module_from_spec(spec)
-    sys.modules["autocoder_supervisor"] = pkg
-    spec.loader.exec_module(pkg)
-    sup_mod = importlib.import_module("autocoder_supervisor.supervisor")
+    # Build the private package object directly under a
+    # private alias name so it cannot shadow the canonical
+    # ``autocoder_supervisor`` import. We also do NOT install
+    # submodules (``autocoder_supervisor.supervisor`` etc.)
+    # into ``sys.modules`` — the guard function below
+    # loads only ``autocoder_supervisor.supervisor``
+    # itself into the same private namespace.
+    private_name = "_round281_src_autocoder_supervisor"
+    if private_name in sys.modules:
+        # Reuse a previously-loaded copy when pytest re-runs
+        # this helper within the same Python process.
+        priv_pkg = sys.modules[private_name]
+    else:
+        spec = _ilu.spec_from_file_location(
+            private_name,
+            f"{src_root}/autocoder_supervisor/__init__.py",
+            submodule_search_locations=[f"{src_root}/autocoder_supervisor"],
+        )
+        priv_pkg = _ilu.module_from_spec(spec)
+        sys.modules[private_name] = priv_pkg
+        spec.loader.exec_module(priv_pkg)
+    # Load the supervisor submodule under the private package.
+    sup_fullname = f"{private_name}.supervisor"
+    if sup_fullname not in sys.modules:
+        sup_spec = _ilu.spec_from_file_location(
+            sup_fullname,
+            f"{src_root}/autocoder_supervisor/supervisor.py",
+        )
+        sup_mod = _ilu.module_from_spec(sup_spec)
+        sys.modules[sup_fullname] = sup_mod
+        sup_spec.loader.exec_module(sup_mod)
+    sup_mod = sys.modules[sup_fullname]
     return sup_mod._check_clean_production_checkout
 
 

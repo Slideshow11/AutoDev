@@ -174,4 +174,21 @@ __all__ = [
     "is_manifest_stale",
     "regenerate_manifest",
     "validate_manifest",
+    "_PROVENANCE_MANIFEST_PATH",
+    "_PROVENANCE_MANIFEST_PATH_AED",
 ]
+
+
+# Canonical provenance manifests the supervisor tracks. Both files
+# are tracked in git and validated by the ``provenance`` CI job. The
+# supervisor consults these on every REPAIR_PUSHED.
+_PROVENANCE_MANIFEST_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "provenance"
+    / "AUTOCODER_SOURCE_COMPLETENESS.json"
+)
+_PROVENANCE_MANIFEST_PATH_AED = (
+    Path(__file__).resolve().parent.parent
+    / "provenance"
+    / "aed-pr417-source-manifest.json"
+)
