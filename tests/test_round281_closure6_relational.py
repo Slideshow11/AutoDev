@@ -19,6 +19,49 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
+
+@pytest.fixture(autouse=True)
+def _stub_github_api_v6(monkeypatch):
+    """Stub the GitHub API calls in hermes_fingerprint so
+    tests do NOT hit the real API (rate-limited)."""
+    from autocoder_supervisor import hermes_fingerprint as hf
+
+    def _stub_live(repo, pr_number):
+        body = {
+            "head": {
+                "sha": "cd15d30cf65552aa3613157a3289c4d830a611f3",
+                "ref": "feat/review-repair-relay-v1",
+                "repo": {"full_name": "Slideshow11/AutoDev"},
+            },
+            "number": 5,
+            "state": "open",
+            "merged": False,
+            "merged_at": None,
+        }
+        return body["head"]["sha"], body
+
+    def _stub_workflow(repo, head):
+        return [{
+            "name": "test (3.10)", "conclusion": "success", "status": "completed",
+        }, {
+            "name": "test (3.11)", "conclusion": "success", "status": "completed",
+        }, {
+            "name": "test (3.12)", "conclusion": "success", "status": "completed",
+        }, {
+            "name": "package-smoke", "conclusion": "success", "status": "completed",
+        }, {
+            "name": "committed-state-scan", "conclusion": "success", "status": "completed",
+        }, {
+            "name": "provenance", "conclusion": "success", "status": "completed",
+        }, {
+            "name": "full-suite", "conclusion": "success", "status": "completed",
+        }]
+
+    monkeypatch.setattr(hf, "_read_live_github_head", _stub_live)
+    monkeypatch.setattr(hf, "_read_workflow_runs", _stub_workflow)
+    yield
+
+
 class TestRunBindingRelationalOwnership:
     """Closure VI §1: validate_run_binding_relations now
     accepts ONLY a set of 4-tuples (head, generation, attempt,
@@ -149,6 +192,10 @@ class TestRunBindingRelationalOwnership:
             validate_run_binding_relations,
         )
         records = [{
+            # Closure VII §4: prelaunch_head is the binding
+            # head. produced/pushed are output provenance and
+            # MUST NOT be substituted for the launch head.
+            "prelaunch_head": "a" * 40,
             "pushed_commit_sha": "a" * 40,
             "generated_commit_sha": "a" * 40,
             "produced_commit_sha": "a" * 40,

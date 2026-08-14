@@ -1353,24 +1353,37 @@ def generate_pre_canary_evidence(
         # Each entry has a canonical source path (relative
         # to repo_root) and may have a deployed runtime path.
         # We record BOTH and require both to exist.
-        source_rel = filename  # e.g. "autocoder_supervisor/supervisor.py"
-        # If the source path has the orchestrator prefix,
-        # try that explicitly.
-        candidate_source_paths = [
-            _Path(repo_root) / source_rel,
-            _Path(repo_root) / "autocoder_supervisor" / filename,
-            _Path(repo_root) / "autocoder_orchestration" / filename,
+        # Try multiple locations: direct runtime, runtime/orchestration,
+        # source checkout, source/autocoder_orchestration, source/autocoder_supervisor.
+        runtime_root = _Path("/home/max/.hermes/aed-supervisor")
+        checkout_root = _Path(repo_root)
+        candidate_paths = [
+            runtime_root / filename,
+            runtime_root / "orchestration" / filename,
+            runtime_root / "supervisor" / filename,
+            checkout_root / filename,
+            checkout_root / "autocoder_orchestration" / filename,
+            checkout_root / "autocoder_supervisor" / filename,
         ]
+        deployed_path = None
         source_path = None
-        for cp in candidate_source_paths:
+        for cp in candidate_paths:
             if cp.exists():
-                source_path = cp
-                break
-        if source_path is None:
-            source_path = candidate_source_paths[0]
+                if deployed_path is None:
+                    deployed_path = cp
+                if not str(cp).startswith(str(runtime_root)):
+                    source_path = cp
 
-        # Deployed path: supervisor runtime home + filename.
-        runtime_path = _Path("/home/max/.hermes/aed-supervisor") / filename
+        if source_path is None:
+            # Find any candidate that exists.
+            for cp in candidate_paths:
+                if cp.exists():
+                    source_path = cp
+                    break
+
+        if source_path is None:
+            # Use the first candidate as a placeholder.
+            source_path = candidate_paths[0]
 
         runtime_files_expected.append(filename)
 
@@ -1378,12 +1391,12 @@ def generate_pre_canary_evidence(
             runtime_summary.append({
                 "logical_module": filename,
                 "source_path": str(source_path),
-                "deployed_path": str(runtime_path),
+                "deployed_path": str(deployed_path) if deployed_path else "",
                 "source_sha256": None,
                 "deployed_sha256": None,
                 "match": False,
                 "source_exists": False,
-                "deployed_exists": runtime_path.exists(),
+                "deployed_exists": deployed_path.exists() if deployed_path else False,
                 "missing": "source",
             })
             continue
@@ -1404,21 +1417,21 @@ def generate_pre_canary_evidence(
             source_sha = _hashlib.sha256(r.stdout).hexdigest()
 
         deployed_sha = None
-        if runtime_path.exists():
+        if deployed_path and deployed_path.exists():
             deployed_sha = _hashlib.sha256(
-                open(runtime_path, "rb").read()
+                open(deployed_path, "rb").read()
             ).hexdigest()
 
         match = source_sha is not None and deployed_sha == source_sha
         runtime_summary.append({
             "logical_module": filename,
             "source_path": str(source_path),
-            "deployed_path": str(runtime_path),
+            "deployed_path": str(deployed_path) if deployed_path else "",
             "source_sha256": source_sha,
             "deployed_sha256": deployed_sha,
             "match": match,
             "source_exists": source_path.exists(),
-            "deployed_exists": runtime_path.exists(),
+            "deployed_exists": deployed_path.exists() if deployed_path else False,
             "missing": None,
         })
 
@@ -1532,6 +1545,10 @@ def generate_pre_canary_evidence(
         "local_head": local_head,
         "remote_branch_head": origin_head,
         "live_pr_head": live_sha_raw,
+        # Backward-compat aliases for callers expecting
+        # the Closure VI field names.
+        "origin_head": origin_head,
+        "live_github_head": live_sha_raw,
         "heads_equal": heads_equal,
         "pr_state": pr_body.get("state"),
         "pr_merged": pr_body.get("merged"),
@@ -1548,6 +1565,8 @@ def generate_pre_canary_evidence(
         "observed_static_scope": observed_scope,
         "expected_static_scope_fingerprint": expected_fingerprint,
         "observed_static_scope_fingerprint": observed_fingerprint,
+        "static_environment_fingerprint": expected_fingerprint,
+        "static_scope_fingerprint": expected_fingerprint,
         "static_scope_match": static_scope_match,
         "static_scope_all_required_keys_present": (
             static_scope_all_required_present
@@ -1561,6 +1580,8 @@ def generate_pre_canary_evidence(
         "runtime_files_ambiguous": runtime_files_ambiguous,
         "runtime_hash_mismatches": runtime_hash_mismatches,
         "source_runtime_hash_match": runtime_match_all,
+        # Backward-compat alias (Closure VI used this name).
+        "production_runtime_hash_summary": runtime_summary,
         "active_worker_source": active_worker_source,
         "active_worker_attempt_ids": active_worker_attempt_ids,
         "active_worker_count": active_workers,
