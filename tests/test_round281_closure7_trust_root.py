@@ -657,7 +657,13 @@ class TestCodexSchedulerCanonicalWorkers:
         # launched_event_ids() to compute active workers.
         # Read the source to assert the codex call site uses
         # canonical_active_worker_attempt_count().
-        src = open("/home/max/AutoDev/autocoder_supervisor/supervisor.py").read()
+        # Use repo-relative path so this works in any checkout.
+        from pathlib import Path as _Path
+        supervisor_path = (
+            _Path(__file__).resolve().parent.parent
+            / "autocoder_supervisor" / "supervisor.py"
+        )
+        src = open(supervisor_path).read()
         # The Codex call site is the LAST occurrence of
         # schedule_codex_request_on_stable_head( (the call,
         # not the function def).
