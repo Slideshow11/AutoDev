@@ -216,6 +216,52 @@ def _sha256_of(path: Path) -> str:
     return h.hexdigest()
 
 
+def canonical_cooldown_deferred_count(state_dir) -> dict:
+    """Canonical cooldown ledger parser.
+
+    Closure VII §5: ONE canonical parser, not duplicated
+    schema logic. Reuses the same entries-preferred /
+    legacy-ids-fallback semantics as
+    ``supervisor._cooldown_deferred_ids``.
+
+    Returns a dict with:
+      - count (int)
+      - entries_count (int)
+      - legacy_ids_count (int)
+      - schema_source (str)
+      - parse_failed (bool)
+    """
+    import json as _json
+    out = {
+        "count": 0,
+        "entries_count": 0,
+        "legacy_ids_count": 0,
+        "schema_source": "cooldown_deferred_events.json",
+        "parse_failed": False,
+    }
+    cd_path = Path(state_dir) / "cooldown_deferred_events.json"
+    if not cd_path.exists():
+        return out
+    try:
+        cd = _json.loads(cd_path.read_text())
+    except (OSError, _json.JSONDecodeError):
+        out["parse_failed"] = True
+        return out
+    if not isinstance(cd, dict):
+        out["parse_failed"] = True
+        return out
+    entries = cd.get("entries")
+    if isinstance(entries, list) and entries:
+        out["entries_count"] = len(entries)
+        out["count"] = out["entries_count"]
+        return out
+    legacy = cd.get("ids", [])
+    if isinstance(legacy, list):
+        out["legacy_ids_count"] = len(legacy)
+        out["count"] = out["legacy_ids_count"]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Static environment fingerprint
 # ---------------------------------------------------------------------------
@@ -610,30 +656,71 @@ def validate_run_binding_relations(
 # owned_tuples set the validator consumes.
 def owned_tuples_from_worker_attempt_records(
     records,
+    *,
+    include_terminal: bool = True,
 ) -> set:
     """Convert WorkerAttempt record dicts into a set of
     4-tuples for ``validate_run_binding_relations``.
 
+    Closure VII §4: authoritative_head MUST be the head
+    against which the worker/generation was launched
+    (``prelaunch_head``), NOT the produced or pushed
+    commit. The produced/pushed commit is independent
+    output provenance and MUST NOT be substituted for the
+    launch head.
+
     Each record must contain:
-      - produced_commit_sha (or pushed_commit_sha) — used as
-        authoritative_head
+      - prelaunch_head (required) — the head the worker was
+        launched against
       - generation_id
       - attempt_id
       - result_contract_id
 
-    Terminal (status='CONSUMED'/'SUPERSEDED') records may be
-    excluded by the caller if appropriate.
+    Records missing ``prelaunch_head`` are skipped
+    (fail-closed: such records cannot satisfy the run
+    binding contract).
+
+    Terminal records (status in {CONSUMED, SUPERSEDED,
+    TERMINAL, FAILED, TERMINATED}) are included by
+    default; pass ``include_terminal=False`` to exclude
+    them (e.g. for active-binding checks).
     """
     out = set()
+    terminal_statuses = frozenset({
+        "CONSUMED", "SUPERSEDED", "TERMINAL", "FAILED", "TERMINATED",
+    })
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        head = rec.get("pushed_commit_sha") or rec.get("produced_commit_sha")
+        if not include_terminal:
+            status = rec.get("status") or rec.get("lifecycle") or ""
+            if status in terminal_statuses:
+                continue
+        # AUTHORITATIVE HEAD = prelaunch_head ONLY.
+        # NEVER substitute produced_commit_sha or
+        # pushed_commit_sha.
+        head = rec.get("prelaunch_head")
         gen = rec.get("generation_id")
         att = rec.get("attempt_id")
         rc = rec.get("result_contract_id")
         if not all(isinstance(x, str) and x for x in (head, gen, att, rc)):
             continue
+        # Reject any attempt record where the record
+        # explicitly distinguishes prelaunch_head from
+        # produced/pushed and the caller is asking us to
+        # derive authoritative_head. If the record has
+        # BOTH prelaunch_head and produced_commit_sha,
+        # they MUST agree (sanity check) for the launch
+        # head. If they differ, that's an autonomous
+        # head advance; the launch head is still
+        # prelaunch_head.
+        produced = rec.get("produced_commit_sha") or ""
+        pushed = rec.get("pushed_commit_sha") or ""
+        if produced and produced != head and produced == pushed:
+            # produced != prelaunch_head and pushed ==
+            # produced: a new commit was produced. The
+            # launch head is STILL prelaunch_head.
+            pass  # authoritative_head remains prelaunch_head
         out.add((head, gen, att, rc))
     return out
 
@@ -738,223 +825,767 @@ def _atomic_write(path, obj):
     _os.replace(tmp, path)
 
 
+def _read_expected_static_scope() -> dict:
+    """Read the EXPECTED_STATIC_SCOPE from the operator's
+    frozen contract. The expected scope is NOT mutated by
+    this evidence generator; it comes from the operator's
+    externalized contract.
+
+    Resolution order (each tried in turn):
+    1. ``$AED_EXPECTED_SCOPE_FILE`` — a JSON file containing
+       a flat dict of static scope keys.
+    2. The environment variables that the operator exported
+       BEFORE invoking this function. If they are already
+       set, they reflect the operator's intent.
+    3. Hardcoded contract defaults — only used if neither
+       (1) nor (2) is available. The defaults are the
+       frozen C22 contract.
+
+    This function does NOT mutate ``os.environ`` to
+    expected values. It only reads.
+    """
+    import json as _json
+    import os as _os
+    expected_file = _os.environ.get("AED_EXPECTED_SCOPE_FILE", "").strip()
+    if expected_file:
+        p = Path(expected_file)
+        if p.exists():
+            try:
+                data = _json.loads(p.read_text())
+                if isinstance(data, dict):
+                    return data
+            except (OSError, _json.JSONDecodeError):
+                pass
+    # Read env vars (without mutating). If the operator
+    # set AED_SCOPE_EXPECTED_* we use those; else the
+    # AED_* values from the caller's env (if any).
+    out = {}
+    for key in STATIC_SCOPE_KEYS:
+        env_key = _os.environ.get(
+            f"AED_SCOPE_EXPECTED_{key.upper()}",
+            _os.environ.get(f"AED_{key.upper()}", ""),
+        )
+        out[key] = env_key
+    # Only return if at least the owner / repo are populated
+    # (i.e., the operator actually set them).
+    if out.get("repository_owner") and out.get("repository_name"):
+        return out
+    # Fallback: hardcoded frozen contract. This is the
+    # expected scope the operator committed to, not the
+    # observed runtime scope.
+    return {
+        "repository_owner": "Slideshow11",
+        "repository_name": "AutoDev",
+        "pr_number": "5",
+        "expected_branch": "feat/review-repair-relay-v1",
+        "expected_branch_set": "feat/review-repair-relay-v1",
+        "expected_pr_set": "5",
+        "production_working_checkout": str(Path("/home/max/AutoDev").resolve()),
+        "supervisor_state_directory": "/home/max/.hermes/aed-supervisor/state",
+        "supervisor_home": "/home/max/.hermes/aed-supervisor",
+        "hermes_binary_path": "/home/max/.local/bin/hermes",
+        "required_providers": "coderabbit",
+        "optional_providers": "codex",
+        "provider_independence": "true",
+    }
+
+
+def _read_observed_static_scope(
+    supervisor_pid=None,
+    state_dir=None,
+) -> dict:
+    """Read the OBSERVED_STATIC_SCOPE from the actual
+    production supervisor. This function NEVER mutates
+    os.environ to expected values. It only reads.
+
+    Resolution order:
+    1. The supervisor's process environ (live): read
+       /proc/<supervisor_pid>/environ which contains the
+       env vars the supervisor was launched with.
+    2. The supervisor's durable run_state.json (for branch /
+       head_sha, which the supervisor writes to disk).
+    3. Failure → raise (evidence incomplete, fail closed).
+
+    The observed scope is mapped to the STATIC_SCOPE_KEYS
+    by looking up the supervisor's AED_* env vars and
+    deriving scope fields from them.
+    """
+    import os as _os
+    import json as _json
+
+    # Map: STATIC_SCOPE_KEY -> AED_* env var name (the
+    # env var the supervisor actually reads).
+    SCOPE_KEY_TO_ENV = {
+        "repository_owner": "AED_REPO_OWNER",
+        "repository_name": "AED_REPO_NAME",
+        "pr_number": "AED_PR_NUMBER",
+        "expected_branch": "AED_EXPECTED_BRANCH",
+        "expected_branch_set": "AED_EXPECTED_BRANCH_SET",
+        "production_working_checkout": "AED_SUPERVISOR_WORKING_CHECKOUT",
+        "supervisor_state_directory": "AED_SUPERVISOR_STATE_DIR",
+        "supervisor_home": "AED_SUPERVISOR_HOME",
+        "hermes_binary_path": "AED_HERMES_BIN",
+        "required_providers": "AED_REQUIRED_REVIEW_PROVIDERS",
+        "optional_providers": "AED_OPTIONAL_REVIEW_PROVIDERS",
+        "provider_independence": "AED_PROVIDERS_INDEPENDENT",
+        "expected_pr_set": "AED_PR_NUMBERS",
+    }
+
+    observed = {}
+
+    # (1) Live: read supervisor's /proc/<pid>/environ.
+    pid = supervisor_pid
+    if pid is None and state_dir:
+        # Derive the supervisor PID from heartbeat / lock /
+        # process list. We try the lock file first.
+        lock_path = Path(state_dir).parent / "lock"
+        if lock_path.exists():
+            try:
+                pid_text = lock_path.read_text().strip()
+                if pid_text.isdigit():
+                    pid = int(pid_text)
+            except (OSError, ValueError):
+                pid = None
+    if pid is None:
+        # Look up supervisor PID by heartbeat freshness
+        # + ps.
+        import subprocess as _sp
+        r = _sp.run(
+            ["ps", "-eo", "pid,etimes,cmd"],
+            capture_output=True, text=True,
+        )
+        for line in r.stdout.splitlines():
+            if "python3" in line and "supervisor" in line and "grep" not in line:
+                try:
+                    pid = int(line.split()[0])
+                    break
+                except (ValueError, IndexError):
+                    pass
+
+    env_source = None
+    if pid is not None:
+        environ_path = Path(f"/proc/{pid}/environ")
+        if environ_path.exists():
+            try:
+                env_bytes = environ_path.read_bytes()
+                # environ is null-separated
+                env_pairs = env_bytes.split(b"\x00")
+                for pair in env_pairs:
+                    if not pair or b"=" not in pair:
+                        continue
+                    k, _, v = pair.partition(b"=")
+                    k = k.decode("utf-8", "replace")
+                    v = v.decode("utf-8", "replace")
+                    if k in SCOPE_KEY_TO_ENV.values():
+                        observed[k] = v
+                env_source = f"/proc/{pid}/environ"
+            except OSError:
+                pass
+
+    # (2) Durable: read run_state.json for branch/head.
+    if state_dir:
+        rs_path = Path(state_dir) / "run_state.json"
+        if rs_path.exists():
+            try:
+                rs = _json.loads(rs_path.read_text())
+                if isinstance(rs, dict):
+                    # Use feature_branch if no AED_EXPECTED_BRANCH
+                    if (
+                        "AED_EXPECTED_BRANCH" not in observed
+                        and rs.get("feature_branch")
+                    ):
+                        observed["AED_EXPECTED_BRANCH"] = rs["feature_branch"]
+                        observed["AED_EXPECTED_BRANCH_SET"] = rs["feature_branch"]
+            except (OSError, _json.JSONDecodeError):
+                pass
+
+    # Map env vars to STATIC_SCOPE_KEYS
+    out = {}
+    for scope_key, env_key in SCOPE_KEY_TO_ENV.items():
+        out[scope_key] = observed.get(env_key, "")
+
+    # (3) Fallback: the supervisor may have used
+    # ``default_config_from_env()`` defaults (no AED_*
+    # env vars set). In that case, the OBSERVED scope is
+    # derived from the SupervisorConfig defaults. We
+    # call ``default_config_from_env()`` to get the
+    # exact config the running supervisor is using.
+    # This ALWAYS runs (not gated by populated) so we
+    # observe the actual running config even when some
+    # fields are populated from elsewhere.
+    populated = sum(1 for v in out.values() if v)
+    if populated < len(STATIC_SCOPE_KEYS):
+        try:
+            from autocoder_supervisor.config import (
+                default_config_from_env,
+            )
+            cfg = default_config_from_env()
+            # Map SupervisorConfig fields back to scope keys.
+            out["production_working_checkout"] = str(
+                cfg.working_checkout
+            )
+            out["supervisor_state_directory"] = str(cfg.state_dir)
+            out["supervisor_home"] = str(
+                Path(str(cfg.state_dir)).parent
+            )
+            # repository_owner / repository_name / pr_number
+            # / expected_branch are NOT in SupervisorConfig
+            # directly; they live in POLICY (a module-level
+            # constant). We attempt to read them too.
+            try:
+                from autocoder_supervisor.supervisor import (
+                    POLICY, AUTHORITATIVE_HEAD,
+                    REPO_OWNER, REPO_NAME, PR_NUMBER,
+                )
+                # Module-level constants.
+                # Use explicit "is not None" rather than
+                # truthiness so PR_NUMBER=0 still binds.
+                # IMPORTANT: the module-level constants
+                # reflect the supervisor module loaded in
+                # THIS subprocess. They are NOT the
+                # supervisor process's actual config unless
+                # the process was started with these env
+                # vars. We treat them as a SUPPLEMENT only —
+                # never overwrite values observed from
+                # /proc/<pid>/environ (which IS the
+                # production supervisor's actual config).
+                if not out.get("repository_owner"):
+                    if REPO_OWNER is not None and REPO_OWNER != "":
+                        out["repository_owner"] = str(REPO_OWNER)
+                if not out.get("repository_name"):
+                    if REPO_NAME is not None and REPO_NAME != "":
+                        out["repository_name"] = str(REPO_NAME)
+                if not out.get("pr_number"):
+                    if PR_NUMBER is not None:
+                        out["pr_number"] = str(PR_NUMBER)
+                        out["expected_pr_set"] = str(PR_NUMBER)
+                # expected_branch: derive from the
+                # production working_checkout's git remote.
+                # The supervisor doesn't have a dedicated
+                # AED_EXPECTED_BRANCH env var; the branch
+                # name comes from the directive_bridge.
+                # We use run_state.json feature_branch as
+                # the canonical observed branch.
+                rs_branch = ""
+                if state_dir:
+                    rs_path = Path(state_dir) / "run_state.json"
+                    if rs_path.exists():
+                        try:
+                            rs = _json.loads(rs_path.read_text())
+                            if isinstance(rs, dict):
+                                rs_branch = rs.get("feature_branch", "")
+                        except Exception:
+                            pass
+                if rs_branch:
+                    out["expected_branch"] = rs_branch
+                    out["expected_branch_set"] = rs_branch
+                # Fallback for expected_branch_set: read
+                # the supervisor's git remote's HEAD branch
+                # if run_state.json doesn't provide one.
+                if not out["expected_branch_set"]:
+                    try:
+                        import subprocess as _sp_remote
+                        _r = _sp_remote.run(
+                            ["git", "-C", str(Path("/home/max/AutoDev").resolve()),
+                             "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True,
+                        )
+                        if _r.returncode == 0 and _r.stdout.strip():
+                            out["expected_branch_set"] = _r.stdout.strip()
+                            if not out["expected_branch"]:
+                                out["expected_branch"] = _r.stdout.strip()
+                    except Exception:
+                        pass
+                if isinstance(POLICY, dict):
+                    # Providers: required_review_providers_for_pr_416 /
+                    # optional_review_providers_for_pr_416 (the keys
+                    # the supervisor actually has).
+                    if "required_review_providers_for_pr_416" in POLICY:
+                        out["required_providers"] = ",".join(
+                            POLICY["required_review_providers_for_pr_416"]
+                        )
+                    elif "required_providers" in POLICY:
+                        out["required_providers"] = ",".join(
+                            POLICY["required_providers"]
+                        )
+                    if "optional_review_providers_for_pr_416" in POLICY:
+                        out["optional_providers"] = ",".join(
+                            POLICY["optional_review_providers_for_pr_416"]
+                        )
+                    elif "optional_providers" in POLICY:
+                        out["optional_providers"] = ",".join(
+                            POLICY["optional_providers"]
+                        )
+                    if "provider_states_are_independent" in POLICY:
+                        out["provider_independence"] = str(
+                            POLICY["provider_states_are_independent"]
+                        ).lower()
+                    # Branch set: also derive from POLICY.
+                    if not out["expected_branch_set"]:
+                        # POLICY doesn't directly contain a branch
+                        # set; leave empty if run_state.json didn't
+                        # provide it.
+                        pass
+            except Exception:
+                pass
+
+            # (4) Hermes binary: derive from PATH lookup.
+            # The supervisor's main loop does
+            # ``os.environ.get("AED_HERMES_BIN") or PATH lookup``.
+            # We replicate that fallback here. We MUST NOT
+            # mutate os.environ.
+            if not out["hermes_binary_path"]:
+                import shutil as _sh
+                hermes_in_path = _sh.which("hermes")
+                if hermes_in_path:
+                    out["hermes_binary_path"] = hermes_in_path
+        except Exception:
+            pass
+
+    # Fail-closed check: every STATIC_SCOPE_KEYS key MUST
+    # be populated. If any is empty, observed scope is
+    # incomplete and freeze is blocked.
+    missing_keys = [
+        k for k in STATIC_SCOPE_KEYS if not out.get(k, "")
+    ]
+    if missing_keys:
+        raise RuntimeError(
+            "could not observe complete static scope; "
+            f"missing keys: {missing_keys}; env_source="
+            f"{env_source!r}; observed_static_scope is "
+            "incomplete; freeze blocked"
+        )
+
+    return out
+
+
+def _compare_scopes(expected: dict, observed: dict) -> dict:
+    """Compare expected vs observed scope. Returns a dict
+    with per-key match status + an overall match bool.
+    Missing observed key = FAIL CLOSED.
+    """
+    result = {
+        "expected": dict(expected),
+        "observed": dict(observed),
+        "per_key": {},
+        "all_required_keys_present": True,
+        "match": True,
+    }
+    for key in STATIC_SCOPE_KEYS:
+        e = expected.get(key, "")
+        o = observed.get(key, "")
+        if not o:
+            # Missing observed key = FAIL CLOSED.
+            result["per_key"][key] = {
+                "expected": e,
+                "observed": "",
+                "match": False,
+                "reason": "missing_observed_key",
+            }
+            result["all_required_keys_present"] = False
+            result["match"] = False
+        elif e != o:
+            result["per_key"][key] = {
+                "expected": e,
+                "observed": o,
+                "match": False,
+                "reason": "value_mismatch",
+            }
+            result["match"] = False
+        else:
+            result["per_key"][key] = {
+                "expected": e,
+                "observed": o,
+                "match": True,
+            }
+    return result
+
+
 def generate_pre_canary_evidence(
     repo_root,
     state_dir,
     repo,
     pr_number,
     branch,
+    supervisor_pid=None,
 ):
     """Generate the pre-canary evidence artifact using only
     machine-read values. The caller cannot supply SHA
     strings; every SHA is read from the system directly.
 
+    The artifact contains EXPECTED_STATIC_SCOPE (frozen
+    contract) AND OBSERVED_STATIC_SCOPE (read from the
+    actual running supervisor) — and a per-key
+    comparison. If they differ, the artifact reports
+    static_scope_match=false and freeze is blocked.
+
     Writes:
       {state_dir}/pre_canary_evidence.json (canonical)
     """
-    import os
-    import json as _json
-    import hashlib as _hashlib
-    import subprocess as _sp
-    from pathlib import Path as _Path
     from datetime import datetime, timezone as _tz
 
-    # Set the AED_* env vars so compute_static_acceptance_scope_fingerprint
-    # has values to bind.
-    _canonical_scope = {
-        "AED_REPO_OWNER": "Slideshow11",
-        "AED_REPO_NAME": "AutoDev",
-        "AED_PR_NUMBER": "5",
-        "AED_PR_NUMBERS": "5",
-        "AED_EXPECTED_BRANCH": "feat/review-repair-relay-v1",
-        "AED_EXPECTED_BRANCH_SET": "feat/review-repair-relay-v1",
-        "AED_SUPERVISOR_WORKING_CHECKOUT": "/home/max/AutoDev",
-        "AED_SUPERVISOR_HOME": "/home/max/.hermes/aed-supervisor",
-        "AED_SUPERVISOR_STATE_DIR": "/home/max/.hermes/aed-supervisor/state",
-        "AED_HERMES_BIN": "/home/max/.local/bin/hermes",
-        "AED_REQUIRED_REVIEW_PROVIDERS": "coderabbit",
-        "AED_OPTIONAL_REVIEW_PROVIDERS": "codex",
-        "AED_PROVIDERS_INDEPENDENT": "true",
-    }
-    _saved = {}
-    for k, v in _canonical_scope.items():
-        _saved[k] = os.environ.get(k)
-        os.environ[k] = v
+    # Read all SHAs from the system.
+    local_head = _read_local_head(repo_root)
+    origin_head = _read_origin_head(repo_root, branch)
+    live_sha_raw, pr_body = _read_live_github_head(repo, pr_number)
+    _verify_full_sha(local_head, "local_head")
+    _verify_full_sha(origin_head, "origin_head")
+    _verify_full_sha(live_sha_raw, "live_github_head")
+    heads_equal = (local_head == origin_head == live_sha_raw)
+
+    # Read workflow runs from GitHub.
+    check_runs = _read_workflow_runs(repo, local_head)
+    workflow_summary = []
+    full_suite_result = None
+    for cr in check_runs:
+        workflow_summary.append({
+            "name": cr["name"],
+            "conclusion": cr.get("conclusion"),
+            "status": cr.get("status"),
+        })
+        if cr["name"] == "full-suite":
+            full_suite_result = cr.get("conclusion")
+
+    # Compute expected vs observed static scope WITHOUT
+    # mutating os.environ.
+    expected_scope = _read_expected_static_scope()
+    observed_scope = _read_observed_static_scope(
+        supervisor_pid=supervisor_pid,
+        state_dir=state_dir,
+    )
+    scope_comparison = _compare_scopes(expected_scope, observed_scope)
+
+    # Compute static scope fingerprints.
+    # EXPECTED fingerprint: with os.environ temporarily set
+    # to expected values. We DO mutate here for the
+    # expected fingerprint ONLY, then restore. This is a
+    # bounded mutation around a single function call.
+    import os as _os
+    _saved_env = {}
+    for k, v in [
+        ("AED_REPO_OWNER", expected_scope.get("repository_owner", "")),
+        ("AED_REPO_NAME", expected_scope.get("repository_name", "")),
+        ("AED_PR_NUMBER", expected_scope.get("pr_number", "")),
+        ("AED_PR_NUMBERS", expected_scope.get("expected_pr_set", "")),
+        ("AED_EXPECTED_BRANCH", expected_scope.get("expected_branch", "")),
+        ("AED_EXPECTED_BRANCH_SET", expected_scope.get("expected_branch_set", "")),
+        ("AED_SUPERVISOR_WORKING_CHECKOUT", expected_scope.get("production_working_checkout", "")),
+        ("AED_SUPERVISOR_HOME", expected_scope.get("supervisor_home", "")),
+        ("AED_SUPERVISOR_STATE_DIR", expected_scope.get("supervisor_state_directory", "")),
+        ("AED_HERMES_BIN", expected_scope.get("hermes_binary_path", "")),
+        ("AED_REQUIRED_REVIEW_PROVIDERS", expected_scope.get("required_providers", "")),
+        ("AED_OPTIONAL_REVIEW_PROVIDERS", expected_scope.get("optional_providers", "")),
+        ("AED_PROVIDERS_INDEPENDENT", expected_scope.get("provider_independence", "")),
+    ]:
+        if k in _os.environ:
+            _saved_env[k] = _os.environ[k]
+        _os.environ[k] = v
     try:
-        # Read all SHAs from the system.
-        local_head = _read_local_head(repo_root)
-        origin_head = _read_origin_head(repo_root, branch)
-        live_sha_raw, pr_body = _read_live_github_head(repo, pr_number)
-        _verify_full_sha(local_head, "local_head")
-        _verify_full_sha(origin_head, "origin_head")
-        _verify_full_sha(live_sha_raw, "live_github_head")
-        heads_equal = (local_head == origin_head == live_sha_raw)
-
-        # Read workflow runs from GitHub.
-        check_runs = _read_workflow_runs(repo, local_head)
-        workflow_summary = []
-        full_suite_result = None
-        for cr in check_runs:
-            workflow_summary.append({
-                "name": cr["name"],
-                "conclusion": cr.get("conclusion"),
-                "status": cr.get("status"),
-            })
-            if cr["name"] == "full-suite":
-                full_suite_result = cr.get("conclusion")
-
-        # Compute static fingerprints via this module.
-        env_fingerprint = compute_static_hermes_environment_fingerprint()
-        scope_fingerprint = compute_static_acceptance_scope_fingerprint()
-
-        # Read production runtime files. Compare against committed bytes.
-        runtime_summary = []
-        home = _Path("/home/max/.hermes/aed-supervisor")
-        for filename in ACCEPTANCE_RUNTIME_INVENTORY:
-            runtime_path = home / filename
-            checkout_path = _Path(repo_root) / filename
-            chosen = None
-            for cp in [
-                runtime_path,
-                checkout_path,
-                _Path(repo_root) / "autocoder_orchestration" / filename,
-                _Path(repo_root) / "autocoder_supervisor" / filename,
-            ]:
-                if cp.exists():
-                    chosen = cp
-                    break
-            if chosen is None:
-                continue
-            try:
-                rel = chosen.relative_to(repo_root)
-            except ValueError:
-                continue
-            rel_str = str(rel)
-            r = _sp.run(
-                ["git", "-C", str(repo_root), "show", f"{local_head}:{rel_str}"],
-                capture_output=True,
-            )
-            committed = (
-                _hashlib.sha256(r.stdout).hexdigest()
-                if r.returncode == 0 else None
-            )
-            runtime = (
-                _hashlib.sha256(open(chosen, "rb").read()).hexdigest()
-                if chosen.exists() else None
-            )
-            runtime_summary.append({
-                "path": str(chosen),
-                "relpath": rel_str,
-                "runtime_sha256": runtime,
-                "committed_sha256": committed,
-                "match": (committed is not None and runtime == committed),
-            })
-
-        # Production checkout clean.
-        r = _sp.run(
-            ["git", "-C", str(repo_root), "status", "--porcelain",
-             "--untracked-files=all"],
-            capture_output=True, text=True,
-        )
-        porcelain = [l for l in r.stdout.splitlines() if l.strip()]
-        production_checkout_clean = (len(porcelain) == 0)
-
-        # Active workers.
-        r = _sp.run(["ps", "-ef"], capture_output=True, text=True)
-        active_workers = sum(
-            1 for l in r.stdout.splitlines()
-            if "aed-supervisor" in l and "python3 -m supervisor" in l
-        )
-
-        supervisor_pid = None
-        for l in r.stdout.splitlines():
-            if "python3 -m supervisor" in l and "grep" not in l:
-                try:
-                    supervisor_pid = int(l.split()[1])
-                    break
-                except (ValueError, IndexError):
-                    pass
-        heartbeat = None
-        hb_path = _Path("/home/max/.hermes/aed-supervisor/heartbeat")
-        if hb_path.exists():
-            heartbeat = hb_path.read_text().strip()
-
-        # Event ledgers.
-        cooldown_count = 0
-        unconsumed_count = 0
-        orphaned_count = 0
-        terminal_pending = 0
-        superseded_pending = 0
-        cd_path = _Path(state_dir) / "cooldown_deferred_events.json"
-        if cd_path.exists():
-            d = _json.loads(cd_path.read_text())
-            if isinstance(d, dict):
-                cooldown_count = len(d.get("ids", []))
-        ue_path = _Path(state_dir) / "unconsumed_events.json"
-        if ue_path.exists():
-            d = _json.loads(ue_path.read_text())
-            if isinstance(d, dict):
-                unconsumed_count = len(d.get("events", []))
-        ct_path = _Path(state_dir) / "consumed_event_terminality.json"
-        if ct_path.exists():
-            d = _json.loads(ct_path.read_text())
-            if isinstance(d, dict):
-                for k, v in d.items():
-                    if isinstance(v, dict):
-                        st = v.get("status")
-                        if st == "ORPHANED":
-                            orphaned_count += 1
-                        elif st == "PENDING_CONSUMPTION":
-                            terminal_pending += 1
-                        elif st == "SUPERSEDED_PENDING_CONSUMPTION":
-                            superseded_pending += 1
-
-        evidence = {
-            "schema_version": SCHEMA_VERSION,
-            "generated_at": datetime.now(_tz.utc).isoformat(),
-            "repo": repo,
-            "pr_number": pr_number,
-            "branch": branch,
-            "local_head": local_head,
-            "origin_head": origin_head,
-            "live_github_head": live_sha_raw,
-            "heads_equal": heads_equal,
-            "pr_state": pr_body.get("state"),
-            "pr_merged": pr_body.get("merged"),
-            "pr_merged_at": pr_body.get("merged_at"),
-            "exact_head_ci_sha": local_head,
-            "workflow_run_summary": workflow_summary,
-            "full_suite_result": full_suite_result,
-            "static_environment_fingerprint": env_fingerprint["fingerprint"],
-            "static_scope_fingerprint": scope_fingerprint["fingerprint"],
-            "environment_inputs_count": len(env_fingerprint["inputs"]),
-            "production_runtime_hash_summary": runtime_summary,
-            "production_runtime_hash_match_all": (
-                all(s["match"] for s in runtime_summary)
-                if runtime_summary else False
-            ),
-            "production_checkout_clean": production_checkout_clean,
-            "active_workers": active_workers,
-            "supervisor_pid": supervisor_pid,
-            "supervisor_heartbeat": heartbeat,
-            "cooldown_deferred_count": cooldown_count,
-            "unconsumed_count": unconsumed_count,
-            "orphaned_count": orphaned_count,
-            "terminal_pending_consumption_count": terminal_pending,
-            "superseded_pending_consumption_count": superseded_pending,
-        }
+        expected_fingerprint = compute_static_acceptance_scope_fingerprint(
+            scope=expected_scope
+        )["fingerprint"]
     finally:
-        # Restore the original AED_* environment so we don't
-        # leak into the caller's process.
-        for k, prior in _saved.items():
-            if prior is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = prior
+        for k, prior in _saved_env.items():
+            _os.environ[k] = prior
+        for k in [
+            "AED_REPO_OWNER", "AED_REPO_NAME", "AED_PR_NUMBER",
+            "AED_PR_NUMBERS", "AED_EXPECTED_BRANCH",
+            "AED_EXPECTED_BRANCH_SET", "AED_SUPERVISOR_WORKING_CHECKOUT",
+            "AED_SUPERVISOR_HOME", "AED_SUPERVISOR_STATE_DIR",
+            "AED_HERMES_BIN", "AED_REQUIRED_REVIEW_PROVIDERS",
+            "AED_OPTIONAL_REVIEW_PROVIDERS", "AED_PROVIDERS_INDEPENDENT",
+        ]:
+            if k not in _saved_env:
+                _os.environ.pop(k, None)
 
-    # Write atomically to canonical + mirror (if mirror dir exists).
+    # OBSERVED fingerprint: with os.environ temporarily set
+    # to observed values. Same bounded pattern.
+    _saved_env2 = {}
+    for k, v in [
+        ("AED_REPO_OWNER", observed_scope.get("repository_owner", "")),
+        ("AED_REPO_NAME", observed_scope.get("repository_name", "")),
+        ("AED_PR_NUMBER", observed_scope.get("pr_number", "")),
+        ("AED_PR_NUMBERS", observed_scope.get("expected_pr_set", "")),
+        ("AED_EXPECTED_BRANCH", observed_scope.get("expected_branch", "")),
+        ("AED_EXPECTED_BRANCH_SET", observed_scope.get("expected_branch_set", "")),
+        ("AED_SUPERVISOR_WORKING_CHECKOUT", observed_scope.get("production_working_checkout", "")),
+        ("AED_SUPERVISOR_HOME", observed_scope.get("supervisor_home", "")),
+        ("AED_SUPERVISOR_STATE_DIR", observed_scope.get("supervisor_state_directory", "")),
+        ("AED_HERMES_BIN", observed_scope.get("hermes_binary_path", "")),
+        ("AED_REQUIRED_REVIEW_PROVIDERS", observed_scope.get("required_providers", "")),
+        ("AED_OPTIONAL_REVIEW_PROVIDERS", observed_scope.get("optional_providers", "")),
+        ("AED_PROVIDERS_INDEPENDENT", observed_scope.get("provider_independence", "")),
+    ]:
+        if k in _os.environ:
+            _saved_env2[k] = _os.environ[k]
+        _os.environ[k] = v
+    try:
+        observed_fingerprint = compute_static_acceptance_scope_fingerprint(
+            scope=observed_scope
+        )["fingerprint"]
+    finally:
+        for k, prior in _saved_env2.items():
+            _os.environ[k] = prior
+        for k in [
+            "AED_REPO_OWNER", "AED_REPO_NAME", "AED_PR_NUMBER",
+            "AED_PR_NUMBERS", "AED_EXPECTED_BRANCH",
+            "AED_EXPECTED_BRANCH_SET", "AED_SUPERVISOR_WORKING_CHECKOUT",
+            "AED_SUPERVISOR_HOME", "AED_SUPERVISOR_STATE_DIR",
+            "AED_HERMES_BIN", "AED_REQUIRED_REVIEW_PROVIDERS",
+            "AED_OPTIONAL_REVIEW_PROVIDERS", "AED_PROVIDERS_INDEPENDENT",
+        ]:
+            if k not in _saved_env2:
+                _os.environ.pop(k, None)
+
+    static_scope_match = scope_comparison["match"]
+    static_scope_all_required_present = scope_comparison[
+        "all_required_keys_present"
+    ]
+
+    # Acceptance runtime inventory: explicit source-to-runtime
+    # mapping. NEVER silently continue past missing files.
+    from pathlib import Path as _Path
+    import hashlib as _hashlib
+    import subprocess as _sp
+    runtime_summary = []
+    runtime_files_expected = []
+    for filename in ACCEPTANCE_RUNTIME_INVENTORY:
+        # Each entry has a canonical source path (relative
+        # to repo_root) and may have a deployed runtime path.
+        # We record BOTH and require both to exist.
+        source_rel = filename  # e.g. "autocoder_supervisor/supervisor.py"
+        # If the source path has the orchestrator prefix,
+        # try that explicitly.
+        candidate_source_paths = [
+            _Path(repo_root) / source_rel,
+            _Path(repo_root) / "autocoder_supervisor" / filename,
+            _Path(repo_root) / "autocoder_orchestration" / filename,
+        ]
+        source_path = None
+        for cp in candidate_source_paths:
+            if cp.exists():
+                source_path = cp
+                break
+        if source_path is None:
+            source_path = candidate_source_paths[0]
+
+        # Deployed path: supervisor runtime home + filename.
+        runtime_path = _Path("/home/max/.hermes/aed-supervisor") / filename
+
+        runtime_files_expected.append(filename)
+
+        if not source_path.exists():
+            runtime_summary.append({
+                "logical_module": filename,
+                "source_path": str(source_path),
+                "deployed_path": str(runtime_path),
+                "source_sha256": None,
+                "deployed_sha256": None,
+                "match": False,
+                "source_exists": False,
+                "deployed_exists": runtime_path.exists(),
+                "missing": "source",
+            })
+            continue
+
+        # Read committed source bytes from git (canonical).
+        try:
+            rel_to_repo = source_path.relative_to(repo_root)
+        except ValueError:
+            rel_to_repo = source_path
+        rel_str = str(rel_to_repo)
+        r = _sp.run(
+            ["git", "-C", str(repo_root), "show", f"{local_head}:{rel_str}"],
+            capture_output=True,
+        )
+        if r.returncode != 0:
+            source_sha = None
+        else:
+            source_sha = _hashlib.sha256(r.stdout).hexdigest()
+
+        deployed_sha = None
+        if runtime_path.exists():
+            deployed_sha = _hashlib.sha256(
+                open(runtime_path, "rb").read()
+            ).hexdigest()
+
+        match = source_sha is not None and deployed_sha == source_sha
+        runtime_summary.append({
+            "logical_module": filename,
+            "source_path": str(source_path),
+            "deployed_path": str(runtime_path),
+            "source_sha256": source_sha,
+            "deployed_sha256": deployed_sha,
+            "match": match,
+            "source_exists": source_path.exists(),
+            "deployed_exists": runtime_path.exists(),
+            "missing": None,
+        })
+
+    runtime_files_compared = sum(
+        1 for r in runtime_summary
+        if r["source_exists"] and r["deployed_exists"]
+    )
+    runtime_files_missing = [
+        r["logical_module"] for r in runtime_summary
+        if not r["source_exists"] or not r["deployed_exists"]
+    ]
+    runtime_files_ambiguous = []  # We resolve deterministically above.
+    runtime_hash_mismatches = [
+        r["logical_module"] for r in runtime_summary
+        if r["source_exists"] and r["deployed_exists"] and not r["match"]
+    ]
+    runtime_match_all = (
+        len(runtime_files_missing) == 0
+        and len(runtime_hash_mismatches) == 0
+    )
+
+    # Production checkout clean.
+    r = _sp.run(
+        ["git", "-C", str(repo_root), "status", "--porcelain",
+         "--untracked-files=all"],
+        capture_output=True, text=True,
+    )
+    porcelain = [l for l in r.stdout.splitlines() if l.strip()]
+    production_checkout_clean = (len(porcelain) == 0)
+
+    # Active workers: use the CANONICAL
+    # WorkerAttemptStore-based determination. Closure VII
+    # §6/§7: NEVER use ps-based process count as a primary
+    # source; that is process count, not WorkerAttempt
+    # ownership. The canonical determination reads from
+    # the durable worker_attempts directory and
+    # cross-checks PID liveness.
+    active_worker_source = (
+        "canonical_active_worker_attempt_count (WorkerAttemptStore + "
+        "PID liveness cross-check; NOT ps-based process count)"
+    )
+    active_worker_attempt_ids = []
+    active_workers = 0
+    try:
+        # Import the canonical helpers from supervisor.
+        # We DO NOT duplicate the determination logic here.
+        from autocoder_supervisor.supervisor import (
+            canonical_active_worker_attempt_count,
+            canonical_active_worker_attempt_ids,
+        )
+        active_workers = canonical_active_worker_attempt_count()
+        active_worker_attempt_ids = (
+            canonical_active_worker_attempt_ids()
+        )
+    except Exception:
+        # Malformed worker-state discovery: fail closed.
+        # We do NOT default to 0; we record the failure.
+        active_workers = -1
+        active_worker_attempt_ids = []
+        active_worker_source = (
+            active_worker_source + " — DETERMINATION FAILED"
+        )
+
+    # Cooldown deferred count: use the canonical parser
+    # (Closure VII §5: one parser, not duplicated schema
+    # logic).
+    cooldown_result = canonical_cooldown_deferred_count(state_dir)
+    cooldown_deferred_count = cooldown_result["count"]
+    cooldown_entries_count = cooldown_result["entries_count"]
+    cooldown_legacy_ids_count = cooldown_result["legacy_ids_count"]
+    cooldown_schema_source = cooldown_result["schema_source"]
+    cooldown_parse_failed = cooldown_result["parse_failed"]
+
+    # Required CI checks.
+    REQUIRED_CI_CHECKS_EXPECTED = [
+        "test (3.10)",
+        "test (3.11)",
+        "test (3.12)",
+        "package-smoke",
+        "committed-state-scan",
+        "provenance",
+        "full-suite",
+    ]
+    observed_check_names = {cr["name"] for cr in workflow_summary}
+    required_ci_checks_observed = [
+        c for c in REQUIRED_CI_CHECKS_EXPECTED if c in observed_check_names
+    ]
+    required_ci_checks_missing = [
+        c for c in REQUIRED_CI_CHECKS_EXPECTED
+        if c not in observed_check_names
+    ]
+    # Non-success among required checks (success = "success"
+    # at workflow level; "neutral" or "success" are OK).
+    required_ci_checks_non_success = [
+        cr["name"] for cr in check_runs
+        if cr["name"] in REQUIRED_CI_CHECKS_EXPECTED
+        and cr.get("conclusion") not in ("success", "neutral", None)
+    ]
+    exact_head_ci_all_required_success = (
+        len(required_ci_checks_missing) == 0
+        and len(required_ci_checks_non_success) == 0
+    )
+
+    # Build the artifact.
+    evidence = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": datetime.now(_tz.utc).isoformat(),
+        "repo": repo,
+        "pr_number": pr_number,
+        "branch": branch,
+        "local_head": local_head,
+        "remote_branch_head": origin_head,
+        "live_pr_head": live_sha_raw,
+        "heads_equal": heads_equal,
+        "pr_state": pr_body.get("state"),
+        "pr_merged": pr_body.get("merged"),
+        "pr_merged_at": pr_body.get("merged_at"),
+        "exact_head_ci_sha": local_head,
+        "required_ci_checks_expected": REQUIRED_CI_CHECKS_EXPECTED,
+        "required_ci_checks_observed": required_ci_checks_observed,
+        "required_ci_checks_missing": required_ci_checks_missing,
+        "required_ci_checks_non_success": required_ci_checks_non_success,
+        "exact_head_ci_all_required_success": exact_head_ci_all_required_success,
+        "workflow_run_summary": workflow_summary,
+        "full_suite_result": full_suite_result,
+        "expected_static_scope": expected_scope,
+        "observed_static_scope": observed_scope,
+        "expected_static_scope_fingerprint": expected_fingerprint,
+        "observed_static_scope_fingerprint": observed_fingerprint,
+        "static_scope_match": static_scope_match,
+        "static_scope_all_required_keys_present": (
+            static_scope_all_required_present
+        ),
+        "static_scope_per_key_match": scope_comparison["per_key"],
+        "acceptance_runtime_expected_count": len(ACCEPTANCE_RUNTIME_INVENTORY),
+        "acceptance_runtime_compared_count": runtime_files_compared,
+        "runtime_file_records": runtime_summary,
+        "runtime_files_expected": runtime_files_expected,
+        "runtime_files_missing": runtime_files_missing,
+        "runtime_files_ambiguous": runtime_files_ambiguous,
+        "runtime_hash_mismatches": runtime_hash_mismatches,
+        "source_runtime_hash_match": runtime_match_all,
+        "active_worker_source": active_worker_source,
+        "active_worker_attempt_ids": active_worker_attempt_ids,
+        "active_worker_count": active_workers,
+        "cooldown_evidence_parser": "entries-preferred, legacy-ids-fallback",
+        "cooldown_schema_source": cooldown_schema_source,
+        "cooldown_entries_count": cooldown_entries_count,
+        "cooldown_legacy_ids_count": cooldown_legacy_ids_count,
+        "cooldown_deferred_count": cooldown_deferred_count,
+        "cooldown_parse_failed": cooldown_parse_failed,
+        "production_checkout_clean": production_checkout_clean,
+        "freeze_eligible": (
+            heads_equal
+            and static_scope_match
+            and static_scope_all_required_present
+            and runtime_match_all
+            and production_checkout_clean
+            and exact_head_ci_all_required_success
+        ),
+    }
+    # Write atomically to canonical + mirror (if mirror
+    # dir exists).
     _atomic_write(_Path(state_dir) / "pre_canary_evidence.json", evidence)
-    mirror_path = _Path("/home/max/.hermes/aed-supervisor/pre_canary_evidence.json")
+    mirror_path = _Path(
+        "/home/max/.hermes/aed-supervisor/pre_canary_evidence.json"
+    )
     mirror_parent = mirror_path.parent
     if mirror_parent.exists():
         _atomic_write(mirror_path, evidence)

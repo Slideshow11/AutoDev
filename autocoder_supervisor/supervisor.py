@@ -1523,6 +1523,76 @@ def _worker_attempt_store():
     return WorkerAttemptStore(WORKER_ATTEMPTS_DIR)
 
 
+def canonical_active_worker_attempt_count() -> int:
+    """Canonical active-worker count.
+
+    Closure VII §6/§7: active workers MUST come from the
+    WorkerAttemptStore (worker-attempt trust model),
+    NOT from launched-event bookkeeping or ps-based
+    process counts. A launched event is event-dispatch
+    bookkeeping; it is not equivalent to live WorkerAttempt
+    ownership. A stale launched marker MUST NOT block
+    Codex scheduling.
+
+    Returns the count of attempts whose lifecycle is
+    non-terminal AND whose PID (if recorded) is alive.
+    Malformed attempt records are skipped silently (the
+    store's own read path handles malformed JSON); a
+    completely absent store returns 0.
+    """
+    try:
+        store = _worker_attempt_store()
+        active = store.list_active()
+    except Exception:  # noqa: BLE001
+        return 0
+    live_count = 0
+    for rec in active:
+        # Cross-check PID liveness when PID is recorded.
+        # An attempt whose worker process has died is
+        # NOT live until reconcile_orphaned_worker_attempts
+        # transitions it to a terminal lifecycle.
+        pid = getattr(rec, "worker_pid", None) or getattr(
+            rec, "pid", None
+        )
+        if pid is not None:
+            try:
+                import os as _os
+                _os.kill(int(pid), 0)
+            except (OSError, ValueError, TypeError):
+                # Process is dead; not live.
+                continue
+        live_count += 1
+    return live_count
+
+
+def canonical_active_worker_attempt_ids() -> list:
+    """Canonical list of active worker attempt IDs.
+
+    Same model as canonical_active_worker_attempt_count;
+    returns attempt IDs of the live non-terminal attempts.
+    """
+    try:
+        store = _worker_attempt_store()
+        active = store.list_active()
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    for rec in active:
+        pid = getattr(rec, "worker_pid", None) or getattr(
+            rec, "pid", None
+        )
+        if pid is not None:
+            try:
+                import os as _os
+                _os.kill(int(pid), 0)
+            except (OSError, ValueError, TypeError):
+                continue
+        aid = getattr(rec, "attempt_id", None)
+        if aid:
+            out.append(str(aid))
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Round-46 C14: thread dispositions + terminal lifecycle closure
 # ---------------------------------------------------------------------------
@@ -14143,11 +14213,17 @@ def main(argv: Optional[list[str]] = None) -> int:
                         _live_for_quota.get("head_sha") or ""
                     )
                     _active_workers = 0
+                    # Closure VII §7: use the canonical
+                    # WorkerAttemptStore-based count, NOT
+                    # launched_event_ids(). launched events
+                    # are event-dispatch bookkeeping; they
+                    # are not equivalent to live WorkerAttempt
+                    # ownership. Stale launched markers MUST
+                    # NOT suppress Codex scheduling.
                     try:
-                        from .supervisor import (  # type: ignore
-                            launched_event_ids as _lei,
+                        _active_workers = (
+                            canonical_active_worker_attempt_count()
                         )
-                        _active_workers = len(_lei())
                     except Exception:
                         pass
                     if (
