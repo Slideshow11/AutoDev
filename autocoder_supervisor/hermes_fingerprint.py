@@ -79,7 +79,7 @@ ACCEPTANCE_RUNTIME_INVENTORY: tuple = (
 # ---------------------------------------------------------------------------
 
 
-# Each entry is (label, Path|None). These paths are resolved
+# Each entry is (label, Path). These paths are resolved
 # from the canonical locations; a missing path means the
 # acceptance environment is broken (fail closed).
 def _default_static_inputs() -> list:
@@ -109,11 +109,38 @@ def _default_static_inputs() -> list:
             home / ".hermes/profiles/aed-quarantine/config.yaml",
         ),
     ]
-    # Every declared acceptance-runtime file in the
-    # inventory contributes to the static hash.
+    # The inventory declares file basenames. autocoder_supervisor/
+    # files are deployed under the supervisor runtime root.
+    # autocoder_orchestration/ files live in the source-controlled
+    # checkout at the canonical REPO_DIR (NOT under the runtime
+    # root). Resolve each entry by checking both locations and
+    # using the one that exists.
     for filename in ACCEPTANCE_RUNTIME_INVENTORY:
+        # Try the supervisor runtime root first.
+        runtime_path = runtime / filename
+        # Then the production checkout (AutoDev repo root).
+        # We resolve REPO_DIR from the supervisor's env if set,
+        # otherwise default to /home/max/AutoDev. The orch
+        # files live under autocoder_orchestration/; try both.
+        checkout = Path(
+            os.environ.get(
+                "AED_SUPERVISOR_WORKING_CHECKOUT", "/home/max/AutoDev"
+            )
+        )
+        checkout_paths = [
+            checkout / filename,
+            checkout / "autocoder_orchestration" / filename,
+            checkout / "autocoder_supervisor" / filename,
+        ]
+        chosen = None
+        for cp in [runtime_path] + checkout_paths:
+            if cp.exists():
+                chosen = cp
+                break
+        if chosen is None:
+            chosen = runtime_path
         inputs.append(
-            (f"acceptance_runtime:{filename}", runtime / filename)
+            (f"acceptance_runtime:{filename}", chosen)
         )
     inputs.append(("hermes_cli_shim", hermes_home / "hermes"))
     return inputs
