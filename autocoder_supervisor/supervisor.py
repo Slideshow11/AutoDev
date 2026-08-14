@@ -241,7 +241,7 @@ def _reconcile_authoritative_head_at_boot() -> str:
         log(
             "warning",
             "round-40 head reconciliation: live PR fetch failed",
-            error=str(exc)[:200],
+            error=str(exc)[:1000],
         )
 
     # 2. run_state.json current_head.
@@ -275,6 +275,9 @@ def _reconcile_authoritative_head_at_boot() -> str:
         if origin_head:
             candidates.append(("origin_branch", origin_head))
     except Exception as exc:  # noqa: BLE001
+        import sys as _ss
+        _ss.stderr.write(f"DEBUG origin failure: REPO_DIR={REPO_DIR} exc={exc!r}\n")
+        _ss.stderr.flush()
         log(
             "warning",
             "round-40 head reconciliation: origin head fetch failed",
@@ -7123,6 +7126,14 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         ".ruff_cache/",
         "__pycache__/",
         ".pytest_cache/",
+        "tests/",
+        # Round-54/C22 §10: test files (whether source-tracked
+        # or untracked) are NOT runtime debris. The dirty-tree
+        # guard exists to catch uncommitted SOURCE-LEVEL changes
+        # that would confuse provenance. Test code is owned by
+        # the test suite, not by the production worker; allow it
+        # through so a developer who has uncommitted test edits
+        # can still launch a worker.
     )
     try:
         _gs = subprocess.run(

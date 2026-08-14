@@ -282,7 +282,7 @@ def test_p1_07_advance_awaiting_ci_refuses_when_checks_not_green() -> None:
     # The function must check required_checks_green and refuse the
     # transition (return False) when checks are not green.
     pattern = re.compile(
-        r"required_checks_green\(_snap\)",
+        r"(required_checks_green|ci_policy_status)\(_snap\)",
         re.MULTILINE,
     )
     assert pattern.search(src), (
@@ -294,8 +294,23 @@ def test_p1_07_advance_awaiting_ci_refuses_when_checks_not_green() -> None:
     assert fn_idx != -1, "_advance_awaiting_ci_to_qualifying not defined"
     fn_end = src.find("\ndef ", fn_idx + 1)
     fn_body = src[fn_idx:fn_end if fn_end != -1 else None]
-    assert "required checks not green" in fn_body, (
-        "_advance_awaiting_ci_to_qualifying must log 'required checks not green'"
+    # Round-31 P1#7 hardening: the supervisor MUST refuse
+    # the transition when CI is not green. The round-39
+    # contract splits this into CHECKS_PENDING /
+    # CHECKS_FAILED / POLICY_UNRESOLVED; the test only
+    # requires that the refusal-path log MENTION the
+    # required checks. Accept any of the four refusal
+    # markers.
+    refusal_markers = (
+        "required checks not green",
+        "required checks pending",
+        "required checks failed",
+        "ci policy unresolved",
+    )
+    assert any(m in fn_body for m in refusal_markers), (
+        "_advance_awaiting_ci_to_qualifying must log a "
+        "refusal marker on the CI-not-green path "
+        f"(expected one of {refusal_markers!r})"
     )
     assert "refusing transition (fail-closed)" in fn_body, (
         "_advance_awaiting_ci_to_qualifying must log 'refusing transition (fail-closed)'"

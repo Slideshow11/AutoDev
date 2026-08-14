@@ -616,6 +616,17 @@ def test_p1_07_advance_allows_when_required_checks_green(
         raising=False,
     )
 
+    # Round-31 P1#7 hardening: the supervisor rebinds
+    # ``head_observed`` from ``AUTHORITATIVE_HEAD`` (the canonical
+    # head the supervisor committed to at the start of the
+    # iteration), NOT from the snapshot's ``head_sha``. The test
+    # must inject the expected head so the function can
+    # deterministically call ``Controller.report_ci_pass`` with
+    # a 40-char head.
+    monkeypatch.setattr(
+        sup, "AUTHORITATIVE_HEAD", "b" * 40, raising=False,
+    )
+
     out = sup._advance_awaiting_ci_to_qualifying()
     assert out is True, (
         "round-31 P1#7: when required checks are green the "

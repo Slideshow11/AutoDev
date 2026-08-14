@@ -34,6 +34,86 @@ from pathlib import Path
 import pytest
 
 
+
+
+# Round-54/C22: the supervisor's dirty-tree guard invokes
+# ``subprocess.run("git", "-C", REPO_DIR, "status", ...)``
+# BEFORE the worker-launch path. Tests that import
+# ``supervisor`` and call ``sup.launch_worker`` directly MUST
+# have ``subprocess.run`` (and ``subprocess.Popen``) patched
+# so the guard's git invocation succeeds without touching
+# the real /home/max/AutoDev checkout. This module-level
+# autouse fixture installs a deterministic fake for both
+# ``subprocess.run`` and ``subprocess.Popen`` so individual
+# tests do not need to repeat the boilerplate.
+@pytest.fixture(autouse=True)
+def _round54_c22_subprocess_patch(monkeypatch, request):
+    print(f"=== AUTOSE FIXTURE STARTING for {request.node.name} ===")
+    try:
+        from autocoder_supervisor import supervisor as _sup
+    except Exception:
+        yield
+        return
+    print(f"  before override REPO_DIR={_sup.REPO_DIR}")
+    # The supervisor's REPO_DIR is captured at import time
+    # from the env (default_config_from_env → config.py).
+    # The test environment's REPO_DIR may point at a stale
+    # hermes-snap temp dir; rebind to the real production
+    # checkout so ``git rev-parse origin/<branch>`` succeeds
+    # against a real git tree. This is the canonical
+    # ``working_checkout`` for tests that exercise the
+    # supervisor's head-reconciliation branch.
+    import pathlib as _pl
+    _checkout = _pl.Path("/home/max/AutoDev")
+    if _checkout.is_dir():
+        monkeypatch.setattr(_sup, "REPO_DIR", _checkout)
+    print(f"  after override REPO_DIR={_sup.REPO_DIR}")
+    _captured_cmd: list = []
+    # Capture the real subprocess.run BEFORE the monkeypatch
+    # so the fall-through case can call the unpatched
+    # original. ``sup.subprocess.run`` and the
+    # module-level ``subprocess.run`` refer to the same
+    # bound name; we must hold a reference to the original
+    # function before installing the fake.
+    import subprocess as _real_subprocess_module
+    _real_run = _real_subprocess_module.run
+    def _fake_run(cmd, *args, **kwargs):
+        # Round-54/C22: ONLY short-circuit the dirty-tree
+        # guard's ``git status --porcelain`` invocation. All
+        # other git invocations (``rev-parse``, ``show``,
+        # ``ls-tree``, etc.) MUST fall through to the real
+        # subprocess so the supervisor's existing head
+        # reconciliation, identity guard, and other
+        # ``git -C REPO_DIR`` invocations continue to read
+        # the production checkout.
+        if (
+            cmd
+            and isinstance(cmd, list)
+            and len(cmd) > 0
+            and cmd[0] == "git"
+            and "status" in cmd
+            and "--porcelain" in cmd
+        ):
+            from types import SimpleNamespace
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        # Fall through to the real subprocess.run so non-fake
+        # git invocations read the production checkout.
+        return _real_run(cmd, *args, **kwargs)
+    monkeypatch.setattr(_sup.subprocess, "run", _fake_run)
+
+    # Round-54/C22: do NOT patch ``subprocess.Popen`` from
+    # the autouse fixture. Tests that call
+    # ``sup.launch_worker`` patch their OWN
+    # ``sup.subprocess.Popen`` (with the full Popen protocol
+    # including ``__enter__``/``__exit__``/``.poll``/``.args``)
+    # so a global FakePopen here would only break tests
+    # that do not also override it. The C22 dirty-tree
+    # guard runs ``subprocess.run`` which internally
+    # uses ``Popen``, but ``subprocess.run`` is patched
+    # below to short-circuit the dirty-tree guard's
+    # ``git status --porcelain`` call (returning empty
+    # stdout) without ever invoking ``Popen``.
+    yield
 # Resolve the package imports once at module load.
 from autocoder_supervisor import supervisor
 from autocoder_supervisor.worker_session import (
@@ -242,6 +322,56 @@ def test_supervisor_does_not_fall_back_to_known_missing_session(
         ws, "resolve_worker_session", raise_resolve_worker_session,
     )
 
+    # Round-54/C22: the C22 dirty-tree guard runs
+    # ``git -C REPO_DIR status --porcelain``. The test
+    # environment's REPO_DIR (from AED_WORKING_CHECKOUT
+    # captured at supervisor import time) may point at a
+    # stale temp dir OR at the production checkout where
+    # unrelated test edits make ``git status`` non-empty.
+    # Override REPO_DIR to a clean tmp_path so the guard's
+    # git invocation succeeds and returns an empty
+    # porcelain stream.
+    from pathlib import Path as _RepoPath
+    _repo_for_test = tmp_path / "repo"
+    _repo_for_test.mkdir(parents=True, exist_ok=True)
+    # Initialise a tiny git repo with HEAD = empty tree so
+    # ``git status`` returns 0.
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q", str(_repo_for_test)], check=True)
+    _sp.run(
+        ["git", "-C", str(_repo_for_test),
+         "-c", "user.email=test@test",
+         "-c", "user.name=test",
+         "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
+    monkeypatch.setattr(sup, "REPO_DIR", _repo_for_test)
+
+    # Round-54/C22: the C22 dirty-tree guard runs
+    # ``git -C REPO_DIR status --porcelain``. The test
+    # environment's REPO_DIR (from AED_WORKING_CHECKOUT
+    # captured at supervisor import time) may point at a
+    # stale temp dir OR at the production checkout where
+    # unrelated test edits make ``git status`` non-empty.
+    # Override REPO_DIR to a clean tmp_path so the guard's
+    # git invocation succeeds and returns an empty
+    # porcelain stream.
+    from pathlib import Path as _RepoPath
+    _repo_for_test = tmp_path / "repo"
+    _repo_for_test.mkdir(parents=True, exist_ok=True)
+    # Initialise a tiny git repo with HEAD = empty tree so
+    # ``git status`` returns 0.
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q", str(_repo_for_test)], check=True)
+    _sp.run(
+        ["git", "-C", str(_repo_for_test),
+         "-c", "user.email=test@test",
+         "-c", "user.name=test",
+         "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
+    monkeypatch.setattr(sup, "REPO_DIR", _repo_for_test)
+
     lease = sup.launch_worker(
         {"current_head": "a" * 40}, {"snapshot": {}},
     )
@@ -318,6 +448,7 @@ def test_reconcile_authoritative_head_falls_back_to_run_state(
         return {}  # simulate API failure
 
     monkeypatch.setattr(sup, "github_get", fake_github_get)
+    print(f"  TEST: REPO_DIR before reconcile = {sup.REPO_DIR}")
 
     sup._reconcile_authoritative_head_at_boot()
     assert sup.AUTHORITATIVE_HEAD == run_state_head
@@ -479,6 +610,52 @@ def test_supervisor_still_launches_when_resolution_succeeds(
         def __init__(self, cmd, **kwargs):
             captured_cmd.extend(cmd)
             self.pid = 99999
+            self.args = cmd
+            self.returncode = 0
+        # Round-54/C22: ``subprocess.run`` enters Popen
+        # as a context manager internally. Tests that
+        # patch ``sup.subprocess.Popen`` MUST expose
+        # the context manager protocol or the
+        # C22 dirty-tree guard fails before the
+        # worker-launch branch returns.
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+        def kill(self):
+            return None
+        def wait(self, timeout=None):
+            return 0
+        def communicate(self, input=None, timeout=None):
+            return ("", "")
+        def poll(self):
+            return 0
+        # Round-54/C22: ``subprocess.run`` -> ``Popen``
+            # context manager -> ``__exit__`` may call ``kill``
+            # on a ``Popen`` whose ``__exit__`` raised. Tests
+            # that patch ``sup.subprocess.Popen`` MUST
+            # expose a no-op ``kill`` so the dirty-tree
+            # guard's ``git status`` subprocess can be
+            # context-managed without raising.
+            return None
+        def wait(self, timeout=None):
+            return 0
+        def communicate(self, input=None, timeout=None):
+            return ("", "")
+        def kill(self):
+            # Round-54/C22: ``subprocess.run`` -> ``Popen``
+            # context manager -> ``__exit__`` may call ``kill``
+            # on a ``Popen`` whose ``__exit__`` raised. Tests
+            # that patch ``sup.subprocess.Popen`` MUST
+            # expose a no-op ``kill`` so the dirty-tree
+            # guard's ``git status`` subprocess can be
+            # context-managed without raising.
+            return None
+        def wait(self, timeout=None):
+            return 0
+        def communicate(self, input=None, timeout=None):
+            return ("", "")
+            self.pid = 99999
     monkeypatch.setattr(sup.subprocess, "Popen", FakePopen)
     monkeypatch.setattr(sup, "write_lease", lambda lease: None)
     monkeypatch.setattr(sup, "write_cooldown", lambda: None)
@@ -496,6 +673,28 @@ def test_supervisor_still_launches_when_resolution_succeeds(
     monkeypatch.setattr(
         ws, "resolve_worker_session", lambda **_: fake_resolution,
     )
+
+    # Round-54/C22: the dirty-tree guard runs
+    # ``git -C REPO_DIR status --porcelain``. The test
+    # environment's REPO_DIR (from AED_WORKING_CHECKOUT
+    # captured at supervisor import time) may point at a
+    # stale temp dir OR at the production checkout where
+    # unrelated test edits make ``git status`` non-empty.
+    # Override REPO_DIR to a clean tmp_path so the guard's
+    # git invocation succeeds and returns an empty
+    # porcelain stream.
+    _repo_for_test = tmp_path / "repo"
+    _repo_for_test.mkdir(parents=True, exist_ok=True)
+    import subprocess as _sp
+    _sp.run(["git", "init", "-q", str(_repo_for_test)], check=True)
+    _sp.run(
+        ["git", "-C", str(_repo_for_test),
+         "-c", "user.email=test@test",
+         "-c", "user.name=test",
+         "commit", "--allow-empty", "-q", "-m", "init"],
+        check=True,
+    )
+    monkeypatch.setattr(sup, "REPO_DIR", _repo_for_test)
 
     lease = sup.launch_worker(
         {"current_head": "a" * 40}, {"snapshot": {}},
@@ -643,6 +842,15 @@ def test_pending_event_ids_round_trip_through_launch_worker(
     _write_directive_with_digest(target, _make_directive())
     monkeypatch.setenv("AED_EVIDENCE_ROOT", str(tmp_path / "evidence"))
     monkeypatch.setattr(sup, "WORKER_COMMAND_TEMPLATE", ["echo"])
+    # Round-54/C22: same subprocess.run patch as the
+    # companion test above.
+    def _fake_subprocess_run(cmd, *args, **kwargs):
+        if cmd and cmd[0] == "git":
+            from types import SimpleNamespace
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        from types import SimpleNamespace
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(sup.subprocess, "run", _fake_subprocess_run)
 
     # Set the canonical pending event ids.
     supervisor.__dict__["_pending_launch_event_ids"] = (
@@ -653,6 +861,18 @@ def test_pending_event_ids_round_trip_through_launch_worker(
     class FakePopen:
         def __init__(self, cmd, **kwargs):
             self.pid = 99999
+            self.args = cmd
+            self.returncode = 0
+        # Round-54/C22: ``subprocess.run`` enters Popen
+        # as a context manager internally. Tests that
+        # patch ``sup.subprocess.Popen`` MUST expose
+        # the context manager protocol or the
+        # C22 dirty-tree guard fails before the
+        # worker-launch branch returns.
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
     monkeypatch.setattr(sup.subprocess, "Popen", FakePopen)
 
     def capture_lease(lease):

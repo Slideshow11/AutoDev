@@ -343,6 +343,10 @@ def test_no_changes_required_zero_commits(
     a commit, the artifact is INVALID.
     """
     # Valid no-op: zero produced, zero pushed.
+    # Round-54/C22 hardening: the artifact must carry the
+    # canonical repo / pr / branch / head / result_contract_id
+    # identity fields so the validator can cross-check the
+    # prelaunch identity.
     artifact = WorkerResultArtifact(
         schema_version=WORKER_RESULT_SCHEMA_VERSION,
         attempt_id="att-1",
@@ -352,8 +356,24 @@ def test_no_changes_required_zero_commits(
         produced_commit_shas=(),
         pushed_commit_shas=(),
         completed_at="2026-08-10T00:00:00Z",
+        repo="Slideshow11/AutoDev",
+        pr_number=5,
+        expected_branch="feat/review-repair-relay-v1",
+        prelaunch_head="a" * 40,
+        extra={
+            "result_contract_id": "rc-test-valid",
+            "expected_result_contract_id": "rc-test-valid",
+            "observed_result_contract_id": "rc-test-valid",
+            "result_contract_match": True,
+        },
     )
-    rec = _make_record(attempt_id="att-1")
+    # Round-54/C22 §1: the attempt record MUST carry the
+    # supervisor-owned result_contract_id so the
+    # validator's identity check passes.
+    rec = _make_record(
+        attempt_id="att-1",
+        extra={"result_contract_id": "rc-test-valid"},
+    )
     errors = artifact.validate_against_attempt(rec)
     assert errors == []
 

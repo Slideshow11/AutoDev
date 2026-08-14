@@ -344,11 +344,29 @@ def test_p1_07_advance_qualifying_refuses_when_checks_not_green() -> None:
     assert fn_idx != -1, "_advance_awaiting_ci_to_qualifying not defined"
     fn_end = src.find("\ndef ", fn_idx + 1)
     fn_body = src[fn_idx:fn_end if fn_end != -1 else None]
-    assert "required_checks_green" in fn_body, (
-        "_advance_awaiting_ci_to_qualifying must call required_checks_green"
+    assert (
+        "required_checks_green" in fn_body
+        or "ci_policy_status" in fn_body
+    ), (
+        "_advance_awaiting_ci_to_qualifying must verify CI before "
+        "transitioning (round-31 hardening: ci_policy_status)"
     )
-    assert "required checks not green" in fn_body, (
-        "must log 'required checks not green' on the refusal path"
+    # Round-31 P1#7 hardening: the supervisor MUST refuse
+    # the transition when CI is not green. The round-39
+    # contract splits this into CHECKS_PENDING /
+    # CHECKS_FAILED / POLICY_UNRESOLVED; the test only
+    # requires that the refusal-path log MENTION the
+    # required checks. Accept any of the four refusal
+    # markers.
+    refusal_markers = (
+        "required checks not green",
+        "required checks pending",
+        "required checks failed",
+        "ci policy unresolved",
+    )
+    assert any(m in fn_body for m in refusal_markers), (
+        "must log a refusal marker on the CI-not-green path "
+        f"(expected one of {refusal_markers!r})"
     )
     assert "refusing transition (fail-closed)" in fn_body, (
         "must log 'refusing transition (fail-closed)' on the refusal path"
