@@ -42,16 +42,35 @@ from pathlib import Path
 # runtime file requires editing this list AND the production
 # source tree (in the same change). This eliminates the
 # hand-maintained partial list defect.
+#
+# Closure V §6: the inventory is the transitive closure of
+# every module that supervisor.py imports from
+# autocoder_supervisor/ AND every autocoder_orchestration/
+# module that supervisor.py imports. The inventory is
+# validated against the actual imports at module-load time.
 ACCEPTANCE_RUNTIME_INVENTORY: tuple = (
+    # autocoder_supervisor/ — modules supervisor.py
+    # imports directly via `from .X import ...`.
     "supervisor.py",
+    "_directive_prompt.py",
     "worker_session.py",
     "aed_worker_wrapper.py",
     "directive_bridge.py",
-    "_directive_prompt.py",
     "provenance_maintenance.py",
     "hermes_fingerprint.py",
+    "orchestration_state_root.py",
+    "relay_wiring.py",
+    "config.py",
+    "contracts.py",
+    "validate.py",
+    # autocoder_orchestration/ — modules supervisor.py
+    # imports for the orchestration/result-contract/repair
+    # pipeline.
     "worker_attempt.py",
     "review_repair_relay.py",
+    "controller.py",
+    "context.py",
+    "store.py",
 )
 
 

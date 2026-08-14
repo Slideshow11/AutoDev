@@ -1178,6 +1178,24 @@
       "line": 411,
       "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
       "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 411; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 32,
+      "line": 700,
+      "line_sha256": "b4a3195c59db4329475bb44a3e86c5fc9027f0c61fb8ec69ff701e5a20c082a1",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 700; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 33,
+      "line": 752,
+      "line_sha256": "b4a3195c59db4329475bb44a3e86c5fc9027f0c61fb8ec69ff701e5a20c082a1",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 752; encoding=utf-8"
     }
   ]
 }

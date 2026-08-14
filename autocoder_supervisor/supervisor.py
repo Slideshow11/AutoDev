@@ -9964,15 +9964,24 @@ def _replay_cooldown_deferred_if_any() -> None:
     # event that was already dispatched (idempotency).
     launched = launched_event_ids()
     replayed: list = []
+    already_dispatched: list = []
+    already_in_unconsumed: list = []
     for eid in list(deferred_ids):
         if eid in launched:
-            # Already dispatched; just remove from the
-            # deferred ledger so it doesn't accumulate.
+            # Already dispatched; remove from the
+            # deferred ledger so it doesn't accumulate
+            # as a tombstone. Closure V §8: previously
+            # the cleanup branch passed only the
+            # un-launched ids, leaking already-launched
+            # entries forever. Now we collect them
+            # explicitly for the consume step below.
+            already_dispatched.append(eid)
             continue
         if eid in existing_ids:
             # Already in the unconsumed ledger; the next
             # ``run_iteration_v5`` will see it via the
             # snapshot delta. Drop the deferred entry.
+            already_in_unconsumed.append(eid)
             continue
         # Original payload is unknown (we only stored
         # ids in the deferred ledger). Synthesize a
@@ -9985,15 +9994,16 @@ def _replay_cooldown_deferred_if_any() -> None:
             {"id": eid, "kind": "replayed_cooldown_deferred"}
         )
         replayed.append(eid)
+    # Closure V §8: the cleanup MUST remove every entry
+    # that has already been dispatched OR is already in
+    # the unconsumed ledger. The previous implementation
+    # only removed un-launched ids, leaking tombstones.
+    cleanup_ids = list(
+        set(already_dispatched) | set(already_in_unconsumed)
+    )
+    if cleanup_ids:
+        _consume_cooldown_deferred(cleanup_ids)
     if not replayed:
-        # All deferred ids were already dispatched or
-        # already in the unconsumed ledger. Drop them
-        # from the deferred ledger so they don't
-        # accumulate; the next iteration sees the
-        # replayed events via the existing paths.
-        _consume_cooldown_deferred(
-            [eid for eid in deferred_ids if eid not in launched]
-        )
         return
     try:
         write_json(
