@@ -9914,6 +9914,9 @@ def _consume_cooldown_deferred(event_ids: Iterable[str]) -> None:
     )
 
 
+_replay_cooldown_deferred_if_any_last_result: list = []
+
+
 def _cooldown_deferred_ids() -> set:
     """Return the set of event ids currently cooldown-deferred.
 
@@ -9933,25 +9936,32 @@ def _cooldown_deferred_ids() -> set:
     return set(existing.get("ids", []))
 
 
-def _replay_cooldown_deferred_if_any() -> None:
+def _replay_cooldown_deferred_if_any() -> list:
+    global _replay_cooldown_deferred_if_any_last_result
     """Replay events that were deferred during cooldown.
 
-    Round-39 P1#2: when cooldown expires, this helper
-    re-emits the deferred events into the unconsumed-events
-    ledger so the next snapshot delta (or the explicit
-    ``handle_new_events`` invocation) routes them to
-    ``_invoke_relay_for_events``. The deferred ledger is
-    cleared once the event payload is replayed.
+    Round-39 P1#2 + Closure VI §2: when cooldown expires,
+    this helper re-emits the deferred events into the
+    unconsumed-events ledger so the SAME-heartbeat
+    handle_new_events invocation routes them to the relay.
+    The deferred ledger is cleaned up once the event payload
+    is replayed.
 
     Exactly-one ownership: PENDING -> dispatched, never
     twice. An event already in ``launched_events.json``
     is considered already-dispatched and is NOT re-emitted
     (the next ``handle_new_events`` short-circuits the
     ``already`` set).
+
+    Returns the list of event ids that were replayed into
+    the unconsumed ledger (so the caller can dispatch them
+    on the same heartbeat). Empty list if no replay
+    happened.
     """
     deferred_ids = _cooldown_deferred_ids()
     if not deferred_ids:
-        return
+        _replay_cooldown_deferred_if_any_last_result = []
+        return []
     # Read the existing unconsumed ledger so we can merge
     # without losing any events that arrived concurrently.
     try:
@@ -10003,8 +10013,9 @@ def _replay_cooldown_deferred_if_any() -> None:
     )
     if cleanup_ids:
         _consume_cooldown_deferred(cleanup_ids)
+    _replay_cooldown_deferred_if_any_last_result = list(replayed)
     if not replayed:
-        return
+        return replayed
     try:
         write_json(
             UNCONSUMED_EVENTS_PATH,  # type: ignore[name-defined]
@@ -10024,6 +10035,8 @@ def _replay_cooldown_deferred_if_any() -> None:
         "cooldown-deferred events replayed",
         replayed=len(replayed),
     )
+    _replay_cooldown_deferred_if_any_last_result = list(replayed)
+    return replayed
 
 
 def unmark_event_launched(event_id: str) -> None:
@@ -14184,8 +14197,60 @@ def main(argv: Optional[list[str]] = None) -> int:
             # so handle_new_events can dispatch them on
             # the SAME heartbeat. Exactly-one ownership:
             # PENDING -> dispatched, never twice.
+            # Round-39 P1#2 + Closure VI §2: replay cooldown-
+            # deferred events when cooldown expires. The
+            # replay merges deferred events into the
+            # unconsumed-events ledger. On the SAME heartbeat
+            # we MUST dispatch the freshly-replayed events
+            # through handle_new_events so a stable head
+            # (no external GitHub snapshot delta) does NOT
+            # strand deferred work in the unconsumed ledger
+            # forever. Without this second invocation, the
+            # replay appends to unconsumed_events.json and
+            # only the next iteration's snapshot delta can
+            # route them to the relay.
+            replayed_event_ids = []
             if not cooldown_active():
                 _replay_cooldown_deferred_if_any()
+                replayed_event_ids = (
+                    _replay_cooldown_deferred_if_any_last_result
+                )
+                # If replay produced new unconsumed events,
+                # dispatch them on the SAME heartbeat so a
+                # stable head cannot strand them. The replay
+                # is bounded to its own bookkeeping; the
+                # handle_new_events call below uses
+                # exactly-one ownership (launched_events
+                # dedup) to prevent duplicates.
+                if replayed_event_ids:
+                    try:
+                        # Read the freshly-replayed payloads
+                        # from unconsumed_events.json.
+                        _ue = read_json(
+                            UNCONSUMED_EVENTS_PATH  # type: ignore
+                        )
+                        _replayed_payloads = []
+                        for ev in _ue.get("events", []):
+                            if (
+                                isinstance(ev, dict)
+                                and ev.get("id") in replayed_event_ids
+                            ):
+                                _replayed_payloads.append(ev)
+                        if _replayed_payloads:
+                            handle_new_events(
+                                rs, _replayed_payloads, token, iteration
+                            )
+                    except Exception as _replay_dispatch_exc:
+                        log(
+                            "warning",
+                            "Closure VI §2: same-heartbeat dispatch "
+                            "of replayed events failed; deferred "
+                            "work remains durable in unconsumed "
+                            "ledger and will be retried next "
+                            "heartbeat",
+                            replayed_count=len(replayed_event_ids),
+                            error=str(_replay_dispatch_exc)[:200],
+                        )
 
             # Round-51/C19 Objective 2: REPAIR-BEFORE-QUALIFICATION.
             # If runnable repair work exists, dispatch it

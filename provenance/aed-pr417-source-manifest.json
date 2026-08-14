@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "7ebf1ceb4dbd6030f3c4c6a6df88cfcd2707bbdf66c40a938eea301471325cef",
-      "destination_size_bytes": 593446,
+      "destination_sha256": "c393255b4c64846dc176a48db14f59d892e86f6c226d50976b75c243088d8247",
+      "destination_size_bytes": 596643,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -248,8 +248,8 @@
     },
     {
       "destination_path": "scripts/scanner-occurrence-allowlist.json",
-      "destination_sha256": "524317b01fc06200ecf2919c4868b1e4f97daa7dd9f70b63663c07a951713c4f",
-      "destination_size_bytes": 62381,
+      "destination_sha256": "193c8b8a00657cb12a7f46de592f3256243f11f513ac8c950608794f5f640b03",
+      "destination_size_bytes": 62040,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_ci_addition",

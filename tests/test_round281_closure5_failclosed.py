@@ -425,6 +425,9 @@ class TestStaticScopeSemantic:
 
 
 class TestRunBindingRelational:
+    """Closure VI §1: validate_run_binding_relations now
+    accepts ONLY a set of 4-tuples."""
+
     def test_relational_validation_rejects_mismatched_head(self):
         from autocoder_supervisor.hermes_fingerprint import (
             validate_run_binding_relations,
@@ -436,13 +439,11 @@ class TestRunBindingRelational:
             "attempt_id": "att-1",
             "result_contract_id": "rc-1",
         }
+        # Owned set does NOT contain the binding tuple.
         with pytest.raises(RunBindingRelationalError):
             validate_run_binding_relations(
                 binding=valid,
-                owned_heads={"b" * 40},  # NOT the bound head
-                owned_generations={"gen-1"},
-                owned_attempts={"att-1"},
-                owned_contracts={"rc-1"},
+                owned_tuples={("b" * 40, "gen-1", "att-1", "rc-1")},
             )
 
     def test_relational_validation_rejects_mismatched_generation(self):
@@ -459,10 +460,7 @@ class TestRunBindingRelational:
         with pytest.raises(RunBindingRelationalError):
             validate_run_binding_relations(
                 binding=valid,
-                owned_heads={"a" * 40},
-                owned_generations={"gen-1"},  # NOT gen-2
-                owned_attempts={"att-1"},
-                owned_contracts={"rc-1"},
+                owned_tuples={("a" * 40, "gen-1", "att-1", "rc-1")},
             )
 
     def test_relational_validation_rejects_mismatched_attempt(self):
@@ -479,10 +477,7 @@ class TestRunBindingRelational:
         with pytest.raises(RunBindingRelationalError):
             validate_run_binding_relations(
                 binding=valid,
-                owned_heads={"a" * 40},
-                owned_generations={"gen-1"},
-                owned_attempts={"att-1"},  # NOT att-2
-                owned_contracts={"rc-1"},
+                owned_tuples={("a" * 40, "gen-1", "att-1", "rc-1")},
             )
 
     def test_relational_validation_rejects_mismatched_contract(self):
@@ -499,10 +494,7 @@ class TestRunBindingRelational:
         with pytest.raises(RunBindingRelationalError):
             validate_run_binding_relations(
                 binding=valid,
-                owned_heads={"a" * 40},
-                owned_generations={"gen-1"},
-                owned_attempts={"att-1"},
-                owned_contracts={"rc-1"},  # NOT rc-2
+                owned_tuples={("a" * 40, "gen-1", "att-1", "rc-1")},
             )
 
     def test_relational_validation_accepts_correct_tuple(self):
@@ -517,10 +509,7 @@ class TestRunBindingRelational:
         }
         result = validate_run_binding_relations(
             binding=valid,
-            owned_heads={"a" * 40},
-            owned_generations={"gen-1"},
-            owned_attempts={"att-1"},
-            owned_contracts={"rc-1"},
+            owned_tuples={("a" * 40, "gen-1", "att-1", "rc-1")},
         )
         assert result["binding"] == valid
         assert result["relations_verified"] is True
