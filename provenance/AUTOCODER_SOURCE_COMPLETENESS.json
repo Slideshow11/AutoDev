@@ -7464,8 +7464,8 @@
       },
       {
         "destination_path": "autocoder_supervisor/supervisor.py",
-        "destination_sha256": "a0d712cd562060b31c762d11452052d8196e501c972379fe2c215bcf62ceedb9",
-        "destination_size_bytes": 568138,
+        "destination_sha256": "514043b29f6bddb3f46f948205a85d9b37477ed138d21de33ff52eac2a9ad0ac",
+        "destination_size_bytes": 576329,
         "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
         "source_size_bytes": 86428,
@@ -7829,7 +7829,7 @@
         "aed_size_bytes": 86428,
         "aed_source_path": "scripts/local/autocoder_supervisor/supervisor.py",
         "autodev_destination": "autocoder_supervisor/supervisor.py",
-        "autodev_sha256": "a0d712cd562060b31c762d11452052d8196e501c972379fe2c215bcf62ceedb9"
+        "autodev_sha256": "514043b29f6bddb3f46f948205a85d9b37477ed138d21de33ff52eac2a9ad0ac"
       },
       {
         "aed_sha256": "82164445f7705df8d83d5282e94f8e4346dd2422038784c1f3787188f7a54224",
