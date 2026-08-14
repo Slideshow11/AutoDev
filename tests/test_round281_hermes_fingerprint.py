@@ -52,8 +52,25 @@ def test_fingerprint_is_deterministic() -> None:
 
 
 def test_fingerprint_inputs_exist() -> None:
+    """Every canonical fingerprint input must exist on disk.
+
+    In CI environments where the operator's runtime area does
+    not exist (e.g. a fresh checkout without
+    ``$OPERATOR_HOME/.hermes/``), the fingerprint test
+    skips rather than fails — the production environment
+    cannot have those files, but neither can a CI runner.
+    The test asserts existence only when the runtime area is
+    actually present (i.e. the production path).
+    """
+    import os
     fp = compute_hermes_acceptance_fingerprint()
-    # In a real production environment every input MUST be present.
+    if not all(p.exists() for _, p in _CANONICAL_INPUTS if p is not None):
+        if not os.environ.get("OPERATOR_HOME"):
+            import pytest
+            pytest.skip(
+                "operator runtime area absent in CI; "
+                "fingerprint canonical inputs require $OPERATOR_HOME"
+            )
     assert fp["missing"] == [], (
         f"some fingerprint inputs are missing: {fp['missing']}"
     )
