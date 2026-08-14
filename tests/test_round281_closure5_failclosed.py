@@ -697,7 +697,7 @@ class TestAcceptanceRuntimeInventoryCompleteness:
         inv = set(ACCEPTANCE_RUNTIME_INVENTORY)
         # Read supervisor.py and find every `from .X import ...`.
         src = open(
-            "/home/max/AutoDev/autocoder_supervisor/supervisor.py"
+            str(Path(__file__).resolve().parent.parent / "autocoder_supervisor" / "supervisor.py")
         ).read()
         locals_ = set()
         for m in re.finditer(r"from\s+\.([\w_]+)\s+import", src):
@@ -749,7 +749,7 @@ class TestAcceptanceRuntimeInventoryCompleteness:
         # imports is derived from the actual code; we
         # compare it to the inventory.
         src = open(
-            "/home/max/AutoDev/autocoder_supervisor/supervisor.py"
+            str(Path(__file__).resolve().parent.parent / "autocoder_supervisor" / "supervisor.py")
         ).read()
         locals_ = set()
         for m in re.finditer(r"from\s+\.([\w_]+)\s+import", src):
