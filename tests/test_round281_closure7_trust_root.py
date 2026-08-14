@@ -83,14 +83,19 @@ class TestStaticScopeObservedVsExpected:
         assert "repository_owner" in out
         assert "repository_name" in out
 
-    def test_read_observed_static_scope_returns_dict(self):
+    def test_read_observed_static_scope_returns_dict(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (
             _read_observed_static_scope,
         )
-        # Pass the production state_dir.
+        # Provide a stub run_state.json so the observer
+        # has something to read.
+        rs = tmp_path / "run_state.json"
+        rs.write_text(json.dumps({"feature_branch": "feat/test"}))
+        # Provide a stub supervisor_pid that doesn't exist
+        # so we skip the /proc/environ path.
         out = _read_observed_static_scope(
-            supervisor_pid=None,
-            state_dir="/home/max/.hermes/aed-supervisor/state",
+            supervisor_pid=999999,
+            state_dir=str(tmp_path),
         )
         assert isinstance(out, dict)
         assert "repository_owner" in out
@@ -199,7 +204,7 @@ class TestStaticScopeObservedVsExpected:
             before_env[k] = os.environ.get(k)
 
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -247,7 +252,7 @@ class TestAcceptanceRuntimeComparison:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -267,7 +272,7 @@ class TestAcceptanceRuntimeComparison:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -280,7 +285,7 @@ class TestAcceptanceRuntimeComparison:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -293,7 +298,7 @@ class TestAcceptanceRuntimeComparison:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -310,7 +315,7 @@ class TestAcceptanceRuntimeComparison:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -688,7 +693,7 @@ class TestRequiredCIChecks:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -706,7 +711,7 @@ class TestRequiredCIChecks:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
