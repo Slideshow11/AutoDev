@@ -5410,111 +5410,6 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                     if _after is not None:
                         _rec_obj = _after
                     _new_lifecycle = LIFECYCLE_PUSH_VERIFIED
-                    # Pre-canary round-281 §6: autonomous provenance
-                    # maintenance production wiring. After a verified
-                    # REPAIR_PUSHED the supervisor MUST check whether
-                    # the committed bytes drift the provenance manifest
-                    # and durably record that drift so the next worker
-                    # round owns the repair. The supervisor does NOT
-                    # itself commit (that requires worker-round
-                    # authority); it only registers the drift as
-                    # durable work.
-                    try:
-                        from .provenance_maintenance import (
-                            is_manifest_stale,
-                            _PROVENANCE_MANIFEST_PATH,
-                            _PROVENANCE_MANIFEST_PATH_AED,
-                        )
-                        import subprocess as _sp
-                        _head = _rec_obj.pushed_commit_sha
-                        _src_root = str(REPO_DIR)  # type: ignore[name-defined]
-                        # Read the committed source bytes for the
-                        # tracked supervisor files and check both
-                        # manifests against the new HEAD.
-                        _git = _sp.run(
-                            ["git", "-C", _src_root, "show", f"{_head}:autocoder_supervisor/supervisor.py"],
-                            capture_output=True,
-                        )
-                        if _git.returncode != 0:
-                            raise RuntimeError(
-                                f"git show failed for {_head}: "
-                                f"{_git.stderr.decode()[:200]!r}"
-                            )
-                        import hashlib as _hl
-                        _committed_sup_sha = _hl.sha256(
-                            _git.stdout
-                        ).hexdigest()
-                        _stale = []
-                        for _mp in (
-                            _PROVENANCE_MANIFEST_PATH,
-                            _PROVENANCE_MANIFEST_PATH_AED,
-                        ):
-                            _stale_here = is_manifest_stale(
-                                _mp,
-                                _src_root,
-                                allowed_paths=(
-                                    "autocoder_supervisor/supervisor.py",
-                                ),
-                            )
-                            if _stale_here:
-                                _stale.append(str(_mp))
-                        if _stale:
-                            log(
-                                "warning",
-                                "round-281 §6: provenance drift detected "
-                                "after REPAIR_PUSHED; registering durable "
-                                "manifest-repair ownership for next round",
-                                attempt_id=_attempt_id,
-                                pushed_commit_sha=_head,
-                                stale_manifests=_stale,
-                                committed_supervisor_sha=(
-                                    _committed_sup_sha[:16] + "..."
-                                ),
-                            )
-                            # Register the drift as durable work. The
-                            # supervisor records a durable
-                            # provenance-drift finding that the next
-                            # worker round MUST repair.
-                            _drift_path = (
-                                STATE_DIR  # type: ignore[name-defined]
-                                / "provenance_drift_pending.json"
-                            )
-                            import json as _json
-                            _existing = []
-                            try:
-                                _existing = _json.loads(
-                                    _drift_path.read_text()
-                                )
-                            except Exception:
-                                _existing = []
-                            _existing.append({
-                                "detected_at": now_iso(),
-                                "head_sha": _head,
-                                "stale_manifests": _stale,
-                                "committed_supervisor_sha": (
-                                    _committed_sup_sha
-                                ),
-                                "attempt_id": _attempt_id,
-                                "owner": (
-                                    "next_worker_round_autonomous"
-                                ),
-                                "repair_status": "pending",
-                            })
-                            _drift_path.write_text(
-                                _json.dumps(_existing, indent=2)
-                            )
-                    except Exception as _pe:
-                        # The drift-detection helper MUST never
-                        # block the supervisor's main flow. Log
-                        # and continue.
-                        log(
-                            "warning",
-                            "round-281 §6: provenance drift check "
-                            "raised; manifest may be stale until "
-                            "next operator reconciliation",
-                            attempt_id=_attempt_id,
-                            error=str(_pe)[:200],
-                        )
                 except Exception as _fe:
                     log(
                         "warning",
@@ -5523,6 +5418,45 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                         error=str(_fe)[:200],
                     )
                     _new_lifecycle = LIFECYCLE_WORKER_EXITED_NO_PUSH
+                # Pre-canary round-281 §6 + Closure III:
+                # canonical autonomous provenance maintenance
+                # production wiring. After a verified
+                # REPAIR_PUSHED (whether reached via normal
+                # completion or orphan reconciliation) the
+                # supervisor MUST detect any provenance
+                # drift across the entire controlled-source
+                # set and durably record the drift with a
+                # real lifecycle. Drift detection runs
+                # REGARDLESS of finalize success; failure to
+                # detect is fail-closed.
+                if (
+                    _new_lifecycle == LIFECYCLE_PUSH_VERIFIED
+                    and _rec_obj.pushed_commit_sha
+                ):
+                    try:
+                        _check_provenance_drift_and_register(
+                            new_head_sha=str(_rec_obj.pushed_commit_sha),
+                            attempt_id=str(_attempt_id),
+                        )
+                    except Exception as _drift_exc:
+                        # Fail closed: do NOT mark the lease
+                        # terminal until the drift is durable.
+                        # The attempt record stays in
+                        # WORKER_RUNNING until the next round
+                        # reconciles.
+                        log(
+                            "error",
+                            "round-281 §6 + Closure III: "
+                            "provenance drift check FAILED; "
+                            "attempt stays in WORKER_RUNNING "
+                            "pending drift resolution",
+                            attempt_id=str(_attempt_id),
+                            pushed_commit_sha=str(
+                                _rec_obj.pushed_commit_sha
+                            )[:12] + "...",
+                            error=str(_drift_exc)[:200],
+                        )
+                        _new_lifecycle = LIFECYCLE_WORKER_RUNNING
             else:
                 _new_lifecycle = LIFECYCLE_UNATTRIBUTED_HEAD_ADVANCE
                 try:
@@ -9724,6 +9658,99 @@ def mark_event_launched(event_id: str) -> None:
 _COOLDOWN_DEFERRED_PATH = STATE_DIR / "cooldown_deferred_events.json"  # type: ignore[name-defined]
 
 
+def _check_provenance_drift_and_register(
+    *, new_head_sha: str, attempt_id: str
+) -> None:
+    """Pre-canary round-281 §6 + Closure III: canonical autonomous
+    provenance maintenance production wiring.
+
+    This helper is the SINGLE entry point that runs after every
+    verified REPAIR_PUSHED, irrespective of whether the
+    verification came from normal completion or orphan
+    reconciliation. It:
+
+      1. Enumerates the controlled-source destination set from
+         the canonical provenance manifests (no hand-maintained
+         partial list).
+      2. Compares every controlled destination's bytes at
+         ``new_head_sha`` against the manifest records.
+      3. On any drift, durably records the drift via the atomic
+         JSON write helper. The drift record carries a real
+         lifecycle (DETECTED -> ... -> TERMINAL or SUPERSEDED).
+      4. Fail-closes on any internal failure: a raised
+         exception is logged AND the caller's drift block
+         considers the lease un-finalized. The supervisor MUST
+         NOT swallow the exception and continue; otherwise the
+         readiness pipeline would advance with an undetected
+         drift.
+
+    The supervisor does NOT itself commit (that requires
+    worker-round authority); it only registers durable work for
+    the next worker round.
+    """
+    from .provenance_maintenance import (
+        find_drift_at_head,
+        register_drift,
+        _PROVENANCE_MANIFEST_PATH,
+        _PROVENANCE_MANIFEST_PATH_AED,
+        AtomicWriteError,
+    )
+    import json as _pjson
+    src_root = Path(str(REPO_DIR))  # type: ignore[name-defined]
+    drift_ledger = (
+        STATE_DIR  # type: ignore[name-defined]
+        / "provenance_drift_pending.json"
+    )
+    manifests = [
+        src_root / "provenance" / "AUTOCODER_SOURCE_COMPLETENESS.json",
+        src_root / "provenance" / "aed-pr417-source-manifest.json",
+    ]
+    # Filter out missing manifests; only iterate those that exist.
+    manifests = [m for m in manifests if m.exists()]
+    # If BOTH canonical manifests are missing, the source-of-truth
+    # is broken. Fail closed.
+    if not manifests:
+        raise RuntimeError(
+            "round-281 §6 + Closure III: no canonical provenance "
+            "manifests found; cannot evaluate drift at head "
+            f"{new_head_sha}"
+        )
+    # The canonical helper returns the drift list; an exception
+    # propagates to the caller (which decides how to handle
+    # fail-closed behavior).
+    drifts = find_drift_at_head(
+        repo_root=src_root,
+        head_sha=new_head_sha,
+        manifest_paths=manifests,
+    )
+    if not drifts:
+        # No drift; the manifests are consistent with the new
+        # head. No durable work to register.
+        return
+    # Drift was detected. Register it durably via the atomic
+    # write helper. The helper raises AtomicWriteError on any
+    # failure; we propagate so the caller can decide.
+    register_drift(
+        head_sha=new_head_sha,
+        attempt_id=attempt_id,
+        drifts=drifts,
+    )
+    # Log at INFO level so operators can audit via the supervisor
+    # log without seeing a warning for normal-detected drift.
+    log(
+        "info",
+        "round-281 §6 + Closure III: provenance drift detected "
+        "after verified REPAIR_PUSHED; durable drift record "
+        "registered for next worker round",
+        attempt_id=attempt_id,
+        pushed_commit_sha=new_head_sha[:12] + "...",
+        drift_count=len(drifts),
+        drift_destinations=sorted(
+            d["destination"] for d in drifts
+        )[:5],
+    )
+
+
 def _classify_event_retry_owner(event: dict) -> dict:
     """Classify a deferred event by kind, head, and retry owner.
 
@@ -12296,64 +12323,64 @@ def handle_new_events(
     operator must inspect the BLOCKED state or the
     existing readiness gate must certify the head.
     """
-    # Pre-canary round-281 §6: register durable provenance-drift
-    # ownership as a synthetic new_thread event so the next worker
-    # round dispatches the manifest-repair task through the
-    # normal review-repair path. The drift is recorded by the
-    # supervisor's post-REPAIR_PUSHED hook (in supervisor.py) so
-    # this branch merely converts the durable drift record into
-    # an actionable event for the relay.
+    # Pre-canary round-281 §6 + Closure III: enqueue durable
+    # provenance-drift records as actionable events for the
+    # relay. The drift records are durably maintained via the
+    # canonical atomic helper; here we only READ the open
+    # drift records and inject events for them. SUPERSEDED
+    # and TERMINAL records are not re-emitted.
     try:
+        from .provenance_maintenance import (
+            list_open_drifts as _list_open_drifts,
+        )
         _drift_path = (
             STATE_DIR  # type: ignore[name-defined]
             / "provenance_drift_pending.json"
         )
-        import json as _pdj
-        if _drift_path.exists():
-            _pd = _pdj.loads(_drift_path.read_text())
-            for _entry in _pd:
-                if _entry.get("repair_status") != "pending":
-                    continue
-                _drift_event = {
-                    "id": (
-                        "provenance_drift:" + _entry.get("head_sha", "")
-                    ),
-                    "kind": "provenance_drift",
-                    "head_sha": _entry.get("head_sha"),
-                    "stale_manifests": _entry.get("stale_manifests"),
-                    "committed_supervisor_sha": _entry.get(
-                        "committed_supervisor_sha"
-                    ),
-                    "attempt_id": _entry.get("attempt_id"),
-                    "severity": "P1",
-                    "title": (
-                        "round-281 §6: provenance manifest drift "
-                        "after REPAIR_PUSHED; repair required"
-                    ),
-                    "body": (
-                        "Autonomous provenance drift detected after "
-                        "REPAIR_PUSHED for head "
-                        + str(_entry.get("head_sha", ""))
-                        + "; the next worker round MUST regenerate "
-                        "the stale manifests via "
-                        "autocoder_supervisor.provenance_maintenance."
-                        "regenerate_manifest() and commit the repair."
-                    ),
-                    "file_path": "provenance/",
-                    "line": 1,
-                }
-                # Idempotency: do not enqueue duplicates for the
-                # same head within the same heartbeat.
-                if not any(
-                    e.get("id") == _drift_event["id"]
-                    for e in new_events
-                ):
-                    new_events.append(_drift_event)
+        for _entry in _list_open_drifts(ledger_path=_drift_path):
+            _drift_event = {
+                "id": (
+                    "provenance_drift:" + _entry.get("head_sha", "")
+                ),
+                "kind": "provenance_drift",
+                "head_sha": _entry.get("head_sha"),
+                "drifts": _entry.get("drifts", []),
+                "state": _entry.get("state"),
+                "attempt_id": _entry.get("attempt_id"),
+                "severity": "P1",
+                "title": (
+                    "round-281 §6 + Closure III: provenance "
+                    "manifest drift after REPAIR_PUSHED; "
+                    "repair required"
+                ),
+                "body": (
+                    "Autonomous provenance drift detected after "
+                    "REPAIR_PUSHED for head "
+                    + str(_entry.get("head_sha", ""))
+                    + "; the next worker round MUST regenerate "
+                    "the stale manifests via "
+                    "autocoder_supervisor.provenance_maintenance."
+                    "regenerate_manifest() and commit the repair."
+                ),
+                "file_path": "provenance/",
+                "line": 1,
+            }
+            # Idempotency: do not enqueue duplicates for the
+            # same head within the same heartbeat.
+            if not any(
+                e.get("id") == _drift_event["id"]
+                for e in new_events
+            ):
+                new_events.append(_drift_event)
     except Exception as _pd_exc:
+        # Fail closed: provenance-drift enqueue MUST NOT
+        # silently lose durable work. Log the error and
+        # leave the drift in the ledger; the next heartbeat
+        # will retry.
         log(
-            "warning",
-            "round-281 §6: provenance-drift enqueue raised; "
-            "the drift will be processed on the next heartbeat",
+            "error",
+            "round-281 §6 + Closure III: provenance-drift "
+            "enqueue FAILED; durable work preserved in ledger",
             error=str(_pd_exc)[:200],
         )
     already = launched_event_ids()
@@ -13607,6 +13634,46 @@ def main(argv: Optional[list[str]] = None) -> int:
                                     origin_head_verified=True,
                                     github_head_verified=True,
                                 )
+                                # Pre-canary round-281 §6 +
+                                # Closure III: SAME canonical
+                                # provenance-drift helper as the
+                                # orphan-recovery path. Drift
+                                # failures fail closed; the
+                                # attempt_id_for_ack is left
+                                # populated and the lease is
+                                # NOT marked terminal until the
+                                # drift (if any) is durably
+                                # registered.
+                                try:
+                                    _check_provenance_drift_and_register(
+                                        new_head_sha=str(live_head),
+                                        attempt_id=str(
+                                            attempt_id_for_ack
+                                        ),
+                                    )
+                                except Exception as _drift_exc:
+                                    # Fail closed: do NOT ack the
+                                    # head advance as a verified
+                                    # repair. The next round will
+                                    # reconcile; the attempt
+                                    # record stays in
+                                    # WORKER_RUNNING until the
+                                    # drift is durable.
+                                    log(
+                                        "error",
+                                        "round-281 §6 + Closure III: "
+                                        "provenance drift check FAILED; "
+                                        "treating head advance as "
+                                        "unverified pending drift "
+                                        "resolution",
+                                        old_head=(
+                                            old_head[:12] if old_head else ""
+                                        ),
+                                        new_head=live_head[:12],
+                                        attempt_id=str(attempt_id_for_ack),
+                                        error=str(_drift_exc)[:200],
+                                    )
+                                    attempt_id_for_ack = None
                 except Exception as exc:
                     log(
                         "warning",
