@@ -31,6 +31,13 @@ def _stub_github_api(monkeypatch, tmp_path):
     process lookup so the observed scope can be
     determined without a real running supervisor.
     """
+    # Pre-create a stub hermes binary in tmp_path so the
+    # observer's fallback path finds one. CI runners may
+    # not have hermes installed.
+    stub_hermes = tmp_path / "hermes"
+    stub_hermes.write_text("#!/bin/sh\nexit 0\n")
+    stub_hermes.chmod(0o755)
+    monkeypatch.setenv("AED_HERMES_BIN", str(stub_hermes))
     from autocoder_supervisor import hermes_fingerprint as hf
     from autocoder_supervisor import supervisor as s
 

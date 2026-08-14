@@ -21,10 +21,19 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _stub_github_api_v6(monkeypatch):
-    """Stub the GitHub API calls in hermes_fingerprint so
-    tests do NOT hit the real API (rate-limited)."""
+def _stub_github_api_v6(monkeypatch, tmp_path):
+    """Stub the GitHub API calls + hermes binary so tests
+    do NOT hit the real API or require hermes on the
+    test machine.
+    """
     from autocoder_supervisor import hermes_fingerprint as hf
+
+    # Pre-create a stub hermes binary in tmp_path so the
+    # observer's hermes_binary_path fallback finds one.
+    stub_hermes = tmp_path / "hermes"
+    stub_hermes.write_text("#!/bin/sh\nexit 0\n")
+    stub_hermes.chmod(0o755)
+    monkeypatch.setenv("AED_HERMES_BIN", str(stub_hermes))
 
     def _stub_live(repo, pr_number):
         body = {
