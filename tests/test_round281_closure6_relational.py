@@ -171,6 +171,40 @@ class TestRunBindingRelationalOwnership:
 
 
 class TestMachineGeneratedEvidence:
+    @pytest.fixture(autouse=True)
+    def _ensure_static_inputs(self, tmp_path):
+        """Create stub static fingerprint inputs so the test
+        can run in environments without the production
+        runtime area (CI runners)."""
+        from pathlib import Path
+        # _default_static_inputs uses OPERATOR_HOME for the
+        # home base; the home dir MUST be the parent of .hermes/
+        home_parent = tmp_path
+        home = home_parent / ".hermes"
+        home.mkdir()
+        (home / "config.yaml").write_text("a: 1\n")
+        profiles = home / "profiles"
+        for p in ("aed-builder", "aed-reviewer", "aed-specifier",
+                  "aed-researcher", "aed-quarantine"):
+            (profiles / p).mkdir(parents=True, exist_ok=True)
+            (profiles / p / "config.yaml").write_text("a: 1\n")
+        runtime = home / "aed-supervisor"
+        runtime.mkdir()
+        from autocoder_supervisor.hermes_fingerprint import ACCEPTANCE_RUNTIME_INVENTORY
+        for fname in ACCEPTANCE_RUNTIME_INVENTORY:
+            (runtime / fname).write_text("# stub\n")
+        hermes = home / "hermes-agent" / "venv" / "bin"
+        hermes.mkdir(parents=True, exist_ok=True)
+        (hermes / "hermes").write_text("#!/bin/sh\n")
+        import os
+        old = os.environ.get("OPERATOR_HOME")
+        os.environ["OPERATOR_HOME"] = str(home_parent)
+        yield
+        if old is None:
+            os.environ.pop("OPERATOR_HOME", None)
+        else:
+            os.environ["OPERATOR_HOME"] = old
+
     def test_short_sha_rejected(self):
         from autocoder_supervisor.hermes_fingerprint import (
             _verify_full_sha,
