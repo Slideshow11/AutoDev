@@ -26,11 +26,33 @@ from pathlib import Path
 
 @pytest.fixture(autouse=True)
 def _stub_github_api(monkeypatch, tmp_path):
-    """Stub the GitHub API calls so tests do NOT hit the
-    real API (rate-limited). Also stub the supervisor
-    process lookup so the observed scope can be
-    determined without a real running supervisor.
+    """Stub the GitHub API calls + hermes binary so tests
+    do NOT hit the real API or require hermes on the
+    test machine. Also set AED_* env vars so the C22
+    validators pass without requiring the test machine to
+    match the production supervisor's actual config.
     """
+    from autocoder_supervisor import hermes_fingerprint as hf
+    from autocoder_supervisor import supervisor as s
+
+    # Set the AED_* env vars so the validator passes for
+    # C22.
+    monkeypatch.setenv("AED_REPO_OWNER", "Slideshow11")
+    monkeypatch.setenv("AED_REPO_NAME", "AutoDev")
+    monkeypatch.setenv("AED_PR_NUMBER", "5")
+    monkeypatch.setenv("AED_PR_NUMBERS", "5")
+    monkeypatch.setenv("AED_EXPECTED_BRANCH", "feat/review-repair-relay-v1")
+    monkeypatch.setenv("AED_EXPECTED_BRANCH_SET", "feat/review-repair-relay-v1")
+    monkeypatch.setenv("AED_SUPERVISOR_WORKING_CHECKOUT", str(tmp_path))
+    monkeypatch.setenv("AED_REQUIRED_REVIEW_PROVIDERS", "coderabbit")
+    monkeypatch.setenv("AED_OPTIONAL_REVIEW_PROVIDERS", "codex")
+    monkeypatch.setenv("AED_PROVIDERS_INDEPENDENT", "true")
+
+    # Pre-populate the supervisor module's REPO_OWNER etc.
+    monkeypatch.setattr(s, "REPO_OWNER", "Slideshow11")
+    monkeypatch.setattr(s, "REPO_NAME", "AutoDev")
+    monkeypatch.setattr(s, "PR_NUMBER", 5)
+
     # Pre-create a stub hermes binary in tmp_path so the
     # observer's fallback path finds one. CI runners may
     # not have hermes installed.

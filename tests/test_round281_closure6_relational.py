@@ -27,6 +27,20 @@ def _stub_github_api_v6(monkeypatch, tmp_path):
     test machine.
     """
     from autocoder_supervisor import hermes_fingerprint as hf
+    from autocoder_supervisor import supervisor as s
+
+    # Set the AED_* env vars so the validator passes for
+    # C22 (pr_number='5', repo='Slideshow11/AutoDev', etc.)
+    monkeypatch.setenv("AED_REPO_OWNER", "Slideshow11")
+    monkeypatch.setenv("AED_REPO_NAME", "AutoDev")
+    monkeypatch.setenv("AED_PR_NUMBER", "5")
+    monkeypatch.setenv("AED_PR_NUMBERS", "5")
+    monkeypatch.setenv("AED_EXPECTED_BRANCH", "feat/review-repair-relay-v1")
+    monkeypatch.setenv("AED_EXPECTED_BRANCH_SET", "feat/review-repair-relay-v1")
+    monkeypatch.setenv("AED_SUPERVISOR_WORKING_CHECKOUT", str(tmp_path))
+    monkeypatch.setenv("AED_REQUIRED_REVIEW_PROVIDERS", "coderabbit")
+    monkeypatch.setenv("AED_OPTIONAL_REVIEW_PROVIDERS", "codex")
+    monkeypatch.setenv("AED_PROVIDERS_INDEPENDENT", "true")
 
     # Pre-create a stub hermes binary in tmp_path so the
     # observer's hermes_binary_path fallback finds one.
@@ -34,6 +48,11 @@ def _stub_github_api_v6(monkeypatch, tmp_path):
     stub_hermes.write_text("#!/bin/sh\nexit 0\n")
     stub_hermes.chmod(0o755)
     monkeypatch.setenv("AED_HERMES_BIN", str(stub_hermes))
+
+    # Pre-populate the supervisor module's REPO_OWNER etc.
+    monkeypatch.setattr(s, "REPO_OWNER", "Slideshow11")
+    monkeypatch.setattr(s, "REPO_NAME", "AutoDev")
+    monkeypatch.setattr(s, "PR_NUMBER", 5)
 
     def _stub_live(repo, pr_number):
         body = {
