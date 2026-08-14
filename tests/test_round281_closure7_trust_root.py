@@ -25,10 +25,42 @@ from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
-def _stub_github_api(monkeypatch):
+def _stub_github_api(monkeypatch, tmp_path):
     """Stub the GitHub API calls so tests do NOT hit the
-    real API (rate-limited)."""
+    real API (rate-limited). Also stub the supervisor
+    process lookup so the observed scope can be
+    determined without a real running supervisor.
+    """
     from autocoder_supervisor import hermes_fingerprint as hf
+    from autocoder_supervisor import supervisor as s
+
+    # Stub the supervisor PID discovery by always
+    # returning a non-existent PID, forcing the code
+    # through the durable state_dir / run_state.json /
+    # module-level constants fallback path.
+    # (We don't need to monkey-patch the ps call
+    # because it already gracefully handles no match.)
+
+    # Pre-populate the policy with expected values so
+    # the observed scope is complete.
+    monkeypatch.setattr(
+        s, "REPO_OWNER", "Slideshow11"
+    )
+    monkeypatch.setattr(
+        s, "REPO_NAME", "AutoDev"
+    )
+    monkeypatch.setattr(s, "PR_NUMBER", 5)
+    # Policy / providers / hermes path are read fresh.
+
+    # Create a run_state.json in tmp_path so the observer
+    # has branch info. Tests that need their own run_state.json
+    # can override.
+    rs = tmp_path / "run_state.json"
+    if not rs.exists():
+        rs.write_text(json.dumps({
+            "feature_branch": "feat/review-repair-relay-v1",
+            "current_head": "a" * 40,
+        }))
 
     def _stub_live(repo, pr_number):
         body = {

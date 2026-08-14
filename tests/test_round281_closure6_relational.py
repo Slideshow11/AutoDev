@@ -287,6 +287,10 @@ class TestMachineGeneratedEvidence:
         from autocoder_supervisor.hermes_fingerprint import (
             generate_pre_canary_evidence,
         )
+        # Provide a stub run_state.json with the canonical
+        # branch name (the validator enforces this for C22).
+        rs = tmp_path / "run_state.json"
+        rs.write_text(json.dumps({"feature_branch": "feat/review-repair-relay-v1"}))
         # Mock by writing to tmp_path. The generator reads
         # the live repo + supervisor paths so it will use
         # the actual state, not the fixture.
@@ -322,6 +326,9 @@ class TestMachineGeneratedEvidence:
         from autocoder_supervisor.hermes_fingerprint import (
             generate_pre_canary_evidence,
         )
+        # Provide a stub run_state.json with canonical branch.
+        rs = tmp_path / "run_state.json"
+        rs.write_text(json.dumps({"feature_branch": "feat/review-repair-relay-v1"}))
         ev = generate_pre_canary_evidence(
             repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
@@ -338,6 +345,13 @@ class TestMachineGeneratedEvidence:
         from autocoder_supervisor.hermes_fingerprint import (
             generate_pre_canary_evidence,
         )
+        # Provide a stub run_state.json so the observed
+        # scope can derive the branch.
+        rs = tmp_path / "run_state.json"
+        rs.write_text(json.dumps({
+            "feature_branch": "feat/review-repair-relay-v1",
+            "current_head": "a" * 40,
+        }))
         ev = generate_pre_canary_evidence(
             repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
