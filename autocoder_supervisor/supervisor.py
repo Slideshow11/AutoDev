@@ -6612,6 +6612,101 @@ def _parse_github_remote_identity(remote_url: str) -> dict:
     return out
 
 
+def _check_clean_production_checkout(repo_dir: str) -> tuple:
+    """Pre-canary round-281 §3 strict dirty-checkout guard.
+
+    Returns a 3-tuple ``(ok, dirty_paths, reason)``.
+
+    - ``ok``: True iff the production repository working tree
+      is completely clean (modulo the bounded runtime
+      exclusions enumerated below).
+    - ``dirty_paths``: list of porcelain-formatted paths that
+      are not permitted.
+    - ``reason``: a stable identifier of the failure mode,
+      one of ``clean``, ``uncommitted_changes``,
+      ``untracked_paths``, ``git_status_failed``.
+
+    Invariants:
+
+    1. The production checkout MUST be completely clean
+       before any worker launch. Tests are part of the
+       source/provenance boundary and are NOT exempt.
+    2. The only permitted exclusions are runtime artifacts
+       that are structurally outside the acceptance
+       repository boundary (Python bytecode caches, the
+       supervisor's local state/logs/cache subdirs).
+    3. If ``git status`` itself fails, the supervisor MUST
+       fail closed (return ``ok=False`` with reason
+       ``git_status_failed``). Never launch a worker into a
+       checkout whose tree integrity cannot be verified.
+
+    This function is module-level and dependency-free
+    (only uses the standard ``subprocess`` module) so it can
+    be exercised directly from the test suite without
+    spinning up the full supervisor process.
+    """
+    # Bounded runtime-state exclusions that are STRUCTURALLY
+    # outside the source/provenance boundary. These are NOT
+    # tracked test files. They are caches and the supervisor's
+    # own runtime state directory.
+    # Each entry may match either as a top-level prefix or as
+    # any path segment (i.e. ``pkg/__pycache__/x.pyc`` is also
+    # accepted because ``__pycache__`` is a runtime cache).
+    _permitted_runtime_subdirs = (
+        "autocoder_supervisor/state/",
+        "autocoder_supervisor/logs/",
+        ".ruff_cache/",
+        "__pycache__/",
+        ".pytest_cache/",
+    )
+
+    def _is_runtime_excluded(p: str) -> bool:
+        # Top-level prefix
+        if any(p.startswith(s) for s in _permitted_runtime_subdirs):
+            return True
+        # Any-segment match: e.g. ``pkg/__pycache__/x.pyc``
+        parts = p.split("/")
+        for seg in parts[:-1]:  # never match the leaf file itself
+            for sub in _permitted_runtime_subdirs:
+                sub = sub.rstrip("/")
+                if seg == sub:
+                    return True
+        return False
+    try:
+        import subprocess as _sp
+        _gs = _sp.run(
+            ["git", "-C", repo_dir, "status", "--porcelain",
+             "--untracked-files=all"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception as exc:
+        return (False, [], f"git_status_failed:{type(exc).__name__}")
+    if _gs.returncode != 0:
+        return (False, [], f"git_status_failed:rc={_gs.returncode}")
+    _dirty = []
+    for _line in (_gs.stdout or "").splitlines():
+        if not _line.strip():
+            continue
+        # git status --porcelain format: XY <path>
+        _path = _line[3:].strip().strip('"')
+        if _is_runtime_excluded(_path):
+            continue
+        _dirty.append(_path)
+    if not _dirty:
+        return (True, [], "clean")
+    # Distinguish committed-but-not-yet from untracked for
+    # better observability.
+    has_modified = any(not line.startswith("??") for line in (_gs.stdout or "").splitlines() if line.strip())
+    has_untracked = any(line.startswith("??") for line in (_gs.stdout or "").splitlines() if line.strip())
+    if has_modified and has_untracked:
+        reason = "uncommitted_changes+untracked_paths"
+    elif has_modified:
+        reason = "uncommitted_changes"
+    else:
+        reason = "untracked_paths"
+    return (False, _dirty, reason)
+
+
 def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # Round-37 fix (repository identity guard): before any
     # worker subprocess is spawned, the supervisor MUST
@@ -7216,73 +7311,27 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
     # so the session-resolution helper could share the prefix.
     stdout_path = worker_attempts_dir / f"{attempt_id_prefix}.stdout.log"
     stderr_path = worker_attempts_dir / f"{attempt_id_prefix}.stderr.log"
-    # Round-54/C22 §12: dirty worktree pre-launch guard.
-    # Inspect the shared production checkout for unexpected
-    # tracked changes OR unexpected untracked paths in the
-    # source tree. Runtime state (heartbeat, logs, leases,
-    # worker attempts) lives outside the repository, so the
-    # guard filters paths that are runtime artifacts.
-    _c22_runtime_state_subdirs = (
-        "autocoder_supervisor/state/",
-        "autocoder_supervisor/logs/",
-        ".ruff_cache/",
-        "__pycache__/",
-        ".pytest_cache/",
-        "tests/",
-        # Round-54/C22 §10: test files (whether source-tracked
-        # or untracked) are NOT runtime debris. The dirty-tree
-        # guard exists to catch uncommitted SOURCE-LEVEL changes
-        # that would confuse provenance. Test code is owned by
-        # the test suite, not by the production worker; allow it
-        # through so a developer who has uncommitted test edits
-        # can still launch a worker.
-    )
-    try:
-        _gs = subprocess.run(
-            ["git", "-C", str(REPO_DIR), "status", "--porcelain", "--untracked-files=all"],
-            capture_output=True, text=True, timeout=10,
-        )
-        _dirty = []
-        for _line in (_gs.stdout or "").splitlines():
-            if not _line.strip():
-                continue
-            # git status --porcelain format: XY <path>
-            _path = _line[3:].strip().strip('"')
-            if any(_path.startswith(s) for s in _c22_runtime_state_subdirs):
-                continue
-            # Allow explicit .gitignore patterns (round-52
-            # operator reports) and known runtime artifacts
-            if _path.startswith(".hermes_"):
-                continue
-            if _path.startswith("/tmp/"):
-                continue
-            _dirty.append(_path)
-        if _dirty:
-            log(
-                "error",
-                "round-54: C22 WORKER_LAUNCH_BLOCKED_DIRTY_TREE; "
-                "aborting worker launch; production checkout has "
-                "unexpected tracked changes or untracked source paths",
-                attempt_id=attempt_id_prefix,
-                dirty_paths=_dirty[:20],
-                dirty_count=len(_dirty),
-            )
-            try:
-                stdout_fh.close()
-                stderr_fh.close()
-            except Exception:
-                pass
-            return None
-    except Exception as _ge:
-        # If git status itself fails, fail closed. The
-        # supervisor must NEVER launch a worker into a
-        # checkout whose tree integrity it cannot verify.
+    # Pre-canary round-281 §3: strict dirty worktree pre-launch guard.
+    # The production checkout MUST be completely clean before any
+    # worker launch. Tests are part of the source/provenance
+    # boundary and are NOT exempt. The only permitted exclusions
+    # are runtime artifacts that are structurally outside the
+    # acceptance repository boundary (cache directories, Python
+    # bytecode, autocoder_supervisor state/logs directories).
+    # Runtime-generated files MUST be created in a dedicated
+    # runtime directory outside the production repository
+    # (e.g. ``$OPERATOR_HOME/aed-supervisor/``).
+    _guard = _check_clean_production_checkout(str(REPO_DIR))  # type: ignore[name-defined]
+    if not _guard[0]:
         log(
             "error",
-            "round-54: C22 WORKER_LAUNCH_BLOCKED_DIRTY_TREE; "
-            "git status check raised; aborting worker launch",
+            "round-281: STRICT_DIRTY_TREE_GUARD; "
+            "aborting worker launch; production checkout has "
+            "unexpected tracked changes or untracked paths",
             attempt_id=attempt_id_prefix,
-            error=str(_ge)[:200],
+            dirty_paths=_guard[1][:20],
+            dirty_count=len(_guard[1]),
+            failure_reason=_guard[2],
         )
         return None
     try:
@@ -9570,12 +9619,80 @@ def mark_event_launched(event_id: str) -> None:
 _COOLDOWN_DEFERRED_PATH = STATE_DIR / "cooldown_deferred_events.json"  # type: ignore[name-defined]
 
 
+def _classify_event_retry_owner(event: dict) -> dict:
+    """Classify a deferred event by kind, head, and retry owner.
+
+    Pre-canary round-281 §8: every deferred event must have a
+    durable future owner. This helper extracts the canonical
+    retry owner from the event kind so the cooldown-deferred
+    ledger can be audited for entries with no owner.
+
+    Returns a dict with keys ``kind``, ``head_sha``,
+    ``retry_owner``, ``next_retry_condition``,
+    ``supersession_condition``.
+    """
+    if not isinstance(event, dict):
+        event = {"id": str(event)}
+    eid = event.get("id", "")
+    kind = event.get("kind", "")
+    head = event.get("head_sha", "")
+    # If kind not pre-populated, infer from id prefix.
+    if not kind:
+        if eid.startswith("new_thread:"):
+            kind = "new_review_thread"
+        elif eid.startswith("check_changed:"):
+            kind = "ci_check_change"
+        elif eid.startswith("provider_state:"):
+            kind = "provider_state_change"
+        elif eid.startswith("new_review:"):
+            kind = "new_review"
+        elif eid.startswith("unresolved_thread_drain:"):
+            kind = "unresolved_thread_drain"
+        else:
+            kind = "unknown"
+    # Retry owner is the supervisor loop for review-surface events;
+    # the cooldown replay re-emits them on next heartbeat.
+    # Provider-state events retry on the quota-state retry timer.
+    if kind == "provider_state_change":
+        retry_owner = "supervisor_quota_state_retry"
+        next_retry_condition = "next_retry_timestamp_elapsed"
+        supersession_condition = "head_change_or_provider_recovery"
+    elif kind == "ci_check_change":
+        retry_owner = "supervisor_handle_new_events"
+        next_retry_condition = "cooldown_expired"
+        supersession_condition = "head_change"
+    elif kind == "unresolved_thread_drain":
+        retry_owner = "supervisor_drain_replay"
+        next_retry_condition = "cooldown_expired"
+        supersession_condition = "head_change"
+    else:
+        retry_owner = "supervisor_handle_new_events"
+        next_retry_condition = "cooldown_expired"
+        supersession_condition = "head_change"
+    return {
+        "id": eid,
+        "kind": kind,
+        "head_sha": head,
+        "retry_owner": retry_owner,
+        "next_retry_condition": next_retry_condition,
+        "supersession_condition": supersession_condition,
+    }
+
+
 def _mark_cooldown_deferred(events: list) -> None:
     """Record that ``events`` were deferred during cooldown.
 
     Idempotent: events already marked are not re-added. The
     record is removed when the event is actually dispatched
     (see ``_consume_cooldown_deferred``).
+
+    Pre-canary round-281 §8: every entry carries a
+    retry_owner + next_retry_condition + supersession_condition
+    so the audit can prove every deferred event has a durable
+    future owner. The legacy ``{ids, last_deferred_at}`` shape
+    is migrated forward: any pre-existing entries get a
+    default ``retry_owner = supervisor_handle_new_events`` so
+    the audit sees them as owned.
     """
     if not events:
         return
@@ -9583,20 +9700,40 @@ def _mark_cooldown_deferred(events: list) -> None:
         existing = read_json(_COOLDOWN_DEFERRED_PATH)
     except Exception:  # noqa: BLE001
         existing = {}
-    deferred = list(existing.get("ids", []))
-    seen = set(deferred)
+    entries = list(existing.get("entries", []))
+    seen = {e["id"] for e in entries if isinstance(e, dict) and "id" in e}
+    # Migration: if the legacy shape is present, fold its
+    # ids into entries with default owners.
+    legacy_ids = list(existing.get("ids", []))
+    for legacy_id in legacy_ids:
+        if legacy_id not in seen:
+            entries.append({
+                "id": legacy_id,
+                "kind": "migrated_legacy",
+                "head_sha": "",
+                "retry_owner": "supervisor_handle_new_events",
+                "next_retry_condition": "cooldown_expired",
+                "supersession_condition": "head_change",
+            })
+            seen.add(legacy_id)
+    deferred_at = now_iso()
     for e in events:
-        eid = e.get("id") if isinstance(e, dict) else None
-        if eid and eid not in seen:
-            deferred.append(eid)
-            seen.add(eid)
-    if not deferred:
+        if not isinstance(e, dict):
+            continue
+        eid = e.get("id")
+        if not eid or eid in seen:
+            continue
+        cls = _classify_event_retry_owner(e)
+        cls["deferred_at"] = deferred_at
+        entries.append(cls)
+        seen.add(eid)
+    if not entries:
         return
     write_json(
         _COOLDOWN_DEFERRED_PATH,
         {
-            "ids": deferred,
-            "last_deferred_at": now_iso(),
+            "entries": entries,
+            "last_deferred_at": deferred_at,
         },
     )
 
@@ -9608,6 +9745,11 @@ def _consume_cooldown_deferred(event_ids: Iterable[str]) -> None:
     dispatch so the event does not appear as still-deferred
     on later heartbeats. Exactly-one ownership: the event
     transitions PENDING -> dispatched, never twice.
+
+    Pre-canary round-281 §8: reads the new ``entries`` shape
+    with full retry-owner metadata, falling back to legacy
+    ``ids`` only when ``entries`` is absent (migration
+    compatibility).
     """
     if not event_ids:
         return
@@ -9615,8 +9757,24 @@ def _consume_cooldown_deferred(event_ids: Iterable[str]) -> None:
         existing = read_json(_COOLDOWN_DEFERRED_PATH)
     except Exception:  # noqa: BLE001
         return
-    deferred = list(existing.get("ids", []))
     consume_set = set(event_ids)
+    # Prefer the entries shape.
+    if "entries" in existing:
+        entries = list(existing.get("entries", []))
+        remaining = [
+            e for e in entries
+            if isinstance(e, dict) and e.get("id") not in consume_set
+        ]
+        write_json(
+            _COOLDOWN_DEFERRED_PATH,
+            {
+                "entries": remaining,
+                "last_deferred_at": existing.get("last_deferred_at"),
+            },
+        )
+        return
+    # Legacy shape.
+    deferred = list(existing.get("ids", []))
     remaining = [eid for eid in deferred if eid not in consume_set]
     write_json(
         _COOLDOWN_DEFERRED_PATH,
@@ -9632,11 +9790,17 @@ def _cooldown_deferred_ids() -> set:
 
     Used by the quiet-window post-loop clear to PRESERVE
     cooldown-deferred events (they MUST NOT be wiped).
+
+    Pre-canary round-281 §8: reads from ``entries`` when
+    present, falling back to ``ids``.
     """
     try:
         existing = read_json(_COOLDOWN_DEFERRED_PATH)
     except Exception:  # noqa: BLE001
         return set()
+    entries = existing.get("entries")
+    if isinstance(entries, list):
+        return {e["id"] for e in entries if isinstance(e, dict) and "id" in e}
     return set(existing.get("ids", []))
 
 

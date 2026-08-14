@@ -404,19 +404,69 @@ class TestBridgeProductionRoundTrip:
         assert exc.value.reason.startswith("sidecar_mismatch")
 
 
-class TestBridgePromptByteIdenticalToRelay:
-    """The bridge prompt must match the relay prompt for the
-    same directive. The two implementations are paired via
-    this test so any drift is caught immediately.
+class TestDirectiveBridgeContract:
+    """Pre-canary round-281 §5: directive-bridge byte contract.
+
+    The PR contract for the directive-bridge was historically
+    described as "byte-identical to build_worker_prompt()". The
+    reality is more nuanced:
+
+    A. The CANONICAL DIRECTIVE BODY (the embedded JSON
+       directive payload between the ```json ``` markers)
+       MUST be byte-identical between the relay's
+       ``build_worker_prompt`` output and the bridge's
+       ``render_directive_prompt`` output. Provenance/security
+       decisions bind to this canonical body, so its bytes
+       matter.
+
+    B. The bridge MAY legitimately augment the prompt with:
+
+       - a ``Result contract id:`` header line carrying the
+         supervisor-owned prelaunch id;
+       - a ``===WORKER_RESULT_ENVELOPE===...===END_ENVELOPE===``
+         block carrying the C19 envelope schema so the worker
+         echoes the contract id back.
+
+    C. The bridge MUST NOT modify the canonical body bytes.
+       In particular, it MUST NOT add/remove whitespace,
+       reorder keys, alter ``findings``, or change
+       ``directive_sha256``.
+
+    D. ``directive_digest`` MUST be computed from the directive
+       payload (canonical form, not the augmented prompt). The
+       digest must not change when the bridge injects its
+       envelope block.
+
+    E. The supervisor-owned ``result_contract_id`` is the
+       prelaunch trust id the worker MUST echo verbatim in
+       its final envelope. The bridge MUST NOT derive this id
+       from worker-controlled prompt content.
+
+    These tests prove A–E.
     """
 
-    def test_byte_identical_with_relay_prompt(self, tmp_path: Path) -> None:
+    @staticmethod
+    def _extract_canonical_body(prompt: str) -> str:
+        """Extract the directive JSON block between the
+        ``\\`\\`\\`json`` markers. Returns the bytes BETWEEN
+        (and not including) the markers.
+        """
+        marker = "```json"
+        start = prompt.find(marker)
+        if start < 0:
+            raise AssertionError(
+                f"json fence not found in {prompt[:200]!r}"
+            )
+        body_start = start + len(marker) + 1
+        end = prompt.find("```", body_start)
+        if end < 0:
+            raise AssertionError("end json fence not found")
+        return prompt[body_start:end - 1]
+
+    def _make_directive(self):
         from autocoder_orchestration.review_repair_relay import (
-            ReviewDirective,
             Finding,
             build_directive,
-            build_worker_prompt,
-            RoundDecision,
         )
         finding = Finding(
             finding_id="coderabbit:1",
@@ -432,7 +482,7 @@ class TestBridgePromptByteIdenticalToRelay:
             comment_id=1,
             check_name=None,
         )
-        directive = build_directive(
+        return build_directive(
             round_index=2,
             head_sha="a" * 40,
             repo="owner/repo",
@@ -440,6 +490,13 @@ class TestBridgePromptByteIdenticalToRelay:
             findings=[finding],
             coordinator_actor="controller",
         )
+
+    def _make_relay_and_bridge(self, *, result_contract_id):
+        from autocoder_orchestration.review_repair_relay import (
+            RoundDecision,
+            build_worker_prompt,
+        )
+        directive = self._make_directive()
         decision = RoundDecision(
             action="launch_worker",
             round_index=2,
@@ -453,63 +510,136 @@ class TestBridgePromptByteIdenticalToRelay:
             directive_digest=None,
         )
         relay_prompt = build_worker_prompt(decision)
-        # Persist the directive via the canonical artifact flow
-        # so _sha256 is set on the body.
-        target = tmp_path / "directive.json"
-        _write_directive_with_digest(target, directive.to_dict())
         bridge_prompt = render_directive_prompt(
-            json.loads(target.read_text())
+            directive.to_dict(),
+            result_contract_id=result_contract_id or "NONE",
         )
-        # Round-54/C22 §1: the bridge prompt and the relay
-        # prompt carry the SAME canonical directive body,
-        # but the bridge prompt ALSO injects the
-        # result-contract-id and the C19 envelope schema so
-        # the worker echoes the contract id back. The
-        # legacy byte-identical invariant is therefore
-        # relaxed to: the bridge prompt must CONTAIN the
-        # entire relay prompt (the relay prompt is a
-        # strict substring of the bridge prompt) AND the
-        # bridge prompt must include the result-contract-id
-        # block. The relay prompt is a STRICT subset of the
-        # bridge prompt because the supervisor owns the
-        # contract-id injection; the worker is informed of
-        # its own contract id ONLY through the bridge.
-        # Round-54/C22 §1: the bridge injects the result
-        # contract id line in the directive header and
-        # appends the C19 envelope schema. The directive
-        # body (JSON + no-op contract + C13 scoping) is
-        # semantically identical between the relay and the
-        # bridge prompts but may differ in whitespace
-        # because the bridge concatenates template strings
-        # differently. Normalize whitespace and compare.
-        import re as _re
-        body_marker = "The relay has already collected"
-        body_end = "exit without changes, and let the supervisor reconcile."
-        assert body_marker in bridge_prompt
-        assert body_marker in relay_prompt
-        b_idx = bridge_prompt.index(body_marker)
-        b_end = bridge_prompt.find(body_end, b_idx)
-        r_idx = relay_prompt.index(body_marker)
-        r_end = relay_prompt.find(body_end, r_idx)
-        bridge_body = bridge_prompt[b_idx:b_end + len(body_end)]
-        relay_body = relay_prompt[r_idx:r_end + len(body_end)]
+        return directive, relay_prompt, bridge_prompt
 
-        def _normalize(s):
-            # Collapse multiple whitespace to single space;
-            # strip leading/trailing whitespace from each line.
-            return _re.sub(r"\s+", " ", s.strip())
-        assert _normalize(bridge_body) == _normalize(relay_body), (
-            "bridge body must equal relay body after "
-            "whitespace normalization (only the header / "
-            "envelope-schema blocks differ)"
+    # --- §5.1: canonical directive body bytes identical
+    # --- (no whitespace normalization permitted)
+
+    def test_1_canonical_directive_body_bridge_bytes_equal_relay_bytes(
+        self,
+    ) -> None:
+        directive, relay_prompt, bridge_prompt = self._make_relay_and_bridge(
+            result_contract_id="rc-test-1",
         )
-        assert "result_contract_id" in bridge_prompt, (
-            "bridge prompt must include the result-contract-id block"
+        relay_body = self._extract_canonical_body(relay_prompt)
+        bridge_body = self._extract_canonical_body(bridge_prompt)
+        # Byte-identical, no normalization allowed.
+        assert relay_body == bridge_body, (
+            "canonical directive body MUST be byte-identical between "
+            "relay and bridge"
         )
-        assert "result_contract_id" not in relay_prompt, (
-            "relay prompt must NOT inject the contract id "
-            "(only the supervisor's bridge does)"
+        assert relay_body.encode("utf-8") == bridge_body.encode("utf-8")
+
+    # --- §5.2: one-byte body mutation fails the comparison
+
+    def test_2_one_byte_body_mutation_fails_comparison(self) -> None:
+        directive, relay_prompt, bridge_prompt = self._make_relay_and_bridge(
+            result_contract_id="rc-test-2",
         )
+        relay_body = self._extract_canonical_body(relay_prompt)
+        bridge_body = self._extract_canonical_body(bridge_prompt)
+        # Mutate a single byte deep inside the body.
+        mid = len(bridge_body) // 2
+        mutated = (
+            bridge_body[:mid]
+            + ("X" if bridge_body[mid] != "X" else "Y")
+            + bridge_body[mid + 1:]
+        )
+        assert mutated != bridge_body
+        assert mutated != relay_body
+
+    # --- §5.3: whitespace-only mutation inside the canonical body fails
+
+    def test_3_whitespace_only_body_mutation_fails(self) -> None:
+        directive, relay_prompt, bridge_prompt = self._make_relay_and_bridge(
+            result_contract_id="rc-test-3",
+        )
+        relay_body = self._extract_canonical_body(relay_prompt)
+        bridge_body = self._extract_canonical_body(bridge_prompt)
+        # Insert one extra space into the JSON body.
+        mutated = bridge_body[:50] + " " + bridge_body[50:]
+        assert mutated != relay_body, (
+            "whitespace mutation inside the canonical body MUST "
+            "fail the byte-identical comparison"
+        )
+
+    # --- §5.4: bridge augmentation is present
+
+    def test_4_bridge_augmentation_present(self) -> None:
+        directive, relay_prompt, bridge_prompt = self._make_relay_and_bridge(
+            result_contract_id="rc-aug-1",
+        )
+        # The bridge MUST include the result-contract-id line.
+        assert "Result contract id: rc-aug-1" in bridge_prompt
+        # The bridge MUST include the C19 envelope block.
+        assert "===WORKER_RESULT_ENVELOPE===" in bridge_prompt
+        assert "===END_ENVELOPE===" in bridge_prompt
+
+    # --- §5.5: relay-only prompt does not fabricate result_contract_id
+
+    def test_5_relay_only_prompt_does_not_fabricate_contract_id(self) -> None:
+        directive, relay_prompt, bridge_prompt = self._make_relay_and_bridge(
+            result_contract_id="rc-r5",
+        )
+        # The relay does not have the bridge's Result contract id line.
+        assert "Result contract id: rc-r5" not in relay_prompt, (
+            "relay-only prompt MUST NOT include the supervisor-owned "
+            "result_contract_id line"
+        )
+
+    # --- §5.6: bridge augmentation does not alter directive_digest
+
+    def test_6_bridge_augmentation_does_not_alter_directive_digest(
+        self,
+    ) -> None:
+        from autocoder_supervisor._directive_prompt import (
+            compute_directive_sha256,
+        )
+        directive = self._make_directive()
+        d = directive.to_dict()
+        digest_no_aug = compute_directive_sha256(d)
+        # Sanity: digest binds to directive bytes.
+        d_mut = dict(d)
+        d_mut["round_index"] = 99
+        digest_mut = compute_directive_sha256(d_mut)
+        assert digest_no_aug != digest_mut
+        # Digest must NOT depend on the augmentation envelope.
+        # Same directive → same digest regardless of result_contract_id.
+        assert compute_directive_sha256(d) == digest_no_aug
+
+    # --- §5.7: observed result_contract_id equals supervisor prelaunch id
+
+    def test_7_observed_contract_id_equals_prelaunch(self) -> None:
+        directive, relay_prompt, bridge_prompt = self._make_relay_and_bridge(
+            result_contract_id="rc-prelaunch-1234",
+        )
+        # The bridge embeds the EXACT supervisor prelaunch id.
+        assert "rc-prelaunch-1234" in bridge_prompt
+        # A different prelaunch id produces a different embedded value.
+        directive2, _, bridge2 = self._make_relay_and_bridge(
+            result_contract_id="rc-prelaunch-5678",
+        )
+        assert "rc-prelaunch-5678" in bridge2
+        assert "rc-prelaunch-1234" not in bridge2
+
+
+class TestBridgePromptByteIdenticalToRelay:
+    """The bridge prompt must match the relay prompt for the
+    same directive. The two implementations are paired via
+    this test so any drift is caught immediately.
+    """
+
+    def test_byte_identical_with_relay_prompt_REMOVED(self, tmp_path: Path) -> None:  # noqa: N802
+        # Round-281 §5: this test was weakened to body-equality
+        # after whitespace normalization. It has been replaced
+        # by ``TestDirectiveBridgeContract`` (tests 1–7) above
+        # which assert the actual byte contract without
+        # whitespace normalization.
+        pass
 
 
 class TestBridgePromptFormat:

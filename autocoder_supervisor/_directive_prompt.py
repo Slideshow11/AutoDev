@@ -3,16 +3,40 @@
 The relay (in ``autocoder_orchestration.review_repair_relay``)
 and the supervisor's directive bridge (in
 ``autocoder_supervisor.directive_bridge``) both render the
-canonical worker prompt from a directive dict. The two
-implementations MUST stay byte-identical so the supervisor
-can render the same prompt the relay produced.
+canonical worker prompt from a directive dict.
 
-This module exists at the supervisor layer because the
-supervisor must not import the orchestration package (the
-orchestration code is dynamically optional). The relay
-mirrors this template through its own ``WORKER_PROMPT_TEMPLATE``
-constant; the two are paired by the
-``tests/test_directive_bridge.py`` companion test.
+Pre-canary round-281 §5 contract
+--------------------------------
+
+The directive-bridge byte contract has TWO parts:
+
+A. The CANONICAL DIRECTIVE BODY (the embedded JSON
+   directive payload between the ``\\`\\`\\`json`` markers)
+   MUST be byte-identical between the relay's
+   ``build_worker_prompt`` output and the bridge's
+   ``render_directive_prompt`` output. Provenance/security
+   decisions bind to this canonical body, so its bytes
+   matter.
+
+B. The bridge MAY legitimately augment the prompt with:
+
+   - a ``Result contract id:`` header line carrying the
+     supervisor-owned prelaunch id;
+   - a ``===WORKER_RESULT_ENVELOPE===...===END_ENVELOPE===``
+     block carrying the C19 envelope schema so the worker
+     echoes the contract id back.
+
+This module is responsible for (A) the canonical body and (B)
+the augmentation. The canonical body bytes are computed by
+substituting ``{directive_json}`` with the canonical
+``json.dumps(directive, indent=2, sort_keys=True)`` payload
+(excluding the persisted ``_sha256`` field). The augmentation
+is appended to the same template via the ``result_contract_id``
+substitution.
+
+The two implementations (relay and bridge) are paired by
+``tests/test_directive_bridge.py::TestDirectiveBridgeContract``
+which asserts the byte contract above.
 
 Template placeholders:
 - ``{round_index}`` — ``int``
@@ -24,13 +48,9 @@ Template placeholders:
 - ``{summary}`` — ``str``
 - ``{directive_json}`` — ``str`` (pretty-printed JSON)
 - ``{result_contract_id}`` — ``str`` (Round-54/C22 §2 result
-   contract id. ``NONE`` when not provided for the
-   backward-compatible path; explicit value is required by
-   the production supervisor pipeline.)
-
-The template is intentionally a single string constant. The
-two implementations are paired by the byte-identical-output
-test, so any drift is caught immediately.
+  contract id. ``NONE`` when not provided for the
+  backward-compatible path; explicit value is required by
+  the production supervisor pipeline.)
 """
 from __future__ import annotations
 
