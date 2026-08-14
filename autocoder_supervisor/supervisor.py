@@ -9924,16 +9924,23 @@ def _cooldown_deferred_ids() -> set:
     cooldown-deferred events (they MUST NOT be wiped).
 
     Pre-canary round-281 §8: reads from ``entries`` when
-    present, falling back to ``ids``.
+    present and non-empty, falling back to ``ids`` when
+    ``entries`` is empty (legacy shape).
     """
     try:
         existing = read_json(_COOLDOWN_DEFERRED_PATH)
     except Exception:  # noqa: BLE001
         return set()
     entries = existing.get("entries")
-    if isinstance(entries, list):
+    # Empty entries list = fall back to legacy ids (the
+    # migration in _mark_cooldown_deferred may not have
+    # run on existing data; fall back preserves visibility).
+    if isinstance(entries, list) and entries:
         return {e["id"] for e in entries if isinstance(e, dict) and "id" in e}
-    return set(existing.get("ids", []))
+    legacy = existing.get("ids", [])
+    if isinstance(legacy, list):
+        return set(legacy)
+    return set()
 
 
 def _replay_cooldown_deferred_if_any() -> list:
