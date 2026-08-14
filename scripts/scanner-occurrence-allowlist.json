@@ -899,6 +899,285 @@
       "line": 153,
       "line_sha256": "0ef2c19415a24b6552c3a60cdfe2f0b04a676754d8d03d5e7de471f73a23d82d",
       "purpose": "Pre-canary closure-IV: legitimate reference to '/home/' in production source code; line 153; encoding=utf-8; approved by review"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 248,
+      "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 248; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 249,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 249; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 250,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 250; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 251,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 251; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 5,
+      "line": 271,
+      "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 271; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 6,
+      "line": 272,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 272; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 7,
+      "line": 273,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 273; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 8,
+      "line": 274,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 274; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 9,
+      "line": 294,
+      "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 294; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 10,
+      "line": 295,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 295; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 11,
+      "line": 296,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 296; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 12,
+      "line": 297,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 297; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 13,
+      "line": 317,
+      "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 317; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 14,
+      "line": 318,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 318; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 15,
+      "line": 319,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 319; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 16,
+      "line": 320,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 320; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 17,
+      "line": 340,
+      "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 340; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 18,
+      "line": 341,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 341; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 19,
+      "line": 342,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 342; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 20,
+      "line": 343,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 343; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 21,
+      "line": 364,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 364; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 22,
+      "line": 365,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 365; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 23,
+      "line": 366,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 366; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 24,
+      "line": 386,
+      "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 386; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 25,
+      "line": 387,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 387; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 26,
+      "line": 388,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 388; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 27,
+      "line": 389,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 389; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 28,
+      "line": 408,
+      "line_sha256": "92426a64a5636bbd1a36f6980c9ad5e2afad881e6f884850f386e30db829f521",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 408; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 29,
+      "line": 409,
+      "line_sha256": "6cec0fa78514dd139255bbcf55c04e2590a0a5c0a5836731c3e6b552a875ac50",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 409; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 30,
+      "line": 410,
+      "line_sha256": "8857dc9c91942a7590f93f682c0cace1bee3433c3d650784a6aea65ac383f484",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 410; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tests/test_round281_closure5_failclosed.py",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 31,
+      "line": 411,
+      "line_sha256": "c03eaade5ed5ccae7320327460d5821a1eb106ee0300928a29e9242ec09bfe8a",
+      "purpose": "Pre-canary closure-V: legitimate reference to '/home/' in production test source; line 411; encoding=utf-8"
     }
   ]
 }

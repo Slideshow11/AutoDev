@@ -43,12 +43,14 @@ HEAD_ADVANCE_UNRELATED = "HEAD_ADVANCE_UNRELATED"
 HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED = "HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED"
 HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED = "HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED"
 HEAD_ADVANCE_WORKER_PUSH_INVALID = "HEAD_ADVANCE_WORKER_PUSH_INVALID"
+HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED = "HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED"
 
 HEAD_ADVANCE_STATES: frozenset[str] = frozenset({
     HEAD_ADVANCE_UNRELATED,
     HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED,
     HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED,
     HEAD_ADVANCE_WORKER_PUSH_INVALID,
+    HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
 })
 
 
@@ -57,6 +59,7 @@ HEAD_ADVANCE_STATES_THAT_BLOCK_QUALIFYING: frozenset[str] = frozenset({
     HEAD_ADVANCE_UNRELATED,
     HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED,
     HEAD_ADVANCE_WORKER_PUSH_INVALID,
+    HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
 })
 
 
@@ -500,34 +503,20 @@ def _manifest_committed_sha(manifest: dict, dest: str) -> Optional[str]:
     return None
 
 
-def find_drift_at_head(
-    *,
-    repo_root: Path,
-    head_sha: str,
+def _all_manifest_expectations_for_dest(
     manifest_paths: Iterable[Path],
-) -> list:
-    """Compare the bytes of every controlled destination at
-    commit ``head_sha`` against the manifest records. Returns a
-    list of drift entries; empty list means no drift.
+) -> dict:
+    """Walk every canonical manifest and return a
+    destination -> list of (manifest_path, expected_sha256,
+    source_path) tuples. The list is the deduplicated list
+    of every record that names this destination.
 
-    The controlled-destination set is derived from the
-    manifests themselves (no hand-maintained partial list).
-
-    CLOSURE IV §3 — fail closed on deletion:
-      - If a manifested path is missing at ``head_sha``
-        (worker deleted the file), a DRIFT entry is recorded
-        with ``actual_sha256 = ""`` and
-        ``expected_sha256 = <manifest-recorded-hash>``. This
-        is a DELETION drift.
-      - If git show fails for any other reason
-        (operational failure), a ``ProvenanceCheckError`` is
-        raised so the supervisor's fail-closed path
-        activates.
-      - If a manifest is missing or malformed, a
-        ``ProvenanceCheckError`` is raised.
+    FAIL-CLOSED semantics (Closure V §3):
+      - missing manifest -> ProvenanceCheckError
+      - unreadable manifest -> ProvenanceCheckError
+      - malformed manifest -> ProvenanceCheckError
     """
-    drifts: list = []
-    seen_destinations: set = set()
+    out: dict = {}
     for mp in manifest_paths:
         if not mp.exists():
             raise ProvenanceCheckError(
@@ -539,43 +528,118 @@ def find_drift_at_head(
             raise ProvenanceCheckError(
                 f"manifest {mp} cannot be parsed: {e}"
             ) from e
-        for _, _, dest, _ in _iter_records(manifest):
-            if dest in seen_destinations:
+        for _, rec, dest, sha_field in _iter_records(manifest):
+            expected = rec.get(sha_field)
+            if not isinstance(expected, str):
                 continue
-            seen_destinations.add(dest)
-            expected = _manifest_committed_sha(manifest, dest)
-            if expected is None:
+            out.setdefault(dest, []).append((mp, expected))
+    # Detect conflicting duplicate destinations within a
+    # single manifest: a manifest that records the same
+    # destination with two different sha256 values is
+    # internally inconsistent.
+    for mp in manifest_paths:
+        try:
+            manifest = json.loads(mp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        seen_in_manifest: dict = {}
+        for _, rec, dest, sha_field in _iter_records(manifest):
+            v = rec.get(sha_field)
+            if not isinstance(v, str):
                 continue
-            try:
-                actual_bytes = _committed_bytes(
-                    repo_root, head_sha, dest
+            prev = seen_in_manifest.get(dest)
+            if prev is not None and prev != v:
+                raise ProvenanceCheckError(
+                    f"manifest {mp} has CONFLICTING duplicate "
+                    f"records for destination {dest!r}: "
+                    f"{prev[:12]}... vs {v[:12]}..."
                 )
-            except FileNotFoundError:
-                # DEL control path at head — record a
-                # deletion drift. The manifest recorded a
-                # hash for a file that no longer exists at
-                # the current head.
+            seen_in_manifest[dest] = v
+    # Detect conflicting destinations across manifests: same
+    # destination, different sha256 in different canonical
+    # manifests is a MANIFEST_CONFLICT.
+    for dest, expectations in out.items():
+        if len(expectations) > 1:
+            shas = {s for _, s in expectations}
+            if len(shas) > 1:
+                conflict_detail = "; ".join(
+                    f"{str(mp)}:{sha[:12]}..." for mp, sha in expectations
+                )
+                raise ProvenanceCheckError(
+                    f"MANIFEST_CONFLICT for destination "
+                    f"{dest!r}: {conflict_detail}"
+                )
+    return out
+
+
+def find_drift_at_head(
+    *,
+    repo_root: Path,
+    head_sha: str,
+    manifest_paths: Iterable[Path],
+) -> list:
+    """Compare the bytes of every controlled destination at
+    commit ``head_sha`` against the manifest records. Returns a
+    list of drift entries; empty list means no drift.
+
+    CLOSURE V §3 — multi-manifest conflict detection:
+      - The controlled-destination set is built by walking
+        every manifest's records independently. Conflicts
+        (same path, different hash in different manifests)
+        raise ``ProvenanceCheckError`` (MANIFEST_CONFLICT).
+      - Within a single manifest, duplicate records for the
+        same destination with different sha256 are also a
+        fail-closed error.
+      - The previous ``seen_destinations`` global dedup is
+        REMOVED. Every manifest's expectation is consulted;
+        a stale or wrong second manifest can no longer be
+        silently hidden by a correct first manifest.
+    """
+    expectations = _all_manifest_expectations_for_dest(manifest_paths)
+    drifts: list = []
+    seen_destinations: set = set()
+    for dest, expectations_for_dest in expectations.items():
+        if dest in seen_destinations:
+            # Within a single canonical provenance model,
+            # one destination should appear at most once per
+            # manifest, and the multi-manifest check above
+            # already ensures all expectations agree. This
+            # internal dedup only catches multi-pass bugs.
+            continue
+        seen_destinations.add(dest)
+        # The conflict check has already verified all
+        # expectations for ``dest`` agree; take the first
+        # (the only one in practice).
+        expected = expectations_for_dest[0][1]
+        mp = expectations_for_dest[0][0]
+        try:
+            actual_bytes = _committed_bytes(
+                repo_root, head_sha, dest
+            )
+        except FileNotFoundError:
+            # DEL control path at head — record a deletion
+            # drift against every manifested expectation for
+            # this destination.
+            for emp, ehash in expectations_for_dest:
                 drifts.append({
-                    "manifest": str(mp),
+                    "manifest": str(emp),
                     "destination": dest,
-                    "expected_sha256": expected,
+                    "expected_sha256": ehash,
                     "actual_sha256": "",
                     "drift_kind": "DELETION",
                 })
-                continue
-            except ProvenanceCheckError:
-                # Operational failure — propagate so the
-                # caller fails closed.
-                raise
-            actual_sha = hashlib.sha256(actual_bytes).hexdigest()
-            if actual_sha != expected:
-                drifts.append({
-                    "manifest": str(mp),
-                    "destination": dest,
-                    "expected_sha256": expected,
-                    "actual_sha256": actual_sha,
-                    "drift_kind": "MODIFIED",
-                })
+            continue
+        except ProvenanceCheckError:
+            raise
+        actual_sha = hashlib.sha256(actual_bytes).hexdigest()
+        if actual_sha != expected:
+            drifts.append({
+                "manifest": str(mp),
+                "destination": dest,
+                "expected_sha256": expected,
+                "actual_sha256": actual_sha,
+                "drift_kind": "MODIFIED",
+            })
     return drifts
 
 
@@ -847,6 +911,7 @@ __all__ = [
     "HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED",
     "HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED",
     "HEAD_ADVANCE_WORKER_PUSH_INVALID",
+    "HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED",
     "HEAD_ADVANCE_STATES",
     "HEAD_ADVANCE_STATES_THAT_BLOCK_QUALIFYING",
     "HeadAdvanceResult",
@@ -855,6 +920,7 @@ __all__ = [
     "regenerate_manifest",
     "validate_manifest",
     "find_drift_at_head",
+    "_all_manifest_expectations_for_dest",
     "register_drift",
     "register_provenance_block",
     "transition_drift_state",
@@ -870,6 +936,8 @@ __all__ = [
     "enumerate_controlled_destinations_strict",
     # Diagnostic enumeration
     "enumerate_controlled_destinations",
+    # Migration
+    "migrate_test_sentinel_to_terminated",
     # Drift states
     "DRIFT_STATE_DETECTED",
     "DRIFT_STATE_QUEUED",

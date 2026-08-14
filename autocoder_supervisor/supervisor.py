@@ -13596,28 +13596,55 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # advance as unrelated / manual and only rebind
                 # AUTHORITATIVE_HEAD.
                 # Round-45: typed head-advance classification.
-                # Optional[str] conflates three semantically
+                # Optional[str] conflates four semantically
                 # distinct states (NO_MATCHING_WORKER,
                 # VERIFIED_WORKER_AND_PROVENANCE_OK,
-                # VERIFIED_WORKER_BUT_PROVENANCE_CHECK_FAILED).
-                # Closure IV §2 — do NOT collapse these into a
-                # single Optional[str]. Use HeadAdvanceResult.
+                # VERIFIED_WORKER_BUT_PROVENANCE_CHECK_FAILED,
+                # OWNERSHIP_UNKNOWN). Closure IV §2 + Closure V
+                # §1 — do NOT collapse these into a single
+                # Optional[str]. Use HeadAdvanceResult.
                 from .provenance_maintenance import (
                     HeadAdvanceResult,
                     HEAD_ADVANCE_UNRELATED,
                     HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED,
                     HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED,
                     HEAD_ADVANCE_WORKER_PUSH_INVALID,
+                    HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
                     register_provenance_block,
                 )
                 ha_result = HeadAdvanceResult(
-                    state=HEAD_ADVANCE_UNRELATED,
+                    state=HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
                 )
+                # Closure V §1: UNRELATED must require a
+                # SUCCESSFUL proof that no matching worker
+                # exists. Discovery exceptions MUST NOT fall
+                # back to UNRELATED; they fall to BLOCKED.
+                worker_identity_established = False
                 try:
                     active = find_active_worker_attempt_for_head(
                         old_head,
                     )
-                    if active is not None:
+                except Exception as _disc_exc:
+                    # Discovery exception — UNKNOWN ownership.
+                    # Fail closed. The attempt identity may
+                    # not yet be established; preserve the
+                    # head pair with BLOCKED state.
+                    log(
+                        "error",
+                        "round-281 §6 + Closure V §1: ownership "
+                        "DISCOVERY raised; head-advance is "
+                        "BLOCKED; readiness FALSE; no qualifying",
+                        old_head=old_head[:12] if old_head else "",
+                        new_head=live_head[:12],
+                        error=str(_disc_exc)[:200],
+                    )
+                    ha_result = HeadAdvanceResult(
+                        state=HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
+                    )
+                    active = None
+                if active is not None:
+                    worker_identity_established = True
+                    try:
                         _attempt_id_for_ack = active.get(
                             "attempt_id"
                         )
@@ -13630,13 +13657,48 @@ def main(argv: Optional[list[str]] = None) -> int:
                             or active.get("pushed_commit_sha")
                         )
                         if _attempt_id_for_ack:
-                            v = verify_push_against_attempt(
-                                attempt_id=_attempt_id_for_ack,
-                                new_head_sha=live_head,
-                            )
+                            try:
+                                v = verify_push_against_attempt(
+                                    attempt_id=_attempt_id_for_ack,
+                                    new_head_sha=live_head,
+                                )
+                            except Exception as _verify_exc:
+                                # Verify exception — UNKNOWN
+                                # verification. Preserve
+                                # identity; BLOCKED.
+                                log(
+                                    "error",
+                                    "round-281 §6 + Closure V §1: "
+                                    "verify_push_against_attempt "
+                                    "raised; head-advance is "
+                                    "BLOCKED",
+                                    old_head=(
+                                        old_head[:12] if old_head else ""
+                                    ),
+                                    new_head=live_head[:12],
+                                    attempt_id=str(_attempt_id_for_ack),
+                                    error=str(_verify_exc)[:200],
+                                )
+                                ha_result = HeadAdvanceResult(
+                                    state=(
+                                        HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED
+                                    ),
+                                    attempt_id=_attempt_id_for_ack,
+                                    claim_id=_claim_id_for_ack,
+                                    result_contract_id=_rcid_for_ack,
+                                    produced_sha=_produced_for_ack,
+                                    pushed_sha=live_head,
+                                    provenance_status="ERROR",
+                                    provenance_error=str(
+                                        _verify_exc
+                                    )[:300],
+                                )
+                                v = None
                             if (
                                 v is None
                                 or not v.get("github_head_verified")
+                            ) and ha_result.state not in (
+                                HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
                             ):
                                 ha_result = HeadAdvanceResult(
                                     state=(
@@ -13648,88 +13710,34 @@ def main(argv: Optional[list[str]] = None) -> int:
                                     produced_sha=_produced_for_ack,
                                     pushed_sha=live_head,
                                 )
-                            else:
-                                # Mark the attempt PUSH_VERIFIED so
-                                # mark_head_advanced_public can
+                            elif ha_result.state not in (
+                                HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
+                            ):
+                                # Mark the attempt PUSH_VERIFIED
+                                # so mark_head_advanced_public can
                                 # acknowledge the push.
-                                finalize_worker_attempt_pushed(
-                                    attempt_id=_attempt_id_for_ack,
-                                    pushed_commit_sha=live_head,
-                                    produced_commit_sha=(
-                                        v.get("produced_commit_sha")
-                                        or live_head
-                                    ),
-                                    origin_head_verified=True,
-                                    github_head_verified=True,
-                                )
-                                # Provenance check. Fail-closed
-                                # semantics: a verified worker
-                                # push whose provenance check
-                                # fails is BLOCKED, not
-                                # UNRELATED. The attempt identity
-                                # is preserved.
                                 try:
-                                    _check_provenance_drift_and_register(
-                                        new_head_sha=str(live_head),
-                                        attempt_id=str(
-                                            _attempt_id_for_ack
-                                        ),
-                                    )
-                                    ha_result = HeadAdvanceResult(
-                                        state=(
-                                            HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED
-                                        ),
+                                    finalize_worker_attempt_pushed(
                                         attempt_id=_attempt_id_for_ack,
-                                        claim_id=_claim_id_for_ack,
-                                        result_contract_id=_rcid_for_ack,
-                                        produced_sha=(
+                                        pushed_commit_sha=live_head,
+                                        produced_commit_sha=(
                                             v.get("produced_commit_sha")
                                             or live_head
                                         ),
-                                        pushed_sha=live_head,
                                         origin_head_verified=True,
                                         github_head_verified=True,
                                     )
-                                except Exception as _drift_exc:
-                                    # Closure IV §2 — verified
-                                    # worker push whose provenance
-                                    # check failed. Preserve
-                                    # attempt identity. Record
-                                    # provenance-block durably.
-                                    # The lease is NOT marked
-                                    # terminal; readiness stays
-                                    # FALSE; no qualifying; no
-                                    # generation count.
-                                    try:
-                                        register_provenance_block(
-                                            head_sha=str(live_head),
-                                            attempt_id=str(
-                                                _attempt_id_for_ack
-                                            ),
-                                            error=str(_drift_exc)[:300],
-                                        )
-                                    except Exception as _pe:
-                                        log(
-                                            "error",
-                                            "round-281 §6 + Closure IV: "
-                                            "provenance-block record "
-                                            "FAILED; lease stays "
-                                            "WORKER_RUNNING; readiness "
-                                            "stays FALSE",
-                                            attempt_id=str(
-                                                _attempt_id_for_ack
-                                            ),
-                                            error=str(_pe)[:200],
-                                        )
+                                except Exception as _fin_exc:
+                                    # Finalize exception —
+                                    # UNKNOWN durability of the
+                                    # PUSH_VERIFIED state.
+                                    # Preserve identity; BLOCKED.
                                     log(
                                         "error",
-                                        "round-281 §6 + Closure IV: "
-                                        "provenance drift check FAILED; "
-                                        "VERIFIED worker push is "
-                                        "BLOCKED pending drift "
-                                        "resolution; readiness FALSE; "
-                                        "NO qualifying; NO generation "
-                                        "count",
+                                        "round-281 §6 + Closure V "
+                                        "§1: finalize_worker_"
+                                        "attempt_pushed raised; "
+                                        "head-advance is BLOCKED",
                                         old_head=(
                                             old_head[:12]
                                             if old_head
@@ -13739,11 +13747,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                                         attempt_id=str(
                                             _attempt_id_for_ack
                                         ),
-                                        error=str(_drift_exc)[:200],
+                                        error=str(_fin_exc)[:200],
                                     )
                                     ha_result = HeadAdvanceResult(
                                         state=(
-                                            HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED
+                                            HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED
                                         ),
                                         attempt_id=_attempt_id_for_ack,
                                         claim_id=_claim_id_for_ack,
@@ -13757,29 +13765,172 @@ def main(argv: Optional[list[str]] = None) -> int:
                                         github_head_verified=True,
                                         provenance_status="ERROR",
                                         provenance_error=str(
-                                            _drift_exc
+                                            _fin_exc
                                         )[:300],
                                     )
-                except Exception as exc:
-                    log(
-                        "warning",
-                        "attempt provenance check failed; "
-                        "treating head advance as unrelated",
-                        error=str(exc),
-                        old_head=old_head[:12] if old_head else "",
-                        new_head=live_head[:12],
-                    )
-                    ha_result = HeadAdvanceResult(
-                        state=HEAD_ADVANCE_UNRELATED,
-                    )
-                # Closure IV §2: the head-advance classification
-                # drives the qualifying / no-qualifying decision.
-                # States that block qualifying:
-                #   HEAD_ADVANCE_UNRELATED
-                #   HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED
-                #   HEAD_ADVANCE_WORKER_PUSH_INVALID
-                # Only HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED
-                # enters the qualifying path.
+                                else:
+                                    # Provenance check. Fail-closed
+                                    # semantics: a verified worker
+                                    # push whose provenance check
+                                    # fails is BLOCKED, not
+                                    # UNRELATED. The attempt
+                                    # identity is preserved.
+                                    try:
+                                        _check_provenance_drift_and_register(
+                                            new_head_sha=str(live_head),
+                                            attempt_id=str(
+                                                _attempt_id_for_ack
+                                            ),
+                                        )
+                                    except Exception as _drift_exc:
+                                        # Closure IV §2 — verified
+                                        # worker push whose
+                                        # provenance check failed.
+                                        # Preserve attempt identity.
+                                        # Record provenance-block
+                                        # durably. The lease is NOT
+                                        # marked terminal; readiness
+                                        # stays FALSE; no qualifying;
+                                        # no generation count.
+                                        try:
+                                            register_provenance_block(
+                                                head_sha=str(live_head),
+                                                attempt_id=str(
+                                                    _attempt_id_for_ack
+                                                ),
+                                                error=str(_drift_exc)[
+                                                    :300
+                                                ],
+                                            )
+                                        except Exception as _pe:
+                                            log(
+                                                "error",
+                                                "round-281 §6 + "
+                                                "Closure IV: "
+                                                "provenance-block "
+                                                "record FAILED; "
+                                                "lease stays "
+                                                "WORKER_RUNNING; "
+                                                "readiness stays FALSE",
+                                                attempt_id=str(
+                                                    _attempt_id_for_ack
+                                                ),
+                                                error=str(_pe)[:200],
+                                            )
+                                        log(
+                                            "error",
+                                            "round-281 §6 + Closure IV: "
+                                            "provenance drift check "
+                                            "FAILED; VERIFIED worker "
+                                            "push is BLOCKED pending "
+                                            "drift resolution; "
+                                            "readiness FALSE; NO "
+                                            "qualifying; NO generation "
+                                            "count",
+                                            old_head=(
+                                                old_head[:12]
+                                                if old_head
+                                                else ""
+                                            ),
+                                            new_head=live_head[:12],
+                                            attempt_id=str(
+                                                _attempt_id_for_ack
+                                            ),
+                                            error=str(_drift_exc)[:200],
+                                        )
+                                        ha_result = HeadAdvanceResult(
+                                            state=(
+                                                HEAD_ADVANCE_WORKER_PROVENANCE_BLOCKED
+                                            ),
+                                            attempt_id=_attempt_id_for_ack,
+                                            claim_id=_claim_id_for_ack,
+                                            result_contract_id=_rcid_for_ack,
+                                            produced_sha=(
+                                                v.get("produced_commit_sha")
+                                                or live_head
+                                            ),
+                                            pushed_sha=live_head,
+                                            origin_head_verified=True,
+                                            github_head_verified=True,
+                                            provenance_status="ERROR",
+                                            provenance_error=str(
+                                                _drift_exc
+                                            )[:300],
+                                        )
+                                    else:
+                                        ha_result = HeadAdvanceResult(
+                                            state=(
+                                                HEAD_ADVANCE_WORKER_PROVENANCE_VERIFIED
+                                            ),
+                                            attempt_id=_attempt_id_for_ack,
+                                            claim_id=_claim_id_for_ack,
+                                            result_contract_id=_rcid_for_ack,
+                                            produced_sha=(
+                                                v.get("produced_commit_sha")
+                                                or live_head
+                                            ),
+                                            pushed_sha=live_head,
+                                            origin_head_verified=True,
+                                            github_head_verified=True,
+                                        )
+                    except Exception as _inner_exc:
+                        # Any unexpected exception inside the
+                        # worker-identity path is ownership
+                        # UNKNOWN, not UNRELATED.
+                        log(
+                            "error",
+                            "round-281 §6 + Closure V §1: unexpected "
+                            "exception in worker-identity path; "
+                            "head-advance is BLOCKED",
+                            old_head=(
+                                old_head[:12] if old_head else ""
+                            ),
+                            new_head=live_head[:12],
+                            error=str(_inner_exc)[:200],
+                        )
+                        try:
+                            _attempt_id_for_ack = (
+                                _attempt_id_for_ack
+                                if "_attempt_id_for_ack" in dir()
+                                and _attempt_id_for_ack
+                                else None
+                            )
+                            _claim_id_for_ack = (
+                                _claim_id_for_ack
+                                if "_claim_id_for_ack" in dir()
+                                else None
+                            )
+                            _rcid_for_ack = (
+                                _rcid_for_ack
+                                if "_rcid_for_ack" in dir()
+                                else None
+                            )
+                        except Exception:
+                            _attempt_id_for_ack = None
+                            _claim_id_for_ack = None
+                            _rcid_for_ack = None
+                        ha_result = HeadAdvanceResult(
+                            state=HEAD_ADVANCE_PROVENANCE_DISCOVERY_BLOCKED,
+                            attempt_id=_attempt_id_for_ack,
+                            claim_id=_claim_id_for_ack,
+                            result_contract_id=_rcid_for_ack,
+                            pushed_sha=live_head,
+                            provenance_status="ERROR",
+                            provenance_error=str(_inner_exc)[:300],
+                        )
+                else:
+                    if not worker_identity_established:
+                        # Discovery ran without exception AND
+                        # returned no active worker. UNRELATED
+                        # is allowed ONLY in this case.
+                        ha_result = HeadAdvanceResult(
+                            state=HEAD_ADVANCE_UNRELATED,
+                        )
+                # Closure V §2: qualification requires a
+                # positive ACK from mark_head_advanced_public.
+                # ACK == False or mark_head_advanced_public
+                # raising MUST NOT enter the qualifying path.
+                ack_recorded = False
                 if ha_result.is_provenance_verified:
                     try:
                         from .relay_wiring import (
@@ -13798,40 +13949,49 @@ def main(argv: Optional[list[str]] = None) -> int:
                                 new_head=live_head[:12],
                                 attempt_id=ha_result.attempt_id,
                             )
+                            ack_recorded = True
                         else:
                             log(
                                 "warning",
+                                "round-281 §6 + Closure V §2: "
                                 "mark_head_advanced_public returned "
                                 "False; controller did NOT record "
-                                "repair_pushed",
+                                "repair_pushed; head-advance is "
+                                "QUALIFY_BLOCKED; readiness FALSE; "
+                                "no qualifying; no generation count",
                                 old_head=old_head[:12] if old_head else "",
                                 new_head=live_head[:12],
                                 attempt_id=ha_result.attempt_id,
                             )
                     except Exception as exc:
                         log(
-                            "warning",
-                            "mark_head_advanced failed; controller "
-                            "state may not match",
+                            "error",
+                            "round-281 §6 + Closure V §2: "
+                            "mark_head_advanced_public raised; "
+                            "head-advance is QUALIFY_BLOCKED; "
+                            "readiness FALSE; no qualifying; no "
+                            "generation count",
                             old_head=old_head[:12] if old_head else "",
                             new_head=live_head[:12],
-                            error=str(exc),
                             attempt_id=ha_result.attempt_id,
+                            error=str(exc)[:200],
                         )
-                    try:
-                        _advance_awaiting_ci_to_qualifying()
-                    except Exception as exc:  # noqa: BLE001
+                    if ack_recorded:
                         try:
-                            log(
-                                "warning",
-                                "round-41 awaiting_ci advance failed; "
-                                "controller may be stuck in AWAITING_CI",
-                                old_head=old_head[:12] if old_head else "",
-                                new_head=live_head[:12],
-                                error=str(exc)[:200],
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
+                            _advance_awaiting_ci_to_qualifying()
+                        except Exception as exc:  # noqa: BLE001
+                            try:
+                                log(
+                                    "warning",
+                                    "round-41 awaiting_ci advance "
+                                    "failed; controller may be "
+                                    "stuck in AWAITING_CI",
+                                    old_head=old_head[:12] if old_head else "",
+                                    new_head=live_head[:12],
+                                    error=str(exc)[:200],
+                                )
+                            except Exception:  # noqa: BLE001
+                                pass
                 else:
                     log(
                         "info",

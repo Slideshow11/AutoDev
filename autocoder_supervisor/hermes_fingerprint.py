@@ -213,6 +213,33 @@ def compute_static_hermes_environment_fingerprint(
 # ---------------------------------------------------------------------------
 
 
+def _validate_static_scope_value(key: str, value) -> None:
+    """Closure V §4: every static-scope value MUST be a
+    canonical, non-empty, well-formed identity. Empty
+    defaults are rejected.
+    """
+    if not isinstance(value, str):
+        raise StaticScopeValidationError(
+            f"static scope value for {key!r} must be a string, "
+            f"got {type(value).__name__}"
+        )
+    if not value.strip():
+        raise StaticScopeValidationError(
+            f"static scope value for {key!r} must be non-empty"
+        )
+
+
+def _validate_absolute_path(key: str, value: str) -> None:
+    """Closure V §4: paths under the static scope that are
+    expected to be absolute MUST be absolute."""
+    import os
+    if not os.path.isabs(value):
+        raise StaticScopeValidationError(
+            f"static scope path {key!r} must be absolute, "
+            f"got {value!r}"
+        )
+
+
 def compute_static_acceptance_scope_fingerprint(
     *, scope=None,
 ) -> dict:
@@ -225,25 +252,115 @@ def compute_static_acceptance_scope_fingerprint(
 
     The scope can be passed explicitly (production) or read
     from environment variables (CI convenience).
+
+    Closure V §4: every value is validated. Empty values,
+    relative paths, PR #0, wrong branch, wrong repository,
+    and missing required providers all fail closed with
+    ``StaticScopeValidationError``.
     """
     parts = scope if scope is not None else _default_static_scope()
-    h = hashlib.sha256()
+    # Required key presence.
     for k in STATIC_SCOPE_KEYS:
         if k not in parts:
             raise RuntimeError(
                 f"static scope is missing required key: {k!r}"
             )
+        _validate_static_scope_value(k, parts[k])
+    # Per-key semantic validation.
+    if parts["repository_owner"] != "Slideshow11":
+        raise StaticScopeValidationError(
+            f"static scope repository_owner must be Slideshow11 "
+            f"for C22; got {parts['repository_owner']!r}"
+        )
+    if parts["repository_name"] != "AutoDev":
+        raise StaticScopeValidationError(
+            f"static scope repository_name must be AutoDev for "
+            f"C22; got {parts['repository_name']!r}"
+        )
+    if parts["pr_number"] != "5":
+        raise StaticScopeValidationError(
+            f"static scope pr_number must be '5' for C22; "
+            f"got {parts['pr_number']!r}"
+        )
+    if parts["pr_number"] in ("", "0"):
+        raise StaticScopeValidationError(
+            f"static scope pr_number cannot be empty or 0; "
+            f"got {parts['pr_number']!r}"
+        )
+    if parts["expected_branch"] != "feat/review-repair-relay-v1":
+        raise StaticScopeValidationError(
+            f"static scope expected_branch must be "
+            f"feat/review-repair-relay-v1 for C22; got "
+            f"{parts['expected_branch']!r}"
+        )
+    if "5" not in parts["expected_pr_set"].split(","):
+        raise StaticScopeValidationError(
+            f"static scope expected_pr_set must contain '5' "
+            f"for C22; got {parts['expected_pr_set']!r}"
+        )
+    if "feat/review-repair-relay-v1" not in parts[
+        "expected_branch_set"
+    ].split(","):
+        raise StaticScopeValidationError(
+            f"static scope expected_branch_set must contain "
+            f"feat/review-repair-relay-v1 for C22; got "
+            f"{parts['expected_branch_set']!r}"
+        )
+    _validate_absolute_path(
+        "production_working_checkout",
+        parts["production_working_checkout"],
+    )
+    _validate_absolute_path(
+        "supervisor_state_directory",
+        parts["supervisor_state_directory"],
+    )
+    _validate_absolute_path(
+        "supervisor_home",
+        parts["supervisor_home"],
+    )
+    _validate_absolute_path(
+        "hermes_binary_path",
+        parts["hermes_binary_path"],
+    )
+    if "coderabbit" not in parts["required_providers"].split(","):
+        raise StaticScopeValidationError(
+            f"static scope required_providers must include "
+            f"coderabbit; got {parts['required_providers']!r}"
+        )
+    if "codex" not in parts["optional_providers"].split(","):
+        raise StaticScopeValidationError(
+            f"static scope optional_providers must include "
+            f"codex for C22; got {parts['optional_providers']!r}"
+        )
+    # Provider overlap / contradiction.
+    req_set = set(parts["required_providers"].split(","))
+    opt_set = set(parts["optional_providers"].split(","))
+    if req_set & opt_set:
+        raise StaticScopeValidationError(
+            f"static scope provider set contradiction: "
+            f"{req_set & opt_set} appears in both required and "
+            f"optional providers"
+        )
+    if parts["provider_independence"] not in ("true", "1", "yes"):
+        raise StaticScopeValidationError(
+            f"static scope provider_independence must be a "
+            f"validated boolean semantic value; got "
+            f"{parts['provider_independence']!r}"
+        )
+    h = hashlib.sha256()
+    for k in STATIC_SCOPE_KEYS:
         v = parts[k]
-        if not isinstance(v, str):
-            raise RuntimeError(
-                f"static scope value for {k!r} must be a string, "
-                f"got {type(v).__name__}"
-            )
         h.update(f"scope\t{k}\t{v}\n".encode("utf-8"))
     return {
         "scope": {k: parts[k] for k in STATIC_SCOPE_KEYS},
         "fingerprint": h.hexdigest(),
     }
+
+
+class StaticScopeValidationError(ValueError):
+    """Raised when a static-scope value fails semantic
+    validation (empty, wrong identity, relative path,
+    wrong branch, etc.)."""
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +429,26 @@ def compute_run_binding_digest(
     The binding MUST satisfy the strict schema. Empty
     bindings, missing keys, empty values, and malformed SHAs
     all raise ``RunBindingSchemaError`` (fail closed).
+
+    Closure V §7: the production path should NOT silently
+    fall back to environment variables. The canonical
+    production caller MUST pass ``binding`` explicitly. The
+    environment fallback is preserved for diagnostics only.
     """
     if binding is None:
-        binding = {k: os.environ.get(k.upper(), "") for k in _RUN_BINDING_REQUIRED_KEYS}
+        # Environment fallback. We use the AED_* prefix
+        # convention, not the upper-case literal key, so the
+        # canonical environment contract is honored.
+        binding = {
+            "authoritative_head": os.environ.get(
+                "AED_AUTHORITATIVE_HEAD", ""
+            ),
+            "generation_id": os.environ.get("AED_GENERATION_ID", ""),
+            "attempt_id": os.environ.get("AED_ATTEMPT_ID", ""),
+            "result_contract_id": os.environ.get(
+                "AED_RESULT_CONTRACT_ID", ""
+            ),
+        }
     _validate_run_binding(binding)
     h = hashlib.sha256()
     keys = sorted(_RUN_BINDING_REQUIRED_KEYS)
@@ -323,6 +457,65 @@ def compute_run_binding_digest(
     return {
         "binding": {k: binding[k] for k in keys},
         "digest": h.hexdigest(),
+    }
+
+
+class RunBindingRelationalError(ValueError):
+    """Raised when the four run-binding fields are individually
+    valid but their relationships are inconsistent
+    (cross-generation mix, wrong contract for the bound
+    attempt, etc.). Fail-closed semantics."""
+
+
+def validate_run_binding_relations(
+    *,
+    binding: dict,
+    owned_heads: set,
+    owned_generations: set,
+    owned_attempts: set,
+    owned_contracts: set,
+) -> dict:
+    """Closure V §7: semantic relational ownership.
+
+    A valid run binding must prove that its four fields
+    belong to the same generation/attempt/contract tuple:
+
+      binding.authoritative_head in owned_heads
+      binding.generation_id in owned_generations
+      binding.attempt_id in owned_attempts
+      binding.result_contract_id in owned_contracts
+
+    Cross-generation mix-and-match is rejected.
+    """
+    # First ensure the binding is syntactically valid.
+    _validate_run_binding(binding)
+    if binding["authoritative_head"] not in owned_heads:
+        raise RunBindingRelationalError(
+            f"run binding head {binding['authoritative_head']!r} "
+            f"not in owned_heads set; cross-generation mix "
+            f"rejected"
+        )
+    if binding["generation_id"] not in owned_generations:
+        raise RunBindingRelationalError(
+            f"run binding generation {binding['generation_id']!r} "
+            f"not in owned_generations set; cross-generation "
+            f"mix rejected"
+        )
+    if binding["attempt_id"] not in owned_attempts:
+        raise RunBindingRelationalError(
+            f"run binding attempt {binding['attempt_id']!r} "
+            f"not in owned_attempts set; cross-generation "
+            f"mix rejected"
+        )
+    if binding["result_contract_id"] not in owned_contracts:
+        raise RunBindingRelationalError(
+            f"run binding contract {binding['result_contract_id']!r} "
+            f"not in owned_contracts set; cross-generation "
+            f"mix rejected"
+        )
+    return {
+        "binding": dict(binding),
+        "relations_verified": True,
     }
 
 
@@ -358,13 +551,18 @@ __all__ = [
     "_default_static_inputs",
     # Static scope
     "compute_static_acceptance_scope_fingerprint",
+    "StaticScopeValidationError",
+    "_validate_static_scope_value",
+    "_validate_absolute_path",
     "STATIC_SCOPE_KEYS",
     "_default_static_scope",
     # Dynamic run binding
     "compute_run_binding_digest",
+    "validate_run_binding_relations",
     "RUN_BINDING_SCHEMA_VERSION",
     "_RUN_BINDING_KEYS",
     "RunBindingSchemaError",
+    "RunBindingRelationalError",
     # Legacy / historical
     "PREVIOUS_CANONICAL_HERMES_FINGERPRINT",
     "SUPERSEDED_INCOMPLETE_STATIC_FINGERPRINT",
