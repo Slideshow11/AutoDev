@@ -151,9 +151,17 @@ def test_B_worker_envelope_with_correct_rc(tmp_path):
         },
         ["echo", "test"],
     )
-    for arg in argv:
-        if "=" in arg and "result-contract-id" in arg:
-            assert arg.split("=", 1)[1] == rc
+    rc_flag_present = False
+    rc_value = None
+    for i, arg in enumerate(argv):
+        if arg == "--result-contract-id" and i + 1 < len(argv):
+            rc_flag_present = True
+            rc_value = argv[i + 1]
+        elif "=" in arg and arg.startswith("--result-contract-id="):
+            rc_flag_present = True
+            rc_value = arg.split("=", 1)[1]
+    assert rc_flag_present, f"--result-contract-id flag not found in argv: {argv}"
+    assert rc_value == rc, f"expected {rc!r}, got {rc_value!r}"
 
 
 # C. missing RC rejected
