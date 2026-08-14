@@ -210,7 +210,7 @@ class TestMachineGeneratedEvidence:
         # the live repo + supervisor paths so it will use
         # the actual state, not the fixture.
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -235,7 +235,7 @@ class TestMachineGeneratedEvidence:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
@@ -251,7 +251,7 @@ class TestMachineGeneratedEvidence:
             generate_pre_canary_evidence,
         )
         ev = generate_pre_canary_evidence(
-            repo_root="/home/max/AutoDev",
+            repo_root=str(Path(__file__).resolve().parent.parent),
             state_dir=str(tmp_path),
             repo="Slideshow11/AutoDev",
             pr_number=5,
