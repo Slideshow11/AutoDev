@@ -657,6 +657,99 @@ class TestAutonomousProvenanceTerminal:
         assert out["value"] is True
         assert out["evidence_head"] == head
 
+    def test_pending_drift_breaks_success_even_with_terminal_chain(
+        self, tmp_path,
+    ):
+        # Repair (round-586/P1): a terminal provenance
+        # artifact with the FULL required lifecycle chain
+        # is necessary but NOT sufficient while the pending
+        # drift ledger still contains entries. A prior
+        # terminal artifact's lifecycle records the success
+        # of a PREVIOUS autonomous round; it does NOT prove
+        # that NEW drift detected since that round has been
+        # finished. The success path MUST refuse
+        # ``value=True`` while ``pending_count > 0``,
+        # otherwise the gate falsely certifies a head
+        # whose unfinished provenance work is still queued.
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_autonomous_provenance_evidence,
+        )
+        # Pending ledger with NEW unresolved drift that
+        # was registered AFTER the terminal artifact below
+        # was generated.
+        (tmp_path / "provenance_drift_pending.json").write_text(
+            json.dumps([
+                {
+                    "state": "DRIFT_DETECTED",
+                    "detected_at": "2026-08-15T02:00:00Z",
+                    "head_sha": (
+                        "abcdef1234567890abcdef1234567890abcdef12"
+                    ),
+                    "attempt_id": "att-20260815T020000Z-111",
+                    "drifts": ["manifest_mismatch"],
+                    "owner": "next_worker_round_autonomous",
+                },
+                {
+                    "state": "DRIFT_DETECTED",
+                    "detected_at": "2026-08-15T02:30:00Z",
+                    "head_sha": (
+                        "1234567890abcdef1234567890abcdef12345678"
+                    ),
+                    "attempt_id": "att-20260815T023000Z-222",
+                    "drifts": ["stale_terminal_artifact"],
+                    "owner": "next_worker_round_autonomous",
+                },
+            ])
+        )
+        # Prior terminal artifact with full chain AND
+        # matching head_sha. Without the fail-closed
+        # guard, the legacy code path would set
+        # ``value=True``.
+        head = "f" * 40
+        term = tmp_path / "provenance_terminal"
+        term.mkdir()
+        (term / f"{head}.json").write_text(json.dumps({
+            "schema_version":
+                "autocoder.provenance_terminal.v1",
+            "head_sha": head,
+            "generated_at": "2026-08-15T01:00:00Z",
+            "terminal": True,
+            "lifecycle_chain": [
+                {"stage": "prelaunch", "event_id": "e1"},
+                {"stage": "production", "event_id": "e2"},
+                {"stage": "drift_discovered", "event_id": "e3"},
+                {"stage": "manifest_repair", "event_id": "e4"},
+                {"stage": "manifest_committed", "event_id": "e5"},
+                {"stage": "drift_pending_cleared",
+                 "event_id": "e6"},
+                {"stage": "source_event_terminalized",
+                 "event_id": "e7"},
+                {"stage": "generation_terminal", "event_id": "e8"},
+            ],
+        }))
+        out = _read_autonomous_provenance_evidence(
+            state_dir=str(tmp_path),
+            expected_head=head,
+        )
+        # Fail-closed: pending entries present MUST
+        # block success, even though the terminal chain
+        # is intact and head-matched.
+        assert out["observation_complete"] is True
+        assert out["value"] is False
+        assert out["pending_drift_count"] == 2
+        assert (
+            "pending_provenance_drift_unresolved"
+            in out["reason"]
+        )
+        assert (
+            out["pending_provenance_entry_accepted_as_success"]
+            is False
+        )
+        # The terminal artifact path is still recorded
+        # for diagnostics; only ``value`` is refused.
+        assert out["evidence_head"] == head
+        assert out["terminal_artifact"] is not None
+
 
 # ---------------------------------------------------------------------
 # §5 Real deferred retry - ordered transitions

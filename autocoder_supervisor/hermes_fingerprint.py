@@ -1426,6 +1426,31 @@ def _read_autonomous_provenance_evidence(
         out["value"] = False
         out["observation_complete"] = True
         return out
+    # Fail-closed: a terminal provenance artifact is
+    # necessary but NOT sufficient while the pending
+    # drift ledger still contains entries. A prior
+    # terminal artifact's lifecycle chain (prelaunch,
+    # production, ... generation_terminal) records
+    # the success of a PREVIOUS autonomous round; it
+    # does NOT prove that NEW drift detected since
+    # that round has been finished. Even with all
+    # required stages present, we MUST refuse success
+    # while pending_count > 0, otherwise the gate
+    # would falsely certify a head whose unfinished
+    # provenance work is still queued in
+    # provenance_drift_pending.json.
+    if pending_count > 0:
+        out["pending_provenance_entry_accepted_as_success"] = (
+            False
+        )
+        out["reason"] = (
+            "pending_provenance_drift_unresolved: "
+            f"pending_drift_count={pending_count} "
+            "terminal_artifact_present_but_drift_pending"
+        )
+        out["value"] = False
+        out["observation_complete"] = True
+        return out
     out["value"] = True
     out["observation_complete"] = True
     out["reason"] = "ok_terminal_provenance_lifecycle"
