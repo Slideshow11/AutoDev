@@ -983,9 +983,15 @@ def _read_coderabbit_clean_head_evidence(
     sdir = _Path_reader(str(state_dir))
     # Read durable per-head provider evidence artifacts
     # written by the supervisor's capture_live_snapshot /
-    # pr416 collector path.
+    # orchestration collector path. Only artifacts that
+    # have a real production writer are honored here; the
+    # ``new_actionable_review_inventory.json`` is written
+    # by ``Controller.report_new_actionable_review_on_qualified_head()``
+    # (see autocoder_orchestration/controller.py). Any
+    # legacy artifact in this list without a current
+    # production writer is silently skipped so the gate
+    # cannot be starved by stale files.
     evidence_files = [
-        "pr416_coderabbit_exact_head_evidence.json",
         "pr5_orch/new_actionable_review_inventory.json",
     ]
     evidence_found = False
@@ -1001,47 +1007,9 @@ def _read_coderabbit_clean_head_evidence(
         evidence_found = True
         # Track the artifact we read from.
         out["source_artifact"] = str(p)
-        # exact head evidence
-        if f == "pr416_coderabbit_exact_head_evidence.json":
-            eh = data.get("exact_head")
-            out["evidence_head"] = eh
-            if not eh or eh != (expected_head or eh):
-                out["reason"] = (
-                    "stale_evidence: exact_head != current_head"
-                )
-                return out
-            status = data.get(
-                "exact_head_coderabbit_status"
-            ) or {}
-            if status.get("conclusion") != "success":
-                out["reason"] = (
-                    f"exact_head_coderabbit_status: "
-                    f"{status.get('conclusion')}"
-                )
-                return out
-            unconsumed = data.get(
-                "unconsumed_actionable_events"
-            ) or []
-            if unconsumed:
-                out["reason"] = (
-                    f"unconsumed_actionable_events: "
-                    f"{len(unconsumed)}"
-                )
-                out["evidence_ids"] = [
-                    str(e.get("id") or e) for e in unconsumed
-                ]
-                return out
-            final = data.get("final_assessment")
-            if not final:
-                out["reason"] = "no_final_assessment"
-                return out
-            out["value"] = True
-            out["observation_complete"] = True
-            out["observed_at"] = (
-                status.get("captured_at") or ""
-            ) or None
-            out["reason"] = "ok"
-            return out
+        # The inventory file is the only durable
+        # coderabbit-clean-head evidence with a live
+        # production writer (Controller).
         if f == "pr5_orch/new_actionable_review_inventory.json":
             eh = data.get("head_observed")
             out["evidence_head"] = eh
@@ -1115,12 +1083,28 @@ def _read_codex_optional_lifecycle_evidence(
         out["reason"] = "no_codex_lifecycle_observed"
         return out
     # Look for the canonical terminal evidence (lifecycle
-    # field set to terminal/consumed).
+    # field set to a real terminal state). The supervisor's
+    # provider lifecycle writes
+    # ``PROVIDER_STATE_REVIEW_COMPLETE`` ("REVIEW_COMPLETE")
+    # when a Codex review completes; ``REQUEST_INTENT``,
+    # ``REQUEST_SENT``, and ``ACKNOWLEDGED`` are the
+    # earlier states of the documented Codex lifecycle
+    # (see autocoder_supervisor/supervisor.py constants).
+    # Recognize both the new provider-state vocabulary and
+    # the legacy lifecycle strings so any real terminal
+    # lifecycle advances the gate.
+    terminal_states = (
+        "REVIEW_COMPLETE",
+        "REQUEST_INTENT",
+        "REQUEST_SENT",
+        "ACKNOWLEDGED",
+        "CONSUMED",
+        "TERMINAL",
+        "OPTIONAL_DEGRADED",
+    )
     terminal_count = 0
     for lc in codex_lifecycles:
-        if lc.get("lifecycle") in (
-            "CONSUMED", "TERMINAL", "OPTIONAL_DEGRADED"
-        ):
+        if lc.get("lifecycle") in terminal_states:
             terminal_count += 1
     if terminal_count == 0:
         out["observation_complete"] = True
@@ -1285,9 +1269,13 @@ def _enumerate_static_environment_inputs(
     inputs: list = []
 
     def _add(label, path, required):
+        # Directory paths are recorded as existing with
+        # sha=None (NOT a missing input). Files get their
+        # actual byte SHA256.
         exists = bool(path) and _os_env.path.exists(path)
         sha = None
-        if exists:
+        is_file = exists and _os_env.path.isfile(path)
+        if is_file:
             try:
                 sha = _hashlib_env.sha256(
                     open(path, "rb").read()
@@ -1299,6 +1287,7 @@ def _enumerate_static_environment_inputs(
             "label": label,
             "path": path or "",
             "exists": exists,
+            "is_file": is_file,
             "required": required,
             "sha256": sha,
         })
@@ -1407,9 +1396,15 @@ def _compute_static_environment_fingerprint(
     h = _hashlib_env.sha256()
     missing = []
     for inp in inputs:
-        if not inp["exists"]:
-            if inp["required"]:
-                missing.append(inp)
+        # Required inputs that are MISSING (don't exist) are
+        # recorded as missing. Directories that exist (with
+        # no SHA) are NOT missing — they are recorded
+        # directories, not files.
+        if not inp["exists"] and inp["required"]:
+            missing.append(inp)
+            continue
+        # Skip entries with no file SHA (directories).
+        if not inp.get("sha256"):
             continue
         h.update(
             f"{inp['label']}\t{inp['path']}\t{inp['sha256']}\n"

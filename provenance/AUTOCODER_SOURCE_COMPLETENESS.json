@@ -7584,8 +7584,8 @@
       },
       {
         "destination_path": "scripts/scanner-occurrence-allowlist.json",
-        "destination_sha256": "8c933e019585b328c99b74d8144cdf2c4f85e82f042712a62cc9ed5d3cd3c8be",
-        "destination_size_bytes": 66336,
+        "destination_sha256": "d50d0223c99cb946b7d978852be03a34004d903cce5e623062724c8b65595581",
+        "destination_size_bytes": 109580,
         "source_path": null,
         "source_sha256": null,
         "source_size_bytes": null,

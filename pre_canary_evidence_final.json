@@ -1,0 +1,811 @@
+{
+  "schema_version": "autocoder.pre_canary_evidence.v1",
+  "generated_at": "2026-08-15T02:08:24.512905+00:00",
+  "repo": "Slideshow11/AutoDev",
+  "pr_number": 5,
+  "branch": "feat/review-repair-relay-v1",
+  "local_head": "fc02cf456d46b293628ec062b9e5919f952bd900",
+  "remote_branch_head": "fc02cf456d46b293628ec062b9e5919f952bd900",
+  "live_pr_head": "fc02cf456d46b293628ec062b9e5919f952bd900",
+  "origin_head": "fc02cf456d46b293628ec062b9e5919f952bd900",
+  "live_github_head": "fc02cf456d46b293628ec062b9e5919f952bd900",
+  "heads_equal": true,
+  "pr_state": "open",
+  "pr_merged": false,
+  "pr_merged_at": null,
+  "exact_head_ci_sha": "fc02cf456d46b293628ec062b9e5919f952bd900",
+  "required_ci_checks_expected": [
+    "test (3.10)",
+    "test (3.11)",
+    "test (3.12)",
+    "package-smoke",
+    "committed-state-scan",
+    "provenance",
+    "full-suite"
+  ],
+  "required_ci_checks_observed": [
+    "test (3.10)",
+    "test (3.11)",
+    "test (3.12)",
+    "package-smoke",
+    "committed-state-scan",
+    "provenance",
+    "full-suite"
+  ],
+  "required_ci_checks_missing": [],
+  "required_ci_checks_non_success": [],
+  "required_ci_checks_pending": [],
+  "exact_head_ci_all_required_success": true,
+  "required_ci_terminal_success_policy": "status=completed AND conclusion=success ONLY",
+  "pending_check_accepted": false,
+  "neutral_check_accepted": false,
+  "skipped_check_accepted": false,
+  "report_artifact_consistency": true,
+  "full_suite_result": "success",
+  "expected_static_scope": {
+    "repository_owner": "Slideshow11",
+    "repository_name": "AutoDev",
+    "pr_number": "5",
+    "expected_branch": "feat/review-repair-relay-v1",
+    "expected_branch_set": "feat/review-repair-relay-v1",
+    "expected_pr_set": "5",
+    "production_working_checkout": "/home/max/AutoDev",
+    "supervisor_state_directory": "/home/max/.hermes/aed-supervisor/state",
+    "supervisor_home": "/home/max/.hermes/aed-supervisor",
+    "hermes_binary_path": "/home/max/.local/bin/hermes",
+    "required_providers": "coderabbit",
+    "optional_providers": "codex",
+    "provider_independence": "true"
+  },
+  "observed_static_scope": {
+    "repository_owner": "Slideshow11",
+    "repository_name": "AutoDev",
+    "pr_number": "5",
+    "expected_branch": "feat/review-repair-relay-v1",
+    "expected_branch_set": "feat/review-repair-relay-v1",
+    "production_working_checkout": "/home/max/AutoDev",
+    "supervisor_state_directory": "/home/max/.hermes/aed-supervisor/state",
+    "supervisor_home": "/home/max/.hermes/aed-supervisor",
+    "hermes_binary_path": "/home/max/.local/bin/hermes",
+    "required_providers": "coderabbit",
+    "optional_providers": "codex",
+    "provider_independence": "true",
+    "expected_pr_set": "5"
+  },
+  "expected_static_scope_fingerprint": "955c53b8a6b15509c7ddbad402aa25cbb50e8d348d4855d64ea97c9e8b182339",
+  "observed_static_scope_fingerprint": "955c53b8a6b15509c7ddbad402aa25cbb50e8d348d4855d64ea97c9e8b182339",
+  "static_scope_fingerprint": "955c53b8a6b15509c7ddbad402aa25cbb50e8d348d4855d64ea97c9e8b182339",
+  "static_scope_match": true,
+  "static_scope_all_required_keys_present": true,
+  "static_scope_per_key_match": {
+    "repository_owner": {
+      "expected": "Slideshow11",
+      "observed": "Slideshow11",
+      "match": true
+    },
+    "repository_name": {
+      "expected": "AutoDev",
+      "observed": "AutoDev",
+      "match": true
+    },
+    "pr_number": {
+      "expected": "5",
+      "observed": "5",
+      "match": true
+    },
+    "expected_branch": {
+      "expected": "feat/review-repair-relay-v1",
+      "observed": "feat/review-repair-relay-v1",
+      "match": true
+    },
+    "production_working_checkout": {
+      "expected": "/home/max/AutoDev",
+      "observed": "/home/max/AutoDev",
+      "match": true
+    },
+    "supervisor_state_directory": {
+      "expected": "/home/max/.hermes/aed-supervisor/state",
+      "observed": "/home/max/.hermes/aed-supervisor/state",
+      "match": true
+    },
+    "supervisor_home": {
+      "expected": "/home/max/.hermes/aed-supervisor",
+      "observed": "/home/max/.hermes/aed-supervisor",
+      "match": true
+    },
+    "hermes_binary_path": {
+      "expected": "/home/max/.local/bin/hermes",
+      "observed": "/home/max/.local/bin/hermes",
+      "match": true
+    },
+    "required_providers": {
+      "expected": "coderabbit",
+      "observed": "coderabbit",
+      "match": true
+    },
+    "optional_providers": {
+      "expected": "codex",
+      "observed": "codex",
+      "match": true
+    },
+    "provider_independence": {
+      "expected": "true",
+      "observed": "true",
+      "match": true
+    },
+    "expected_branch_set": {
+      "expected": "feat/review-repair-relay-v1",
+      "observed": "feat/review-repair-relay-v1",
+      "match": true
+    },
+    "expected_pr_set": {
+      "expected": "5",
+      "observed": "5",
+      "match": true
+    }
+  },
+  "static_scope_observation_source_per_key": {
+    "repository_owner": "/proc/657566/environ",
+    "repository_name": "/proc/657566/environ",
+    "pr_number": "/proc/657566/environ",
+    "expected_pr_set": "/proc/657566/environ",
+    "expected_branch": "/proc/657566/environ",
+    "expected_branch_set": "/proc/657566/environ",
+    "production_working_checkout": "/proc/657566/environ",
+    "supervisor_home": "/proc/657566/environ",
+    "supervisor_state_directory": "/proc/657566/environ",
+    "hermes_binary_path": "/proc/657566/environ",
+    "required_providers": "/proc/657566/environ",
+    "optional_providers": "/proc/657566/environ",
+    "provider_independence": "/proc/657566/environ"
+  },
+  "static_scope_observation_complete": true,
+  "acceptance_runtime_expected_count": 17,
+  "acceptance_runtime_compared_count": 17,
+  "runtime_file_records": [
+    {
+      "logical_module": "supervisor.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/supervisor.py",
+      "committed_source_sha256": "724cf8df7e355f14c62579988466e60260db78354de6b87d29e351533dada4e1",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/supervisor.py",
+      "actual_production_sha256": "724cf8df7e355f14c62579988466e60260db78354de6b87d29e351533dada4e1",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "_directive_prompt.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/_directive_prompt.py",
+      "committed_source_sha256": "a6d0a8737633bf4f44cc8b6b8d3e240347c77daa03b56702d6c74a651107ea23",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/_directive_prompt.py",
+      "actual_production_sha256": "a6d0a8737633bf4f44cc8b6b8d3e240347c77daa03b56702d6c74a651107ea23",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "worker_session.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/worker_session.py",
+      "committed_source_sha256": "4651d88b472f2958e4e33fd7cbdaf303a75b1b474cbdd1931768d08b8aa79dcc",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/worker_session.py",
+      "actual_production_sha256": "4651d88b472f2958e4e33fd7cbdaf303a75b1b474cbdd1931768d08b8aa79dcc",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "aed_worker_wrapper.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/aed_worker_wrapper.py",
+      "committed_source_sha256": "2fc07ebea23177f672bfa87d043d98dde47389647c514e8fbfb7c937d2b0e5c2",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/aed_worker_wrapper.py",
+      "actual_production_sha256": "2fc07ebea23177f672bfa87d043d98dde47389647c514e8fbfb7c937d2b0e5c2",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "directive_bridge.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/directive_bridge.py",
+      "committed_source_sha256": "cc0359997a583d61533cf6467fdb018470374e749c58f68d5eda33618d8d4ae6",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/directive_bridge.py",
+      "actual_production_sha256": "cc0359997a583d61533cf6467fdb018470374e749c58f68d5eda33618d8d4ae6",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "provenance_maintenance.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/provenance_maintenance.py",
+      "committed_source_sha256": "f20b24b12e382c436c53be6a7f1efba818b4e742f19a006fe6f24ed29abdd620",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/provenance_maintenance.py",
+      "actual_production_sha256": "f20b24b12e382c436c53be6a7f1efba818b4e742f19a006fe6f24ed29abdd620",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "hermes_fingerprint.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/hermes_fingerprint.py",
+      "committed_source_sha256": "f87dc3aaaa8dffb8e3f98d25314c5119cba712f66361e083c3a4773df0244a18",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/hermes_fingerprint.py",
+      "actual_production_sha256": "6d3c7a5c79ce0b7a8111092767266d1faefee367559bbe8b7ee03da95563baf0",
+      "match": false,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "orchestration_state_root.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/orchestration_state_root.py",
+      "committed_source_sha256": "2a56dd9d8ec8c35f65f7d184615766ef9ae840c14adacfe143e12d0f808f3044",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/orchestration_state_root.py",
+      "actual_production_sha256": "2a56dd9d8ec8c35f65f7d184615766ef9ae840c14adacfe143e12d0f808f3044",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "relay_wiring.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/relay_wiring.py",
+      "committed_source_sha256": "c991a5773092db862d9f344afd9d2d035ffc8edfb9a6c91abcdb80dc5eb5e92c",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/relay_wiring.py",
+      "actual_production_sha256": "c991a5773092db862d9f344afd9d2d035ffc8edfb9a6c91abcdb80dc5eb5e92c",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "config.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/config.py",
+      "committed_source_sha256": "17850c5dedf6cf27f3179e828b37346ccdf2b9fd6ad348a70e2947c42f61bf43",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/config.py",
+      "actual_production_sha256": "17850c5dedf6cf27f3179e828b37346ccdf2b9fd6ad348a70e2947c42f61bf43",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "contracts.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/contracts.py",
+      "committed_source_sha256": "55602790d4c450c37d6630b50e9aad1aa35dbeb9a386d4acaa31135061c9f0d9",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/contracts.py",
+      "actual_production_sha256": "55602790d4c450c37d6630b50e9aad1aa35dbeb9a386d4acaa31135061c9f0d9",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "validate.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_supervisor/validate.py",
+      "committed_source_sha256": "d76dd823b06850cbd1f3d12089beec6b0fa077986793f1cc7df06f4ee45e573e",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_supervisor/validate.py",
+      "actual_production_sha256": "d76dd823b06850cbd1f3d12089beec6b0fa077986793f1cc7df06f4ee45e573e",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "worker_attempt.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_orchestration/worker_attempt.py",
+      "committed_source_sha256": "34afca750a25a6f8019b54785f15f99cd69578226549b3d7806e83b152f1331f",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_orchestration/worker_attempt.py",
+      "actual_production_sha256": "34afca750a25a6f8019b54785f15f99cd69578226549b3d7806e83b152f1331f",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "review_repair_relay.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_orchestration/review_repair_relay.py",
+      "committed_source_sha256": "d80e642189596d3732ce01b73f467acab64fe428ab0da430212d9f97998493a0",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_orchestration/review_repair_relay.py",
+      "actual_production_sha256": "d80e642189596d3732ce01b73f467acab64fe428ab0da430212d9f97998493a0",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "controller.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_orchestration/controller.py",
+      "committed_source_sha256": "d5f5a85d177e3ddbf16e68b910b8b9d1cf34f317bf386cb76725d26792dd9367",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_orchestration/controller.py",
+      "actual_production_sha256": "d5f5a85d177e3ddbf16e68b910b8b9d1cf34f317bf386cb76725d26792dd9367",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "context.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_orchestration/context.py",
+      "committed_source_sha256": "e842ae49209cdf01f796d760ddab963e5a1662798f0be1a483eedcac75c50db4",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_orchestration/context.py",
+      "actual_production_sha256": "e842ae49209cdf01f796d760ddab963e5a1662798f0be1a483eedcac75c50db4",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    },
+    {
+      "logical_module": "store.py",
+      "committed_source_path": "/home/max/AutoDev/autocoder_orchestration/store.py",
+      "committed_source_sha256": "d56dda39209d0b37e66b2f19a0ed255653a0937236b65a733e97fc4343cead84",
+      "actual_production_loaded_path": "/home/max/AutoDev/autocoder_orchestration/store.py",
+      "actual_production_sha256": "d56dda39209d0b37e66b2f19a0ed255653a0937236b65a733e97fc4343cead84",
+      "match": true,
+      "source_exists": true,
+      "deployed_exists": true,
+      "provenance_of_loaded_path": "supervisor-owned artifact (loaded_modules)"
+    }
+  ],
+  "runtime_files_expected": [
+    "supervisor.py",
+    "_directive_prompt.py",
+    "worker_session.py",
+    "aed_worker_wrapper.py",
+    "directive_bridge.py",
+    "provenance_maintenance.py",
+    "hermes_fingerprint.py",
+    "orchestration_state_root.py",
+    "relay_wiring.py",
+    "config.py",
+    "contracts.py",
+    "validate.py",
+    "worker_attempt.py",
+    "review_repair_relay.py",
+    "controller.py",
+    "context.py",
+    "store.py"
+  ],
+  "runtime_files_missing": [],
+  "runtime_files_ambiguous": [],
+  "runtime_hash_mismatches": [
+    "hermes_fingerprint.py"
+  ],
+  "source_runtime_hash_match": false,
+  "active_worker_source": "canonical_active_worker_attempt_count (WorkerAttemptStore + PID liveness cross-check; NOT ps-based process count)",
+  "active_worker_attempt_ids": [],
+  "active_worker_count": 0,
+  "cooldown_evidence_parser": "entries-preferred, legacy-ids-fallback",
+  "cooldown_schema_source": "cooldown_deferred_events.json",
+  "cooldown_entries_count": 3,
+  "cooldown_legacy_ids_count": 0,
+  "cooldown_deferred_count": 3,
+  "cooldown_parse_failed": false,
+  "deferred_event_ids": [
+    "check_changed:test (3.10)",
+    "unresolved_thread_drain:PRRT_kwDOTtyQLc6ZdTMI",
+    "head_changed:fc02cf456d46b293628ec062b9e5919f952bd900"
+  ],
+  "deferred_without_retry_owner": [],
+  "deferred_without_executable_retry_path": [],
+  "deferred_current_head_actionable": [
+    "unresolved_thread_drain:PRRT_kwDOTtyQLc6ZdTMI"
+  ],
+  "deferred_unknown_classification": [],
+  "real_deferred_retry_event_ids": [],
+  "event_state_observation_complete": true,
+  "event_state_observation_error": null,
+  "event_observation_failures": [],
+  "orphaned_count": 0,
+  "terminal_pending_consumption_count": 0,
+  "superseded_pending_consumption_count": 0,
+  "production_checkout_clean": false,
+  "core_static_gates_pass": false,
+  "pre_canary_freeze_eligible": false,
+  "structural_freeze_eligible": false,
+  "empirical_freeze_eligible": false,
+  "empirical_gates_pending": [
+    "coderabbit_clean_head",
+    "autonomous_provenance_real_execution",
+    "real_deferred_retry"
+  ],
+  "empirical_gate_evidence": {
+    "coderabbit_clean_head": {
+      "value": false,
+      "observation_complete": false,
+      "evidence_head": "fc02cf456d46b293628ec062b9e5919f952bd900",
+      "evidence_ids": [
+        "head_changed:fc02cf456d46b293628ec062b9e5919f952bd900"
+      ],
+      "observed_at": null,
+      "source_artifact": "/home/max/.hermes/aed-supervisor/state/pr5_orch/new_actionable_review_inventory.json",
+      "reason": "actionable_inventory_non_empty: 1"
+    },
+    "codex_optional_lifecycle": {
+      "value": true,
+      "observation_complete": true,
+      "evidence_head": null,
+      "evidence_ids": [
+        "f5e15932b15b7e1e1909d1f705b56311b0b82b0d",
+        "602e1fca5259b8a8c0db50a70f8c4624d54fd682",
+        "af83caa248aaee9b21f63561ec4cc92baf1e2762",
+        "711329dab3c576a70ad2ce1eebe996856e341ec2",
+        "fc02cf456d46b293628ec062b9e5919f952bd900"
+      ],
+      "observed_at": "2026-08-15T02:05:06Z",
+      "source_artifact": "/home/max/.hermes/aed-supervisor/state/review_requests",
+      "reason": "ok_terminal_lifecycle_observed"
+    },
+    "autonomous_provenance_real_execution": {
+      "value": false,
+      "observation_complete": true,
+      "evidence_head": null,
+      "evidence_ids": [],
+      "observed_at": null,
+      "source_artifact": "/home/max/.hermes/aed-supervisor/state/provenance_drift_pending.json",
+      "reason": "no_autonomous_provenance_cycle_observed"
+    },
+    "real_deferred_retry": {
+      "value": false,
+      "observation_complete": true,
+      "evidence_head": null,
+      "evidence_ids": [],
+      "observed_at": null,
+      "source_artifact": "/home/max/.hermes/aed-supervisor/state/consumed_event_terminality.json",
+      "reason": "no_deferred_retry_lifecycle_observed"
+    }
+  },
+  "real_deferred_retry_empirically_proven": false,
+  "empirical_gate_values_source": "canonical_durable_evidence",
+  "static_environment_fingerprint": "5a4166d603146ac0a5b5b776583387bf4800c3bd19a756189fb6870d0e342f7e",
+  "static_environment_input_count": 46,
+  "static_environment_inputs": [
+    {
+      "label": "acceptance_runtime/supervisor.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/supervisor.py",
+      "exists": true,
+      "required": true,
+      "sha256": "724cf8df7e355f14c62579988466e60260db78354de6b87d29e351533dada4e1"
+    },
+    {
+      "label": "acceptance_runtime/supervisor.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/supervisor.py",
+      "exists": true,
+      "required": true,
+      "sha256": "724cf8df7e355f14c62579988466e60260db78354de6b87d29e351533dada4e1"
+    },
+    {
+      "label": "acceptance_runtime/_directive_prompt.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/_directive_prompt.py",
+      "exists": true,
+      "required": true,
+      "sha256": "a6d0a8737633bf4f44cc8b6b8d3e240347c77daa03b56702d6c74a651107ea23"
+    },
+    {
+      "label": "acceptance_runtime/_directive_prompt.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/_directive_prompt.py",
+      "exists": true,
+      "required": true,
+      "sha256": "a6d0a8737633bf4f44cc8b6b8d3e240347c77daa03b56702d6c74a651107ea23"
+    },
+    {
+      "label": "acceptance_runtime/worker_session.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/worker_session.py",
+      "exists": true,
+      "required": true,
+      "sha256": "4651d88b472f2958e4e33fd7cbdaf303a75b1b474cbdd1931768d08b8aa79dcc"
+    },
+    {
+      "label": "acceptance_runtime/worker_session.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/worker_session.py",
+      "exists": true,
+      "required": true,
+      "sha256": "4651d88b472f2958e4e33fd7cbdaf303a75b1b474cbdd1931768d08b8aa79dcc"
+    },
+    {
+      "label": "acceptance_runtime/aed_worker_wrapper.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/aed_worker_wrapper.py",
+      "exists": true,
+      "required": true,
+      "sha256": "2fc07ebea23177f672bfa87d043d98dde47389647c514e8fbfb7c937d2b0e5c2"
+    },
+    {
+      "label": "acceptance_runtime/aed_worker_wrapper.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/aed_worker_wrapper.py",
+      "exists": true,
+      "required": true,
+      "sha256": "2fc07ebea23177f672bfa87d043d98dde47389647c514e8fbfb7c937d2b0e5c2"
+    },
+    {
+      "label": "acceptance_runtime/directive_bridge.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/directive_bridge.py",
+      "exists": true,
+      "required": true,
+      "sha256": "cc0359997a583d61533cf6467fdb018470374e749c58f68d5eda33618d8d4ae6"
+    },
+    {
+      "label": "acceptance_runtime/directive_bridge.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/directive_bridge.py",
+      "exists": true,
+      "required": true,
+      "sha256": "cc0359997a583d61533cf6467fdb018470374e749c58f68d5eda33618d8d4ae6"
+    },
+    {
+      "label": "acceptance_runtime/provenance_maintenance.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/provenance_maintenance.py",
+      "exists": true,
+      "required": true,
+      "sha256": "f20b24b12e382c436c53be6a7f1efba818b4e742f19a006fe6f24ed29abdd620"
+    },
+    {
+      "label": "acceptance_runtime/provenance_maintenance.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/provenance_maintenance.py",
+      "exists": true,
+      "required": true,
+      "sha256": "f20b24b12e382c436c53be6a7f1efba818b4e742f19a006fe6f24ed29abdd620"
+    },
+    {
+      "label": "acceptance_runtime/hermes_fingerprint.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/hermes_fingerprint.py",
+      "exists": true,
+      "required": true,
+      "sha256": "6d3c7a5c79ce0b7a8111092767266d1faefee367559bbe8b7ee03da95563baf0"
+    },
+    {
+      "label": "acceptance_runtime/hermes_fingerprint.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/hermes_fingerprint.py",
+      "exists": true,
+      "required": true,
+      "sha256": "6d3c7a5c79ce0b7a8111092767266d1faefee367559bbe8b7ee03da95563baf0"
+    },
+    {
+      "label": "acceptance_runtime/orchestration_state_root.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/orchestration_state_root.py",
+      "exists": true,
+      "required": true,
+      "sha256": "2a56dd9d8ec8c35f65f7d184615766ef9ae840c14adacfe143e12d0f808f3044"
+    },
+    {
+      "label": "acceptance_runtime/orchestration_state_root.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/orchestration_state_root.py",
+      "exists": true,
+      "required": true,
+      "sha256": "2a56dd9d8ec8c35f65f7d184615766ef9ae840c14adacfe143e12d0f808f3044"
+    },
+    {
+      "label": "acceptance_runtime/relay_wiring.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/relay_wiring.py",
+      "exists": true,
+      "required": true,
+      "sha256": "c991a5773092db862d9f344afd9d2d035ffc8edfb9a6c91abcdb80dc5eb5e92c"
+    },
+    {
+      "label": "acceptance_runtime/relay_wiring.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/relay_wiring.py",
+      "exists": true,
+      "required": true,
+      "sha256": "c991a5773092db862d9f344afd9d2d035ffc8edfb9a6c91abcdb80dc5eb5e92c"
+    },
+    {
+      "label": "acceptance_runtime/config.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/config.py",
+      "exists": true,
+      "required": true,
+      "sha256": "17850c5dedf6cf27f3179e828b37346ccdf2b9fd6ad348a70e2947c42f61bf43"
+    },
+    {
+      "label": "acceptance_runtime/config.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/config.py",
+      "exists": true,
+      "required": true,
+      "sha256": "17850c5dedf6cf27f3179e828b37346ccdf2b9fd6ad348a70e2947c42f61bf43"
+    },
+    {
+      "label": "acceptance_runtime/contracts.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/contracts.py",
+      "exists": true,
+      "required": true,
+      "sha256": "55602790d4c450c37d6630b50e9aad1aa35dbeb9a386d4acaa31135061c9f0d9"
+    },
+    {
+      "label": "acceptance_runtime/contracts.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/contracts.py",
+      "exists": true,
+      "required": true,
+      "sha256": "55602790d4c450c37d6630b50e9aad1aa35dbeb9a386d4acaa31135061c9f0d9"
+    },
+    {
+      "label": "acceptance_runtime/validate.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_supervisor/validate.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d76dd823b06850cbd1f3d12089beec6b0fa077986793f1cc7df06f4ee45e573e"
+    },
+    {
+      "label": "acceptance_runtime/validate.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_supervisor/validate.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d76dd823b06850cbd1f3d12089beec6b0fa077986793f1cc7df06f4ee45e573e"
+    },
+    {
+      "label": "acceptance_runtime/worker_attempt.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_orchestration/worker_attempt.py",
+      "exists": true,
+      "required": true,
+      "sha256": "34afca750a25a6f8019b54785f15f99cd69578226549b3d7806e83b152f1331f"
+    },
+    {
+      "label": "acceptance_runtime/worker_attempt.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_orchestration/worker_attempt.py",
+      "exists": true,
+      "required": true,
+      "sha256": "34afca750a25a6f8019b54785f15f99cd69578226549b3d7806e83b152f1331f"
+    },
+    {
+      "label": "acceptance_runtime/review_repair_relay.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_orchestration/review_repair_relay.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d80e642189596d3732ce01b73f467acab64fe428ab0da430212d9f97998493a0"
+    },
+    {
+      "label": "acceptance_runtime/review_repair_relay.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_orchestration/review_repair_relay.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d80e642189596d3732ce01b73f467acab64fe428ab0da430212d9f97998493a0"
+    },
+    {
+      "label": "acceptance_runtime/controller.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_orchestration/controller.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d5f5a85d177e3ddbf16e68b910b8b9d1cf34f317bf386cb76725d26792dd9367"
+    },
+    {
+      "label": "acceptance_runtime/controller.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_orchestration/controller.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d5f5a85d177e3ddbf16e68b910b8b9d1cf34f317bf386cb76725d26792dd9367"
+    },
+    {
+      "label": "acceptance_runtime/context.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_orchestration/context.py",
+      "exists": true,
+      "required": true,
+      "sha256": "e842ae49209cdf01f796d760ddab963e5a1662798f0be1a483eedcac75c50db4"
+    },
+    {
+      "label": "acceptance_runtime/context.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_orchestration/context.py",
+      "exists": true,
+      "required": true,
+      "sha256": "e842ae49209cdf01f796d760ddab963e5a1662798f0be1a483eedcac75c50db4"
+    },
+    {
+      "label": "acceptance_runtime/store.py/committed_source",
+      "path": "/home/max/AutoDev/autocoder_orchestration/store.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d56dda39209d0b37e66b2f19a0ed255653a0937236b65a733e97fc4343cead84"
+    },
+    {
+      "label": "acceptance_runtime/store.py/production_loaded",
+      "path": "/home/max/AutoDev/autocoder_orchestration/store.py",
+      "exists": true,
+      "required": true,
+      "sha256": "d56dda39209d0b37e66b2f19a0ed255653a0937236b65a733e97fc4343cead84"
+    },
+    {
+      "label": "global_hermes_config",
+      "path": "/home/max/.hermes/config.yaml",
+      "exists": true,
+      "required": true,
+      "sha256": "2730b1c3061a2c6e3e211513554d0f97dd6b20e407b5a88c98493df7eb4401e5"
+    },
+    {
+      "label": "aed_profile/aed-builder/config.yaml",
+      "path": "/home/max/.hermes/profiles/aed-builder/config.yaml",
+      "exists": true,
+      "required": true,
+      "sha256": "b68c8563e9a1a1b6fe0f94b12976b7dae6332f003f43bf55478546dcead2b8dd"
+    },
+    {
+      "label": "aed_profile/aed-quarantine/config.yaml",
+      "path": "/home/max/.hermes/profiles/aed-quarantine/config.yaml",
+      "exists": true,
+      "required": true,
+      "sha256": "21cc8c4e3ff7c8813355c18817b6144d2a9aafbd93575c07ffaa9266d6d88b84"
+    },
+    {
+      "label": "aed_profile/aed-researcher/config.yaml",
+      "path": "/home/max/.hermes/profiles/aed-researcher/config.yaml",
+      "exists": true,
+      "required": true,
+      "sha256": "e5e393b97d16efef38f67c7eb9d18f1a4896ca72273ac24b7043e039a6f0f967"
+    },
+    {
+      "label": "aed_profile/aed-reviewer/config.yaml",
+      "path": "/home/max/.hermes/profiles/aed-reviewer/config.yaml",
+      "exists": true,
+      "required": true,
+      "sha256": "062d88a03f62aed012e6ec0d3b846fd6db8ecfb47fa95fce9214638e1b72d23e"
+    },
+    {
+      "label": "aed_profile/aed-specifier/config.yaml",
+      "path": "/home/max/.hermes/profiles/aed-specifier/config.yaml",
+      "exists": true,
+      "required": true,
+      "sha256": "b95e8f4809e03291e1ad0b7e3ea62261e6e2cb5d8c07e5d6743fb6362f860ada"
+    },
+    {
+      "label": "hermes_invoked_path",
+      "path": "/home/max/.local/bin/hermes",
+      "exists": true,
+      "required": true,
+      "sha256": "8a84b0263b6cbfaf04e08c39279173247c74dce5461b62ae54bcfa3de7873b48"
+    },
+    {
+      "label": "hermes_resolved_path",
+      "path": "/home/max/.hermes/hermes-agent/venv/bin/hermes",
+      "exists": true,
+      "required": true,
+      "sha256": "8a84b0263b6cbfaf04e08c39279173247c74dce5461b62ae54bcfa3de7873b48"
+    },
+    {
+      "label": "security/security.yaml",
+      "path": "/home/max/.hermes/security.yaml",
+      "exists": false,
+      "required": false,
+      "sha256": null
+    },
+    {
+      "label": "security/restrictions.yaml",
+      "path": "/home/max/.hermes/restrictions.yaml",
+      "exists": false,
+      "required": false,
+      "sha256": null
+    },
+    {
+      "label": "production_working_checkout",
+      "path": "/home/max/AutoDev",
+      "exists": false,
+      "required": true,
+      "sha256": null
+    },
+    {
+      "label": "supervisor_state_directory",
+      "path": "/home/max/.hermes/aed-supervisor/state",
+      "exists": false,
+      "required": true,
+      "sha256": null
+    }
+  ],
+  "static_environment_missing_inputs": [
+    {
+      "label": "production_working_checkout",
+      "path": "/home/max/AutoDev",
+      "exists": false,
+      "required": true,
+      "sha256": null
+    },
+    {
+      "label": "supervisor_state_directory",
+      "path": "/home/max/.hermes/aed-supervisor/state",
+      "exists": false,
+      "required": true,
+      "sha256": null
+    }
+  ],
+  "static_environment_inputs_fingerprint_complete": false,
+  "hermes_invoked_path": "/home/max/.local/bin/hermes",
+  "hermes_invoked_path_sha256": "8a84b0263b6cbfaf04e08c39279173247c74dce5461b62ae54bcfa3de7873b48",
+  "hermes_resolved_path": "/home/max/.hermes/hermes-agent/venv/bin/hermes",
+  "hermes_resolved_path_sha256": "8a84b0263b6cbfaf04e08c39279173247c74dce5461b62ae54bcfa3de7873b48"
+}
