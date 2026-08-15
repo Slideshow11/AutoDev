@@ -243,6 +243,9 @@ def test_evaluate_readiness_no_required_checks_allows_qualification(
     """
     monkeypatch.setitem(supervisor.POLICY, "required_check_names", [])
     snap = _clean_snap()
+    monkeypatch.setattr(
+        supervisor, "list_unconsumed_events", lambda: snap.get("unconsumed_event_ids", []),
+    )
     res = supervisor.evaluate_readiness(snap, AUTH)
     assert res["ready"] is True
     assert res["reason"] == "no_required_checks"
@@ -253,6 +256,9 @@ def test_evaluate_readiness_checks_pending_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(supervisor.POLICY, "required_check_names", ["ci-1"])
+    monkeypatch.setattr(
+        supervisor, "list_unconsumed_events", lambda: snap.get("unconsumed_event_ids", []),
+    )
     snap = _clean_snap()
     snap["required_checks"]["ci-1"] = {
         "status": "in_progress", "conclusion": None,
@@ -266,6 +272,9 @@ def test_evaluate_readiness_checks_failed_blocks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(supervisor.POLICY, "required_check_names", ["ci-1"])
+    monkeypatch.setattr(
+        supervisor, "list_unconsumed_events", lambda: snap.get("unconsumed_event_ids", []),
+    )
     snap = _clean_snap()
     snap["required_checks"]["ci-1"] = {
         "status": "completed", "conclusion": "failure",
@@ -283,6 +292,12 @@ def test_evaluate_readiness_policy_unresolved_blocks(
     closed until authoritative evidence arrives.
     """
     monkeypatch.setitem(supervisor.POLICY, "required_check_names", ["ci-1"])
+    monkeypatch.setattr(
+        supervisor, "list_unconsumed_events", lambda: snap.get("unconsumed_event_ids", []),
+    )
+    monkeypatch.setattr(
+        supervisor, "list_unconsumed_events", lambda: snap.get("unconsumed_event_ids", []),
+    )
     snap = _clean_snap()
     # No ``required_checks`` populated at all.
     res = supervisor.evaluate_readiness(snap, AUTH)
@@ -294,10 +309,16 @@ def test_evaluate_readiness_checks_green_allows_qualification(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(supervisor.POLICY, "required_check_names", ["ci-1"])
+    monkeypatch.setattr(
+        supervisor, "list_unconsumed_events", lambda: snap.get("unconsumed_event_ids", []),
+    )
     snap = _clean_snap()
     snap["required_checks"]["ci-1"] = {
         "status": "completed", "conclusion": "success",
     }
+    monkeypatch.setattr(
+        supervisor, "list_unconsumed_events", lambda: snap.get("unconsumed_event_ids", []),
+    )
     res = supervisor.evaluate_readiness(snap, AUTH)
     assert res["ready"] is True
     assert res["reason"] == "quiet_window_match"

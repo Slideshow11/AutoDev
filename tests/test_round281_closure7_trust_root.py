@@ -148,16 +148,23 @@ class TestStaticScopeObservedVsExpected:
         from autocoder_supervisor.hermes_fingerprint import (
             _read_observed_static_scope,
         )
-        # Provide a stub run_state.json so the observer
-        # has something to read.
+        # Provide a stub run_state.json with the canonical
+        # branch (the C22 validator enforces this).
         rs = tmp_path / "run_state.json"
-        rs.write_text(json.dumps({"feature_branch": "feat/test"}))
+        rs.write_text(json.dumps({"feature_branch": "feat/review-repair-relay-v1"}))
         # Provide a stub supervisor_pid that doesn't exist
         # so we skip the /proc/environ path.
-        out = _read_observed_static_scope(
+        # Closure VIII: function now returns a tuple
+        # (scope, sources_per_key, observation_complete).
+        result = _read_observed_static_scope(
             supervisor_pid=999999,
             state_dir=str(tmp_path),
         )
+        # Unpack the tuple.
+        if isinstance(result, tuple):
+            out = result[0]
+        else:
+            out = result
         assert isinstance(out, dict)
         assert "repository_owner" in out
 
@@ -322,8 +329,13 @@ class TestAcceptanceRuntimeComparison:
         records = ev["runtime_file_records"]
         for r in records:
             assert "logical_module" in r
-            assert "source_path" in r
-            assert "deployed_path" in r
+            # Closure VIII: source_path renamed to
+            # committed_source_path; deployed_path renamed
+            # to actual_production_loaded_path.
+            assert "committed_source_path" in r
+            assert "actual_production_loaded_path" in r
+            assert "committed_source_sha256" in r
+            assert "actual_production_sha256" in r
             assert "match" in r
             assert "source_exists" in r
             assert "deployed_exists" in r
@@ -382,12 +394,12 @@ class TestAcceptanceRuntimeComparison:
             pr_number=5,
             branch="feat/review-repair-relay-v1",
         )
-        # Every record must have deployed_path recorded
-        # even if it's outside repo_root.
+        # Every record must have actual_production_loaded_path
+        # recorded even if it's outside repo_root.
         for r in ev["runtime_file_records"]:
-            assert r["deployed_path"] is not None
-            assert r["deployed_path"] != ""
-            assert "deployed_sha256" in r
+            assert r["actual_production_loaded_path"] is not None
+            assert r["actual_production_loaded_path"] != ""
+            assert "actual_production_sha256" in r
 
 
 # ---------------------------------------------------------------------------

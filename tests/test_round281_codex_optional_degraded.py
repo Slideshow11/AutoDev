@@ -143,7 +143,9 @@ class TestDBoundedBackoff:
 
 
 class TestECodexDoesNotBlockReadiness:
-    def test_codex_pause_does_not_block_readiness(self) -> None:
+    def test_codex_pause_does_not_block_readiness(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from autocoder_supervisor import supervisor as _sup
         snap = {
             "head_sha": "a" * 40,
@@ -152,7 +154,18 @@ class TestECodexDoesNotBlockReadiness:
                 "coderabbit": {"clean": True, "paused": False, "in_progress": False},
             },
             "checks": {},
+            "unconsumed_event_ids": [],
         }
+        # Closure VIII: evaluate_readiness() calls the global
+        # ``list_unconsumed_events()`` BEFORE ci_policy_status.
+        # The durable ledger may carry production data, so
+        # patch the function to use the hermetic snapshot's
+        # ``unconsumed_event_ids`` field.
+        monkeypatch.setattr(
+            _sup,
+            "list_unconsumed_events",
+            lambda: snap.get("unconsumed_event_ids", []),
+        )
         res = _sup.evaluate_readiness(snap, "a" * 40)
         assert res["ready"] is True
 
@@ -189,7 +202,9 @@ class TestFNonterminalCodexEvent:
 
 
 class TestGLaterCodexCanRejoin:
-    def test_codex_clean_at_current_head_keeps_ready(self) -> None:
+    def test_codex_clean_at_current_head_keeps_ready(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         from autocoder_supervisor import supervisor as _sup
         HEAD = "c" * 40
         snap = {
@@ -199,7 +214,14 @@ class TestGLaterCodexCanRejoin:
                 "coderabbit": {"clean": True, "paused": False, "in_progress": False},
             },
             "checks": {},
+            "unconsumed_event_ids": [],
         }
+        # Closure VIII: see test_codex_pause_does_not_block_readiness.
+        monkeypatch.setattr(
+            _sup,
+            "list_unconsumed_events",
+            lambda: snap.get("unconsumed_event_ids", []),
+        )
         res = _sup.evaluate_readiness(snap, HEAD)
         assert res["ready"] is True
 

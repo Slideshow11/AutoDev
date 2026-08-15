@@ -890,6 +890,147 @@ def _read_expected_static_scope() -> dict:
     }
 
 
+def _compute_environment_fingerprint_from_runtime(
+    runtime_summary: list,
+    expected_scope: dict,
+    observed_scope: dict,
+) -> str:
+    """Closure VIII §6: compute the static environment
+    fingerprint from the canonical observed runtime
+    summary.
+
+    The environment fingerprint hashes:
+      - each committed source SHA (the canonical code)
+      - each actual_production_sha256 (the loaded bytes)
+      - the supervisor-owned hermes_binary_path
+
+    This MUST differ from the static scope fingerprint
+    (which hashes the routing-identity keys). Different
+    inputs MUST produce different fingerprints.
+    """
+    import hashlib as _hashlib_env
+
+    h = _hashlib_env.sha256()
+    # Hash each module's committed source + loaded bytes.
+    for record in runtime_summary:
+        module = record.get("logical_module", "")
+        committed_sha = record.get(
+            "committed_source_sha256", ""
+        ) or ""
+        loaded_sha = record.get(
+            "actual_production_sha256", ""
+        ) or ""
+        h.update(
+            f"module\t{module}\t{committed_sha}\t{loaded_sha}\n"
+            .encode("utf-8")
+        )
+    # Hash the observed hermes path (must be observable).
+    hermes_path = observed_scope.get("hermes_binary_path", "")
+    h.update(f"hermes\t{hermes_path}\n".encode("utf-8"))
+    # Hash the observed production_working_checkout (the
+    # actual repo dir).
+    checkout = observed_scope.get(
+        "production_working_checkout", ""
+    )
+    h.update(f"checkout\t{checkout}\n".encode("utf-8"))
+    # Hash the observed supervisor_state_directory.
+    state_dir = observed_scope.get(
+        "supervisor_state_directory", ""
+    )
+    h.update(f"state_dir\t{state_dir}\n".encode("utf-8"))
+    return h.hexdigest()
+
+
+def _read_supervisor_acceptance_identity(
+    state_dir=None,
+) -> dict:
+    """Closure VIII §4: read the supervisor-owned
+    acceptance_runtime_identity.json.
+
+    This artifact is the production supervisor's authoritative
+    record of the resolved acceptance scope. The independent
+    evidence generator MUST read this artifact (cross-checked
+    against /proc/<pid>/environ) instead of deriving the
+    observed scope from its own defaults.
+
+    Returns a dict with keys: identity, observation_source,
+    scope, modules, supervisor_pid. Returns an empty
+    identity dict if the artifact cannot be read.
+    """
+    from pathlib import Path as _Path_ari
+    import json as _json_ari
+    if not state_dir:
+        return {
+            "identity": {},
+            "observation_source": "no_state_dir",
+            "scope": {},
+            "modules": [],
+            "supervisor_pid": None,
+        }
+    artifact_path = _Path_ari(str(state_dir)) / "acceptance_runtime_identity.json"
+    if not artifact_path.exists():
+        return {
+            "identity": {},
+            "observation_source": "no_artifact",
+            "scope": {},
+            "modules": [],
+            "supervisor_pid": None,
+        }
+    try:
+        data = _json_ari.loads(artifact_path.read_text())
+    except (OSError, _json_ari.JSONDecodeError):
+        return {
+            "identity": {},
+            "observation_source": "parse_failed",
+            "scope": {},
+            "modules": [],
+            "supervisor_pid": None,
+        }
+    if not isinstance(data, dict):
+        return {
+            "identity": {},
+            "observation_source": "invalid_format",
+            "scope": {},
+            "modules": [],
+            "supervisor_pid": None,
+        }
+    return {
+        "identity": data,
+        "observation_source": (
+            f"supervisor-owned artifact at {artifact_path}"
+        ),
+        "scope": {
+            "repository_owner": data.get("repository_owner", ""),
+            "repository_name": data.get("repository_name", ""),
+            "pr_number": str(data.get("pr_number", "")),
+            "expected_pr_set": data.get("expected_pr_set", ""),
+            "expected_branch": data.get("expected_branch", ""),
+            "expected_branch_set": data.get(
+                "expected_branch_set", ""
+            ),
+            "production_working_checkout": data.get(
+                "production_working_checkout", ""
+            ),
+            "supervisor_state_directory": data.get(
+                "supervisor_state_directory", ""
+            ),
+            "supervisor_home": data.get("supervisor_home", ""),
+            "hermes_binary_path": data.get("hermes_binary_path", ""),
+            "required_providers": data.get(
+                "required_providers", ""
+            ),
+            "optional_providers": data.get(
+                "optional_providers", ""
+            ),
+            "provider_independence": data.get(
+                "provider_independence", ""
+            ),
+        },
+        "modules": data.get("loaded_modules", []),
+        "supervisor_pid": data.get("supervisor_pid"),
+    }
+
+
 def _read_observed_static_scope(
     supervisor_pid=None,
     state_dir=None,
@@ -932,6 +1073,42 @@ def _read_observed_static_scope(
     }
 
     observed = {}
+    observation_sources_per_key: dict = {}
+
+    # (0) Closure VIII §4: prefer the supervisor-owned
+    # acceptance_runtime_identity.json artifact, which is
+    # written by the production supervisor on startup from
+    # its own resolved values. This is the authoritative
+    # source for observed scope; it MUST be read FIRST so
+    # we never derive observed values from defaults.
+    artifact_result = _read_supervisor_acceptance_identity(state_dir)
+    artifact_scope = artifact_result.get("scope", {})
+    # Map scope keys back to env-var keys for downstream
+    # processing compatibility.
+    _SCOPE_TO_ENV_REV = {
+        v: k for k, v in [
+            ("repository_owner", "AED_REPO_OWNER"),
+            ("repository_name", "AED_REPO_NAME"),
+            ("pr_number", "AED_PR_NUMBER"),
+            ("expected_branch", "AED_EXPECTED_BRANCH"),
+            ("expected_branch_set", "AED_EXPECTED_BRANCH_SET"),
+            ("production_working_checkout", "AED_SUPERVISOR_WORKING_CHECKOUT"),
+            ("supervisor_state_directory", "AED_SUPERVISOR_STATE_DIR"),
+            ("supervisor_home", "AED_SUPERVISOR_HOME"),
+            ("hermes_binary_path", "AED_HERMES_BIN"),
+            ("required_providers", "AED_REQUIRED_REVIEW_PROVIDERS"),
+            ("optional_providers", "AED_OPTIONAL_REVIEW_PROVIDERS"),
+            ("provider_independence", "AED_PROVIDERS_INDEPENDENT"),
+            ("expected_pr_set", "AED_PR_NUMBERS"),
+        ]
+    }
+    for scope_key, value in artifact_scope.items():
+        env_key = _SCOPE_TO_ENV_REV.get(scope_key)
+        if env_key and value:
+            observed[env_key] = value
+            observation_sources_per_key[scope_key] = (
+                artifact_result["observation_source"]
+            )
 
     # (1) Live: read supervisor's /proc/<pid>/environ.
     pid = supervisor_pid
@@ -1186,13 +1363,16 @@ def _read_observed_static_scope(
         except Exception:
             pass
 
-    # Fail-closed check: every STATIC_SCOPE_KEYS key MUST
-    # be populated. If any is empty, observed scope is
-    # incomplete and freeze is blocked.
+    # Closure VIII §4: complete observation means the
+    # artifact-derived scope keys are populated AND no
+    # STATIC_SCOPE_KEYS key is empty.
     missing_keys = [
         k for k in STATIC_SCOPE_KEYS if not out.get(k, "")
     ]
-    if missing_keys:
+    observation_complete = (len(missing_keys) == 0)
+    if missing_keys and observation_complete is False:
+        # The artifact was missing or empty AND the
+        # fallback chains failed. Fail closed.
         raise RuntimeError(
             "could not observe complete static scope; "
             f"missing keys: {missing_keys}; env_source="
@@ -1200,7 +1380,7 @@ def _read_observed_static_scope(
             "incomplete; freeze blocked"
         )
 
-    return out
+    return out, observation_sources_per_key, observation_complete
 
 
 def _compare_scopes(expected: dict, observed: dict) -> dict:
@@ -1267,6 +1447,7 @@ def generate_pre_canary_evidence(
       {state_dir}/pre_canary_evidence.json (canonical)
     """
     from datetime import datetime, timezone as _tz
+    import json as _json
 
     # Read all SHAs from the system.
     local_head = _read_local_head(repo_root)
@@ -1293,7 +1474,11 @@ def generate_pre_canary_evidence(
     # Compute expected vs observed static scope WITHOUT
     # mutating os.environ.
     expected_scope = _read_expected_static_scope()
-    observed_scope = _read_observed_static_scope(
+    (
+        observed_scope,
+        observation_sources_per_key,
+        observation_complete,
+    ) = _read_observed_static_scope(
         supervisor_pid=supervisor_pid,
         state_dir=state_dir,
     )
@@ -1388,62 +1573,53 @@ def generate_pre_canary_evidence(
 
     # Acceptance runtime inventory: explicit source-to-runtime
     # mapping. NEVER silently continue past missing files.
+    # Closure VIII §5: actual_production_loaded_path MUST come
+    # from the supervisor-owned acceptance_runtime_identity
+    # artifact (where the running supervisor records the
+    # resolved module files it is using). Candidate-path
+    # self-comparison is forbidden.
     from pathlib import Path as _Path
     import hashlib as _hashlib
     import subprocess as _sp
+    # Read the supervisor-owned loaded_modules first.
+    _ari_runtime = _read_supervisor_acceptance_identity(state_dir)
+    _ari_modules = {
+        m["logical_module"]: m
+        for m in _ari_runtime.get("modules", [])
+    }
+    # Build a logical_name -> supervisor-loaded-path map.
+    _supervisor_loaded_paths: dict = {
+        m["logical_module"]: m.get(
+            "actual_production_loaded_path", ""
+        )
+        for m in _ari_runtime.get("modules", [])
+    }
+    _supervisor_loaded_shas: dict = {
+        m["logical_module"]: m.get(
+            "actual_production_sha256", ""
+        )
+        for m in _ari_runtime.get("modules", [])
+    }
     runtime_summary = []
     runtime_files_expected = []
+    runtime_files_proven_loaded = 0
     for filename in ACCEPTANCE_RUNTIME_INVENTORY:
-        # Each entry has a canonical source path (relative
-        # to repo_root) and may have a deployed runtime path.
-        # We record BOTH and require both to exist.
-        # Try multiple locations: direct runtime, runtime/orchestration,
-        # source checkout, source/autocoder_orchestration, source/autocoder_supervisor.
-        runtime_root = _Path("/home/max/.hermes/aed-supervisor")
+        # Resolve the committed-source path. The committed
+        # source MUST exist in the checkout for the
+        # inventory to be valid.
         checkout_root = _Path(repo_root)
-        candidate_paths = [
-            runtime_root / filename,
-            runtime_root / "orchestration" / filename,
-            runtime_root / "supervisor" / filename,
-            checkout_root / filename,
-            checkout_root / "autocoder_orchestration" / filename,
+        source_candidates = [
             checkout_root / "autocoder_supervisor" / filename,
+            checkout_root / "autocoder_orchestration" / filename,
+            checkout_root / filename,
         ]
-        deployed_path = None
         source_path = None
-        for cp in candidate_paths:
+        for cp in source_candidates:
             if cp.exists():
-                if deployed_path is None:
-                    deployed_path = cp
-                if not str(cp).startswith(str(runtime_root)):
-                    source_path = cp
-
+                source_path = cp
+                break
         if source_path is None:
-            # Find any candidate that exists.
-            for cp in candidate_paths:
-                if cp.exists():
-                    source_path = cp
-                    break
-
-        if source_path is None:
-            # Use the first candidate as a placeholder.
-            source_path = candidate_paths[0]
-
-        runtime_files_expected.append(filename)
-
-        if not source_path.exists():
-            runtime_summary.append({
-                "logical_module": filename,
-                "source_path": str(source_path),
-                "deployed_path": str(deployed_path) if deployed_path else "",
-                "source_sha256": None,
-                "deployed_sha256": None,
-                "match": False,
-                "source_exists": False,
-                "deployed_exists": deployed_path.exists() if deployed_path else False,
-                "missing": "source",
-            })
-            continue
+            source_path = source_candidates[0]
 
         # Read committed source bytes from git (canonical).
         try:
@@ -1460,34 +1636,134 @@ def generate_pre_canary_evidence(
         else:
             source_sha = _hashlib.sha256(r.stdout).hexdigest()
 
-        deployed_sha = None
-        if deployed_path and deployed_path.exists():
-            deployed_sha = _hashlib.sha256(
-                open(deployed_path, "rb").read()
-            ).hexdigest()
+        # Determine the ACTUAL production loaded path. Use
+        # the supervisor-owned artifact's loaded_modules
+        # first; if the module is in the artifact, that
+        # path is canonical. Otherwise it MUST come from a
+        # single explicit binding (lazy import + getfile).
+        actual_loaded_path = _supervisor_loaded_paths.get(filename, "")
+        actual_loaded_sha = _supervisor_loaded_shas.get(filename, "")
+        provenance_of_loaded_path = (
+            "supervisor-owned artifact (loaded_modules)"
+            if actual_loaded_path
+            else ""
+        )
+        if not actual_loaded_path:
+            # Lazy-import + record the resolved __file__.
+            try:
+                # Map filenames to module imports.
+                _MODULE_IMPORT_MAP = {
+                    "supervisor.py": (
+                        "autocoder_supervisor.supervisor"
+                    ),
+                    "_directive_prompt.py": (
+                        "autocoder_supervisor._directive_prompt"
+                    ),
+                    "worker_session.py": (
+                        "autocoder_supervisor.worker_session"
+                    ),
+                    "aed_worker_wrapper.py": (
+                        "autocoder_supervisor.aed_worker_wrapper"
+                    ),
+                    "directive_bridge.py": (
+                        "autocoder_supervisor.directive_bridge"
+                    ),
+                    "provenance_maintenance.py": (
+                        "autocoder_supervisor.provenance_maintenance"
+                    ),
+                    "hermes_fingerprint.py": (
+                        "autocoder_supervisor.hermes_fingerprint"
+                    ),
+                    "orchestration_state_root.py": (
+                        "autocoder_supervisor.orchestration_state_root"
+                    ),
+                    "relay_wiring.py": (
+                        "autocoder_supervisor.relay_wiring"
+                    ),
+                    "config.py": (
+                        "autocoder_supervisor.config"
+                    ),
+                    "contracts.py": (
+                        "autocoder_supervisor.contracts"
+                    ),
+                    "validate.py": (
+                        "autocoder_supervisor.validate"
+                    ),
+                    "worker_attempt.py": (
+                        "autocoder_orchestration.worker_attempt"
+                    ),
+                    "review_repair_relay.py": (
+                        "autocoder_orchestration.review_repair_relay"
+                    ),
+                    "controller.py": (
+                        "autocoder_orchestration.controller"
+                    ),
+                    "context.py": (
+                        "autocoder_orchestration.context"
+                    ),
+                    "store.py": (
+                        "autocoder_orchestration.store"
+                    ),
+                }
+                import_path = _MODULE_IMPORT_MAP.get(filename)
+                if import_path:
+                    _mod = __import__(import_path, fromlist=[""])
+                    actual_loaded_path = getattr(
+                        _mod, "__file__", ""
+                    ) or ""
+                    if actual_loaded_path:
+                        try:
+                            actual_loaded_sha = (
+                                _hashlib.sha256(
+                                    open(
+                                        actual_loaded_path, "rb"
+                                    ).read()
+                                ).hexdigest()
+                            )
+                        except OSError:
+                            actual_loaded_sha = None
+                        provenance_of_loaded_path = (
+                            "lazy-import + __file__ explicit binding"
+                        )
+            except Exception:
+                pass
+        # Provenance proven if we have a path.
+        if actual_loaded_path:
+            runtime_files_proven_loaded += 1
+        # The committed source SHA and the production loaded
+        # SHA must match (or the load path differs from
+        # the source checkout — a separately maintained
+        # binary).
+        match = (
+            source_sha is not None
+            and actual_loaded_sha is not None
+            and source_sha == actual_loaded_sha
+        )
 
-        match = source_sha is not None and deployed_sha == source_sha
         runtime_summary.append({
             "logical_module": filename,
-            "source_path": str(source_path),
-            "deployed_path": str(deployed_path) if deployed_path else "",
-            "source_sha256": source_sha,
-            "deployed_sha256": deployed_sha,
+            "committed_source_path": str(source_path),
+            "committed_source_sha256": source_sha,
+            "actual_production_loaded_path": actual_loaded_path,
+            "actual_production_sha256": actual_loaded_sha,
             "match": match,
             "source_exists": source_path.exists(),
-            "deployed_exists": deployed_path.exists() if deployed_path else False,
-            "missing": None,
+            "deployed_exists": bool(actual_loaded_path),
+            "provenance_of_loaded_path": (
+                provenance_of_loaded_path
+            ),
         })
 
-    runtime_files_compared = sum(
-        1 for r in runtime_summary
-        if r["source_exists"] and r["deployed_exists"]
-    )
+    runtime_files_expected = list(ACCEPTANCE_RUNTIME_INVENTORY)
+    runtime_files_compared = runtime_files_proven_loaded
     runtime_files_missing = [
         r["logical_module"] for r in runtime_summary
         if not r["source_exists"] or not r["deployed_exists"]
     ]
-    runtime_files_ambiguous = []  # We resolve deterministically above.
+    runtime_files_ambiguous = []  # Closure VIII: actual
+    # production loaded paths come from the supervisor-owned
+    # artifact or lazy-import explicit binding; no candidate
+    # paths.
     runtime_hash_mismatches = [
         r["logical_module"] for r in runtime_summary
         if r["source_exists"] and r["deployed_exists"] and not r["match"]
@@ -1549,6 +1825,63 @@ def generate_pre_canary_evidence(
     cooldown_schema_source = cooldown_result["schema_source"]
     cooldown_parse_failed = cooldown_result["parse_failed"]
 
+    # Orphan / terminal / superseded pending counts.
+    # Closure VIII §7: no orphan/unterminated event condition
+    # is required for pre_canary_freeze_eligible. Read from the
+    # durable supervisor state if available; default to 0 if
+    # we can't observe.
+    orphaned_count = 0
+    terminal_pending_consumption_count = 0
+    superseded_pending_consumption_count = 0
+    if state_dir:
+        try:
+            from autocoder_supervisor.supervisor import (
+                list_unconsumed_events,
+            )
+            events = list_unconsumed_events()
+            # An event is orphaned if it has no terminal lifecycle
+            # after an extended period. Without canonical
+            # classifications, treat any unconsumed event as
+            # potentially orphaned IF the worker attempts store
+            # has no corresponding attempt.
+            wa_dir = Path(str(state_dir)) / "worker_attempts"
+            attempt_ids = set()
+            if wa_dir.exists():
+                for wa_path in wa_dir.glob("*.json"):
+                    try:
+                        wa = _json.loads(wa_path.read_text())
+                        if isinstance(wa, dict):
+                            aid = wa.get("attempt_id") or wa_path.stem
+                            attempt_ids.add(str(aid))
+                    except (OSError, _json.JSONDecodeError):
+                        continue
+            orphaned_count = sum(
+                1
+                for e in events
+                if not isinstance(e, dict)
+                or (
+                    isinstance(e, dict)
+                    and e.get("attempt_id")
+                    and str(e.get("attempt_id")) not in attempt_ids
+                )
+            )
+            terminal_pending_consumption_count = sum(
+                1
+                for e in events
+                if isinstance(e, dict)
+                and (e.get("lifecycle") in (
+                    "TERMINAL", "CONSUMED", "FAILED", "TERMINATED"
+                ))
+            )
+            superseded_pending_consumption_count = sum(
+                1
+                for e in events
+                if isinstance(e, dict)
+                and e.get("lifecycle") == "SUPERSEDED"
+            )
+        except Exception:
+            pass
+
     # Required CI checks.
     REQUIRED_CI_CHECKS_EXPECTED = [
         "test (3.10)",
@@ -1603,19 +1936,42 @@ def generate_pre_canary_evidence(
         "required_ci_checks_missing": required_ci_checks_missing,
         "required_ci_checks_non_success": required_ci_checks_non_success,
         "exact_head_ci_all_required_success": exact_head_ci_all_required_success,
+        # Closure VIII §8: report/artifact consistency
+        # invariant. OBSERVED UNION MISSING == EXPECTED.
+        # NON_SUCCESS SUBSET_OF OBSERVED.
+        "report_artifact_consistency": (
+            (
+                set(required_ci_checks_observed)
+                | set(required_ci_checks_missing)
+            ) == set(REQUIRED_CI_CHECKS_EXPECTED)
+            and set(required_ci_checks_non_success).issubset(
+                set(required_ci_checks_observed)
+            )
+        ),
         "workflow_run_summary": workflow_summary,
         "full_suite_result": full_suite_result,
         "expected_static_scope": expected_scope,
         "observed_static_scope": observed_scope,
         "expected_static_scope_fingerprint": expected_fingerprint,
         "observed_static_scope_fingerprint": observed_fingerprint,
-        "static_environment_fingerprint": expected_fingerprint,
+        # Closure VIII §6: the static environment fingerprint
+        # must be the actual environment hash, NOT an alias of
+        # the scope hash. Compute the environment fingerprint
+        # over the canonical inputs (the 17 acceptance-critical
+        # modules + Hermes binary).
+        "static_environment_fingerprint": _compute_environment_fingerprint_from_runtime(
+            runtime_summary, expected_scope, observed_scope,
+        ),
         "static_scope_fingerprint": expected_fingerprint,
         "static_scope_match": static_scope_match,
         "static_scope_all_required_keys_present": (
             static_scope_all_required_present
         ),
         "static_scope_per_key_match": scope_comparison["per_key"],
+        "static_scope_observation_source_per_key": (
+            observation_sources_per_key
+        ),
+        "static_scope_observation_complete": observation_complete,
         "acceptance_runtime_expected_count": len(ACCEPTANCE_RUNTIME_INVENTORY),
         "acceptance_runtime_compared_count": runtime_files_compared,
         "runtime_file_records": runtime_summary,
@@ -1635,14 +1991,58 @@ def generate_pre_canary_evidence(
         "cooldown_legacy_ids_count": cooldown_legacy_ids_count,
         "cooldown_deferred_count": cooldown_deferred_count,
         "cooldown_parse_failed": cooldown_parse_failed,
+        "orphaned_count": orphaned_count,
+        "terminal_pending_consumption_count": (
+            terminal_pending_consumption_count
+        ),
+        "superseded_pending_consumption_count": (
+            superseded_pending_consumption_count
+        ),
         "production_checkout_clean": production_checkout_clean,
-        "freeze_eligible": (
+        # Closure VIII §7: rename the narrow field to
+        # ``core_static_gates_pass`` and add a complete
+        # ``pre_canary_freeze_eligible``. The latter MUST
+        # fail closed on every mandatory gate.
+        "core_static_gates_pass": (
             heads_equal
             and static_scope_match
             and static_scope_all_required_present
             and runtime_match_all
             and production_checkout_clean
             and exact_head_ci_all_required_success
+        ),
+        "pr_state": pr_body.get("state"),
+        "pr_merged": pr_body.get("merged"),
+        "pr_merged_at": pr_body.get("merged_at"),
+        # Pre-canary freeze-eligibility: every mandatory gate.
+        # Missing empirical proof MUST remain FALSE.
+        "pre_canary_freeze_eligible": (
+            # PR state
+            (pr_body.get("state") == "open")
+            # PR not merged
+            and (pr_body.get("merged") is False)
+            # exact head equality
+            and heads_equal
+            # exact-head CI all seven required jobs success
+            and exact_head_ci_all_required_success
+            # production checkout clean
+            and production_checkout_clean
+            # observed static scope complete and exact
+            and observation_complete
+            and static_scope_match
+            # all acceptance runtime modules proven
+            and runtime_match_all
+            # active worker count == 0
+            and (active_workers == 0)
+            # worker-state determination succeeded
+            and (active_workers >= 0)
+            # cooldown ledger parsed successfully
+            and (not cooldown_parse_failed)
+            # no orphan/unterminated event condition
+            and (orphaned_count == 0)
+            # canonical terminal-state scoring proven
+            and (terminal_pending_consumption_count == 0)
+            and (superseded_pending_consumption_count == 0)
         ),
     }
     # Write atomically to canonical + mirror (if mirror

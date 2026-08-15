@@ -110,6 +110,156 @@ from .orchestration_state_root import OrchestrationRootError, OrchestrationRootM
 # ---------------------------------------------------------------------------
 
 
+def _write_acceptance_runtime_identity(cfg: SupervisorConfig) -> None:
+    """Closure VIII §4: write the supervisor-owned
+    acceptance_runtime_identity.json atomically.
+
+    This artifact is the production supervisor's
+    authoritative record of the resolved acceptance scope
+    and runtime identity. The independent evidence
+    generator MUST read this artifact (cross-checked
+    against /proc/<pid>/environ) instead of deriving the
+    observed scope from its own defaults.
+    """
+    import hashlib as _hash_ari
+    import json as _json_ari
+    import os as _os_ari
+    from datetime import datetime, timezone as _tz_ari
+
+    # Discover the supervisor's actual loaded module paths.
+    loaded_modules: dict = {}
+    try:
+        # Lazy-import acceptance-critical modules to prove
+        # they load from a single canonical runtime.
+        from autocoder_supervisor import (
+            hermes_fingerprint as _hf_ari,
+        )
+        loaded_modules["hermes_fingerprint"] = (
+            _hf_ari.__file__
+            if hasattr(_hf_ari, "__file__") and _hf_ari.__file__
+            else ""
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from autocoder_supervisor import supervisor as _self_ari
+        loaded_modules["supervisor"] = (
+            _self_ari.__file__
+            if hasattr(_self_ari, "__file__") and _self_ari.__file__
+            else ""
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from autocoder_orchestration import worker_attempt as _wa_ari
+        loaded_modules["worker_attempt"] = (
+            _wa_ari.__file__
+            if hasattr(_wa_ari, "__file__") and _wa_ari.__file__
+            else ""
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from autocoder_orchestration import review_repair_relay as _rrr_ari
+        loaded_modules["review_repair_relay"] = (
+            _rrr_ari.__file__
+            if hasattr(_rrr_ari, "__file__") and _rrr_ari.__file__
+            else ""
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from autocoder_orchestration import controller as _ctl_ari
+        loaded_modules["controller"] = (
+            _ctl_ari.__file__
+            if hasattr(_ctl_ari, "__file__") and _ctl_ari.__file__
+            else ""
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Compute SHA256 for each loaded module.
+    module_records: list = []
+    for name, path in loaded_modules.items():
+        if not path:
+            continue
+        try:
+            sha = _hash_ari.sha256(
+                open(path, "rb").read()
+            ).hexdigest()
+        except OSError:
+            sha = None
+        module_records.append({
+            "logical_module": name,
+            "actual_production_loaded_path": path,
+            "actual_production_sha256": sha,
+        })
+
+    # Determine the hermes binary actually used for launch.
+    hermes_bin = _os_ari.environ.get(
+        "AED_HERMES_BIN", "/home/max/.local/bin/hermes"
+    )
+
+    artifact = {
+        "schema_version": (
+            "autocoder.acceptance_runtime_identity.v1"
+        ),
+        "supervisor_pid": _os_ari.getpid(),
+        "process_start_identity": _os_ari.environ.get(
+            "AED_PROCESS_START_IDENTITY", ""
+        ) or f"pid-{_os_ari.getpid()}-{_os_ari.getppid()}",
+        "instance_id": cfg.instance_id,
+        "repository_owner": _os_ari.environ.get(
+            "AED_REPO_OWNER", ""
+        ),
+        "repository_name": _os_ari.environ.get(
+            "AED_REPO_NAME", ""
+        ),
+        "pr_number": int(
+            _os_ari.environ.get("AED_PR_NUMBER", "0") or "0"
+        ),
+        "expected_pr_set": _os_ari.environ.get(
+            "AED_PR_NUMBERS",
+            _os_ari.environ.get("AED_PR_NUMBER", ""),
+        ),
+        "expected_branch": _os_ari.environ.get(
+            "AED_EXPECTED_BRANCH",
+            "feat/review-repair-relay-v1",
+        ),
+        "expected_branch_set": _os_ari.environ.get(
+            "AED_EXPECTED_BRANCH_SET",
+            _os_ari.environ.get(
+                "AED_EXPECTED_BRANCH",
+                "feat/review-repair-relay-v1",
+            ),
+        ),
+        "production_working_checkout": cfg.working_checkout,
+        "supervisor_state_directory": cfg.state_dir,
+        "supervisor_home": str(Path(cfg.state_dir).parent),
+        "hermes_binary_path": hermes_bin,
+        "required_providers": _os_ari.environ.get(
+            "AED_REQUIRED_REVIEW_PROVIDERS", "coderabbit"
+        ),
+        "optional_providers": _os_ari.environ.get(
+            "AED_OPTIONAL_REVIEW_PROVIDERS", "codex"
+        ),
+        "provider_independence": _os_ari.environ.get(
+            "AED_PROVIDERS_INDEPENDENT", "true"
+        ),
+        "loaded_modules": module_records,
+        "generated_at": datetime.now(_tz_ari.utc).isoformat(),
+    }
+
+    # Write atomically. The artifact lives in the
+    # supervisor's state dir.
+    state_dir = Path(cfg.state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    target = state_dir / "acceptance_runtime_identity.json"
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(_json_ari.dumps(artifact, indent=2, sort_keys=True))
+    tmp.replace(target)
+
+
 def _apply_config(cfg: SupervisorConfig) -> dict[str, Any]:
     """Populate the module-level globals from a SupervisorConfig.
 
@@ -564,6 +714,21 @@ except (ValueError, OSError):
     # re-raised by the bare-except branch below.
     _BOOTSTRAPPED_FROM = None  # type: ignore[assignment]
     _APPLIED = {}
+# Closure VIII §4: write the supervisor-owned
+# acceptance_runtime_identity.json atomically on module load
+# so the independent evidence generator can read the
+# production supervisor's actual resolved values rather
+# than deriving them in the evidence-generator process.
+try:
+    if _BOOTSTRAPPED_FROM is not None:
+        _write_acceptance_runtime_identity(_BOOTSTRAPPED_FROM)
+except Exception as _ari_exc:  # noqa: BLE001
+    import sys as _sys_ari
+    print(
+        f"warning: failed to write acceptance_runtime_identity: "
+        f"{_ari_exc}",
+        file=_sys_ari.stderr,
+    )
 if _BOOTSTRAPPED_FROM is not None:
     POLICY: dict[str, Any] = _default_policy(_BOOTSTRAPPED_FROM)
     PROVIDERS: dict[str, dict[str, Any]] = _default_providers(
