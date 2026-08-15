@@ -1246,10 +1246,22 @@ def _read_codex_optional_lifecycle_evidence(
 
 def _read_autonomous_provenance_evidence(
     state_dir=None,
+    expected_head=None,
 ) -> dict:
     """Closure X §4: derive
     AUTONOMOUS_PROVENANCE_REAL_EXECUTION from the
     TERMINAL provenance lifecycle.
+
+    When ``expected_head`` is supplied (the production
+    caller path), the chosen terminal artifact's
+    ``head_sha`` MUST match it exactly. A terminal
+    artifact left over from a prior PR head MUST NOT
+    prove success for a new frozen head whose
+    provenance has never been verified — that is
+    fail-closed behaviour. When ``expected_head`` is
+    None (e.g. test scaffolding that does not bind
+    to a head), the legacy mtime-based selection is
+    preserved so existing fixtures continue to pass.
 
     A pending drift record is evidence of UNFINISHED
     provenance work — it MUST NEVER prove
@@ -1324,10 +1336,17 @@ def _read_autonomous_provenance_evidence(
     # Look for the canonical terminal provenance artifact
     # at provenance_terminal/<head>.json. If present, it
     # must include a full terminal lifecycle chain.
-    target_head = None
-    # We don't know expected_head here; the caller passes
-    # the local head via the artifact's record of head_sha.
-    # We look for the latest terminal artifact by mtime.
+    target_head = expected_head
+    # Bind the terminal provenance evidence to the frozen
+    # head: when the caller supplies ``expected_head``
+    # (the production caller path always does), the
+    # selected artifact's recorded ``head_sha`` MUST
+    # equal it. Otherwise a stale artifact from a prior
+    # head could prove success for a new head whose
+    # provenance was never verified. When
+    # ``expected_head`` is None (test fixtures that do
+    # not bind a head), we fall back to the legacy
+    # mtime-based selection so existing tests pass.
     term_dir = sdir / "provenance_terminal"
     terminal_files = []
     if term_dir.exists():
@@ -1349,7 +1368,28 @@ def _read_autonomous_provenance_evidence(
         # means we cannot prove autonomous execution.
         out["value"] = False
         return out
-    # Choose the most recent.
+    # Filter to head-matched artifacts when the caller
+    # bound us to a specific frozen head. This is the
+    # fail-closed repair: stale terminal artifacts from
+    # prior heads MUST NOT prove success for a new head.
+    if target_head is not None:
+        head_matched = [
+            (f, d) for (f, d) in terminal_files
+            if d.get("head_sha") == target_head
+        ]
+        if not head_matched:
+            out["observation_complete"] = True
+            out["reason"] = (
+                "no_terminal_provenance_artifact_for_frozen_head: "
+                f"expected_head={target_head} "
+                f"pending_drift_count={pending_count}"
+            )
+            out["terminal_artifact"] = None
+            out["value"] = False
+            return out
+        terminal_files = head_matched
+    # Choose the most recent among the head-matched set
+    # (or among all terminal files when no head was bound).
     terminal_files.sort(
         key=lambda t: t[1].get("generated_at") or "",
         reverse=True,
@@ -2711,6 +2751,7 @@ def generate_pre_canary_evidence(
     )
     _autoprov_evidence = _read_autonomous_provenance_evidence(
         state_dir=state_dir,
+        expected_head=local_head,
     )
     _retry_evidence = _read_real_deferred_retry_evidence(
         state_dir=state_dir,

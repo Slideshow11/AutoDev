@@ -560,6 +560,103 @@ class TestAutonomousProvenanceTerminal:
         )
         assert out["value"] is True
 
+    def test_stale_terminal_artifact_rejected_for_new_head(
+        self, tmp_path,
+    ):
+        # Repair: terminal provenance evidence MUST be
+        # bound to the frozen head. A terminal artifact
+        # left over from a prior head MUST NOT prove
+        # success for a new head whose provenance was
+        # never verified — that is fail-closed behaviour.
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_autonomous_provenance_evidence,
+        )
+        # Empty pending ledger
+        (tmp_path / "provenance_drift_pending.json").write_text(
+            "[]"
+        )
+        # Terminal provenance artifact from a PRIOR head.
+        # It carries a full lifecycle chain and would
+        # otherwise pass the legacy mtime-only check.
+        term = tmp_path / "provenance_terminal"
+        term.mkdir()
+        prior_head = "0" * 40  # 40-char SHA placeholder
+        new_head = "1" * 40  # the current frozen head
+        (term / f"{prior_head}.json").write_text(json.dumps({
+            "schema_version":
+                "autocoder.provenance_terminal.v1",
+            "head_sha": prior_head,
+            "generated_at": "2026-08-15T00:00:00Z",
+            "terminal": True,
+            "lifecycle_chain": [
+                {"stage": "prelaunch", "event_id": "e1"},
+                {"stage": "production", "event_id": "e2"},
+                {"stage": "drift_discovered", "event_id": "e3"},
+                {"stage": "manifest_repair", "event_id": "e4"},
+                {"stage": "manifest_committed", "event_id": "e5"},
+                {"stage": "drift_pending_cleared",
+                 "event_id": "e6"},
+                {"stage": "source_event_terminalized",
+                 "event_id": "e7"},
+                {"stage": "generation_terminal", "event_id": "e8"},
+            ],
+        }))
+        # Caller is bound to the NEW head; the stale
+        # artifact must NOT prove success.
+        out = _read_autonomous_provenance_evidence(
+            state_dir=str(tmp_path),
+            expected_head=new_head,
+        )
+        assert out["value"] is False
+        assert out["observation_complete"] is True
+        assert (
+            "no_terminal_provenance_artifact_for_frozen_head"
+            in out["reason"]
+        )
+        assert out["terminal_artifact"] is None
+
+    def test_head_matched_terminal_artifact_passes(
+        self, tmp_path,
+    ):
+        # Counterpart: when a terminal artifact's
+        # ``head_sha`` matches the expected head, it
+        # passes. This locks the positive path under
+        # the frozen-head binding.
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_autonomous_provenance_evidence,
+        )
+        (tmp_path / "provenance_drift_pending.json").write_text(
+            "[]"
+        )
+        head = "f" * 40
+        term = tmp_path / "provenance_terminal"
+        term.mkdir()
+        (term / f"{head}.json").write_text(json.dumps({
+            "schema_version":
+                "autocoder.provenance_terminal.v1",
+            "head_sha": head,
+            "generated_at": "2026-08-15T00:00:00Z",
+            "terminal": True,
+            "lifecycle_chain": [
+                {"stage": "prelaunch", "event_id": "e1"},
+                {"stage": "production", "event_id": "e2"},
+                {"stage": "drift_discovered", "event_id": "e3"},
+                {"stage": "manifest_repair", "event_id": "e4"},
+                {"stage": "manifest_committed", "event_id": "e5"},
+                {"stage": "drift_pending_cleared",
+                 "event_id": "e6"},
+                {"stage": "source_event_terminalized",
+                 "event_id": "e7"},
+                {"stage": "generation_terminal", "event_id": "e8"},
+            ],
+        }))
+        out = _read_autonomous_provenance_evidence(
+            state_dir=str(tmp_path),
+            expected_head=head,
+        )
+        assert out["value"] is True
+        assert out["evidence_head"] == head
+
 
 # ---------------------------------------------------------------------
 # §5 Real deferred retry - ordered transitions
