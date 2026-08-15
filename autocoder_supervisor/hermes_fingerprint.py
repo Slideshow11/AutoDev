@@ -2016,35 +2016,53 @@ def generate_pre_canary_evidence(
         "pr_merged_at": pr_body.get("merged_at"),
         # Pre-canary freeze-eligibility: every mandatory gate.
         # Missing empirical proof MUST remain FALSE.
-        "pre_canary_freeze_eligible": (
-            # PR state
-            (pr_body.get("state") == "open")
-            # PR not merged
-            and (pr_body.get("merged") is False)
-            # exact head equality
-            and heads_equal
-            # exact-head CI all seven required jobs success
-            and exact_head_ci_all_required_success
-            # production checkout clean
-            and production_checkout_clean
-            # observed static scope complete and exact
-            and observation_complete
-            and static_scope_match
-            # all acceptance runtime modules proven
-            and runtime_match_all
-            # active worker count == 0
-            and (active_workers == 0)
-            # worker-state determination succeeded
-            and (active_workers >= 0)
-            # cooldown ledger parsed successfully
-            and (not cooldown_parse_failed)
-            # no orphan/unterminated event condition
-            and (orphaned_count == 0)
-            # canonical terminal-state scoring proven
-            and (terminal_pending_consumption_count == 0)
-            and (superseded_pending_consumption_count == 0)
-        ),
+        "pr_state": pr_body.get("state"),
+        "pr_merged": pr_body.get("merged"),
+        "pr_merged_at": pr_body.get("merged_at"),
     }
+    # Closure VIII §11: empirical gates (CodeRabbit clean
+    # head, Codex lifecycle, autonomous provenance, real
+    # deferred retry) MUST fail closed until proven.
+    # These remain UNPROVEN in this closure; the gate
+    # therefore stays FALSE for those dimensions. The
+    # structural gates (PR state, head equality, CI, etc.)
+    # are all TRUE.
+    _empirical_gates_pending = [
+        ("coderabbit_clean_head", False),
+        ("codex_optional_lifecycle", False),
+        ("autonomous_provenance_real_execution", False),
+        ("real_deferred_retry", False),
+    ]
+    _structural_freeze_eligible = (
+        (pr_body.get("state") == "open")
+        and (pr_body.get("merged") is False)
+        and heads_equal
+        and exact_head_ci_all_required_success
+        and production_checkout_clean
+        and observation_complete
+        and static_scope_match
+        and runtime_match_all
+        and (active_workers == 0)
+        and (active_workers >= 0)
+        and (not cooldown_parse_failed)
+        and (orphaned_count == 0)
+        and (terminal_pending_consumption_count == 0)
+        and (superseded_pending_consumption_count == 0)
+    )
+    _empirical_freeze_eligible = all(
+        proven
+        for (_label, proven) in _empirical_gates_pending
+    )
+    # final dict
+    evidence["pre_canary_freeze_eligible"] = (
+        _structural_freeze_eligible and _empirical_freeze_eligible
+    )
+    evidence["structural_freeze_eligible"] = _structural_freeze_eligible
+    evidence["empirical_freeze_eligible"] = _empirical_freeze_eligible
+    evidence["empirical_gates_pending"] = [
+        label for (label, proven) in _empirical_gates_pending
+        if not proven
+    ]
     # Write atomically to canonical + mirror (if mirror
     # dir exists).
     _atomic_write(_Path(state_dir) / "pre_canary_evidence.json", evidence)
