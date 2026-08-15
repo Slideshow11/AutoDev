@@ -2100,6 +2100,14 @@ def evaluate_round(
             pr_number=pr_number,
             findings=findings,
             coordinator_actor=coordinator_actor,
+            # Round-676/P2: carry the focused-thread
+            # identity into the persisted directive so the
+            # JSON and bridge-rendered worker prompt
+            # identify the round as activated/thread-scoped
+            # rather than broad. ``focused_thread_id`` is
+            # already in scope from the bound round entry;
+            # passing it preserves the supervisor's scope.
+            target_thread_id=focused_thread_id,
             # Round-35: cap findings per directive so a
             # worker is not overwhelmed by 76+ historical
             # threads in a single prompt. Subsequent
