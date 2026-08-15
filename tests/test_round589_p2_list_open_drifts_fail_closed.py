@@ -109,3 +109,55 @@ def test_empty_ledger_returns_empty(tmp_path: Path) -> None:
     p = tmp_path / "provenance_drift_pending.json"
     p.write_text("[]")
     assert list_open_drifts(ledger_path=p) == []
+
+
+def test_ledger_with_null_entry_raises_atomicwriteerror(
+    tmp_path: Path,
+) -> None:
+    """Round-679 P2: a ``[null]`` ledger must fail closed.
+
+    Previously the ``isinstance(rec, dict)`` filter inside
+    ``list_open_drifts`` silently discarded non-object entries,
+    so the supervisor's ``handle_new_events`` observed an empty
+    drift list and emitted no repair event. The maintenance
+    lifecycle then stalled indefinitely on a corrupted ledger.
+    """
+    list_open_drifts, AtomicWriteError = _import()
+    p = tmp_path / "provenance_drift_pending.json"
+    p.write_text(json.dumps([None]))
+    with pytest.raises(AtomicWriteError):
+        list_open_drifts(ledger_path=p)
+
+
+def test_ledger_with_string_entry_raises_atomicwriteerror(
+    tmp_path: Path,
+) -> None:
+    """Round-679 P2: a ``["corrupt"]`` ledger must fail closed.
+
+    Same fail-closed contract as ``test_ledger_with_null_entry_raises_atomicwriteerror``
+    — string entries must NOT silently disappear.
+    """
+    list_open_drifts, AtomicWriteError = _import()
+    p = tmp_path / "provenance_drift_pending.json"
+    p.write_text(json.dumps(["corrupt"]))
+    with pytest.raises(AtomicWriteError):
+        list_open_drifts(ledger_path=p)
+
+
+def test_ledger_with_mixed_dict_and_non_dict_raises(
+    tmp_path: Path,
+) -> None:
+    """Round-679 P2: any single non-object entry poisons the ledger.
+
+    A list with a valid dict followed by a corrupt scalar MUST
+    fail closed; we do NOT silently keep the valid dict and drop
+    the bad one — the helper is fail-closed on the whole ledger.
+    """
+    list_open_drifts, AtomicWriteError = _import()
+    p = tmp_path / "provenance_drift_pending.json"
+    p.write_text(json.dumps([
+        {"state": "DRIFT_DETECTED", "head_sha": "abc"},
+        "corrupt",
+    ]))
+    with pytest.raises(AtomicWriteError):
+        list_open_drifts(ledger_path=p)

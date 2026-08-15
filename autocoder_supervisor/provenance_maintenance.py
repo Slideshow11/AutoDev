@@ -235,6 +235,24 @@ def _read_drift_ledger_or_failclosed(path: Path) -> list:
             f"drift ledger {path} is not a list (got "
             f"{type(parsed).__name__}); refusing to overwrite"
         )
+    # Round-679 P2: a syntactically valid list containing
+    # non-object entries (e.g. ``[null]`` or ``["corrupt"]``)
+    # previously passed this helper and was silently dropped
+    # by ``list_open_drifts``'s ``isinstance(rec, dict)``
+    # filter. The supervisor's ``handle_new_events`` would
+    # then observe no open provenance work and emit no
+    # repair event, leaving a corrupted ledger unable to
+    # surface its drift and stalling the maintenance
+    # lifecycle indefinitely. Fail closed on any
+    # non-dict entry — every drift record MUST be a JSON
+    # object.
+    for _i, _rec in enumerate(parsed):
+        if not isinstance(_rec, dict):
+            raise AtomicWriteError(
+                f"drift ledger {path} entry {_i} is not a "
+                f"JSON object (got {type(_rec).__name__}); "
+                f"refusing to silently discard corrupt record"
+            )
     return parsed
 
 
