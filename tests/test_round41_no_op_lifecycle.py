@@ -43,6 +43,7 @@ from autocoder_orchestration.worker_attempt import (
 )
 from autocoder_orchestration.controller import Controller
 from autocoder_orchestration.context import make_run_context
+from autocoder_orchestration.reconciliation import FindingDisposition
 from autocoder_orchestration.state_machine import (
     STATE_QUALIFYING_READINESS,
     STATE_REPAIRING_REVIEW_FINDINGS,
@@ -481,7 +482,10 @@ def test_controller_report_no_changes_required_advances_state(
         head_observed="b" * 40,
         proof={
             "findings": [
-                {"category": "ALREADY_SATISFIED", "finding_id": "thread:X"}
+                {
+                    "disposition": FindingDisposition.ALREADY_SATISFIED,
+                    "finding_id": "thread:X",
+                }
             ],
         },
     )

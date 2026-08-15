@@ -203,47 +203,78 @@ class Controller:
                 f"{head_observed!r}"
             )
         # Round-591: enforce the disposition contract on every
-        # assigned finding in the proof payload.
-        if proof is not None:
-            findings_proof = proof.get("findings", []) if isinstance(proof, dict) else []
-            nonterminal = (
-                FindingDisposition.STILL_ACTIONABLE,
-                FindingDisposition.INCOMPLETE_EVIDENCE,
+        # assigned finding in the proof payload. Round-664 P1:
+        # every malformed shape (absent proof, non-object proof,
+        # missing/non-list findings, empty findings, non-object
+        # entries, entries without a ``disposition`` field) MUST
+        # be rejected — the state machine delegates required-
+        # evidence enforcement to the controller, so silently
+        # accepting any of these shapes would advance to
+        # QUALIFYING_READINESS on incomplete proof.
+        if not isinstance(proof, dict):
+            raise ControllerError(
+                "NO_CHANGES_REQUIRED proof must be an object/dict mapping "
+                f"with a 'findings' list; got {type(proof).__name__}"
             )
-            terminal_with_required_proof = (
-                FindingDisposition.SUPERSEDED,
-                FindingDisposition.REPAIRED,
-                FindingDisposition.INVALID,
-                FindingDisposition.INCONCLUSIVE,
+        findings_proof = proof.get("findings")
+        if not isinstance(findings_proof, list):
+            raise ControllerError(
+                "NO_CHANGES_REQUIRED proof is missing a 'findings' list; "
+                "the controller cannot validate the no-op without the "
+                "per-finding disposition contract"
             )
-            for entry in findings_proof:
-                if not isinstance(entry, dict):
-                    continue
-                disp_raw = entry.get("disposition")
-                try:
-                    disp = FindingDisposition(disp_raw) if disp_raw is not None else None
-                except (ValueError, TypeError):
-                    raise ControllerError(
-                        f"NO_CHANGES_REQUIRED proof has unknown disposition: "
-                        f"{disp_raw!r}"
-                    )
-                if disp is None:
-                    continue
-                if disp in nonterminal:
-                    raise ControllerError(
-                        f"NO_CHANGES_REQUIRED rejected: finding "
-                        f"{entry.get('finding_id')!r} has nonterminal "
-                        f"disposition {disp.value!r}; cannot be "
-                        f"represented as a no-op without leaving "
-                        f"nonterminal work stranded"
-                    )
-                if disp in terminal_with_required_proof and not entry.get("evidence"):
-                    raise ControllerError(
-                        f"NO_CHANGES_REQUIRED rejected: finding "
-                        f"{entry.get('finding_id')!r} has disposition "
-                        f"{disp.value!r} but no evidence field; "
-                        f"supersession / repair must be concretely proven"
-                    )
+        if len(findings_proof) == 0:
+            raise ControllerError(
+                "NO_CHANGES_REQUIRED proof has an empty 'findings' list; "
+                "the controller cannot validate a no-op without any "
+                "assigned-finding disposition"
+            )
+        nonterminal = (
+            FindingDisposition.STILL_ACTIONABLE,
+            FindingDisposition.INCOMPLETE_EVIDENCE,
+        )
+        terminal_with_required_proof = (
+            FindingDisposition.SUPERSEDED,
+            FindingDisposition.REPAIRED,
+            FindingDisposition.INVALID,
+            FindingDisposition.INCONCLUSIVE,
+        )
+        for idx, entry in enumerate(findings_proof):
+            if not isinstance(entry, dict):
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED proof findings[{idx}] is not "
+                    f"an object/dict: {entry!r}"
+                )
+            disp_raw = entry.get("disposition")
+            if disp_raw is None or not isinstance(disp_raw, str):
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED proof findings[{idx}] "
+                    f"(finding_id={entry.get('finding_id')!r}) is missing "
+                    f"a 'disposition' string; the controller cannot "
+                    f"validate the no-op without a terminal disposition"
+                )
+            try:
+                disp = FindingDisposition(disp_raw)
+            except ValueError:
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED proof has unknown disposition: "
+                    f"{disp_raw!r}"
+                )
+            if disp in nonterminal:
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED rejected: finding "
+                    f"{entry.get('finding_id')!r} has nonterminal "
+                    f"disposition {disp.value!r}; cannot be "
+                    f"represented as a no-op without leaving "
+                    f"nonterminal work stranded"
+                )
+            if disp in terminal_with_required_proof and not entry.get("evidence"):
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED rejected: finding "
+                    f"{entry.get('finding_id')!r} has disposition "
+                    f"{disp.value!r} but no evidence field; "
+                    f"supersession / repair must be concretely proven"
+                )
         sm = self._require_state_for_event()
         # Round-27 P1#5 atomicity: rebind context FIRST, then
         # apply the transition.

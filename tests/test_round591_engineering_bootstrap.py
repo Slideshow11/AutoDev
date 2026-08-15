@@ -1011,3 +1011,180 @@ def test_dirt_allowlist_excludes_unknown_untracked_source(tmp_path: Path):
         f"TestRound590PytestOfRecurrence failed: "
         f"stdout={r.stdout[:2000]} stderr={r.stderr[:500]}"
     )
+
+
+# ===========================================================================
+# §15.17 — Round-664 P1: reject absent or incomplete no-op proof
+# ===========================================================================
+
+
+def _build_round664_controller(td: Path):
+    """Helper: build a Controller seeded in
+    REPAIRING_REVIEW_FINDINGS, mirroring the §15.10 setup."""
+    from autocoder_orchestration.controller import Controller
+    from autocoder_orchestration.context import (
+        SCHEMA_VERSION, make_run_context,
+    )
+    from autocoder_orchestration.store import StateStore
+    from autocoder_orchestration.state_machine import StateMachine
+    ctx = make_run_context(
+        run_id="test-r664",
+        repo_owner="test", repo_name="test-repo",
+        local_checkout=str(PRODUCTION_ROOT), base_branch="main",
+        authorized_base_sha="a" * 40,
+        feature_branch="test-feat",
+        task_specification_path="/tmp/empty.txt",
+        task_specification_sha256="b" * 64,
+        required_ci_jobs=list(SEVEN_NAME_POLICY),
+        evidence_root="/tmp/evi",
+        implementation_worker_command=[],
+        state_root="/tmp/state",
+        pr_number=5,
+    )
+    state_root = Path(td) / "state"
+    state_root.mkdir(parents=True)
+    store = StateStore(str(state_root))
+    store.write_atomic("run_context.json", ctx.to_dict())
+    store.write_atomic(
+        "state.json",
+        {
+            "current_state": "REPAIRING_REVIEW_FINDINGS",
+            "revision": 0,
+            "expected_revision": 0,
+            "journal": [],
+            "evidence": {},
+        },
+    )
+    return Controller(ctx, store)
+
+
+def test_round664_p1_proof_none_rejected(tmp_path: Path) -> None:
+    """Round-664 P1: ``proof=None`` MUST raise ControllerError;
+    the controller MUST NOT silently accept an absent proof
+    as a valid empty no-op."""
+    from autocoder_orchestration.controller import ControllerError
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        c = _build_round664_controller(Path(td))
+        with pytest.raises(ControllerError):
+            c.report_no_changes_required(
+                head_observed="b" * 40,
+                proof=None,
+            )
+
+
+def test_round664_p1_non_object_proof_rejected(tmp_path: Path) -> None:
+    """Round-664 P1: a non-dict proof (e.g. a list or string)
+    MUST raise ControllerError; it is not silently coerced to
+    an empty findings list."""
+    from autocoder_orchestration.controller import ControllerError
+    import tempfile
+    for bad_proof in ([], "nope", 42, 3.14):
+        with tempfile.TemporaryDirectory() as td:
+            c = _build_round664_controller(Path(td))
+            with pytest.raises(ControllerError):
+                c.report_no_changes_required(
+                    head_observed="b" * 40,
+                    proof=bad_proof,  # type: ignore[arg-type]
+                )
+
+
+def test_round664_p1_missing_findings_list_rejected(tmp_path: Path) -> None:
+    """Round-664 P1: a dict proof without a ``findings`` key
+    or with a non-list ``findings`` MUST raise ControllerError;
+    it is not silently treated as an empty list."""
+    from autocoder_orchestration.controller import ControllerError
+    import tempfile
+    for bad_proof in ({}, {"findings": "nope"}, {"findings": {}}):
+        with tempfile.TemporaryDirectory() as td:
+            c = _build_round664_controller(Path(td))
+            with pytest.raises(ControllerError):
+                c.report_no_changes_required(
+                    head_observed="b" * 40,
+                    proof=bad_proof,
+                )
+
+
+def test_round664_p1_empty_findings_list_rejected(tmp_path: Path) -> None:
+    """Round-664 P1: an empty ``findings`` list MUST raise
+    ControllerError; the controller cannot validate a no-op
+    without any assigned-finding disposition."""
+    from autocoder_orchestration.controller import ControllerError
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        c = _build_round664_controller(Path(td))
+        with pytest.raises(ControllerError):
+            c.report_no_changes_required(
+                head_observed="b" * 40,
+                proof={"findings": []},
+            )
+
+
+def test_round664_p1_non_object_entry_rejected(tmp_path: Path) -> None:
+    """Round-664 P1: a non-dict entry inside ``findings``
+    MUST raise ControllerError; it is not silently skipped."""
+    from autocoder_orchestration.controller import ControllerError
+    import tempfile
+    for bad_entry in (None, "string", 42, ["list"]):
+        with tempfile.TemporaryDirectory() as td:
+            c = _build_round664_controller(Path(td))
+            with pytest.raises(ControllerError):
+                c.report_no_changes_required(
+                    head_observed="b" * 40,
+                    proof={"findings": [bad_entry]},  # type: ignore[list-item]
+                )
+
+
+def test_round664_p1_entry_without_disposition_rejected(tmp_path: Path) -> None:
+    """Round-664 P1: an entry without a ``disposition`` field
+    MUST raise ControllerError; it is not silently accepted
+    as a terminal disposition."""
+    from autocoder_orchestration.controller import ControllerError
+    import tempfile
+    for bad_entry in (
+        {"finding_id": "thread:X"},  # no disposition at all
+        {"finding_id": "thread:X", "disposition": None},
+        {"finding_id": "thread:X", "disposition": 42},
+        {"finding_id": "thread:X", "category": "ALREADY_SATISFIED"},
+    ):
+        with tempfile.TemporaryDirectory() as td:
+            c = _build_round664_controller(Path(td))
+            with pytest.raises(ControllerError):
+                c.report_no_changes_required(
+                    head_observed="b" * 40,
+                    proof={"findings": [bad_entry]},  # type: ignore[list-item]
+                )
+
+
+def test_round664_p1_terminal_disposition_with_evidence_passes(tmp_path: Path) -> None:
+    """Round-664 P1 sanity: the tightened validator still
+    accepts a properly-shaped ALREADY_SATISFIED proof (the
+    expected happy path for round-591 §15.11 plus a
+    SUPERSEDED-with-evidence entry)."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        c = _build_round664_controller(Path(td))
+        sm = c.report_no_changes_required(
+            head_observed="b" * 40,
+            proof={
+                "findings": [
+                    {
+                        "finding_id": "thread:A",
+                        "disposition": "ALREADY_SATISFIED",
+                    },
+                    {
+                        "finding_id": "thread:B",
+                        "disposition": "SUPERSEDED",
+                        "evidence": (
+                            "subject thread's bound commit_oid is now "
+                            "behind current_authorized_head — rendered "
+                            "moot by head advance"
+                        ),
+                    },
+                ],
+            },
+        )
+        from autocoder_orchestration.state_machine import (
+            STATE_QUALIFYING_READINESS,
+        )
+        assert sm.current_state == STATE_QUALIFYING_READINESS
