@@ -8624,11 +8624,37 @@ def collect_coderabbit_exact_head_evidence(
     }
     if not isinstance(snap, dict):
         return out
+    # Round-666/P1 provider-isolation: the canonical
+    # CodeRabbit evidence surfaces live under
+    # ``provider_surfaces["coderabbit"]``. The shared
+    # ``snap["issue_comments"]`` and ``snap["review_comments"]``
+    # are the union of every provider's comments and MUST
+    # NOT be used as CodeRabbit-only evidence. If the
+    # provider surface collector did not write a
+    # coderabbit entry, the observation is INCOMPLETE and
+    # the function returns ``surfaces_complete=False``.
+    cr_surfaces = (
+        snap.get("provider_surfaces", {}).get("coderabbit")
+        if isinstance(snap.get("provider_surfaces"), dict)
+        else None
+    )
+    if not isinstance(cr_surfaces, dict):
+        # Collector did not run / failed. INCOMPLETE.
+        return out
+    cr_inline_comments = (
+        cr_surfaces.get("review_comments") or []
+        if isinstance(cr_surfaces.get("review_comments"), list)
+        else []
+    )
+    cr_issue_comments = (
+        cr_surfaces.get("issue_comments") or []
+        if isinstance(cr_surfaces.get("issue_comments"), list)
+        else []
+    )
     # 1. Find the latest CodeRabbit status comment whose
-    #    head equals head_norm. The "head commit changed"
-    #    pattern plus a provider head extractor parses the
-    #    body (e.g. "at head `c3ad21dda7b0`.").
-    for comment in snap.get("issue_comments", []) or []:
+    #    head equals head_norm. Read from the
+    #    provider-specific surface ONLY.
+    for comment in cr_issue_comments:
         user = (comment.get("user") or {}).get("login") or ""
         if "coderabbitai" not in user.lower():
             continue
@@ -8666,7 +8692,12 @@ def collect_coderabbit_exact_head_evidence(
             continue
         out["old_head_discards"] += 1
     # 2. Inline review comments bound to this head.
-    for comment in snap.get("review_comments", []) or []:
+    #    Round-666/P1: read ONLY the provider-specific
+    #    surface, not the merged-across-providers
+    #    ``snap["review_comments"]``.
+    for comment in cr_inline_comments:
+        if not isinstance(comment, dict):
+            continue
         path = comment.get("path") or comment.get("file") or ""
         # No head in inline comments; use the snapshot's
         # overall head_bind. OldHead inline comments are

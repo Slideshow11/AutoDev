@@ -40,7 +40,16 @@ HEAD_SHORT = HEAD_FULL[:12]
 
 
 def _make_snapshot(*, head: str = HEAD_FULL) -> dict:
-    """Build a complete, clean CodeRabbit snapshot for tests."""
+    """Build a complete, clean CodeRabbit snapshot for tests.
+
+    Round-666/P1: the canonical coderabbit evidence lives in
+    ``provider_surfaces[coderabbit]``. The shared
+    ``snap["review_comments"]`` and ``snap["issue_comments"]``
+    buckets are populated by the merge step at
+    supervisor.py:10770-10775 (every provider's comments
+    appended). The writer ONLY consumes the
+    ``provider_surfaces[coderabbit]`` bucket.
+    """
     return {
         "head_sha": head,
         "formal_reviews": [
@@ -78,6 +87,42 @@ def _make_snapshot(*, head: str = HEAD_FULL) -> dict:
                 "resolved": True,
                 "outdated": False,
                 "owner": "coderabbit",
+            },
+        },
+        # Round-666/P1: the provider surface is the
+        # authoritative coderabbit-only bucket. Mirror the
+        # same record set into the surface so the writer's
+        # provider-isolated read sees them.
+        "provider_surfaces": {
+            "coderabbit": {
+                "provider": "coderabbit",
+                "head_sha": head,
+                "reviews": [],
+                "review_comments": [
+                    {
+                        "id": 200,
+                        "body": "nit: rename variable for clarity",
+                        "path": "src/example.py",
+                        "line": 12,
+                        "commit_id": head,
+                        # The production canonical-writer
+                        # shape (supervisor.py:9396-9401)
+                        # OMITS the ``user`` field for inline
+                        # comments.
+                    },
+                ],
+                "issue_comments": [
+                    {
+                        "id": 300,
+                        "body": (
+                            f"All findings addressed. Review "
+                            f"completed at head `{head[:7]}`."
+                        ),
+                        "created_at": "2026-08-15T10:01:00Z",
+                        "login": "coderabbitai[bot]",
+                    },
+                ],
+                "check_runs": [],
             },
         },
     }

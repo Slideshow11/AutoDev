@@ -1147,26 +1147,47 @@ def _collect_coderabbit_exact_head_surfaces(
                 return v
         return ""
 
-    # 2. Inline review comments. The production canonical
-    # writer (``collect_provider_surfaces``, supervisor.py
-    # lines 9396-9401) does NOT propagate the ``user`` /
-    # ``login`` field on inline comment records — the
-    # surface carries only path / line / body. The
-    # snapshot collector itself filters those records by
-    # ``commit_id == head_sha`` upstream, so the surface
-    # presence of even one record is already head-bound.
-    # The earlier reader required
-    # ``"coderabbitai" in user.lower()`` and dropped every
-    # record by accident (nested ``(c.get("user") or
-    # {}).get("login")`` returned ``""`` for every surface
-    # entry, so the equality branch never fired).
+    # Round-666/P1 provider-isolation: the canonical
+    # CodeRabbit evidence surfaces live under
+    # ``snap["provider_surfaces"]["coderabbit"]``. The
+    # shared ``snap["issue_comments"]`` and
+    # ``snap["review_comments"]`` are the union of every
+    # provider's comments and MUST NOT be consulted for
+    # CodeRabbit attribution. If the provider surface
+    # collector did not write a coderabbit entry, the
+    # observation is INCOMPLETE rather than "successfully
+    # zero". The collector early-exits below with all
+    # surfaces still false.
+    cr_surfaces = (
+        snap.get("provider_surfaces", {}).get("coderabbit")
+        if isinstance(snap.get("provider_surfaces"), dict)
+        else None
+    )
+    if not isinstance(cr_surfaces, dict):
+        return out
+    cr_inline_comments = (
+        cr_surfaces.get("review_comments") or []
+        if isinstance(cr_surfaces.get("review_comments"), list)
+        else []
+    )
+    cr_issue_comments = (
+        cr_surfaces.get("issue_comments") or []
+        if isinstance(cr_surfaces.get("issue_comments"), list)
+        else []
+    )
+
+    # 2. Inline review comments. Read ONLY the
+    # CodeRabbit-specific surface. The cr_surfaces /
+    # cr_inline_comments / cr_issue_comments bindings are
+    # computed earlier (right after ``_author_login``);
+    # this section only classifies each inline record.
     #
     # New contract: classify each inline comment into one
     # of two buckets based on attribution availability.
     inline_comments = []
     inline_comments_attributed = []
     inline_comments_unattributed = []
-    for c in snap.get("review_comments", []) or []:
+    for c in cr_inline_comments:
         if not isinstance(c, dict):
             continue
         user = _author_login(c)
@@ -1183,24 +1204,56 @@ def _collect_coderabbit_exact_head_surfaces(
                 inline_comments_attributed.append(c)
         else:
             # No ``user`` field — production canonical-writer
-            # shape (supervisor.py:9396-9401). The snapshot
-            # collector already filtered by current head's
-            # review API; trust the surface presence and
-            # record it.
+            # shape (supervisor.py:9396-9401). The
+            # provider_surfaces bucket is ALREADY filtered by
+            # the per-provider review API, so the surface
+            # presence of a record here IS a CodeRabbit
+            # record. Track it under
+            # ``inline_comments_unattributed`` for the
+            # observation-completeness view but DO NOT
+            # promote it as a coderabbit-attributed record;
+            # the clean semantics require attributed evidence
+            # OR a successful coderabbit fetch returning
+            # ``[]`` (the empty-list branch handled below).
             inline_comments_unattributed.append(c)
-    out["inline_comments_collected"] = bool(
-        inline_comments_attributed or inline_comments_unattributed
-    )
-    out["inline_comments_attributed_count"] = len(
-        inline_comments_attributed
-    )
-    out["inline_comments_unattributed_count"] = len(
-        inline_comments_unattributed
-    )
+    # Round-666/P1: a successful CodeRabbit fetch that
+    # returns an empty inline list is a complete
+    # zero-result observation (``inline_comments_collected
+    # is True``). A failed or absent fetch is INCOMPLETE,
+    # not a silent clean. ``snap["provider_surface_complete"]
+    # being False already forces the readiness gate to
+    # fail closed, but we also harden here so the head
+    # assessment artifact itself records the
+    # INCOMPLETE state explicitly. ``cr_inline_comments`` is
+    # the provider-specific bucket; an empty list there
+    # paired with ``provider_surface_complete=False`` is
+    # the canonical INCOMPLETE-observation shape.
+    if (
+        snap.get("provider_surface_complete") is False
+        and not cr_inline_comments
+    ):
+        # Collector signalled incomplete provider surface.
+        # Do not silently treat an empty provider bucket
+        # as a clean observation.
+        out["inline_comments_collected"] = False
+        out["inline_comments_collector_incomplete"] = True
+        out["inline_comments_attributed_count"] = len(
+            inline_comments_attributed
+        )
+        out["inline_comments_unattributed_count"] = len(
+            inline_comments_unattributed
+        )
+        return out
     # 3. Issue comments authored by coderabbit at this head.
+    #    Round-666/P1: read ONLY the provider-specific
+    #    surface, not the merged-across-providers
+    #    ``snap["issue_comments"]`` bucket. The provider
+    #    surface is already filtered by the canonical
+    #    writer's bot_logins check, so every comment here
+    #    is a coderabbit comment.
     status_comment = None
     top_level = []
-    for c in snap.get("issue_comments", []) or []:
+    for c in cr_issue_comments:
         if not isinstance(c, dict):
             continue
         user = _author_login(c)
@@ -1261,10 +1314,30 @@ def _collect_coderabbit_exact_head_surfaces(
     else:
         completion_proof["exact_head_status"] = "no_status"
     out["completion_proof"] = completion_proof
+    # Round-666/P1: ``inline_comments_collected`` is the
+    # ``surface was successfully fetched`` flag, NOT the
+    # ``records were present`` flag. A coderabbit fetch
+    # that returns ``[]`` is a complete zero-result
+    # observation (per directive §6E). The pre-fix code
+    # conflated the two: it set ``inline_comments_collected``
+    # only when at least one record appeared, which let an
+    # empty fetch be misreported as INCOMPLETE. Track the
+    # bucket-presence flag explicitly and use it for the
+    # surfaces_complete check.
+    coderabbit_inline_surface_fetched = True  # we read it
+    out["inline_comments_collected"] = bool(
+        inline_comments_attributed or inline_comments_unattributed
+    )
+    out["inline_comments_attributed_count"] = len(
+        inline_comments_attributed
+    )
+    out["inline_comments_unattributed_count"] = len(
+        inline_comments_unattributed
+    )
     surfaces_complete = (
         out["statuses_collected"]
         and out["top_level_comment_collected"]
-        and out["inline_comments_collected"]
+        and coderabbit_inline_surface_fetched
         and out["review_threads_collected"]
         and out["formal_reviews_collected"]
         and bool(formal_reviews)

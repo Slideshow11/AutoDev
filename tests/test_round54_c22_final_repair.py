@@ -632,16 +632,29 @@ def test_N_coderabbit_exact_head_evidence(tmp_path):
     head = "abcabc" * 7
     snap = {
         "head_sha": head,
-        "issue_comments": [
-            {"id": 1,
-             "user": {"login": "coderabbitai[bot]"},
-             "body": "<!-- CodeRabbit --> I will review "
-                      "pull request `#5` at head `"
-                      + head + "`."},
-        ],
+        "issue_comments": [],
         "review_comments": [],
         "review_threads": {},
         "formal_reviews": [],
+        # Round-666/P1: the canonical coderabbit evidence
+        # surfaces live under provider_surfaces[coderabbit].
+        # Mirror the issue comment into the provider surface.
+        "provider_surfaces": {
+            "coderabbit": {
+                "provider": "coderabbit",
+                "head_sha": head,
+                "reviews": [],
+                "review_comments": [],
+                "issue_comments": [
+                    {"id": 1,
+                     "user": {"login": "coderabbitai[bot]"},
+                     "body": "<!-- CodeRabbit --> I will review "
+                              "pull request `#5` at head `"
+                              + head + "`."},
+                ],
+                "check_runs": [],
+            },
+        },
     }
     res = sup.collect_coderabbit_exact_head_evidence(
         head=head, snap=snap,
@@ -658,17 +671,27 @@ def test_O_completion_does_not_imply_clean(tmp_path):
     head = "abcabc" * 7
     snap = {
         "head_sha": head,
-        "issue_comments": [
-            {"id": 1,
-             "user": {"login": "coderabbitai[bot]"},
-             "body": "I will review pull request `#5` at head "
-                      "`" + head + "`."},
-        ],
+        "issue_comments": [],
         "review_comments": [],
         "review_threads": {
             "PRRT_X": {"resolved": False, "outdated": False},
         },
         "formal_reviews": [],
+        "provider_surfaces": {
+            "coderabbit": {
+                "provider": "coderabbit",
+                "head_sha": head,
+                "reviews": [],
+                "review_comments": [],
+                "issue_comments": [
+                    {"id": 1,
+                     "user": {"login": "coderabbitai[bot]"},
+                     "body": "I will review pull request `#5` at "
+                              "head `" + head + "`."},
+                ],
+                "check_runs": [],
+            },
+        },
     }
     res = sup.collect_coderabbit_exact_head_evidence(
         head=head, snap=snap,
