@@ -149,9 +149,9 @@
       "path": ".github/workflows/ci.yml",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 1,
-      "line": 100,
+      "line": 97,
       "line_sha256": "c14913ccd1adfbd002a09154daad42efc1187eb97588e62610ae3ba71ae8ea6f",
-      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 100; encoding=utf-8"
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 97; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -374,9 +374,9 @@
       "path": "autocoder_supervisor/hermes_fingerprint.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 13,
-      "line": 2812,
+      "line": 2814,
       "line_sha256": "65e3a65b48920a1404f8d9ffb8137a16bbf570dfa2bba5eb0b91f7fd5bcddbdf",
-      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 2812; encoding=utf-8"
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 2814; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1166,9 +1166,9 @@
       "path": "tests/test_round281_closure6_relational.py",
       "token_id": "tok_3b122b9d4638",
       "ordinal": 1,
-      "line": 338,
+      "line": 421,
       "line_sha256": "761abd3911f8a7c4001b43f55f9042996432fe8410f9b2944354350c895e84fb",
-      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 338; encoding=utf-8"
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 421; encoding=utf-8"
     },
     {
       "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
@@ -1331,6 +1331,150 @@
       "line": 297,
       "line_sha256": "1357416c68292646b240b39b7ecd2ffe25a2e3a6f04713e29f1a608de7668307",
       "purpose": "Pre-canary closure-X: legitimate reference to 'ghp_' in committed text; line 297; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp4g8q2fph/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 1,
+      "line_sha256": "d4eb57f7d4e06665d25f542dc393e071436d6031f0baf64a38d194ef6bd7141e",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp4g8q2fph/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 1,
+      "line_sha256": "d4eb57f7d4e06665d25f542dc393e071436d6031f0baf64a38d194ef6bd7141e",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp4g8q2fph/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 1,
+      "line_sha256": "d4eb57f7d4e06665d25f542dc393e071436d6031f0baf64a38d194ef6bd7141e",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp4g8q2fph/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 1,
+      "line_sha256": "d4eb57f7d4e06665d25f542dc393e071436d6031f0baf64a38d194ef6bd7141e",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp6l6_9l_g/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 1,
+      "line_sha256": "1682cf73f97707f44602d12c72d09d6f47186b3e0b267fad35fb2487d7e64da3",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp6l6_9l_g/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 1,
+      "line_sha256": "1682cf73f97707f44602d12c72d09d6f47186b3e0b267fad35fb2487d7e64da3",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp6l6_9l_g/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 1,
+      "line_sha256": "1682cf73f97707f44602d12c72d09d6f47186b3e0b267fad35fb2487d7e64da3",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp6l6_9l_g/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 1,
+      "line_sha256": "1682cf73f97707f44602d12c72d09d6f47186b3e0b267fad35fb2487d7e64da3",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp_y_39eer/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 1,
+      "line_sha256": "966418bb6921ef635881dc4b9cd4bc0310ba21ce85580600cde8864b75028743",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp_y_39eer/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 1,
+      "line_sha256": "966418bb6921ef635881dc4b9cd4bc0310ba21ce85580600cde8864b75028743",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp_y_39eer/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 1,
+      "line_sha256": "966418bb6921ef635881dc4b9cd4bc0310ba21ce85580600cde8864b75028743",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmp_y_39eer/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 1,
+      "line_sha256": "966418bb6921ef635881dc4b9cd4bc0310ba21ce85580600cde8864b75028743",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmptni7ih5p/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 1,
+      "line": 1,
+      "line_sha256": "63533e71ccfa0e6d9dd455cbe104e9e53123ccfd73e78b482f9c90f3a96505f9",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmptni7ih5p/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 2,
+      "line": 1,
+      "line_sha256": "63533e71ccfa0e6d9dd455cbe104e9e53123ccfd73e78b482f9c90f3a96505f9",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmptni7ih5p/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 3,
+      "line": 1,
+      "line_sha256": "63533e71ccfa0e6d9dd455cbe104e9e53123ccfd73e78b482f9c90f3a96505f9",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
+    },
+    {
+      "schema_version": "autocoder.scanner_occurrence_allowlist.v1",
+      "path": "tmptni7ih5p/acceptance_runtime_identity.json",
+      "token_id": "tok_3b122b9d4638",
+      "ordinal": 4,
+      "line": 1,
+      "line_sha256": "63533e71ccfa0e6d9dd455cbe104e9e53123ccfd73e78b482f9c90f3a96505f9",
+      "purpose": "Pre-canary closure-X: legitimate reference to '/home/' in committed text; line 1; encoding=utf-8"
     }
   ]
 }

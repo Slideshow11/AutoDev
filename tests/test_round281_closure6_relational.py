@@ -87,6 +87,89 @@ def _stub_github_api_v6(monkeypatch, tmp_path):
 
     monkeypatch.setattr(hf, "_read_live_github_head", _stub_live)
     monkeypatch.setattr(hf, "_read_workflow_runs", _stub_workflow)
+
+    # Write supervisor-owned identity for the artifact-based
+    # observation path (Closure X §9).
+    from pathlib import Path as _P
+    import json as _json_v6
+    import hashlib as _hash_v6
+    src_root = _P(__file__).resolve().parent.parent
+    _modules = [
+        ("supervisor.py", "autocoder_supervisor.supervisor"),
+        ("_directive_prompt.py", "autocoder_supervisor._directive_prompt"),
+        ("worker_session.py", "autocoder_supervisor.worker_session"),
+        ("aed_worker_wrapper.py", "autocoder_supervisor.aed_worker_wrapper"),
+        ("directive_bridge.py", "autocoder_supervisor.directive_bridge"),
+        ("provenance_maintenance.py", "autocoder_supervisor.provenance_maintenance"),
+        ("hermes_fingerprint.py", "autocoder_supervisor.hermes_fingerprint"),
+        ("orchestration_state_root.py", "autocoder_supervisor.orchestration_state_root"),
+        ("relay_wiring.py", "autocoder_supervisor.relay_wiring"),
+        ("config.py", "autocoder_supervisor.config"),
+        ("contracts.py", "autocoder_supervisor.contracts"),
+        ("validate.py", "autocoder_supervisor.validate"),
+        ("worker_attempt.py", "autocoder_orchestration.worker_attempt"),
+        ("review_repair_relay.py", "autocoder_orchestration.review_repair_relay"),
+        ("controller.py", "autocoder_orchestration.controller"),
+        ("context.py", "autocoder_orchestration.context"),
+        ("store.py", "autocoder_orchestration.store"),
+    ]
+    _loaded = []
+    for fn, _ in _modules:
+        for prefix in ["autocoder_supervisor", "autocoder_orchestration", ""]:
+            candidate = src_root / prefix / fn
+            if candidate.exists():
+                _loaded.append({
+                    "logical_module": fn,
+                    "actual_production_loaded_path": str(candidate),
+                    "actual_production_sha256": _hash_v6.sha256(
+                        candidate.read_bytes()
+                    ).hexdigest(),
+                })
+                break
+    identity = {
+        "schema_version": "autocoder.acceptance_runtime_identity.v1",
+        "supervisor_python_pid": 999999,
+        "launcher_pid": 999998,
+        "supervisor_boot_id": "boot-test",
+        "supervisor_start_ticks": 0,
+        "supervisor_exe": "/usr/bin/python3",
+        "supervisor_cmdline_sha256": "",
+        "supervisor_process_identity": "test-fixture",
+        "supervisor_pid": 999999,
+        "process_start_identity": "test-fixture",
+        "instance_id": "test",
+        "repository_owner": "Slideshow11",
+        "repository_name": "AutoDev",
+        "pr_number": 5,
+        "expected_pr_set": "5",
+        "expected_branch": "feat/review-repair-relay-v1",
+        "expected_branch_set": "feat/review-repair-relay-v1",
+        "production_working_checkout": str(src_root),
+        "supervisor_state_directory": str(tmp_path),
+        "supervisor_home": str(tmp_path),
+        "hermes_binary_path": str(stub_hermes),
+        "required_providers": "coderabbit",
+        "optional_providers": "codex",
+        "provider_independence": "true",
+        "loaded_modules": _loaded,
+        "generated_at": "2026-08-15T00:00:00Z",
+    }
+    (tmp_path / "acceptance_runtime_identity.json").write_text(
+        _json_v6.dumps(identity)
+    )
+    (tmp_path / "run_state.json").write_text(_json_v6.dumps({
+        "feature_branch": "feat/review-repair-relay-v1",
+    }))
+    (tmp_path / "unconsumed_events.json").write_text(
+        _json_v6.dumps({"events": []})
+    )
+    (tmp_path / "cooldown_deferred_events.json").write_text(
+        _json_v6.dumps({"entries": [], "ids": []})
+    )
+    (tmp_path / "consumed_event_terminality.json").write_text(
+        _json_v6.dumps({"entries": []})
+    )
+    (tmp_path / "worker_attempts").mkdir(exist_ok=True)
     yield
 
 

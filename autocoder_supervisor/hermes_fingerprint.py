@@ -1804,8 +1804,8 @@ def _read_observed_static_scope(
     artifact_scope = artifact_result.get("scope", {})
     # Map scope keys back to env-var keys for downstream
     # processing compatibility.
-    _SCOPE_TO_ENV_REV = {
-        v: k for k, v in [
+    _SCOPE_TO_ENV = {
+        k: v for k, v in [
             ("repository_owner", "AED_REPO_OWNER"),
             ("repository_name", "AED_REPO_NAME"),
             ("pr_number", "AED_PR_NUMBER"),
@@ -1822,7 +1822,9 @@ def _read_observed_static_scope(
         ]
     }
     for scope_key, value in artifact_scope.items():
-        env_key = _SCOPE_TO_ENV_REV.get(scope_key)
+        # Map scope_key -> env_key. The map's keys are
+        # scope keys; the values are env-var names.
+        env_key = _SCOPE_TO_ENV.get(scope_key)
         if env_key and value:
             observed[env_key] = value
             observation_sources_per_key[scope_key] = (
