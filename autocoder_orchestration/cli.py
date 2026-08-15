@@ -1498,8 +1498,19 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
     repo = f"{ctx.repo_owner}/{ctx.repo_name}"
     # Read required_check_names from the supervisor config if
     # present; otherwise accept the caller-supplied list.
-    required_check_names = tuple(
+    # Fall back to ``ctx.required_ci_jobs`` (the persisted
+    # ``RunContext`` policy) when the operator omits
+    # ``--required-check-names`` so a head with no review
+    # findings still drives pending/failing required checks
+    # through the CI-finding collector rather than silently
+    # calling the head clean.
+    cli_required_check_names = tuple(
         name for name in (args.required_check_names or "").split(",") if name
+    )
+    required_check_names = (
+        cli_required_check_names
+        if cli_required_check_names
+        else tuple(ctx.required_ci_jobs or ())
     )
     max_rounds = int(args.max_rounds) if args.max_rounds else DEFAULT_MAX_ROUNDS
     loop = RelayLoop(
