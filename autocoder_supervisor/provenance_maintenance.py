@@ -831,13 +831,22 @@ def migrate_test_sentinel_to_terminated(
 
 
 def list_open_drifts(ledger_path: Optional[Path] = None) -> list:
+    """Return open (non-terminal, non-superseded) drift
+    entries from ``ledger_path``.
+
+    Fail-closed: a missing file yields ``[]`` (no drift to
+    repair), but an UNREADABLE or MALFORMED ledger raises
+    ``AtomicWriteError`` so the caller does NOT silently
+    treat an unreadable ledger as "no open drift". The
+    canonical atomic helpers in this module use the same
+    fail-closed contract via ``_read_drift_ledger_or_failclosed``;
+    this reader MUST honor it as well — otherwise a
+    persistently truncated ledger would never emit its
+    provenance-repair events and the autonomous maintenance
+    lifecycle would stall indefinitely.
+    """
     path = ledger_path or _drift_ledger_path()
-    if not path.exists():
-        return []
-    try:
-        existing = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return []
+    existing = _read_drift_ledger_or_failclosed(path)
     return [
         rec for rec in existing
         if isinstance(rec, dict)
