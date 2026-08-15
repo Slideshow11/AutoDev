@@ -967,6 +967,7 @@ def _read_coderabbit_clean_head_evidence(
       reason: str | None
     """
     import os as _os
+    import json as _json
     from pathlib import Path as _Path_reader
     out = {
         "value": False,
@@ -1080,6 +1081,7 @@ def _read_codex_optional_lifecycle_evidence(
     production lifecycle or explicit durable
     OPTIONAL_DEGRADED outcome.
     """
+    import json as _json
     from pathlib import Path as _Path_reader
     out = {
         "value": False,
