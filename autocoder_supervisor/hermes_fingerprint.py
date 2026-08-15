@@ -1818,11 +1818,28 @@ def _read_autonomous_provenance_evidence(
         except (OSError, _json_auto.JSONDecodeError):
             out["reason"] = "parse_failed:provenance_drift_pending"
             return out
+        # Fail closed on malformed containers: a syntactically
+        # valid JSON file whose top-level shape is not a list
+        # AND not a dict whose ``entries`` key is a list (the
+        # only two schemas we accept) MUST NOT silently coerce
+        # to ``pending_count=0``. Silently treating such
+        # payloads as "empty ledger" would let a matching
+        # terminal artifact prove success for a head whose
+        # pending provenance was actually corrupted. We
+        # therefore surface a dedicated parse_failed reason
+        # and refuse to issue a positive verdict.
         if isinstance(d, list):
             pending_count = len(d)
-        elif isinstance(d, dict):
-            e = d.get("entries")
-            pending_count = len(e) if isinstance(e, list) else 0
+        elif isinstance(d, dict) and isinstance(d.get("entries"), list):
+            pending_count = len(d["entries"])
+        else:
+            out["reason"] = (
+                "parse_failed:provenance_drift_pending_shape:"
+                f"top_level_type={type(d).__name__}"
+            )
+            out["observation_complete"] = True
+            out["value"] = False
+            return out
     out["pending_drift_count"] = pending_count
     # Look for the canonical terminal provenance artifact
     # at provenance_terminal/<head>.json. If present, it
