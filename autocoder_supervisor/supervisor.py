@@ -7094,12 +7094,23 @@ def _check_clean_production_checkout(repo_dir: str) -> tuple:
     # Each entry may match either as a top-level prefix or as
     # any path segment (i.e. ``pkg/__pycache__/x.pyc`` is also
     # accepted because ``__pycache__`` is a runtime cache).
+    # round-590 (recurrence): pytest's standard tmpdir prefix
+    # is ``pytest-of-<user>/`` (see pytest tmpdir docs). The
+    # runner owns its own state and is permitted to leave it
+    # behind without permanently stranding worker dispatch.
+    # An arbitrary top-level pytest-of-* tree is therefore
+    # safe to tolerate as runtime leakage. The narrower
+    # ``pytest-of-*/`` rule restricts the exclusion to known
+    # pytest-owned prefix trees only; it does NOT cover any
+    # other top-level untracked source directory, and it does
+    # NOT cover tracked source modifications.
     _permitted_runtime_subdirs = (
         "autocoder_supervisor/state/",
         "autocoder_supervisor/logs/",
         ".ruff_cache/",
         "__pycache__/",
         ".pytest_cache/",
+        "pytest-of-",
     )
 
     def _is_runtime_excluded(p: str) -> bool:

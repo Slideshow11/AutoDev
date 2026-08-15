@@ -853,16 +853,46 @@ class ReviewDirective:
                 )
         if self.target_thread_id is not None:
             expected_id = f"thread:{self.target_thread_id}"
-            if len(self.findings) != 1:
+            expected_finding = (
+                f"thread:{self.target_thread_id!r}"
+            )
+            # Round-45 C13 (round-590 correction): when
+            # ``target_thread_id`` is set, focused mode scopes
+            # the REVIEW portion of the directive to the
+            # targeted current-head thread. CI_FAILURE findings
+            # are independently required by round-281 C22 §6
+            # and are NOT subject to focused scope, so the
+            # ``len(findings) == 1`` invariant from round-45
+            # is RELAXED to:
+            #
+            #  - the targeted thread ``finding_id`` MUST appear
+            #    in ``self.findings``;
+            #  - no other REVIEW finding (severity in
+            #    {``SEVERITY_P1``, ``SEVERITY_P2``,
+            #    ``SEVERITY_P0_ESCALATE``} whose
+            #    ``finding_id != thread:<target>``) MUST
+            #    appear (focused review scope is preserved);
+            #  - CI_FAILURE findings (severity ==
+            #    ``SEVERITY_CI_FAILURE``) MAY appear; they are
+            #    the explicit round-590 carve-out.
+            targeted_found = any(
+                f.finding_id == expected_id for f in self.findings
+            )
+            if not targeted_found:
                 raise DirectiveContractError(
-                    f"target_thread_id={self.target_thread_id!r} requires "
-                    f"exactly one finding; directive has {len(self.findings)}"
+                    f"target_thread_id={expected_finding} requires "
+                    f"finding_id={expected_id!r}; missing"
                 )
-            if self.findings[0].finding_id != expected_id:
+            for f in self.findings:
+                if f.finding_id == expected_id:
+                    continue
+                if f.severity == SEVERITY_CI_FAILURE:
+                    continue
                 raise DirectiveContractError(
-                    f"target_thread_id={self.target_thread_id!r} requires "
-                    f"finding_id={expected_id!r}; directive has "
-                    f"finding_id={self.findings[0].finding_id!r}"
+                    f"target_thread_id={expected_finding} scopes "
+                    f"review findings to the targeted thread only; "
+                    f"unexpected finding {f.finding_id!r} "
+                    f"(severity={f.severity!r})"
                 )
 
     def to_dict(self) -> dict:
@@ -1584,18 +1614,41 @@ def collect_findings(
     pass ``ledger=None`` and filter separately via
     ``filter_findings_to_current_head``.
 
-    Round-45 C13: ``focused_thread_id`` scopes the collector to
-    a SINGLE targeted review thread. When set, the returned
-    list contains ONLY the finding with
-    ``finding_id == "thread:<focused_thread_id>"`` (or is empty
-    if no matching thread exists). The head-binding filter is
-    still applied so a thread whose ``commit_oid`` does not
-    match the current head is excluded. The supervisor's
-    durable-thread-drain path uses this to force the worker
-    to evaluate the targeted thread rather than the
-    historical 8-P1 backlog that the ``max_findings=8`` cap
-    would otherwise force into the directive.
+    Round-45 C13 (round-590 correction): ``focused_thread_id``
+    scopes the REVIEW findings portion of the directive to a
+    SINGLE targeted review thread. It MUST NOT suppress CI
+    failure findings. The focused-mode collector:
+
+    1. Collects the targeted current-head review thread
+       (``finding_id == "thread:<focused_thread_id>"``) or
+       emits no review finding if the thread is resolved /
+       outdated / not bound to the current head.
+    2. Independently calls ``_collect_ci_findings`` against the
+       same snapshot so every terminal failed required check
+       becomes a ``CI_FAILURE`` finding, including when
+       ``focused_thread_id`` is set.
+    3. Successful / skipped / neutral required checks produce
+       no CI failure; pending required checks are still
+       surfaced as a CI failure (unified policy; see round-281
+       C22 §6).
+    4. Unrelated historical review findings remain excluded;
+       the focused mode only adds the targeted current-head
+       thread (zero or one) to the union.
+    5. Truncation by ``max_findings`` is never permitted to
+       drop a CI_FAILURE finding — the ``max_findings`` cap
+       is applied AFTER the union below, in the directive
+       builder, where it already preserves CI failures
+       (round-281 C22 §6).
+
+    The historical 8-P1 backlog is therefore still excluded
+    when ``focused_thread_id`` is supplied, while required CI
+    failures continue to drive the directive through the
+    empirical-gate reader path.
     """
+    review_findings: List[Finding] = []
+    ci_findings: List[Finding] = list(
+        _collect_ci_findings(snapshot, required_check_names)
+    )
     if focused_thread_id is not None:
         threads = snapshot.get("review_threads") or {}
         thread_data = (
@@ -1606,49 +1659,44 @@ def collect_findings(
         current_head = snapshot.get("head_sha")
         if isinstance(thread_data, dict):
             if thread_data.get("resolved"):
-                return []
-            if thread_data.get("outdated"):
-                return []
-            thread_body = str(thread_data.get("body") or "").strip()
-            thread_path = thread_data.get("path") or ""
-            thread_line = thread_data.get("line")
-            thread_commit_oid = thread_data.get("commit_oid")
-            if (
-                not thread_body
-                and not thread_path
-                and thread_commit_oid
-                and current_head
-                and thread_commit_oid != current_head
-            ):
-                return []
-            severity = _classify_severity(thread_body)
-            title = (
-                thread_body.splitlines()[0]
-                if thread_body else f"(thread {focused_thread_id[-12:]})"
-            )
-            focused_finding = Finding(
-                finding_id=f"thread:{focused_thread_id}",
-                source="review_thread",
-                severity=severity,
-                title=title[:120],
-                body=thread_body,
-                file_path=thread_path if thread_path else None,
-                line=int(thread_line) if isinstance(thread_line, int) else None,
-                url=None,
-                suggested_test=None,
-                review_id=None,
-                comment_id=None,
-                check_name=None,
-            )
-            if ledger is not None:
-                focused_list = filter_findings_to_current_head(
-                    [focused_finding], ledger
-                )
-                return focused_list
-            return [focused_finding]
-        return []
-    review_findings = _collect_review_findings(snapshot)
-    ci_findings = _collect_ci_findings(snapshot, required_check_names)
+                pass
+            elif thread_data.get("outdated"):
+                pass
+            else:
+                thread_body = str(thread_data.get("body") or "").strip()
+                thread_path = thread_data.get("path") or ""
+                thread_line = thread_data.get("line")
+                thread_commit_oid = thread_data.get("commit_oid")
+                if (
+                    not thread_body
+                    and not thread_path
+                    and thread_commit_oid
+                    and current_head
+                    and thread_commit_oid != current_head
+                ):
+                    pass
+                else:
+                    severity = _classify_severity(thread_body)
+                    title = (
+                        thread_body.splitlines()[0]
+                        if thread_body else f"(thread {focused_thread_id[-12:]})"
+                    )
+                    review_findings.append(Finding(
+                        finding_id=f"thread:{focused_thread_id}",
+                        source="review_thread",
+                        severity=severity,
+                        title=title[:120],
+                        body=thread_body,
+                        file_path=thread_path if thread_path else None,
+                        line=int(thread_line) if isinstance(thread_line, int) else None,
+                        url=None,
+                        suggested_test=None,
+                        review_id=None,
+                        comment_id=None,
+                        check_name=None,
+                    ))
+    else:
+        review_findings = list(_collect_review_findings(snapshot))
     findings: List[Finding] = list(review_findings) + list(ci_findings)
     if ledger is not None:
         findings = filter_findings_to_current_head(findings, ledger)

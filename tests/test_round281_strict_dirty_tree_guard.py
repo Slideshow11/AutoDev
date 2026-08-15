@@ -445,3 +445,113 @@ class TestReasonClassification:
         assert ok is False
         assert reason == "untracked_paths"
         assert any("scratch.py" in p for p in dirty)
+
+
+# ---------------------------------------------------------------------------
+# Round-590 (recurrence): pytest's standard tmpdir prefix
+# ``pytest-of-<user>/`` is structurally a runtime artifact and MUST
+# NOT permanently strand worker dispatch. The narrow recurrence
+# fix only adds the ``pytest-of-`` prefix to the runtime allowlist.
+# All other dirty-tree rules remain in force:
+#   - arbitrary untracked source files (non-pytest) MUST still be
+#     blocked;
+#   - tracked source modifications MUST still be blocked;
+#   - the existing top-level runtime exclusions
+#     (``__pycache__/``, ``.pytest_cache/``, ``.ruff_cache/``,
+#     ``autocoder_supervisor/state/``, ``autocoder_supervisor/logs/``)
+#     continue to be permitted.
+# ---------------------------------------------------------------------------
+
+
+class TestRound590PytestOfRecurrence:
+    def test_pytest_of_max_directory_is_excluded(
+        self, clean_repo: Path
+    ) -> None:
+        """A ``pytest-of-max/`` tmpdir tree (pytest's standard
+        tmpdir prefix) MUST NOT block worker dispatch. The
+        recurrence fix narrows the runtime allowlist to recognize
+        ``pytest-of-`` as a pytest-owned tmpdir prefix.
+        """
+        pyroot = clean_repo / "pytest-of-max"
+        pyroot.mkdir()
+        inner = pyroot / "pytest-1"
+        inner.mkdir()
+        (inner / "acceptance.json").write_text("{}\n")
+        (inner / "hermes-snap-fcaa.sh").write_text("#!/bin/sh\n")
+        sub = pyroot / "test_full_ordered_chain_provescurrent"
+        sub.write_text("state\n")
+
+        ok, dirty, reason = _guard()(str(clean_repo))
+        assert ok is True, (
+            f"pytest-of-max leakage MUST NOT permanently strand "
+            f"worker dispatch; ok={ok}, dirty={dirty}, reason={reason}"
+        )
+        assert reason == "clean"
+        assert dirty == []
+
+    def test_arbitrary_untracked_source_still_blocks(
+        self, clean_repo: Path
+    ) -> None:
+        """An arbitrary untracked top-level source directory
+        whose name does NOT begin with ``pytest-of-`` MUST
+        still block worker dispatch. The recurrence fix is
+        narrow and does not generalize.
+        """
+        bad = clean_repo / "scratch-rndm"
+        bad.mkdir()
+        (bad / "experiment.py").write_text("x=1\n")
+        ok, dirty, reason = _guard()(str(clean_repo))
+        assert ok is False
+        assert reason == "untracked_paths"
+        assert any("scratch-rndm" in p for p in dirty)
+
+    def test_tracked_modified_source_still_blocks(
+        self, clean_repo: Path
+    ) -> None:
+        """A modified tracked production source file MUST
+        still block worker dispatch. The recurrence fix MUST NOT
+        weaken the protected-source invariant.
+        """
+        (clean_repo / "production.py").write_text("# intentionally modified\n")
+        ok, dirty, reason = _guard()(str(clean_repo))
+        assert ok is False
+        assert reason == "uncommitted_changes"
+        assert any("production.py" in p for p in dirty)
+
+    def test_tracked_modified_test_file_still_blocks(
+        self, clean_repo: Path
+    ) -> None:
+        """A modified tracked test file MUST still block worker
+        dispatch (tests are inside the source/provenance
+        boundary and are NOT exempt).
+        """
+        test_file = clean_repo / "tests" / "test_example.py"
+        test_file.write_text("# intentionally modified\n")
+        ok, dirty, reason = _guard()(str(clean_repo))
+        assert ok is False
+        assert reason == "uncommitted_changes"
+        assert any("test_example.py" in p for p in dirty)
+
+    def test_pytest_of_with_unrelated_untracked_still_blocks(
+        self, clean_repo: Path
+    ) -> None:
+        """When a permitted ``pytest-of-max/`` tree COEXISTS
+        with an unrelated untracked source tree, the unrelated
+        source tree still blocks. The recurrence allowlist
+        ``pytest-of-`` does NOT grant a global free pass.
+        """
+        pyroot = clean_repo / "pytest-of-max"
+        pyroot.mkdir()
+        (pyroot / "pytest-1").mkdir()
+        (pyroot / "pytest-1" / "x.json").write_text("{}\n")
+        bad = clean_repo / "scratch-leak"
+        bad.mkdir()
+        (bad / "leaked.py").write_text("x=1\n")
+
+        ok, dirty, reason = _guard()(str(clean_repo))
+        assert ok is False
+        assert reason == "untracked_paths"
+        # pytest-of-max is excluded.
+        assert not any("pytest-of-max" in p for p in dirty)
+        # scratch-leak still surfaces.
+        assert any("scratch-leak" in p for p in dirty)
