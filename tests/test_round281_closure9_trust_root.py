@@ -144,14 +144,19 @@ class TestEmpiricalGateEvidenceReaders:
         from autocoder_supervisor.hermes_fingerprint import (
             _read_coderabbit_clean_head_evidence,
         )
-        # No artifact => incomplete observation, value False
+        # No artifact => value False, observation_complete
+        # TRUE (we acknowledge the gap, no fake pass).
         out = _read_coderabbit_clean_head_evidence(
             state_dir=str(tmp_path),
             expected_head="cd15d30cf65552aa3613157a3289c4d830a611f3",
         )
         assert out["value"] is False
-        assert out["observation_complete"] is False
+        assert out["observation_complete"] is True
         assert out["reason"] is not None
+        assert (
+            "no_canonical_provider_head_assessment_artifact"
+            in out["reason"]
+        )
 
     def test_coderabbit_evidence_no_artifact(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (
@@ -161,8 +166,10 @@ class TestEmpiricalGateEvidenceReaders:
             state_dir=str(tmp_path),
             expected_head="cd15d30cf65552aa3613157a3289c4d830a611f3",
         )
-        assert out["observation_complete"] is False
-        assert "no_evidence_artifact_found" in out["reason"]
+        assert (
+            "no_canonical_provider_head_assessment_artifact"
+            in out["reason"]
+        )
 
     def test_codex_evidence_returns_dict(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (
@@ -186,15 +193,14 @@ class TestEmpiricalGateEvidenceReaders:
         assert out["value"] is False
         assert out["observation_complete"] is True
 
-    def test_autonomous_provenance_evidence_parses_list_schema(
+    def test_autonomous_provenance_evidence_pending_only_fails(
         self, tmp_path,
     ):
-        # The canonical drift ledger written by
-        # `_atomic_append_drift()` is a top-level JSON list,
-        # with each entry keyed by `attempt_id` and `head_sha`
-        # rather than `id`. The reader must accept this schema
-        # and surface real `evidence_ids`, otherwise real
-        # autonomous provenance cycles are reported as absent.
+        # Closure X §4: pending drift ledger does NOT prove
+        # success. The reader records the count but
+        # value=False; autonomous provenance success
+        # requires a TERMINAL provenance artifact with
+        # a full lifecycle chain.
         from autocoder_supervisor.hermes_fingerprint import (
             _read_autonomous_provenance_evidence,
         )
@@ -224,19 +230,13 @@ class TestEmpiricalGateEvidenceReaders:
         out = _read_autonomous_provenance_evidence(
             state_dir=str(tmp_path),
         )
+        # Pending drift must NOT prove success.
         assert out["observation_complete"] is True
-        assert out["value"] is True
-        assert out["evidence_ids"] == [
-            "att-20260815T020000Z-111",
-            "att-20260815T023000Z-222",
-        ]
-        assert (
-            out["evidence_head"]
-            == "1234567890abcdef1234567890abcdef12345678"
-        )
-        assert (
-            out["reason"] == "ok_observed_autonomous_cycle"
-        )
+        assert out["value"] is False
+        assert "no_terminal_provenance_artifact" in out["reason"]
+        # evidence_ids from the pending ledger are still
+        # captured for diagnostics.
+        assert out["pending_drift_count"] == 2
 
     def test_real_deferred_retry_evidence_returns_dict(
         self, tmp_path,

@@ -143,12 +143,13 @@ def _resolve_production_runtime_binding(
     logical_filename: str,
     import_path: str,
 ) -> dict:
-    """Closure IX §6: resolve the production binding
-    from INSIDE the running supervisor process. Returns a
-    record with:
+    """Closure IX §6 + Closure X §11: resolve the production
+    binding from INSIDE the running supervisor process.
+
+    Returns a record with:
 
       logical_module
-      binding_method: "loaded_module" | "import_spec"
+      binding_method: "loaded_module" | "import_spec" | "executing_module"
       production_process_pid
       production_process_start_identity
       actual_production_path
@@ -175,6 +176,47 @@ def _resolve_production_runtime_binding(
         "actual_production_sha256": None,
         "exists": False,
     }
+    # Closure X §11: special-case the currently executing
+    # supervisor module. When running ``python3 -m supervisor``,
+    # the module is registered under multiple keys. We
+    # require the actual file currently executing as main()
+    # for supervisor.py.
+    if logical_filename == "supervisor.py":
+        import __main__ as _main
+        main_file = getattr(_main, "__file__", None) or ""
+        # Also try __main__.__spec__
+        main_spec = getattr(_main, "__spec__", None)
+        main_origin = (
+            main_spec.origin if main_spec is not None else None
+        ) or ""
+        # Choose the running main module file. If __main__ is
+        # not the supervisor module (e.g. when running tests
+        # via pytest), fall back to sys.modules lookup of
+        # the autocoder_supervisor.supervisor entry.
+        path = main_file or main_origin
+        if (
+            not path
+            or not path.endswith("supervisor.py")
+            or "autocoder_supervisor" not in path
+        ):
+            sm = _sys_bind.modules.get(
+                "autocoder_supervisor.supervisor"
+            )
+            if sm is not None and getattr(sm, "__file__", None):
+                path = sm.__file__ or ""
+        sha = None
+        if path:
+            try:
+                sha = _hash_bind.sha256(
+                    open(path, "rb").read()
+                ).hexdigest()
+            except OSError:
+                pass
+        record["binding_method"] = "executing_module"
+        record["actual_production_path"] = path
+        record["actual_production_sha256"] = sha
+        record["exists"] = bool(sha)
+        return record
     # Try (A) LOADED_MODULE
     loaded = _sys_bind.modules.get(import_path)
     if loaded is not None and getattr(loaded, "__file__", None):
@@ -265,14 +307,75 @@ def _write_acceptance_runtime_identity(cfg: SupervisorConfig) -> None:
         "AED_HERMES_BIN", "/home/max/.local/bin/hermes"
     )
 
+    # Closure X §10: kernel-backed process identity.
+    # PID can be reused; boot_id + starttime + pid + exe +
+    # cmdline digest give a non-reusable process identity.
+    supervisor_pid = _os_ari.getpid()
+    ppid = _os_ari.getppid()
+    boot_id = ""
+    try:
+        boot_id = open("/proc/sys/kernel/random/boot_id").read().strip()
+    except OSError:
+        boot_id = ""
+    start_ticks = 0
+    exe_resolved = ""
+    cmdline_sha256 = ""
+    try:
+        with open(f"/proc/{supervisor_pid}/stat") as _f:
+            _stat = _f.read()
+        # field 22 is starttime (after the command name in
+        # parens, so use rfind of ')' and split).
+        _after_paren = _stat.rfind(")")
+        _fields = _stat[_after_paren + 1:].split()
+        # field index 21 (0-based after paren) is starttime
+        if len(_fields) > 21:
+            start_ticks = int(_fields[21])
+    except (OSError, ValueError):
+        start_ticks = 0
+    try:
+        exe_resolved = _os_ari.path.realpath(
+            f"/proc/{supervisor_pid}/exe"
+        )
+    except OSError:
+        exe_resolved = ""
+    try:
+        cmdline = open(
+            f"/proc/{supervisor_pid}/cmdline", "rb"
+        ).read().split(b"\x00")
+        cmdline_str = " ".join(
+            c.decode("utf-8", "replace") for c in cmdline
+            if c
+        )
+        cmdline_sha256 = _hash_ari.sha256(
+            cmdline_str.encode("utf-8")
+        ).hexdigest()
+    except OSError:
+        cmdline_sha256 = ""
+    # Build a non-reusable process identity.
+    supervisor_process_identity = (
+        f"boot={boot_id[:12]}|start_ticks={start_ticks}|"
+        f"pid={supervisor_pid}|exe={exe_resolved[:64]}|"
+        f"cmdline_sha256={cmdline_sha256[:16]}"
+    )
+    # Launcher PID = the parent process that invoked the
+    # Python daemon. Detect by inspecting getppid().
+    launcher_pid = ppid
+
     artifact = {
         "schema_version": (
             "autocoder.acceptance_runtime_identity.v1"
         ),
-        "supervisor_pid": _os_ari.getpid(),
+        "supervisor_python_pid": supervisor_pid,
+        "launcher_pid": launcher_pid,
+        "supervisor_boot_id": boot_id,
+        "supervisor_start_ticks": start_ticks,
+        "supervisor_exe": exe_resolved,
+        "supervisor_cmdline_sha256": cmdline_sha256,
+        "supervisor_process_identity": supervisor_process_identity,
+        "supervisor_pid": supervisor_pid,  # backward-compat
         "process_start_identity": _os_ari.environ.get(
             "AED_PROCESS_START_IDENTITY", ""
-        ) or f"pid-{_os_ari.getpid()}-{_os_ari.getppid()}",
+        ) or supervisor_process_identity,
         "instance_id": cfg.instance_id,
         "repository_owner": _os_ari.environ.get(
             "AED_REPO_OWNER", ""

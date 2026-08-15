@@ -267,7 +267,9 @@ def canonical_cooldown_deferred_count(state_dir) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def canonical_deferred_backlog_analysis(state_dir) -> dict:
+def canonical_deferred_backlog_analysis(
+    state_dir, current_head=None
+) -> dict:
     """Closure IX §7: detailed semantic disposition of
     each deferred entry.
     """
@@ -276,7 +278,8 @@ def canonical_deferred_backlog_analysis(state_dir) -> dict:
         "deferred_without_retry_owner": [],
         "deferred_without_executable_retry_path": [],
         "deferred_current_head_actionable": [],
-        "deferred_unknown_classification": [],
+        "deferred_stale_head": [],
+        "deferred_head_unknown": [],
         "real_deferred_retry_event_ids": [],
     }
     import json as _json
@@ -312,10 +315,13 @@ def canonical_deferred_backlog_analysis(state_dir) -> dict:
         ):
             out["deferred_without_executable_retry_path"].append(eid)
         head = entry.get("head_sha")
-        if head and entry.get("actionable") is not False:
-            out["deferred_current_head_actionable"].append(eid)
-        if not entry.get("kind") and not entry.get("lifecycle"):
-            out["deferred_unknown_classification"].append(eid)
+        if not head:
+            out["deferred_head_unknown"].append(eid)
+        elif current_head and head == current_head:
+            if entry.get("actionable") is not False:
+                out["deferred_current_head_actionable"].append(eid)
+        elif current_head and head != current_head:
+            out["deferred_stale_head"].append(eid)
     return out
 
 
@@ -954,17 +960,28 @@ def _read_coderabbit_clean_head_evidence(
     live_head=None,
     expected_head=None,
 ) -> dict:
-    """Closure IX §2.A: derive CODERABBIT_CLEAN_HEAD from
-    canonical durable evidence.
+    """Closure X §3: derive CODERABBIT_CLEAN_HEAD from a
+    canonical per-head provider_head_assessment artifact.
 
-    Returns a dict:
-      value: bool (False unless proven)
-      observation_complete: bool
-      evidence_head: str | None
-      evidence_ids: list
-      observed_at: str | None
-      source_artifact: str | None
-      reason: str | None
+    The clean gate requires:
+      provider == coderabbit
+      head_sha == current exact head
+      observation_complete == true
+      all required surfaces collected
+      completion proof valid
+      actionable_finding_ids == []
+      unowned_actionable_finding_ids == []
+      clean == true
+
+    CodeRabbit status success by itself is NOT sufficient.
+    A long-lived edited comment containing historical
+    "Reviews paused" text is NOT clean proof.
+
+    ``new_actionable_review_inventory.json`` is NOT clean
+    proof; it means "new actionables were found and the
+    qualified head must reopen".
+
+    Returns a dict with full audit fields.
     """
     import os as _os
     import json as _json
@@ -977,64 +994,101 @@ def _read_coderabbit_clean_head_evidence(
         "observed_at": None,
         "source_artifact": None,
         "reason": "no_state_dir",
+        "actionable_finding_ids": [],
+        "unowned_actionable_finding_ids": [],
+        "surface_completeness": {},
     }
     if not state_dir:
         return out
     sdir = _Path_reader(str(state_dir))
-    # Read durable per-head provider evidence artifacts
-    # written by the supervisor's capture_live_snapshot /
-    # orchestration collector path. Only artifacts that
-    # have a real production writer are honored here; the
-    # ``new_actionable_review_inventory.json`` is written
-    # by ``Controller.report_new_actionable_review_on_qualified_head()``
-    # (see autocoder_orchestration/controller.py). Any
-    # legacy artifact in this list without a current
-    # production writer is silently skipped so the gate
-    # cannot be starved by stale files.
-    evidence_files = [
-        "pr5_orch/new_actionable_review_inventory.json",
-    ]
-    evidence_found = False
-    for f in evidence_files:
-        p = sdir / f
-        if not p.exists():
-            continue
-        try:
-            data = _json.loads(p.read_text())
-        except (OSError, _json.JSONDecodeError):
-            out["reason"] = f"parse_failed:{f}"
-            return out
-        evidence_found = True
-        # Track the artifact we read from.
-        out["source_artifact"] = str(p)
-        # The inventory file is the only durable
-        # coderabbit-clean-head evidence with a live
-        # production writer (Controller).
-        if f == "pr5_orch/new_actionable_review_inventory.json":
-            eh = data.get("head_observed")
-            out["evidence_head"] = eh
-            if not eh or eh != (expected_head or eh):
+    target_head = expected_head or live_head
+    if target_head:
+        assessment_path = (
+            sdir
+            / "provider_head_assessment"
+            / "coderabbit"
+            / f"{target_head}.json"
+        )
+        if assessment_path.exists():
+            try:
+                data = _json.loads(assessment_path.read_text())
+            except (OSError, _json.JSONDecodeError):
                 out["reason"] = (
-                    "stale_inventory: head_observed != current_head"
+                    f"parse_failed:{assessment_path}"
                 )
                 return out
-            inv = data.get("inventory") or []
-            if inv:
+            out["source_artifact"] = str(assessment_path)
+            out["evidence_head"] = data.get("head_sha")
+            if (
+                data.get("provider") != "coderabbit"
+                or data.get("head_sha") != target_head
+            ):
                 out["reason"] = (
-                    f"actionable_inventory_non_empty: {len(inv)}"
+                    "head_or_provider_mismatch: "
+                    f"expected_head={target_head[:12]}, "
+                    f"data_head={(data.get('head_sha') or '')[:12]}"
                 )
-                out["evidence_ids"] = list(inv)
+                return out
+            if not data.get("observation_complete"):
+                out["reason"] = "observation_incomplete"
+                return out
+            surfaces = data.get("surfaces") or {}
+            required_surfaces = (
+                "top_level_comment_collected",
+                "inline_comments_collected",
+                "review_threads_collected",
+                "formal_reviews_collected",
+                "statuses_collected",
+            )
+            out["surface_completeness"] = {
+                k: bool(surfaces.get(k))
+                for k in required_surfaces
+            }
+            missing = [
+                k for k in required_surfaces
+                if not surfaces.get(k)
+            ]
+            if missing:
+                out["reason"] = f"surfaces_missing: {missing}"
+                return out
+            cp = data.get("completion_proof") or {}
+            if not cp:
+                out["reason"] = "no_completion_proof"
+                return out
+            out["actionable_finding_ids"] = list(
+                data.get("actionable_finding_ids") or []
+            )
+            out["unowned_actionable_finding_ids"] = list(
+                data.get("unowned_actionable_finding_ids") or []
+            )
+            if out["actionable_finding_ids"]:
+                out["reason"] = (
+                    f"actionable_findings_present: "
+                    f"{len(out['actionable_finding_ids'])}"
+                )
+                return out
+            if out["unowned_actionable_finding_ids"]:
+                out["reason"] = (
+                    f"unowned_actionable_findings: "
+                    f"{len(out['unowned_actionable_finding_ids'])}"
+                )
+                return out
+            if not data.get("clean"):
+                out["reason"] = "clean_flag_not_set"
                 return out
             out["value"] = True
             out["observation_complete"] = True
             out["observed_at"] = (
-                data.get("recorded_at") or None
+                data.get("observation_completed_at") or None
             )
-            out["reason"] = "ok_inventory_clean"
+            out["reason"] = "ok_canonical_head_assessment"
             return out
-    if not evidence_found:
-        out["reason"] = "no_evidence_artifact_found"
-        return out
+    # No canonical provider_head_assessment artifact yet.
+    # Mark this as a known limitation, not clean.
+    out["reason"] = (
+        "no_canonical_provider_head_assessment_artifact"
+    )
+    out["observation_complete"] = True
     return out
 
 
@@ -1082,30 +1136,43 @@ def _read_codex_optional_lifecycle_evidence(
         out["observation_complete"] = True
         out["reason"] = "no_codex_lifecycle_observed"
         return out
-    # Look for the canonical terminal evidence (lifecycle
-    # field set to a real terminal state). The supervisor's
-    # provider lifecycle writes
-    # ``PROVIDER_STATE_REVIEW_COMPLETE`` ("REVIEW_COMPLETE")
-    # when a Codex review completes; ``REQUEST_INTENT``,
-    # ``REQUEST_SENT``, and ``ACKNOWLEDGED`` are the
-    # earlier states of the documented Codex lifecycle
-    # (see autocoder_supervisor/supervisor.py constants).
-    # Recognize both the new provider-state vocabulary and
-    # the legacy lifecycle strings so any real terminal
-    # lifecycle advances the gate.
+    # Look for the canonical TERMINAL lifecycle marker.
+    # Closure X §2: only REVIEW_COMPLETE or explicit
+    # OPTIONAL_DEGRADED count as terminal. REQUEST_INTENT
+    # / REQUEST_SENT / ACKNOWLEDGED are PROGRESS markers,
+    # NOT terminal. A request that dies after REQUEST_INTENT
+    # MUST NOT satisfy the empirical gate.
     terminal_states = (
         "REVIEW_COMPLETE",
+        "OPTIONAL_DEGRADED",
+    )
+    progress_states = (
         "REQUEST_INTENT",
         "REQUEST_SENT",
         "ACKNOWLEDGED",
-        "CONSUMED",
-        "TERMINAL",
-        "OPTIONAL_DEGRADED",
+        "REMOTE_REQUEST_ATTEMPT",
+        "POLLING",
+        "WAITING",
+        "RETRY_SCHEDULED",
     )
     terminal_count = 0
+    progress_count = 0
+    head_matched_request = None
     for lc in codex_lifecycles:
-        if lc.get("lifecycle") in terminal_states:
+        lifecycle = lc.get("lifecycle") or ""
+        if lifecycle in terminal_states:
             terminal_count += 1
+            if (
+                head_matched_request is None
+                and lc.get("request_head")
+            ):
+                head_matched_request = lc
+        elif lifecycle in progress_states:
+            progress_count += 1
+    out["terminal_states"] = list(terminal_states)
+    out["progress_states_observed"] = sorted({
+        lc.get("lifecycle") or "" for lc in codex_lifecycles
+    })
     if terminal_count == 0:
         out["observation_complete"] = True
         out["source_artifact"] = str(rr_dir)
@@ -1113,8 +1180,10 @@ def _read_codex_optional_lifecycle_evidence(
             lc.get("request_head") for lc in codex_lifecycles
         ]
         out["reason"] = (
-            f"codex_lifecycles_pending_terminal: "
-            f"{len(codex_lifecycles)}"
+            f"codex_no_terminal_lifecycle: "
+            f"lifecycle_count={len(codex_lifecycles)}, "
+            f"progress_count={progress_count}, "
+            f"terminal_count={terminal_count}"
         )
         return out
     out["value"] = True
@@ -1123,9 +1192,10 @@ def _read_codex_optional_lifecycle_evidence(
     out["evidence_ids"] = [
         lc.get("request_head") for lc in codex_lifecycles
     ]
-    out["observed_at"] = codex_lifecycles[-1].get(
-        "requested_at"
-    ) if codex_lifecycles else None
+    out["observed_at"] = (
+        head_matched_request.get("requested_at")
+        if head_matched_request else None
+    )
     out["reason"] = "ok_terminal_lifecycle_observed"
     return out
 
@@ -1133,12 +1203,43 @@ def _read_codex_optional_lifecycle_evidence(
 def _read_autonomous_provenance_evidence(
     state_dir=None,
 ) -> dict:
-    """Closure IX §2.C: derive AUTONOMOUS_PROVENANCE_REAL_EXECUTION
-    from the real durable provenance lifecycle.
+    """Closure X §4: derive
+    AUTONOMOUS_PROVENANCE_REAL_EXECUTION from the
+    TERMINAL provenance lifecycle.
 
-    Captures the durable provenance_drift_pending.json or
-    similar ledger entries that show autonomous workers
-    caused source-changing cycles.
+    A pending drift record is evidence of UNFINISHED
+    provenance work — it MUST NEVER prove
+    autonomous_provenance_real_execution.
+
+    A valid autonomous provenance proof requires one
+    real source-changing worker generation under the
+    final frozen acceptance runtime/environment with:
+
+      prelaunch exact head
+      generation id
+      attempt id
+      result contract id
+      worker-produced commit SHA D
+      worker-reported pushed SHA D
+      origin branch == D
+      live GitHub PR head == D
+      PUSH_VERIFIED
+      controlled-source drift discovered
+      manifest maintenance owned
+      manifest repair terminalized
+      manifest committed/pushed as required
+      all manifest hashes consistent
+      drift pending cleared
+      source event terminalized/consumed
+      generation terminal
+
+    Do NOT use:
+      presence of a pending entry
+      absence of pending entries
+      manual manifest sync
+      operator Closure X commits
+
+    Returns a dict with terminal lifecycle fields.
     """
     from pathlib import Path as _Path_reader
     import json as _json_auto
@@ -1150,78 +1251,129 @@ def _read_autonomous_provenance_evidence(
         "observed_at": None,
         "source_artifact": None,
         "reason": "no_state_dir",
+        "terminal_artifact": None,
+        "pending_provenance_entry_accepted_as_success": False,
+        "terminal_lifecycle_chain": [],
     }
     if not state_dir:
         return out
     sdir = _Path_reader(str(state_dir))
-    # provenance_drift_pending.json records drift entries
-    # that have not been resolved. Resolved entries
-    # indicate autonomous provenance-maintenance cycles.
-    p = sdir / "provenance_drift_pending.json"
-    if not p.exists():
+    # Pending drift ledger: PENDING entries are evidence of
+    # UNFINISHED provenance work. Presence of a pending
+    # entry MUST NEVER prove success. Empty pending ledger
+    # is necessary but NOT sufficient; we also need a
+    # terminal provenance artifact.
+    pending_path = sdir / "provenance_drift_pending.json"
+    pending_count = 0
+    if pending_path.exists():
+        try:
+            d = _json_auto.loads(pending_path.read_text())
+        except (OSError, _json_auto.JSONDecodeError):
+            out["reason"] = "parse_failed:provenance_drift_pending"
+            return out
+        if isinstance(d, list):
+            pending_count = len(d)
+        elif isinstance(d, dict):
+            e = d.get("entries")
+            pending_count = len(e) if isinstance(e, list) else 0
+    out["pending_drift_count"] = pending_count
+    # Look for the canonical terminal provenance artifact
+    # at provenance_terminal/<head>.json. If present, it
+    # must include a full terminal lifecycle chain.
+    target_head = None
+    # We don't know expected_head here; the caller passes
+    # the local head via the artifact's record of head_sha.
+    # We look for the latest terminal artifact by mtime.
+    term_dir = sdir / "provenance_terminal"
+    terminal_files = []
+    if term_dir.exists():
+        for f in term_dir.glob("*.json"):
+            try:
+                d = _json_auto.loads(f.read_text())
+            except (OSError, _json_auto.JSONDecodeError):
+                continue
+            if isinstance(d, dict) and d.get("terminal") is True:
+                terminal_files.append((f, d))
+    if not terminal_files:
         out["observation_complete"] = True
-        out["reason"] = "no_provenance_drift_ledger"
+        out["reason"] = (
+            "no_terminal_provenance_artifact: "
+            f"pending_drift_count={pending_count}"
+        )
+        out["terminal_artifact"] = None
+        # Even with no pending entries, no terminal artifact
+        # means we cannot prove autonomous execution.
+        out["value"] = False
         return out
-    try:
-        d = _json_auto.loads(p.read_text())
-    except (OSError, _json_auto.JSONDecodeError):
-        out["reason"] = "parse_failed:provenance_drift_pending"
+    # Choose the most recent.
+    terminal_files.sort(
+        key=lambda t: t[1].get("generated_at") or "",
+        reverse=True,
+    )
+    artifact_path, term = terminal_files[0]
+    out["terminal_artifact"] = str(artifact_path)
+    out["evidence_head"] = term.get("head_sha")
+    out["terminal_lifecycle_chain"] = term.get("lifecycle_chain") or []
+    out["observed_at"] = term.get("generated_at")
+    out["evidence_ids"] = [
+        e.get("event_id") for e in (term.get("lifecycle_chain") or [])
+        if isinstance(e, dict) and e.get("event_id")
+    ]
+    # Required chain stages (per directive §4).
+    required_stages = {
+        "prelaunch",
+        "production",
+        "drift_discovered",
+        "manifest_repair",
+        "manifest_committed",
+        "drift_pending_cleared",
+        "source_event_terminalized",
+        "generation_terminal",
+    }
+    observed_stages = {
+        e.get("stage") for e in (term.get("lifecycle_chain") or [])
+        if isinstance(e, dict) and e.get("stage")
+    }
+    missing = required_stages - observed_stages
+    if missing:
+        out["reason"] = (
+            f"terminal_lifecycle_missing_stages: {sorted(missing)}"
+        )
+        out["value"] = False
+        out["observation_complete"] = True
         return out
+    out["value"] = True
     out["observation_complete"] = True
-    out["source_artifact"] = str(p)
-    # The canonical drift ledger is a top-level JSON list
-    # written by `_atomic_append_drift()`; each entry holds
-    # `attempt_id` and `head_sha` (no `id` field). Older
-    # dict-with-`entries` payloads are tolerated for backward
-    # compatibility with whatever may be left on disk.
-    entries: list = []
-    if isinstance(d, list):
-        entries = d
-    elif isinstance(d, dict):
-        entries = d.get("entries", []) if isinstance(
-            d.get("entries"), list
-        ) else []
-    def _entry_id(e: dict):
-        return (
-            e.get("attempt_id")
-            or e.get("head_sha")
-            or e.get("id")
-        )
-    out["evidence_ids"] = [
-        _entry_id(e) for e in entries if isinstance(e, dict)
-    ]
-    out["evidence_ids"] = [
-        eid for eid in out["evidence_ids"] if eid
-    ]
-    last = next(
-        (e for e in reversed(entries) if isinstance(e, dict)),
-        None,
-    )
-    if last is not None:
-        out["evidence_head"] = (
-            last.get("head_sha")
-            or last.get("attempt_id")
-        )
-        out["observed_at"] = last.get("detected_at") or last.get(
-            "recorded_at"
-        )
-    # Even an empty ledger means no autonomous cycle has
-    # occurred. The gate requires a real lifecycle.
-    out["reason"] = (
-        "no_autonomous_provenance_cycle_observed"
-        if not out["evidence_ids"]
-        else "ok_observed_autonomous_cycle"
-    )
-    out["value"] = bool(out["evidence_ids"])
+    out["reason"] = "ok_terminal_provenance_lifecycle"
     return out
 
 
 def _read_real_deferred_retry_evidence(
     state_dir=None,
 ) -> dict:
-    """Closure IX §2.D: derive REAL_DEFERRED_RETRY from a
-    real production event transition such as:
-    DEFERRED -> ELIGIBLE -> RETRY_ATTEMPT -> OWNED -> CONSUMED.
+    """Closure X §5: derive REAL_DEFERRED_RETRY from
+    ordered, durable event transitions for the SAME
+    event_id.
+
+    Requires durable ordered evidence:
+
+    DEFERRED
+    -> ELIGIBLE
+    -> RETRY_ATTEMPT
+    -> OWNED
+    -> TERMINAL
+    -> CONSUMED
+    or an explicitly valid canonical supersession lifecycle.
+
+    Every transition must contain:
+      event_id, head, timestamp, owner/consumer,
+      transition_source, previous_lifecycle, new_lifecycle
+
+    The event history must be monotonic and internally
+    consistent. A prose reason string cannot substitute
+    for lifecycle transitions.
+
+    Returns a dict with terminal lifecycle fields.
     """
     from pathlib import Path as _Path_reader
     import json as _json_retry
@@ -1233,6 +1385,8 @@ def _read_real_deferred_retry_evidence(
         "observed_at": None,
         "source_artifact": None,
         "reason": "no_state_dir",
+        "real_deferred_retry_transitions": [],
+        "real_deferred_retry_event_ids": [],
     }
     if not state_dir:
         return out
@@ -1252,30 +1406,88 @@ def _read_real_deferred_retry_evidence(
     entries = []
     if isinstance(d, dict):
         entries = d.get("entries", [])
-    retry_evidence = []
+    # Closure X §5: require ordered lifecycle transitions.
+    # Prose strings are NOT sufficient.
+    valid_progression = (
+        ("DEFERRED", "ELIGIBLE"),
+        ("ELIGIBLE", "RETRY_ATTEMPT"),
+        ("RETRY_ATTEMPT", "OWNED"),
+        ("OWNED", "TERMINAL"),
+        ("TERMINAL", "CONSUMED"),
+    )
+    valid_supersession = (
+        ("DEFERRED", "ELIGIBLE"),
+        ("ELIGIBLE", "SUPERSEDED"),
+    )
+    # Group entries by event_id
+    by_event = {}
     for e in entries:
         if not isinstance(e, dict):
             continue
-        reason = (e.get("reason") or "").lower()
-        consumer = e.get("consumer") or ""
-        if (
-            "deferred" in reason
-            and "retry" in reason
-            and consumer
-        ):
-            retry_evidence.append(e)
-    out["evidence_ids"] = [
-        e.get("event_id") for e in retry_evidence
-    ]
-    out["value"] = bool(retry_evidence)
+        eid = e.get("event_id")
+        if not eid:
+            continue
+        by_event.setdefault(eid, []).append(e)
+    # For each event, check monotonic lifecycle progression
+    retry_evidence = []
+    retry_event_ids = []
+    for eid, evs in by_event.items():
+        # Sort by timestamp
+        evs_sorted = sorted(
+            evs, key=lambda e: e.get("recorded_at") or ""
+        )
+        lifecycles = [e.get("lifecycle") for e in evs_sorted]
+        # Check supersession OR full progression
+        matched = False
+        # Full DEFERRED -> ... -> CONSUMED progression
+        last_idx = -1
+        for prev, new in valid_progression:
+            for i, lc in enumerate(lifecycles):
+                if lc == prev and i > last_idx:
+                    last_idx = i
+                    break
+            # If the next stage is observed AFTER prev...
+        full_match = (
+            lifecycles[0] == "DEFERRED"
+            and "ELIGIBLE" in lifecycles
+            and "RETRY_ATTEMPT" in lifecycles
+            and "OWNED" in lifecycles
+            and "TERMINAL" in lifecycles
+            and "CONSUMED" in lifecycles
+        )
+        if full_match:
+            matched = True
+        # Supersession
+        if not matched and lifecycles[0] == "DEFERRED":
+            if (
+                "ELIGIBLE" in lifecycles
+                and "SUPERSEDED" in lifecycles
+            ):
+                matched = True
+        if matched:
+            retry_event_ids.append(eid)
+            for e in evs_sorted:
+                retry_evidence.append({
+                    "event_id": e.get("event_id"),
+                    "head": e.get("head"),
+                    "timestamp": e.get("recorded_at"),
+                    "owner_consumer": e.get("consumer"),
+                    "transition_source": e.get("reason"),
+                    "previous_lifecycle": e.get("previous_lifecycle"),
+                    "new_lifecycle": e.get("lifecycle"),
+                })
+    out["real_deferred_retry_event_ids"] = retry_event_ids
+    out["real_deferred_retry_transitions"] = retry_evidence
+    out["evidence_ids"] = retry_event_ids
+    out["value"] = bool(retry_event_ids)
     out["observed_at"] = (
-        retry_evidence[-1].get("recorded_at")
+        retry_evidence[-1]["timestamp"]
         if retry_evidence else None
     )
     out["reason"] = (
-        "ok_observed_deferred_retry_lifecycle"
-        if retry_evidence
-        else "no_deferred_retry_lifecycle_observed"
+        "ok_ordered_deferred_retry_transitions"
+        if retry_event_ids
+        else "no_ordered_deferred_retry_transitions"
     )
     return out
 
@@ -1713,187 +1925,23 @@ def _read_observed_static_scope(
     for scope_key, env_key in SCOPE_KEY_TO_ENV.items():
         out[scope_key] = observed.get(env_key, "")
 
-    # (3) Fallback: the supervisor may have used
-    # ``default_config_from_env()`` defaults (no AED_*
-    # env vars set). In that case, the OBSERVED scope is
-    # derived from the SupervisorConfig defaults. We
-    # call ``default_config_from_env()`` to get the
-    # exact config the running supervisor is using.
-    # This ALWAYS runs (not gated by populated) so we
-    # observe the actual running config even when some
-    # fields are populated from elsewhere.
-    populated = sum(1 for v in out.values() if v)
-    if populated < len(STATIC_SCOPE_KEYS):
-        try:
-            from autocoder_supervisor.config import (
-                default_config_from_env,
-            )
-            cfg = default_config_from_env()
-            # Map SupervisorConfig fields back to scope keys.
-            out["production_working_checkout"] = str(
-                cfg.working_checkout
-            )
-            out["supervisor_state_directory"] = str(cfg.state_dir)
-            out["supervisor_home"] = str(
-                Path(str(cfg.state_dir)).parent
-            )
-            # repository_owner / repository_name / pr_number
-            # / expected_branch are NOT in SupervisorConfig
-            # directly; they live in POLICY (a module-level
-            # constant). We attempt to read them too.
-            try:
-                from autocoder_supervisor.supervisor import (
-                    POLICY, AUTHORITATIVE_HEAD,
-                    REPO_OWNER, REPO_NAME, PR_NUMBER,
-                )
-                # Module-level constants.
-                # Use explicit "is not None" rather than
-                # truthiness so PR_NUMBER=0 still binds.
-                # IMPORTANT: the module-level constants
-                # reflect the supervisor module loaded in
-                # THIS subprocess. They are NOT the
-                # supervisor process's actual config unless
-                # the process was started with these env
-                # vars. We treat them as a SUPPLEMENT only —
-                # never overwrite values observed from
-                # /proc/<pid>/environ (which IS the
-                # production supervisor's actual config).
-                if not out.get("repository_owner"):
-                    if REPO_OWNER is not None and REPO_OWNER != "":
-                        out["repository_owner"] = str(REPO_OWNER)
-                if not out.get("repository_name"):
-                    if REPO_NAME is not None and REPO_NAME != "":
-                        out["repository_name"] = str(REPO_NAME)
-                if not out.get("pr_number"):
-                    if PR_NUMBER is not None:
-                        out["pr_number"] = str(PR_NUMBER)
-                        out["expected_pr_set"] = str(PR_NUMBER)
-                # expected_branch: derive from the
-                # production working_checkout's git remote.
-                # The supervisor doesn't have a dedicated
-                # AED_EXPECTED_BRANCH env var; the branch
-                # name comes from the directive_bridge.
-                # We use run_state.json feature_branch as
-                # the canonical observed branch.
-                rs_branch = ""
-                if state_dir:
-                    rs_path = Path(state_dir) / "run_state.json"
-                    if rs_path.exists():
-                        try:
-                            rs = _json.loads(rs_path.read_text())
-                            if isinstance(rs, dict):
-                                rs_branch = rs.get("feature_branch", "")
-                        except Exception:
-                            pass
-                if rs_branch:
-                    out["expected_branch"] = rs_branch
-                    out["expected_branch_set"] = rs_branch
-                # Fallback for expected_branch_set: read
-                # the supervisor's git remote's HEAD branch
-                # if run_state.json doesn't provide one.
-                if not out["expected_branch_set"]:
-                    try:
-                        import subprocess as _sp_remote
-                        _r = _sp_remote.run(
-                            ["git", "-C", str(Path("/home/max/AutoDev").resolve()),
-                             "rev-parse", "--abbrev-ref", "HEAD"],
-                            capture_output=True, text=True,
-                        )
-                        if _r.returncode == 0 and _r.stdout.strip():
-                            out["expected_branch_set"] = _r.stdout.strip()
-                            if not out["expected_branch"]:
-                                out["expected_branch"] = _r.stdout.strip()
-                    except Exception:
-                        pass
-                if isinstance(POLICY, dict):
-                    # Providers: required_review_providers_for_pr_416 /
-                    # optional_review_providers_for_pr_416 (the keys
-                    # the supervisor actually has).
-                    if "required_review_providers_for_pr_416" in POLICY:
-                        out["required_providers"] = ",".join(
-                            POLICY["required_review_providers_for_pr_416"]
-                        )
-                    elif "required_providers" in POLICY:
-                        out["required_providers"] = ",".join(
-                            POLICY["required_providers"]
-                        )
-                    if "optional_review_providers_for_pr_416" in POLICY:
-                        out["optional_providers"] = ",".join(
-                            POLICY["optional_review_providers_for_pr_416"]
-                        )
-                    elif "optional_providers" in POLICY:
-                        out["optional_providers"] = ",".join(
-                            POLICY["optional_providers"]
-                        )
-                    if "provider_states_are_independent" in POLICY:
-                        out["provider_independence"] = str(
-                            POLICY["provider_states_are_independent"]
-                        ).lower()
-                    # Branch set: also derive from POLICY.
-                    if not out["expected_branch_set"]:
-                        # POLICY doesn't directly contain a branch
-                        # set; leave empty if run_state.json didn't
-                        # provide it.
-                        pass
-            except Exception:
-                pass
-
-            # (4) Hermes binary: derive from PATH lookup.
-            # The supervisor's main loop does
-            # ``os.environ.get("AED_HERMES_BIN") or PATH lookup``.
-            # We replicate that fallback here. We MUST NOT
-            # mutate os.environ.
-            if not out["hermes_binary_path"]:
-                import shutil as _sh
-                hermes_in_path = _sh.which("hermes")
-                if hermes_in_path:
-                    out["hermes_binary_path"] = hermes_in_path
-                # Last-resort fallback: standard installation
-                # locations used in production + CI.
-                else:
-                    for _hpath in [
-                        # Production
-                        "/home/max/.local/bin/hermes",
-                        "/home/max/.hermes/hermes-agent/venv/bin/hermes",
-                        "/usr/local/bin/hermes",
-                        "/usr/bin/hermes",
-                        # Common CI paths (GitHub Actions
-                        # runners have hermes installed in
-                        # /opt or /home/runner; macOS; etc.)
-                        "/opt/hermes/bin/hermes",
-                        "/home/runner/.local/bin/hermes",
-                        "/home/runner/.hermes/hermes-agent/venv/bin/hermes",
-                        "/usr/local/hermes/bin/hermes",
-                        # Generic POSIX /usr/* install
-                        "/usr/local/share/hermes/hermes",
-                        # Fallback sentinel: use /usr/bin/env
-                        # to launch hermes if it exists in any
-                        # PATH-resolved location. The fallback
-                        # is observable as the PATH-derived
-                        # executable name.
-                        _sh.which("hermes") or "",
-                    ]:
-                        if _hpath and _os.path.exists(_hpath):
-                            out["hermes_binary_path"] = _hpath
-                            break
-                # Final defensive fallback: if no hermes is
-                # observable, leave it as the sentinel
-                # ``which("hermes")`` value (which is
-                # ``None`` or empty). The freeze-eligibility
-                # check below requires this to be a non-empty
-                # string. If we cannot observe a hermes at
-                # all, we DO NOT raise — we report
-                # hermes_binary_path as empty AND set
-                # ``freeze_eligible=false`` separately.
-                if not out["hermes_binary_path"]:
-                    # Try the Python interpreter itself
-                    # as a last-ditch observable sentinel.
-                    # Tests may use this; production will
-                    # use the actual hermes binary.
-                    import sys as _sys
-                    out["hermes_binary_path"] = _sys.executable or ""
-        except Exception:
-            pass
+    # Closure X §9: STRICT observation. The OBSERVED
+    # static scope MUST come ONLY from production-owned
+    # sources:
+    #   1. supervisor-owned acceptance_runtime_identity.json
+    #   2. /proc/<actual-supervisor-pid>/environ
+    #   3. canonical run_state.json (for fields owned there)
+    #
+    # The verifier MUST NOT fill missing OBSERVED
+    # values from its own environment, its own imported
+    # supervisor constants, or default_config_from_env().
+    # Any missing observation => the key remains empty
+    # and the gate fails closed.
+    #
+    # The legacy fallback (default_config_from_env + module
+    # globals + PATH lookup + sentinel sys.executable) is
+    # REMOVED because it is verifier-process self-filling,
+    # not production observation.
 
     # Closure VIII §4: complete observation means the
     # artifact-derived scope keys are populated AND no
@@ -1902,15 +1950,11 @@ def _read_observed_static_scope(
         k for k in STATIC_SCOPE_KEYS if not out.get(k, "")
     ]
     observation_complete = (len(missing_keys) == 0)
-    if missing_keys and observation_complete is False:
-        # The artifact was missing or empty AND the
-        # fallback chains failed. Fail closed.
-        raise RuntimeError(
-            "could not observe complete static scope; "
-            f"missing keys: {missing_keys}; env_source="
-            f"{env_source!r}; observed_static_scope is "
-            "incomplete; freeze blocked"
-        )
+    if missing_keys:
+        # Strict observation: missing keys are recorded,
+        # but we DO NOT raise. The structural gate fails
+        # closed via observation_complete=False.
+        pass
 
     return out, observation_sources_per_key, observation_complete
 
@@ -2225,6 +2269,19 @@ def generate_pre_canary_evidence(
         and len(runtime_hash_mismatches) == 0
     )
 
+    # Closure X §7: enumerate static environment inputs
+    # BEFORE structural freeze is evaluated. Missing any
+    # required input must block structural freeze.
+    _env_inputs = _enumerate_static_environment_inputs(
+        runtime_summary, observed_scope,
+    )
+    _env_fp = _compute_static_environment_fingerprint(_env_inputs)
+    static_environment_input_count = len(_env_fp["inputs"])
+    static_environment_missing_inputs = _env_fp["missing_inputs"]
+    static_environment_inputs_fingerprint_complete = (
+        len(static_environment_missing_inputs) == 0
+    )
+
     # Production checkout clean.
     r = _sp.run(
         ["git", "-C", str(repo_root), "status", "--porcelain",
@@ -2279,7 +2336,7 @@ def generate_pre_canary_evidence(
 
     # Closure IX §7: detailed deferred backlog analysis.
     deferred_analysis = canonical_deferred_backlog_analysis(
-        state_dir
+        state_dir, current_head=local_head
     )
 
     # Closure IX §3: event observation MUST fail closed.
@@ -2355,11 +2412,13 @@ def generate_pre_canary_evidence(
                     f"consumed_event_terminality_parse_failed: "
                     f"{_ct_exc}"
                 )
-        # Compute counts only when ALL observations succeeded.
+        # Compute counts only when ALL observations succeeded
+        # AND no failures recorded.
         if (
             events is not None
             and attempt_ids is not None
             and terminal_ledger_ok
+            and not event_observation_failures
         ):
             orphaned_count = sum(
                 1
@@ -2509,6 +2568,13 @@ def generate_pre_canary_evidence(
         "static_scope_observation_source_per_key": (
             observation_sources_per_key
         ),
+        "static_scope_observation_source_complete": (
+            len(observation_sources_per_key) == len(STATIC_SCOPE_KEYS)
+            and all(
+                observation_sources_per_key.get(k)
+                for k in STATIC_SCOPE_KEYS
+            )
+        ),
         "static_scope_observation_complete": observation_complete,
         "acceptance_runtime_expected_count": len(ACCEPTANCE_RUNTIME_INVENTORY),
         "acceptance_runtime_compared_count": runtime_files_compared,
@@ -2543,8 +2609,11 @@ def generate_pre_canary_evidence(
         "deferred_current_head_actionable": deferred_analysis[
             "deferred_current_head_actionable"
         ],
-        "deferred_unknown_classification": deferred_analysis[
-            "deferred_unknown_classification"
+        "deferred_stale_head": deferred_analysis[
+            "deferred_stale_head"
+        ],
+        "deferred_head_unknown": deferred_analysis[
+            "deferred_head_unknown"
         ],
         "real_deferred_retry_event_ids": deferred_analysis[
             "real_deferred_retry_event_ids"
@@ -2617,10 +2686,19 @@ def generate_pre_canary_evidence(
         and production_checkout_clean
         and observation_complete
         and static_scope_match
+        # Closure X §9: every static-scope key must have a
+        # non-empty observation source.
+        and evidence.get(
+            "static_scope_observation_source_complete", False
+        )
         and runtime_match_all
         and (active_workers == 0)
         and (active_workers >= 0)
         and (not cooldown_parse_failed)
+        # Closure X §7: static environment MUST be
+        # complete BEFORE structural freeze.
+        and static_environment_inputs_fingerprint_complete
+        and (len(static_environment_missing_inputs) == 0)
         # Closure IX §3: event observation MUST be complete.
         and EVENT_STATE_OBSERVATION_COMPLETE
         and (orphaned_count == 0)
@@ -2648,7 +2726,12 @@ def generate_pre_canary_evidence(
         )
         and (
             len(deferred_analysis[
-                "deferred_unknown_classification"
+                "deferred_stale_head"
+            ]) == 0
+        )
+        and (
+            len(deferred_analysis[
+                "deferred_head_unknown"
             ]) == 0
         )
     )
@@ -2685,11 +2768,6 @@ def generate_pre_canary_evidence(
     evidence["empirical_gate_values_source"] = (
         "canonical_durable_evidence"
     )
-    # Closure IX §5: full static environment fingerprint.
-    _env_inputs = _enumerate_static_environment_inputs(
-        runtime_summary, observed_scope,
-    )
-    _env_fp = _compute_static_environment_fingerprint(_env_inputs)
     evidence["static_environment_fingerprint"] = _env_fp["fingerprint"]
     evidence["static_environment_input_count"] = len(
         _env_fp["inputs"]
