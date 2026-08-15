@@ -670,6 +670,7 @@ def _committed_bytes(repo_root: Path, head_sha: str, rel_path: str) -> bytes:
     r = subprocess.run(
         ["git", "-C", str(repo_root), "show", f"{head_sha}:{rel_path}"],
         capture_output=True,
+        timeout=5,
     )
     if r.returncode != 0:
         err = r.stderr.decode()[:200]
