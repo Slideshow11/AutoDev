@@ -11123,6 +11123,33 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             "latest_review_ts": recent_review_ts,
             "latest_comment_id": latest_comment_id,
         }
+    # Round-590/P1: persist the canonical per-head
+    # ``provider_head_assessment/coderabbit/<head>.json``
+    # artifact that the clean-head reader requires. Without
+    # this writer the gate would always fail with
+    # ``no_canonical_provider_head_assessment_artifact``.
+    try:
+        from autocoder_supervisor.hermes_fingerprint import (
+            persist_coderabbit_head_assessment,
+        )
+        _state_dir_for_assessment = (
+            globals().get("STATE_DIR") or ""
+        )
+        _head_for_assessment = (
+            globals().get("AUTHORITATIVE_HEAD") or ""
+        )
+        snap["coderabbit_head_assessment"] = (
+            persist_coderabbit_head_assessment(
+                snap=snap,
+                state_dir=str(_state_dir_for_assessment),
+                expected_head=_head_for_assessment,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        snap["coderabbit_head_assessment"] = {
+            "written_path": None,
+            "error": f"persist_failed:{exc}",
+        }
     return snap
 
 

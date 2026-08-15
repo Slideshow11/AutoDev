@@ -999,6 +999,348 @@ def _read_expected_static_scope() -> dict:
 # override.
 
 
+def _collect_coderabbit_exact_head_surfaces(
+    snap,
+    expected_head,
+) -> dict:
+    """Closure X §3 + Round-590/P1: derive the canonical
+    surface map for the CodeRabbit head_assessment artifact
+    from a live supervisor snapshot.
+
+    Returns a dict with:
+
+      - ``statuses_collected``       : bool — at least one
+        CodeRabbit issue comment is present in the snapshot
+        that names the exact head.
+      - ``top_level_comment_collected``: bool — at least one
+        CodeRabbit top-level issue comment is present.
+      - ``inline_comments_collected``: bool — at least one
+        CodeRabbit inline review comment is present.
+      - ``review_threads_collected``: bool — the snapshot
+        carries a ``review_threads`` mapping.
+      - ``formal_reviews_collected``: bool — at least one
+        CodeRabbit formal review record is present.
+      - ``actionable_finding_ids``  : list of thread ids that
+        are still unresolved AND bound to this head.
+      - ``unowned_actionable_finding_ids``: list of unresolved
+        thread ids whose owner is unknown.
+      - ``completion_proof``        : dict with at minimum
+        ``exact_head_status`` (one of ``success`` /
+        ``in_progress`` / ``paused``) and the source
+        comment id when present.
+      - ``clean``                   : bool — surfaces_complete
+        AND actionable_finding_ids == [] AND
+        unowned_actionable_finding_ids == [].
+
+    The caller (``persist_coderabbit_head_assessment``) MUST
+    only persist the artifact when ``observation_complete``
+    can be computed; this helper NEVER marks observation
+    complete — the caller decides based on the live snapshot.
+    """
+    out = {
+        "statuses_collected": False,
+        "top_level_comment_collected": False,
+        "inline_comments_collected": False,
+        "review_threads_collected": False,
+        "formal_reviews_collected": False,
+        "actionable_finding_ids": [],
+        "unowned_actionable_finding_ids": [],
+        "completion_proof": {},
+        "clean": False,
+    }
+    if not isinstance(snap, dict):
+        return out
+    target_head = (expected_head or "").strip()
+    if not target_head:
+        return out
+    # Try multiple head-prefix lengths so we accept both the
+    # canonical 40-char sha and the 7-char short-sha that
+    # GitHub UI embeds in CodeRabbit review status comments.
+    head_prefixes = sorted(
+        {target_head[:n] for n in (7, 8, 9, 10, 12, 40)
+         if len(target_head) >= n},
+        key=len, reverse=True,
+    )
+    # 1. Formal reviews bound to this head.
+    formal_reviews = []
+    for r in snap.get("formal_reviews", []) or []:
+        if not isinstance(r, dict):
+            continue
+        if r.get("provider") != "coderabbit":
+            continue
+        cid = r.get("commit_id") or ""
+        if not cid:
+            continue
+        if (
+            cid == target_head
+            or target_head.startswith(cid)
+            or cid.startswith(target_head)
+        ):
+            formal_reviews.append(r)
+    out["formal_reviews_collected"] = bool(formal_reviews)
+    # 2. Inline review comments authored by coderabbit.
+    inline_comments = []
+    for c in snap.get("review_comments", []) or []:
+        if not isinstance(c, dict):
+            continue
+        user = (c.get("user") or {}).get("login") or ""
+        if "coderabbitai" not in user.lower():
+            continue
+        # Inline review comments are intrinsically bound to
+        # the commit they reviewed; the snapshot collector
+        # already filters by the current head's review API.
+        inline_comments.append(c)
+    out["inline_comments_collected"] = bool(inline_comments)
+    # 3. Issue comments authored by coderabbit at this head.
+    status_comment = None
+    top_level = []
+    for c in snap.get("issue_comments", []) or []:
+        if not isinstance(c, dict):
+            continue
+        user = (c.get("user") or {}).get("login") or ""
+        if "coderabbitai" not in user.lower():
+            continue
+        top_level.append(c)
+        body = (c.get("body") or "").lower()
+        body_has_head = any(
+            p in body for p in head_prefixes
+        )
+        if body_has_head and (
+            "i will review" in body
+            or "all findings addressed" in body
+            or "review finished" in body
+            or "review completed" in body
+            or "completed" in body
+        ):
+            if status_comment is None:
+                status_comment = c
+            continue
+        # Fallback: any coderabbit top-level comment whose
+        # body mentions the exact head.
+        if body_has_head and status_comment is None:
+            status_comment = c
+    out["top_level_comment_collected"] = bool(top_level)
+    out["statuses_collected"] = bool(status_comment)
+    # 4. Review threads bound to this head (unresolved only).
+    actionable = []
+    unowned = []
+    threads = snap.get("review_threads", {}) or {}
+    for tid, state in threads.items():
+        if not isinstance(state, dict):
+            continue
+        if state.get("resolved") or state.get("outdated"):
+            continue
+        owner = state.get("owner") or state.get("provider") or ""
+        actionable.append(str(tid))
+        if not owner:
+            unowned.append(str(tid))
+    out["actionable_finding_ids"] = actionable
+    out["unowned_actionable_finding_ids"] = unowned
+    out["review_threads_collected"] = isinstance(threads, dict)
+    # 5. Completion proof: classify the latest status comment.
+    completion_proof = {}
+    if status_comment:
+        body = (status_comment.get("body") or "").lower()
+        cid = status_comment.get("id")
+        if "review completed" in body or "all findings addressed" in body:
+            completion_proof["exact_head_status"] = "success"
+        elif "in progress" in body or "review in progress" in body:
+            completion_proof["exact_head_status"] = "in_progress"
+        elif "paused" in body:
+            completion_proof["exact_head_status"] = "paused"
+        else:
+            completion_proof["exact_head_status"] = "unknown"
+        if cid is not None:
+            completion_proof["status_comment_id"] = cid
+    else:
+        completion_proof["exact_head_status"] = "no_status"
+    out["completion_proof"] = completion_proof
+    surfaces_complete = (
+        out["statuses_collected"]
+        and out["top_level_comment_collected"]
+        and out["inline_comments_collected"]
+        and out["review_threads_collected"]
+        and out["formal_reviews_collected"]
+        and bool(formal_reviews)
+    )
+    out["clean"] = (
+        surfaces_complete
+        and not actionable
+        and not unowned
+        and completion_proof.get("exact_head_status") == "success"
+    )
+    return out
+
+
+def persist_coderabbit_head_assessment(
+    *,
+    snap,
+    state_dir,
+    expected_head,
+    now_iso_fn=None,
+) -> dict:
+    """Round-590/P1: persist the canonical per-head
+    ``provider_head_assessment/coderabbit/<head>.json``
+    artifact that ``_read_coderabbit_clean_head_evidence``
+    requires.
+
+    Without this writer the clean-gate reader would always
+    return ``no_canonical_provider_head_assessment_artifact``
+    for genuinely clean CodeRabbit reviews. The relay's
+    own observation pipeline already produces the surfaces;
+    this function materializes them into the canonical
+    artifact path.
+
+    Behavior:
+      - ``snap`` must be a live supervisor snapshot (the
+        output of ``capture_live_snapshot``); only the keys
+        ``formal_reviews``, ``review_comments``,
+        ``issue_comments``, ``review_threads``,
+        ``_provider_issue_comments``, ``head_sha`` are read.
+      - The artifact is written atomically via a tmp file
+        + ``os.replace`` so a crash mid-write never leaves
+        a half-written JSON file.
+      - When ``state_dir`` already holds a previous
+        assessment for a DIFFERENT head, the previous
+        artifact is rotated to ``<old>.superseded.json``
+        so the audit trail is preserved while the active
+        artifact always points at the current head.
+      - Returns a dict with ``written_path``,
+        ``observation_complete``, ``clean``, and the
+        surfaces map. The caller MUST surface this dict
+        so the rest of the supervisor can refuse
+        qualification on stale evidence.
+
+    Failure modes:
+      - ``snap`` is None / not a dict: returns
+        ``written_path=None``, ``observation_complete=False``.
+      - ``expected_head`` is missing: returns the same.
+      - Any ``OSError`` during write is caught and
+        returned in ``error``; the supervisor can refuse
+        qualification rather than silently fabricate.
+    """
+    import json as _json
+    import os as _os
+    import shutil as _shutil
+    from pathlib import Path as _Path_writer
+
+    out = {
+        "written_path": None,
+        "rotated_paths": [],
+        "observation_complete": False,
+        "clean": False,
+        "surfaces": {},
+        "error": None,
+    }
+    if not isinstance(snap, dict):
+        out["error"] = "snap_not_dict"
+        return out
+    if not state_dir:
+        out["error"] = "no_state_dir"
+        return out
+    target_head = (expected_head or "").strip()
+    if not target_head:
+        out["error"] = "no_expected_head"
+        return out
+    sdir = _Path_writer(str(state_dir))
+    asm_root = sdir / "provider_head_assessment" / "coderabbit"
+    # Rotate any existing artifact that does NOT match the
+    # current head. The active artifact MUST always be the
+    # current head's record; older heads move aside so the
+    # audit trail is preserved.
+    if asm_root.exists():
+        for p in asm_root.glob("*.json"):
+            name = p.name
+            if name.endswith(".superseded.json"):
+                continue
+            stem = name[:-5]  # strip ".json"
+            if stem == target_head:
+                continue
+            try:
+                rotated = p.with_name(f"{stem}.superseded.json")
+                p.replace(rotated)
+                out["rotated_paths"].append(str(rotated))
+            except OSError as exc:  # noqa: BLE001
+                out["error"] = f"rotate_failed:{p}:{exc}"
+                return out
+    # Collect the canonical surfaces from the snapshot.
+    surfaces = _collect_coderabbit_exact_head_surfaces(
+        snap, target_head
+    )
+    out["surfaces"] = surfaces
+    surfaces_complete = (
+        bool(surfaces.get("statuses_collected"))
+        and bool(surfaces.get("top_level_comment_collected"))
+        and bool(surfaces.get("inline_comments_collected"))
+        and bool(surfaces.get("review_threads_collected"))
+        and bool(surfaces.get("formal_reviews_collected"))
+    )
+    out["observation_complete"] = surfaces_complete
+    out["clean"] = bool(surfaces.get("clean"))
+    # Persist only when observation actually completed; a
+    # partial observation MUST NOT produce a canonical
+    # artifact that the reader might interpret as evidence.
+    if not surfaces_complete:
+        return out
+    if now_iso_fn is None:
+        from datetime import datetime as _dt, timezone as _tz
+        now_iso_fn = lambda: _dt.now(_tz.utc).isoformat()  # noqa: E731
+    artifact = {
+        "schema_version": "autocoder.provider_head_assessment.v1",
+        "provider": "coderabbit",
+        "head_sha": target_head,
+        "observation_complete": True,
+        "observation_completed_at": now_iso_fn(),
+        "surfaces": {
+            "top_level_comment_collected": bool(
+                surfaces.get("top_level_comment_collected")
+            ),
+            "inline_comments_collected": bool(
+                surfaces.get("inline_comments_collected")
+            ),
+            "review_threads_collected": bool(
+                surfaces.get("review_threads_collected")
+            ),
+            "formal_reviews_collected": bool(
+                surfaces.get("formal_reviews_collected")
+            ),
+            "statuses_collected": bool(
+                surfaces.get("statuses_collected")
+            ),
+        },
+        "completion_proof": dict(surfaces.get("completion_proof") or {}),
+        "actionable_finding_ids": list(
+            surfaces.get("actionable_finding_ids") or []
+        ),
+        "unowned_actionable_finding_ids": list(
+            surfaces.get("unowned_actionable_finding_ids") or []
+        ),
+        "clean": bool(surfaces.get("clean")),
+    }
+    asm_root.mkdir(parents=True, exist_ok=True)
+    final_path = asm_root / f"{target_head}.json"
+    tmp_path = final_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            _json.dump(artifact, fh, sort_keys=True)
+            fh.flush()
+            _os.fsync(fh.fileno())
+        _os.replace(tmp_path, final_path)
+    except OSError as exc:  # noqa: BLE001
+        out["error"] = f"write_failed:{final_path}:{exc}"
+        # Best-effort cleanup of the tmp file.
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        return out
+    # _shutil is imported for symmetry / future fsync use.
+    _ = _shutil  # noqa: F841
+    out["written_path"] = str(final_path)
+    return out
+
+
 def _read_coderabbit_clean_head_evidence(
     state_dir=None,
     live_head=None,
