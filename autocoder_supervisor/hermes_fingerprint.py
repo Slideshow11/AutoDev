@@ -251,6 +251,17 @@ def canonical_cooldown_deferred_count(state_dir) -> dict:
         out["parse_failed"] = True
         return out
     entries = cd.get("entries")
+    if "entries" in cd and not isinstance(entries, list):
+        # ``entries`` is present but is NOT a list. The
+        # container itself is malformed: a dict/str/int/null
+        # at this position can never be a valid deferred
+        # ledger. Silently falling through to the legacy
+        # ``ids`` path (or returning count=0 / parse_failed=
+        # False when neither path matches) opens a freeze-
+        # bypass because the structural-freeze predicate
+        # keys off ``parse_failed``. Fail closed.
+        out["parse_failed"] = True
+        return out
     if isinstance(entries, list) and entries:
         # Per-entry validation: every entry MUST be a dict
         # with a non-None ``id``. A malformed entry (null,
@@ -277,6 +288,13 @@ def canonical_cooldown_deferred_count(state_dir) -> dict:
         out["count"] = valid_count
         return out
     legacy = cd.get("ids", [])
+    if "ids" in cd and not isinstance(legacy, list):
+        # Legacy container is present but is NOT a list.
+        # Same freeze-bypass risk as the ``entries`` branch:
+        # a non-list ``ids`` value (e.g. ``{}``) silently
+        # passes with parse_failed=False. Fail closed.
+        out["parse_failed"] = True
+        return out
     if isinstance(legacy, list):
         # Legacy path: every id MUST be a non-None scalar.
         # A list containing null/strings-without-meaning/
