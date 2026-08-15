@@ -252,13 +252,57 @@ def canonical_cooldown_deferred_count(state_dir) -> dict:
         return out
     entries = cd.get("entries")
     if isinstance(entries, list) and entries:
+        # Per-entry validation: every entry MUST be a dict
+        # with a non-None ``id``. A malformed entry (null,
+        # string, dict without ``id``, etc.) MUST fail the
+        # parse closed so the structural-freeze predicate
+        # cannot bypass on a corrupted ledger. The downstream
+        # ``canonical_deferred_backlog_analysis`` silently
+        # discards such entries; without this guard, the
+        # count parser would still report a non-zero backlog
+        # with parse_failed=False, opening a freeze-bypass.
+        valid_count = 0
+        malformed = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                malformed += 1
+                continue
+            if entry.get("id") is None:
+                malformed += 1
+                continue
+            valid_count += 1
         out["entries_count"] = len(entries)
-        out["count"] = out["entries_count"]
+        if malformed > 0:
+            out["parse_failed"] = True
+        out["count"] = valid_count
         return out
     legacy = cd.get("ids", [])
     if isinstance(legacy, list):
+        # Legacy path: every id MUST be a non-None scalar.
+        # A list containing null/strings-without-meaning/
+        # dicts/etc. is malformed and MUST fail closed.
+        valid_count = 0
+        malformed = 0
+        for item in legacy:
+            if item is None:
+                malformed += 1
+                continue
+            # In the legacy schema ``ids`` is a list of
+            # scalar ids (typically strings). Booleans are
+            # excluded because Python treats True/False as
+            # ints; non-bool scalars (str/int/float) are the
+            # only valid shapes here.
+            if isinstance(item, bool):
+                malformed += 1
+                continue
+            if not isinstance(item, (str, int, float)):
+                malformed += 1
+                continue
+            valid_count += 1
         out["legacy_ids_count"] = len(legacy)
-        out["count"] = out["legacy_ids_count"]
+        if malformed > 0:
+            out["parse_failed"] = True
+        out["count"] = valid_count
     return out
 
 
