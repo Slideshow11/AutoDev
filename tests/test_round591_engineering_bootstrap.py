@@ -913,15 +913,23 @@ def test_provenance_finalize_provenance_finalize_constant_present():
     """The canonical ``MANIFEST_CONTROLLED_PATHS`` list is
     re-exported by the production provenance module. A
     worker pre-commit hook can therefore enumerate the
-    set deterministically."""
+    set deterministically.
+
+    Round-663 P1: the canonical set is now DERIVED from
+    the canonical extraction manifest at call time (it is
+    no longer a hard-coded tuple). The membership test
+    therefore pins entries that the manifest actually
+    records, not stale historical entries that the
+    canonical extractor never captured.
+    """
     from autocoder_supervisor import provenance_maintenance as pm
     assert hasattr(pm, "MANIFEST_CONTROLLED_PATHS")
     # And it MUST contain the supervisor's exact head
-    # dependencies.
+    # dependencies that the canonical manifest records.
     paths = set(pm.MANIFEST_CONTROLLED_PATHS)
     for required in (
         "autocoder_supervisor/supervisor.py",
-        "autocoder_supervisor/hermes_fingerprint.py",
+        "autocoder_orchestration/cli.py",
     ):
         assert required in paths
 

@@ -509,40 +509,73 @@ def validate_manifest(
 # ---------------------------------------------------------------------------
 
 
-# Canonical controlled-destination paths. EVERY path under
-# this constant is ``manifest-controlled``: it appears as a
-# ``destination_path`` in the canonical extraction manifest
-# AND the supervisor-owned runtime MUST update its recorded
-# sha256 + size_bytes atomically whenever the on-disk bytes
-# change. A worker that edits ANY of these paths and pushes
-# without re-running ``provenance_finalize()`` will break the
-# ``provenance`` CI job on the exact head.
-MANIFEST_CONTROLLED_PATHS: tuple[str, ...] = (
-    "autocoder_supervisor/supervisor.py",
-    "autocoder_supervisor/hermes_fingerprint.py",
-    "autocoder_supervisor/orchestration_state_root.py",
-    "autocoder_supervisor/_directive_prompt.py",
-    "autocoder_supervisor/worker_session.py",
-    "autocoder_supervisor/worker_attempt.py",
-    "autocoder_supervisor/directive_bridge.py",
-    "autocoder_supervisor/aed_worker_wrapper.py",
-    "autocoder_supervisor/provenance_maintenance.py",
-    "autocoder_supervisor/relay_wiring.py",
-    # Round-658 P1 follow-on: the CLI entry point is a
-    # manifest-controlled destination (it appears in the
-    # canonical extraction manifest's ``destination_path``
-    # list and is the worker interface invoked via
-    # ``python3 -m autocoder_orchestration.cli``) but the
-    # controlled-paths constant historically omitted it. A
-    # worker that edits ``autocoder_orchestration/cli.py``
-    # would leave the canonical manifest's destination
-    # SHA-256 stale and break CI ``provenance`` /
-    # ``test (3.10)`` / ``test (3.11)`` /
-    # ``test (3.12)`` / ``full-suite`` simultaneously. The
-    # canonical set MUST enumerate every manifest
-    # destination whose bytes the supervisor owns.
-    "autocoder_orchestration/cli.py",
+# Round-663 P1: the canonical controlled-destination paths
+# are DERIVED from the canonical extraction manifest, NOT
+# hard-coded. A worker that edits ANY path that appears as
+# a ``destination_path`` in the manifest and pushes
+# without re-running ``provenance_finalize()`` will break
+# the ``provenance`` CI job on the exact head. The set
+# therefore MUST be derived from the manifest at call time
+# via ``manifest_controlled_paths(...)``. ``regenerate_manifest``
+# already treats records outside ``allowed_paths`` as
+# read-only, so skipping a worker-edited destination path
+# is exactly the failure mode this round's review caught:
+# manifest-controlled bytes (e.g. ``autocoder_orchestration/cli.py``)
+# were being left stale because the historical tuple omitted
+# every entry that was not itself an in-package worker
+# interface file. The historical tuple has been removed.
+_DEFAULT_MANIFEST_RELATIVE = (
+    Path("provenance") / "aed-pr417-source-manifest.json"
 )
+
+
+def manifest_controlled_paths(
+    manifest_path: Path | None = None,
+) -> tuple[str, ...]:
+    """Derive the canonical controlled-destination set FROM
+    the canonical extraction manifest.
+
+    The set is the tuple of every ``destination_path``
+    recorded in ``manifest_path``. The supervisor-owned
+    runtime MUST update each entry's recorded sha256 +
+    size_bytes atomically whenever the on-disk bytes
+    change, otherwise the ``provenance`` CI job on the
+    exact head will fail closed.
+
+    ``manifest_path`` defaults to the production layout
+    rooted at this file's parent directory
+    (``provenance/aed-pr417-source-manifest.json``). Tests
+    may pass a synthetic manifest to scope the derivation.
+
+    Uses :func:`enumerate_controlled_destinations_strict`
+    so a missing or malformed manifest fails closed rather
+    than silently returning a stale partial set.
+    """
+    if manifest_path is None:
+        manifest_path = (
+            Path(__file__).resolve().parent.parent
+            / _DEFAULT_MANIFEST_RELATIVE
+        )
+    return tuple(
+        sorted(
+            enumerate_controlled_destinations_strict(
+                [Path(manifest_path)]
+            )
+        )
+    )
+
+
+# Backward-compatibility re-export. Older workers /
+# pre-commit hooks referenced ``MANIFEST_CONTROLLED_PATHS``
+# as a tuple enumerating the supervisor-owned entries.
+# The set is now derived from the canonical manifest at
+# call time; we expose a module attribute so ``hasattr``
+# checks and ``set(...)`` membership tests in
+# test_round591_engineering_bootstrap remain valid.
+def __getattr__(name: str):  # pragma: no cover - import hook
+    if name == "MANIFEST_CONTROLLED_PATHS":
+        return manifest_controlled_paths()
+    raise AttributeError(name)
 
 
 def provenance_finalize(
@@ -550,7 +583,7 @@ def provenance_finalize(
     repo_root: Path,
     manifest_path: Path | None = None,
     audit_path: Path | None = None,
-    allowed_paths: Iterable[str] = MANIFEST_CONTROLLED_PATHS,
+    allowed_paths: Iterable[str] | None = None,
 ) -> dict:
     """Round-591: the canonical worker pre-commit
     provenance finalization.
@@ -595,11 +628,26 @@ def provenance_finalize(
         audit_path = (
             repo_root / "provenance" / "AUTOCODER_SOURCE_COMPLETENESS.json"
         )
-    allowed = list(allowed_paths)
     if not manifest_path.is_file():
         raise ProvenanceFinalizeError(
             f"manifest not found: {manifest_path}"
         )
+    # Round-663 P1: derive the allowed paths from the
+    # manifest at call time rather than relying on the
+    # historical hard-coded tuple. The caller may still
+    # override ``allowed_paths`` explicitly to scope to a
+    # subset (e.g. one manager-schema test fixture); when
+    # the caller passes ``None`` we derive the full
+    # supervisor-owned set from the canonical manifest.
+    if allowed_paths is None:
+        try:
+            allowed = list(manifest_controlled_paths(manifest_path))
+        except ManifestEnumerationError as e:
+            raise ProvenanceFinalizeError(
+                f"manifest-controlled-path derivation failed: {e}"
+            ) from e
+    else:
+        allowed = list(allowed_paths)
     # Step 1: rewrite manifest hash + size for the allowed paths.
     regen = regenerate_manifest(
         manifest_path, repo_root, allowed_paths=allowed
