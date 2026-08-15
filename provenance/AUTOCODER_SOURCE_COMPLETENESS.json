@@ -7524,8 +7524,8 @@
       },
       {
         "destination_path": ".gitignore",
-        "destination_sha256": "7d912f75b9b7a3a522ee9250c3456da5417d31c7c1973905a628f9552e3edb30",
-        "destination_size_bytes": 1806,
+        "destination_sha256": "36b379d4d2e03b78776b5cdc76d94a9c0ce021d11f6155c9fcd5e13a39d4dc20",
+        "destination_size_bytes": 1840,
         "source_path": null,
         "source_sha256": null,
         "source_size_bytes": null,
@@ -7584,8 +7584,8 @@
       },
       {
         "destination_path": "scripts/scanner-occurrence-allowlist.json",
-        "destination_sha256": "f767a6e09f37a3bdf3d81753b6d623811f04f24b29d47cb8c04442f3dbbed9f9",
-        "destination_size_bytes": 70403,
+        "destination_sha256": "40c1ecb33c7fe8ee8dc0a978595f93ce3a6b24552e00d80aa859af605439788d",
+        "destination_size_bytes": 63619,
         "source_path": null,
         "source_sha256": null,
         "source_size_bytes": null,
