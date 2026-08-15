@@ -1138,6 +1138,7 @@ def _read_coderabbit_clean_head_evidence(
 
 def _read_codex_optional_lifecycle_evidence(
     state_dir=None,
+    expected_head=None,
 ) -> dict:
     """Closure IX §2.B: derive CODEX_OPTIONAL_LIFECYCLE from
     a real supervisor-owned production lifecycle.
@@ -1146,6 +1147,18 @@ def _read_codex_optional_lifecycle_evidence(
     reader. Codex is OPTIONAL; the gate requires a real
     production lifecycle or explicit durable
     OPTIONAL_DEGRADED outcome.
+
+    When ``expected_head`` is supplied (the production
+    caller path), at least one terminal lifecycle's
+    ``request_head`` MUST match it exactly. Otherwise a
+    stale terminal artifact from a prior PR head could
+    satisfy ``codex_optional_lifecycle`` for a new frozen
+    head whose own Codex request is still REQUEST_INTENT /
+    REQUEST_SENT / ACKNOWLEDGED (i.e. has never reached a
+    terminal lifecycle under the new head). When
+    ``expected_head`` is None (test scaffolding that does
+    not bind a head), the legacy mtime-based selection is
+    preserved so existing fixtures continue to pass.
     """
     import json as _json
     from pathlib import Path as _Path_reader
@@ -1201,16 +1214,46 @@ def _read_codex_optional_lifecycle_evidence(
     )
     terminal_count = 0
     progress_count = 0
-    head_matched_request = None
+    head_matched_terminal = None
+    # Bind terminal Codex lifecycle evidence to the
+    # frozen head: when the caller supplies
+    # ``expected_head`` (the production caller path
+    # always does), at least one terminal lifecycle's
+    # ``request_head`` MUST equal it. Otherwise a stale
+    # terminal artifact from a prior PR head could
+    # satisfy this gate for a new head whose own Codex
+    # request is still REQUEST_INTENT / REQUEST_SENT /
+    # ACKNOWLEDGED. When ``expected_head`` is None (test
+    # fixtures that do not bind a head), we fall back to
+    # the legacy mtime-based selection so existing tests
+    # pass.
+    if expected_head is not None:
+        head_matched_lifecycles = [
+            lc for lc in codex_lifecycles
+            if lc.get("request_head") == expected_head
+        ]
+        if not head_matched_lifecycles:
+            out["observation_complete"] = True
+            out["source_artifact"] = str(rr_dir)
+            out["evidence_ids"] = [
+                lc.get("request_head") for lc in codex_lifecycles
+            ]
+            out["reason"] = (
+                "no_terminal_codex_lifecycle_for_frozen_head: "
+                f"expected_head={expected_head}, "
+                f"lifecycle_count={len(codex_lifecycles)}"
+            )
+            return out
+        codex_lifecycles = head_matched_lifecycles
     for lc in codex_lifecycles:
         lifecycle = lc.get("lifecycle") or ""
         if lifecycle in terminal_states:
             terminal_count += 1
             if (
-                head_matched_request is None
+                head_matched_terminal is None
                 and lc.get("request_head")
             ):
-                head_matched_request = lc
+                head_matched_terminal = lc
         elif lifecycle in progress_states:
             progress_count += 1
     out["terminal_states"] = list(terminal_states)
@@ -1237,8 +1280,8 @@ def _read_codex_optional_lifecycle_evidence(
         lc.get("request_head") for lc in codex_lifecycles
     ]
     out["observed_at"] = (
-        head_matched_request.get("requested_at")
-        if head_matched_request else None
+        head_matched_terminal.get("requested_at")
+        if head_matched_terminal else None
     )
     out["reason"] = "ok_terminal_lifecycle_observed"
     return out
@@ -2793,6 +2836,7 @@ def generate_pre_canary_evidence(
     )
     _codex_evidence = _read_codex_optional_lifecycle_evidence(
         state_dir=state_dir,
+        expected_head=local_head,
     )
     _autoprov_evidence = _read_autonomous_provenance_evidence(
         state_dir=state_dir,

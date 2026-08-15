@@ -419,6 +419,138 @@ class TestCodexTerminalSemantics:
         assert out["value"] is True
         assert out["reason"] == "ok_terminal_lifecycle_observed"
 
+    def test_review_complete_wrong_head_fails_closed(
+        self, tmp_path
+    ):
+        """Round-587 repair: a terminal Codex lifecycle whose
+        ``request_head`` does not match the supplied
+        ``expected_head`` MUST NOT satisfy
+        ``codex_optional_lifecycle`` for a different frozen
+        head. The stale artifact from head A must not prove
+        success for head B whose own Codex request is only
+        pending / failed.
+        """
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_codex_optional_lifecycle_evidence,
+        )
+        rr = tmp_path / "review_requests"
+        rr.mkdir()
+        # Head A — completed lifecycle (stale).
+        (rr / "codex__stale.json").write_text(json.dumps({
+            "request_id": "req-stale",
+            "request_head": "aaaaaaaaaaaaaaaa",
+            "lifecycle": "REVIEW_COMPLETE",
+            "requested_at": "2026-08-01T00:00:00Z",
+        }))
+        # Head B — request only made it to REQUEST_INTENT.
+        (rr / "codex__pending.json").write_text(json.dumps({
+            "request_id": "req-pending",
+            "request_head": "bbbbbbbbbbbbbbbb",
+            "lifecycle": "REQUEST_INTENT",
+        }))
+        # Caller is bound to head B — the stale
+        # REVIEW_COMPLETE under head A MUST NOT satisfy
+        # the gate.
+        out = _read_codex_optional_lifecycle_evidence(
+            state_dir=str(tmp_path),
+            expected_head="bbbbbbbbbbbbbbbb",
+        )
+        assert out["value"] is False
+        # Either fail-closed reason is acceptable: the
+        # head-A terminal was filtered out before the
+        # terminal-count check, so the remaining head-B
+        # set is now progress-only; the existing
+        # ``codex_no_terminal_lifecycle`` reason is what
+        # the reader returns. Either way, ``value`` is
+        # False and a stale artifact did not pass.
+        assert (
+            "no_terminal_codex_lifecycle_for_frozen_head"
+            in out["reason"]
+            or "codex_no_terminal_lifecycle" in out["reason"]
+        )
+
+    def test_review_complete_matching_head_passes_when_bound(
+        self, tmp_path
+    ):
+        """Round-587: when ``expected_head`` matches a
+        terminal lifecycle's ``request_head``, the gate
+        MUST pass under the head-bound path.
+        """
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_codex_optional_lifecycle_evidence,
+        )
+        rr = tmp_path / "review_requests"
+        rr.mkdir()
+        head = "cd15d30c" + "0" * 24  # 32-char hex
+        (rr / "codex__aaa.json").write_text(json.dumps({
+            "request_id": "req-1",
+            "request_head": head,
+            "lifecycle": "REVIEW_COMPLETE",
+        }))
+        out = _read_codex_optional_lifecycle_evidence(
+            state_dir=str(tmp_path),
+            expected_head=head,
+        )
+        assert out["value"] is True
+        assert out["reason"] == "ok_terminal_lifecycle_observed"
+
+    def test_review_complete_no_matching_head_fails_closed(
+        self, tmp_path
+    ):
+        """Round-587: when ONLY a stale (head-A) terminal
+        lifecycle exists and the caller is bound to head-B,
+        the gate MUST fail closed with the explicit
+        ``no_terminal_codex_lifecycle_for_frozen_head``
+        reason. This codifies the explicit head-binding
+        branch — distinct from the progress-only
+        ``codex_no_terminal_lifecycle`` path.
+        """
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_codex_optional_lifecycle_evidence,
+        )
+        rr = tmp_path / "review_requests"
+        rr.mkdir()
+        (rr / "codex__stale.json").write_text(json.dumps({
+            "request_id": "req-stale",
+            "request_head": "aaaaaaaaaaaaaaaa",
+            "lifecycle": "REVIEW_COMPLETE",
+        }))
+        out = _read_codex_optional_lifecycle_evidence(
+            state_dir=str(tmp_path),
+            expected_head="bbbbbbbbbbbbbbbb",
+        )
+        assert out["value"] is False
+        assert (
+            "no_terminal_codex_lifecycle_for_frozen_head"
+            in out["reason"]
+        )
+
+    def test_legacy_no_expected_head_keeps_legacy_behaviour(
+        self, tmp_path
+    ):
+        """Round-587: when the caller does not bind a
+        head (test fixtures that do not bind a head),
+        the legacy mtime-based selection MUST remain so
+        existing tests continue to pass. A terminal
+        lifecycle with no head binding MUST still
+        satisfy the gate.
+        """
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_codex_optional_lifecycle_evidence,
+        )
+        rr = tmp_path / "review_requests"
+        rr.mkdir()
+        (rr / "codex__aaa.json").write_text(json.dumps({
+            "request_id": "req-1",
+            "request_head": "cd15d30c",
+            "lifecycle": "REVIEW_COMPLETE",
+        }))
+        out = _read_codex_optional_lifecycle_evidence(
+            state_dir=str(tmp_path)
+        )
+        assert out["value"] is True
+        assert out["reason"] == "ok_terminal_lifecycle_observed"
+
 
 # ---------------------------------------------------------------------
 # §3 CodeRabbit clean evidence - provider_head_assessment required
