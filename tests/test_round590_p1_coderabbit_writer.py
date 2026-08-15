@@ -285,6 +285,70 @@ class TestPersistCoderabbitHeadAssessment:
         assert data["clean"] is False
         assert "thread-2" in data["actionable_finding_ids"]
 
+    def test_writer_persists_artifact_when_coderabbit_inline_empty(
+        self, tmp_path,
+    ):
+        """Round-682/P1: a successful CodeRabbit fetch that
+        returns zero inline comments is a complete observation,
+        NOT an INCOMPLETE one. The canonical artifact MUST be
+        written so the clean-head reader can satisfy the gate
+        for genuinely clean reviews (e.g. reviews that
+        exclusively produced status/top-level comments and no
+        inline review threads).
+
+        Pre-fix, ``surfaces_complete`` consulted
+        ``bool(surfaces.get("inline_comments_collected"))`` which
+        is False for the empty-fetch path, blocking the artifact
+        from ever being persisted.
+        """
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_coderabbit_clean_head_evidence,
+            persist_coderabbit_head_assessment,
+        )
+        snap = _make_snapshot()
+        # Simulate a clean review with zero coderabbit inline
+        # comments: empty both in the merged ``review_comments``
+        # bucket AND in the provider-specific
+        # ``provider_surfaces.coderabbit.review_comments`` bucket.
+        snap["review_comments"] = []
+        snap["provider_surfaces"]["coderabbit"]["review_comments"] = []
+        out = persist_coderabbit_head_assessment(
+            snap=snap,
+            state_dir=str(tmp_path),
+            expected_head=HEAD_FULL,
+            now_iso_fn=lambda: "2026-08-15T10:02:00+00:00",
+        )
+        assert out["written_path"] is not None, (
+            "Empty-but-successful coderabbit inline fetch MUST be "
+            "treated as a complete observation (round-682/P1). "
+            f"Got: {out!r}"
+        )
+        assert out["observation_complete"] is True
+        assert out["clean"] is True
+        artifact_path = (
+            tmp_path / "provider_head_assessment" / "coderabbit"
+            / f"{HEAD_FULL}.json"
+        )
+        assert artifact_path.exists()
+        data = json.loads(artifact_path.read_text())
+        # Records-presence flag stays False (zero records), but
+        # the surface-was-fetched gate must have allowed the
+        # write.
+        assert data["surfaces"]["inline_comments_collected"] is False
+        assert data["observation_complete"] is True
+        assert data["clean"] is True
+        assert data["actionable_finding_ids"] == []
+        # The reader at _read_coderabbit_clean_head_evidence must
+        # be satisfied by the produced artifact — this is the
+        # whole point of the round-682 fix.
+        reader = _read_coderabbit_clean_head_evidence(
+            state_dir=str(tmp_path),
+            expected_head=HEAD_FULL,
+        )
+        assert reader["value"] is True
+        assert reader["reason"] == "ok_canonical_head_assessment"
+        assert reader["evidence_head"] == HEAD_FULL
+
     def test_writer_fails_closed_on_empty_snap(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (
             persist_coderabbit_head_assessment,

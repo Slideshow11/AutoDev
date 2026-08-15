@@ -1059,6 +1059,16 @@ def _collect_coderabbit_exact_head_surfaces(
         "statuses_collected": False,
         "top_level_comment_collected": False,
         "inline_comments_collected": False,
+        # Round-682/P1: surface-was-fetched flag, separate from
+        # inline_comments_collected (which is the records-were-
+        # present flag). A successful CodeRabbit fetch returning
+        # ``[]`` is a complete zero-result observation; the caller
+        # MUST use this flag (not ``inline_comments_collected``)
+        # when deciding whether the inline surface has been
+        # observed at all. Set True at the bottom of this
+        # function for the empty-fetch path; the INCOMPLETE
+        # early-return path leaves it False.
+        "inline_comments_surface_fetched": False,
         "review_threads_collected": False,
         "formal_reviews_collected": False,
         "actionable_finding_ids": [],
@@ -1328,6 +1338,13 @@ def _collect_coderabbit_exact_head_surfaces(
     out["inline_comments_collected"] = bool(
         inline_comments_attributed or inline_comments_unattributed
     )
+    # Round-682/P1: a successful CodeRabbit fetch returning
+    # ``[]`` IS a complete observation (we read the bucket;
+    # the bucket is empty). Expose the surface-fetched flag
+    # separately from the records-presence flag so the caller
+    # can build a complete surfaces view even when no inline
+    # comments exist (e.g. a clean review with zero inlines).
+    out["inline_comments_surface_fetched"] = True
     out["inline_comments_attributed_count"] = len(
         inline_comments_attributed
     )
@@ -1447,10 +1464,23 @@ def persist_coderabbit_head_assessment(
         snap, target_head
     )
     out["surfaces"] = surfaces
+    # Round-682/P1: ``inline_comments_collected`` is the
+    # records-were-present flag, not the surface-was-fetched
+    # flag. A successful CodeRabbit fetch returning ``[]`` is
+    # a complete zero-result observation, so the gate MUST
+    # consult ``inline_comments_surface_fetched`` instead.
+    # Falling back to ``inline_comments_collected`` only when
+    # the new flag is absent keeps the gate compatible with
+    # pre-round-682 callers (defensive default).
+    inline_surface_ok = bool(
+        surfaces.get("inline_comments_surface_fetched")
+        if "inline_comments_surface_fetched" in surfaces
+        else surfaces.get("inline_comments_collected")
+    )
     surfaces_complete = (
         bool(surfaces.get("statuses_collected"))
         and bool(surfaces.get("top_level_comment_collected"))
-        and bool(surfaces.get("inline_comments_collected"))
+        and inline_surface_ok
         and bool(surfaces.get("review_threads_collected"))
         and bool(surfaces.get("formal_reviews_collected"))
     )
@@ -1474,8 +1504,26 @@ def persist_coderabbit_head_assessment(
             "top_level_comment_collected": bool(
                 surfaces.get("top_level_comment_collected")
             ),
+            # Round-682/P1: persist BOTH the records-present
+            # flag (``inline_comments_collected``) AND the
+            # surface-was-fetched flag
+            # (``inline_comments_surface_fetched``). The reader
+            # (``_read_coderabbit_clean_head_evidence``) MUST
+            # gate on the surface-was-fetched flag so that a
+            # successful CodeRabbit fetch returning ``[]``
+            # (a complete zero-result observation) is treated
+            # as clean evidence. Backward compatibility:
+            # readers that only look at
+            # ``inline_comments_collected`` keep their existing
+            # semantics — the new flag is additive.
             "inline_comments_collected": bool(
                 surfaces.get("inline_comments_collected")
+            ),
+            "inline_comments_surface_fetched": bool(
+                surfaces.get(
+                    "inline_comments_surface_fetched",
+                    surfaces.get("inline_comments_collected"),
+                )
             ),
             "review_threads_collected": bool(
                 surfaces.get("review_threads_collected")
@@ -1600,18 +1648,40 @@ def _read_coderabbit_clean_head_evidence(
             surfaces = data.get("surfaces") or {}
             required_surfaces = (
                 "top_level_comment_collected",
-                "inline_comments_collected",
+                # Round-682/P1: ``inline_comments_collected`` is
+                # the records-present flag, not the surface-was-
+                # fetched flag. A successful CodeRabbit fetch
+                # returning ``[]`` is a complete zero-result
+                # observation; readers MUST treat that as a
+                # complete surface view. The new
+                # ``inline_comments_surface_fetched`` field
+                # captures this; falling back to
+                # ``inline_comments_collected`` keeps the gate
+                # compatible with artifacts written before
+                # round-682 (defensive default).
+                "inline_comments_surface_fetched",
                 "review_threads_collected",
                 "formal_reviews_collected",
                 "statuses_collected",
             )
+            def _surface_value(k):
+                # Round-682/P1: the inline-comments key in
+                # ``required_surfaces`` is the surface-was-
+                # fetched flag, with a defensive fallback to
+                # the legacy records-present flag for
+                # artifacts written before round-682.
+                if k == "inline_comments_surface_fetched":
+                    return surfaces.get(
+                        "inline_comments_surface_fetched",
+                        surfaces.get("inline_comments_collected"),
+                    )
+                return surfaces.get(k)
+
             out["surface_completeness"] = {
-                k: bool(surfaces.get(k))
-                for k in required_surfaces
+                k: bool(_surface_value(k)) for k in required_surfaces
             }
             missing = [
-                k for k in required_surfaces
-                if not surfaces.get(k)
+                k for k in required_surfaces if not _surface_value(k)
             ]
             if missing:
                 out["reason"] = f"surfaces_missing: {missing}"
