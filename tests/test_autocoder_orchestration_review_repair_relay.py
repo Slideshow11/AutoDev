@@ -465,8 +465,11 @@ class TestReviewDirective:
         assert d2.repo == d.repo
         assert d2.pr_number == d.pr_number
         assert len(d2.findings) == 2
-        assert d2.findings[0].severity == SEVERITY_P1
-        assert d2.findings[1].severity == SEVERITY_CI_FAILURE
+        # Round-591: CI_FAILURE findings appear FIRST in the
+        # directive so a worker observes them before any
+        # optional review work.
+        assert d2.findings[0].severity == SEVERITY_CI_FAILURE
+        assert d2.findings[1].severity == SEVERITY_P1
 
     def test_unknown_severity_rejected(self) -> None:
         with pytest.raises(DirectiveContractError):

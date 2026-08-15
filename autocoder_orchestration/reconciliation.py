@@ -23,6 +23,29 @@ class FindingDisposition(str, Enum):
     SUPERSEDED = "SUPERSEDED"
     INVALID = "INVALID"
     INCONCLUSIVE = "INCONCLUSIVE"
+    # Round-591: terminal supervisor-side dispositions for
+    # ``no_changes_required_proof`` and worker ``claim.disposition``.
+    # REAL_REPAIR_REQUIRED: worker has authority+evidence to fix
+    # and HAS produced/repaired; the finding is repaired and
+    # the work is on the current head.
+    # ALREADY_SATISFIED: terminal no-change disposition with
+    # proof; the observed evidence confirms the finding is moot
+    # in current state.
+    # SUPERSEDED: terminal disposition requiring ACTUAL
+    # supersession proof (e.g. the subject SHA advanced past
+    # the finding head); ``I think this is a fetch/config gap``
+    # is NOT a supersession proof.
+    # INCOMPLETE_EVIDENCE: NONTERMINAL — re-observe on next
+    # round; never accepted as a NO_CHANGES_REQUIRED
+    # disposition alone.
+    # STILL_ACTIONABLE: NONTERMINAL — the finding is real and
+    # the worker has authority+evidence to repair but chose
+    # not to (e.g. round-39 anti-churn while CI is red);
+    # this MUST leave the work executable for a later attempt.
+    REAL_REPAIR_REQUIRED = "REAL_REPAIR_REQUIRED"
+    ALREADY_SATISFIED = "ALREADY_SATISFIED"
+    INCOMPLETE_EVIDENCE = "INCOMPLETE_EVIDENCE"
+    STILL_ACTIONABLE = "STILL_ACTIONABLE"
 
 
 @dataclass(frozen=True)

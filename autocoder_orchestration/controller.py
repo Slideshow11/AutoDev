@@ -174,6 +174,26 @@ class Controller:
         commit was produced. The supervisor's quiet-window /
         readiness machinery handles the rest of the
         qualification.
+
+        Round-591: NO_CHANGES_REQUIRED is valid only when
+        every assigned finding has a terminal no-change
+        disposition supported by evidence:
+
+            REAL_REPAIR_REQUIRED, ALREADY_SATISFIED,
+            SUPERSEDED (with proof), REPAIRED, INVALID,
+            INCONCLUSIVE (with proof)
+
+        Findings with a NONTERMINAL disposition
+        (``STILL_ACTIONABLE`` or ``INCOMPLETE_EVIDENCE``)
+        MUST NOT be accepted as NO_CHANGES_REQUIRED — they
+        represent work that must remain executable for a
+        later attempt, and the round-39 anti-churn
+        discipline is not a blanket no-op permission. A
+        supervisor-only ``SUPERSEDED`` without concrete
+        supersession proof (e.g. ``the subject SHA
+        advanced past the finding head``) is also rejected;
+        ``I think this is a fetch/config gap`` is NOT a
+        supersession proof.
         """
         if not isinstance(head_observed, str) or (
             len(head_observed) != 40 and len(head_observed) != 64
@@ -182,6 +202,48 @@ class Controller:
                 f"head_observed must be 40 or 64 lowercase hex chars: "
                 f"{head_observed!r}"
             )
+        # Round-591: enforce the disposition contract on every
+        # assigned finding in the proof payload.
+        if proof is not None:
+            findings_proof = proof.get("findings", []) if isinstance(proof, dict) else []
+            nonterminal = (
+                FindingDisposition.STILL_ACTIONABLE,
+                FindingDisposition.INCOMPLETE_EVIDENCE,
+            )
+            terminal_with_required_proof = (
+                FindingDisposition.SUPERSEDED,
+                FindingDisposition.REPAIRED,
+                FindingDisposition.INVALID,
+                FindingDisposition.INCONCLUSIVE,
+            )
+            for entry in findings_proof:
+                if not isinstance(entry, dict):
+                    continue
+                disp_raw = entry.get("disposition")
+                try:
+                    disp = FindingDisposition(disp_raw) if disp_raw is not None else None
+                except (ValueError, TypeError):
+                    raise ControllerError(
+                        f"NO_CHANGES_REQUIRED proof has unknown disposition: "
+                        f"{disp_raw!r}"
+                    )
+                if disp is None:
+                    continue
+                if disp in nonterminal:
+                    raise ControllerError(
+                        f"NO_CHANGES_REQUIRED rejected: finding "
+                        f"{entry.get('finding_id')!r} has nonterminal "
+                        f"disposition {disp.value!r}; cannot be "
+                        f"represented as a no-op without leaving "
+                        f"nonterminal work stranded"
+                    )
+                if disp in terminal_with_required_proof and not entry.get("evidence"):
+                    raise ControllerError(
+                        f"NO_CHANGES_REQUIRED rejected: finding "
+                        f"{entry.get('finding_id')!r} has disposition "
+                        f"{disp.value!r} but no evidence field; "
+                        f"supersession / repair must be concretely proven"
+                    )
         sm = self._require_state_for_event()
         # Round-27 P1#5 atomicity: rebind context FIRST, then
         # apply the transition.

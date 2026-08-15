@@ -91,6 +91,20 @@ EXIT_GUARD = 3
 EXIT_STATE = 4
 EXIT_INTERNAL = 5
 
+# Round-591: the OPERATOR-POLICY set for PR #5. Migration
+# operations MUST target exactly this set; narrowing is
+# forbidden so the operator cannot silently shrink the
+# required-check policy.
+SEVEN_NAME_OPERATOR_POLICY: tuple[str, ...] = (
+    "test (3.10)",
+    "test (3.11)",
+    "test (3.12)",
+    "package-smoke",
+    "provenance",
+    "committed-state-scan",
+    "full-suite",
+)
+
 # Author login used by CodeRabbit on this repository. The CLI filters
 # latestReviews by this identity so a human review cannot satisfy the
 # CodeRabbit guard. GitHub App bot logins are conventionally suffixed
@@ -388,12 +402,16 @@ def cmd_initialize(args: argparse.Namespace) -> int:
                 json_mode=args.json,
                 exit_code=EXIT_INVARG,
             )
-    # Required CI jobs precedence:
+    # Required CI jobs precedence (round-591):
     # 1. --required-ci-jobs flag from operator (explicit).
     # 2. Existing RunContext's required_ci_jobs (persisted
     #    by a prior initialize call or supervisor config).
-    # 3. Default 6-job set (test 3.10/3.11/3.12,
-    #    package-smoke, provenance, committed-state-scan).
+    # 3. Operator-policy SEVEN-NAME default (the exact seven
+    #    GitHub check-run names for PR #5):
+    #       test (3.10), test (3.11), test (3.12),
+    #       package-smoke,
+    #       provenance, committed-state-scan,
+    #       full-suite.
     # The persisted RunContext MUST take precedence over
     # the default set when no explicit flag is provided.
     # A configured gate such as ``security-scan`` MUST
@@ -419,9 +437,15 @@ def cmd_initialize(args: argparse.Namespace) -> int:
                 existing_ctx_dict["required_ci_jobs"],
             )
         else:
+            # round-591: SEVEN-NAME operator policy (default).
+            # The previous six-job default omitted ``full-suite``,
+            # which is the seventh authoritative required check
+            # on PR #5.
             required_ci_jobs = [
                 "test (3.10)", "test (3.11)", "test (3.12)",
-                "package-smoke", "provenance", "committed-state-scan",
+                "package-smoke", "provenance",
+                "committed-state-scan",
+                "full-suite",
             ]
     impl_cmd = tuple(args.impl_worker_command.split()) if args.impl_worker_command else (
         "/usr/bin/env", "true", "{prompt}", "{session_id}"
@@ -452,6 +476,168 @@ def cmd_initialize(args: argparse.Namespace) -> int:
         "state_path": ctx.state_path,
     }
     return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
+
+
+def cmd_migrate_required_ci_jobs(args: argparse.Namespace) -> int:
+    """Round-591: audited, narrow migration of the persisted
+    ``required_ci_jobs`` set when a stale run was initialized
+    with non-operator-policy identities (e.g. ``['test', 'lint']``
+    from an early bootstrap before the GitHub workflow added
+    ``full-suite``).
+
+    Engineering bootstrap authorization: this is the ONLY
+    canonical path for changing a persisted
+    ``required_ci_jobs``. The supervisor, the CLI, and the
+    tests cannot silently rewrite the persisted policy.
+
+    Invariants (all enforced; fail-closed):
+
+    - ``--expected-old`` MUST equal the persisted
+      ``required_ci_jobs`` exactly (both length and order).
+      If the persisted value differs, the call is REJECTED
+      so a stale caller cannot accidentally narrow the
+      operator policy.
+    - ``--new-required-ci-jobs`` MUST be a non-empty list.
+    - The migration is atomic via the
+      ``StateStore.compare_and_swap`` path; on success,
+      the persisted ``run_context.json`` revision is
+      incremented and the durable audit trail
+      ``required_ci_jobs_migrations.json`` records the
+      before/after/by/at pair.
+    - Run identity, PR identity, authorized head, and worker /
+      generation history are preserved — only the
+      ``required_ci_jobs`` field changes.
+    - Idempotent: re-running with the already-applied
+      ``--expected-old`` will fail-closed (expected_old
+      does not match the NEW value).
+    """
+    state_store = StateStore(args.state_root)
+    # Read strictly; missing run_context fails closed.
+    if not state_store.exists("run_context.json"):
+        return _emit(
+            {"error": "run_context.json does not exist; nothing to migrate"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    rev_marker = "run_context.json"
+    expected_rev = -1
+    ctx_dict = None
+    try:
+        # First read is informational (revision lookup).
+        ctx_dict = state_store.read_strict(rev_marker)
+        expected_rev = int(ctx_dict.get("_revision", 0))
+    except StateStoreError as exc:
+        return _emit(
+            {"error": f"cannot read run_context.json: {exc}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    # Required set BEFORE the migration.
+    persisted = list(ctx_dict.get("required_ci_jobs") or [])
+    expected_old = [
+        name.strip() for name in (args.expected_old or "").split(",") if name.strip()
+    ]
+    if tuple(persisted) != tuple(expected_old):
+        return _emit(
+            {
+                "error": (
+                    "expected-old mismatch: persisted "
+                    f"{persisted!r} != --expected-old {expected_old!r}; "
+                    "refusing to migrate to avoid silent policy change"
+                ),
+                "persisted_required_ci_jobs": persisted,
+                "expected_old": expected_old,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    new_required_ci_jobs = [
+        name.strip()
+        for name in (args.new_required_ci_jobs or "").split(",")
+        if name.strip()
+    ]
+    if not new_required_ci_jobs:
+        return _emit(
+            {"error": "--new-required-ci-jobs must be non-empty"},
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    # Safety: refuse silent reduction relative to operator
+    # policy intent. Every entry in the new set must already
+    # be the seven-name operator policy, OR the operation
+    # must specify a complete replacement. A narrowing of
+    # the seven-name operator-policy set is REJECTED.
+    if set(new_required_ci_jobs) != set(SEVEN_NAME_OPERATOR_POLICY):
+        return _emit(
+            {
+                "error": (
+                    "--new-required-ci-jobs MUST equal the "
+                    "exact seven-name operator-policy set; "
+                    "narrowing is forbidden by round-591"
+                ),
+                "expected_seven_name": list(SEVEN_NAME_OPERATOR_POLICY),
+                "got": new_required_ci_jobs,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    # Atomically rewrite run_context.json via CAS so concurrent
+    # relaunches can't interleave a stale read.
+    new_ctx = dict(ctx_dict)
+    new_ctx.pop("_revision", None)
+    new_ctx.pop("_written_at", None)
+    new_ctx["required_ci_jobs"] = list(new_required_ci_jobs)
+    try:
+        new_rev = state_store.compare_and_swap(
+            rev_marker, new_ctx, expected_revision=expected_rev
+        )
+    except StateStoreError as exc:
+        return _emit(
+            {"error": f"compare_and_swap failed: {exc}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    # Persist a durable audit trail.
+    audit_entry = {
+        "migration_id": (
+            f"rcimgr-{new_rev.path.replace('/', '_')}@{new_rev.revision}"
+        ),
+        "from_required_ci_jobs": persisted,
+        "to_required_ci_jobs": list(new_required_ci_jobs),
+        "by": args.by,
+        "reason": args.reason,
+        "at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        ),
+        "run_id": ctx_dict.get("run_id"),
+        "pr_number": ctx_dict.get("pr_number"),
+        "rev_before": expected_rev,
+        "rev_after": new_rev.revision,
+    }
+    try:
+        state_store.append_journal("required_ci_jobs_migrations.json", audit_entry)
+    except StateStoreError as exc:
+        # Migration succeeded but audit-trail append failed;
+        # surface the error but DO NOT roll back (the durable
+        # run_context.json change is the canonical record).
+        return _emit(
+            {
+                "warning": f"migration committed (rev {new_rev.revision}) "
+                           f"but audit-trail append failed: {exc}",
+                "migration": audit_entry,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_OK,
+        )
+    return _emit(
+        {
+            "migration": audit_entry,
+            "new_revision": new_rev.revision,
+            "new_required_ci_jobs": list(new_required_ci_jobs),
+        },
+        json_mode=args.json,
+        exit_code=EXIT_OK,
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -1637,6 +1823,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     init.add_argument("--impl-worker-command", default="")
     init.add_argument("--evidence-root", default="/var/tmp/autodev-evidence")
 
+    # Round-591: audited required-CI-policy migration. THIS IS
+    # the ONLY canonical path for changing the persisted
+    # ``required_ci_jobs`` field. It enforces a fail-closed
+    # ``--expected-old`` precondition before rewriting.
+    migr = sub.add_parser("migrate-required-ci-jobs", parents=[common])
+    migr.add_argument(
+        "--expected-old", required=True,
+        help=(
+            "Comma-separated required_ci_jobs that MUST exactly "
+            "match the persisted value before the migration is "
+            "allowed to proceed. Refuses to commit silently."
+        ),
+    )
+    migr.add_argument(
+        "--new-required-ci-jobs", required=True,
+        help=(
+            "Comma-separated replacement required_ci_jobs. The "
+            "full operator-policy set (seven-name) should be "
+            "passed verbatim to avoid silent narrowing."
+        ),
+    )
+    migr.add_argument(
+        "--by", default="operator",
+        help="Identity recorded in the migration audit trail.",
+    )
+    migr.add_argument(
+        "--reason", default="",
+        help="Free-form reason recorded in the migration audit trail.",
+    )
+
     build = sub.add_parser("build-candidate", parents=[common])
     build.add_argument("--file-paths", default="")
     build.add_argument("--aed-paths", default="")
@@ -1692,6 +1908,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_gates(args)
         if args.command == "initialize":
             return cmd_initialize(args)
+        if args.command == "migrate-required-ci-jobs":
+            return cmd_migrate_required_ci_jobs(args)
         if args.command == "run":
             return cmd_run(args)
         if args.command == "observe":

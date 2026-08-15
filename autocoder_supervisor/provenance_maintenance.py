@@ -26,6 +26,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -271,7 +272,22 @@ def _sha256_of(path: Path) -> str:
 
 
 def _iter_records(manifest: dict):
-    """Yield (path_to_record, record, dest, sha_field) tuples."""
+    """Yield (path_to_record, record, dest, sha_field, size_field) tuples.
+
+    Round-591: the ``size_field`` is the schema-paired
+    companion of ``sha_field``. Both fields MUST be kept
+    in lockstep so that a downstream assertion like
+    ``test_provenance_destination_hashes_match_actual_files``
+    which checks ``recorded sha == actual sha`` AND a
+    companion size assertion both succeed atomically.
+
+    Mapping:
+
+        sha_field                    size_field
+        -----------                  ------------
+        ``autodev_sha256``           ``autodev_size_bytes``
+        ``destination_sha256``       ``destination_size_bytes``
+    """
     def _walk(obj, parents):
         if isinstance(obj, dict):
             dest = (
@@ -292,8 +308,17 @@ def _iter_records(manifest: dict):
                     else None
                 )
             )
+            size_field = (
+                "autodev_size_bytes"
+                if "autodev_size_bytes" in obj
+                else (
+                    "destination_size_bytes"
+                    if "destination_size_bytes" in obj
+                    else None
+                )
+            )
             if dest and sha_field:
-                yield parents, obj, dest, sha_field
+                yield parents, obj, dest, sha_field, size_field
                 return
             for k, v in obj.items():
                 yield from _walk(v, parents + [k])
@@ -348,7 +373,7 @@ def enumerate_controlled_destinations_strict(
             raise ManifestEnumerationError(
                 f"manifest {mp} cannot be parsed: {e}"
             ) from e
-        for _, _, dest, _ in _iter_records(manifest):
+        for _, _, dest, _, _ in _iter_records(manifest):
             out.add(dest)
     if not out:
         raise ManifestEnumerationError(
@@ -374,7 +399,7 @@ def enumerate_controlled_destinations(
             manifest = json.loads(mp.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        for _, _, dest, _ in _iter_records(manifest):
+        for _, _, dest, _, _ in _iter_records(manifest):
             out.add(dest)
     return out
 
@@ -404,7 +429,7 @@ def is_manifest_stale(
     except (OSError, json.JSONDecodeError):
         return True
     allowed = set(allowed_paths) if allowed_paths is not None else None
-    for _, rec, dest, sha_field in _iter_records(manifest):
+    for _, rec, dest, sha_field, _ in _iter_records(manifest):
         if allowed is not None and dest not in allowed:
             continue
         try:
@@ -432,21 +457,41 @@ def regenerate_manifest(
     allowed = set(allowed_paths)
     manifest = json.loads(manifest_path.read_text())
     audit = {"updated": [], "skipped_outside_allowed": 0, "missing_files": []}
-    for _, rec, dest, sha_field in _iter_records(manifest):
+    for _, rec, dest, sha_field, size_field in _iter_records(manifest):
         if dest not in allowed:
             audit["skipped_outside_allowed"] += 1
             continue
         target = _get_path_in_repo(repo_root, dest)
         try:
             new_hash = _sha256_of(target)
+            # Round-591: paired SIZE field MUST be updated alongside
+            # the hash to keep the manifest in sync with the on-disk
+            # destination bytes. Without this, downstream size-check
+            # assertions will fail closed whenever the destination
+            # is rewritten but ``destination_size_bytes`` (or
+            # ``autodev_size_bytes``) remains at the prior size.
+            new_size = target.stat().st_size if target.exists() else None
         except OSError:
             audit["missing_files"].append(dest)
             continue
         old_hash = rec.get(sha_field)
         rec[sha_field] = new_hash
-        audit["updated"].append(
-            {"path": dest, "old": old_hash, "new": new_hash}
-        )
+        if size_field is not None and new_size is not None:
+            old_size = rec.get(size_field)
+            rec[size_field] = new_size
+            audit["updated"].append(
+                {
+                    "path": dest,
+                    "old": old_hash,
+                    "new": new_hash,
+                    "size_old": old_size,
+                    "size_new": new_size,
+                }
+            )
+        else:
+            audit["updated"].append(
+                {"path": dest, "old": old_hash, "new": new_hash}
+            )
     _atomic_write_json(manifest_path, manifest)
     return audit
 
@@ -457,6 +502,149 @@ def validate_manifest(
     return not is_manifest_stale(
         manifest_path, repo_root, allowed_paths=allowed_paths
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-591: canonical provenance finalization composition.
+# ---------------------------------------------------------------------------
+
+
+# Canonical controlled-destination paths. EVERY path under
+# this constant is ``manifest-controlled``: it appears as a
+# ``destination_path`` in the canonical extraction manifest
+# AND the supervisor-owned runtime MUST update its recorded
+# sha256 + size_bytes atomically whenever the on-disk bytes
+# change. A worker that edits ANY of these paths and pushes
+# without re-running ``provenance_finalize()`` will break the
+# ``provenance`` CI job on the exact head.
+MANIFEST_CONTROLLED_PATHS: tuple[str, ...] = (
+    "autocoder_supervisor/supervisor.py",
+    "autocoder_supervisor/hermes_fingerprint.py",
+    "autocoder_supervisor/orchestration_state_root.py",
+    "autocoder_supervisor/_directive_prompt.py",
+    "autocoder_supervisor/worker_session.py",
+    "autocoder_supervisor/worker_attempt.py",
+    "autocoder_supervisor/directive_bridge.py",
+    "autocoder_supervisor/aed_worker_wrapper.py",
+    "autocoder_supervisor/provenance_maintenance.py",
+    "autocoder_supervisor/relay_wiring.py",
+)
+
+
+def provenance_finalize(
+    *,
+    repo_root: Path,
+    manifest_path: Path | None = None,
+    audit_path: Path | None = None,
+    allowed_paths: Iterable[str] = MANIFEST_CONTROLLED_PATHS,
+) -> dict:
+    """Round-591: the canonical worker pre-commit
+    provenance finalization.
+
+    Composes the existing canonical operations in order:
+
+    1. ``regenerate_manifest(...)`` — rewrites ``destination_sha256``
+       AND paired ``destination_size_bytes`` for every destination
+       in ``allowed_paths`` from the actual on-disk bytes.
+    2. ``regenerate_audit(...)`` — regenerates
+       ``provenance/AUTOCODER_SOURCE_COMPLETENESS.json`` from the
+       now-fresh manifest, via the canonical
+       ``scripts.provenance_audit`` generator.
+    3. ``validate_manifest(...)`` — re-reads the rewritten
+       manifest and asserts every recorded destination SHA-256
+       matches the on-disk destination. Fails closed if the
+       generator changed a digest but the on-disk bytes have
+       drifted again.
+
+    Returns a structured dict suitable for the worker's
+    ``result_envelope.extra.provenance_finalize`` audit
+    field.
+
+    Fail-closed contract:
+
+    - any failed regenerate_manifest pass raises
+      ``ProvenanceFinalizeError``;
+    - the audit regenerator is invoked via subprocess to avoid
+      a Python import-time binding to the canonical audit
+      module (so a future refactor that splits audit generation
+      into another package does not silently rewire here);
+    - the validate pass MUST pass before this function returns
+      successfully. A failure means the worker MUST NOT push;
+      it MUST emit ``result_type=WORKER_RESULT_INVALID``.
+    """
+    repo_root = Path(repo_root).resolve()
+    if manifest_path is None:
+        manifest_path = (
+            repo_root / "provenance" / "aed-pr417-source-manifest.json"
+        )
+    if audit_path is None:
+        audit_path = (
+            repo_root / "provenance" / "AUTOCODER_SOURCE_COMPLETENESS.json"
+        )
+    allowed = list(allowed_paths)
+    if not manifest_path.is_file():
+        raise ProvenanceFinalizeError(
+            f"manifest not found: {manifest_path}"
+        )
+    # Step 1: rewrite manifest hash + size for the allowed paths.
+    regen = regenerate_manifest(
+        manifest_path, repo_root, allowed_paths=allowed
+    )
+    if regen.get("missing_files"):
+        raise ProvenanceFinalizeError(
+            "regenerate_manifest reported missing files: "
+            f"{regen['missing_files']}"
+        )
+    # Step 2: run the canonical audit regenerator as a
+    # subprocess so the audit path is asserted by its
+    # standalone ``check`` subcommand as well — a tight
+    # round-trip coupling that catches drift immediately.
+    import subprocess as _sp
+    proc = _sp.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "provenance_audit.py"),
+            "check",
+            "--manifest", str(manifest_path),
+            "--audit", str(audit_path),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc.returncode != 0:
+        raise ProvenanceFinalizeError(
+            "provenance_audit.py check failed: "
+            f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        )
+    # Step 3: re-validate the manifest against the on-disk
+    # destinations; a passing regenerate_manifest does not
+    # guarantee a passing validate if anything in the audit
+    # path is stale.
+    if not validate_manifest(
+        manifest_path, repo_root, allowed_paths=allowed
+    ):
+        raise ProvenanceFinalizeError(
+            "post-finalize validate_manifest FAILED; manifest "
+            "and on-disk destinations disagree; refusing push"
+        )
+    return {
+        "regenerate": regen,
+        "audit_check": {
+            "stdout": proc.stdout,
+            "returncode": proc.returncode,
+        },
+        "validate": True,
+        "manifest_path": str(manifest_path),
+        "audit_path": str(audit_path),
+    }
+
+
+class ProvenanceFinalizeError(RuntimeError):
+    """Raised by ``provenance_finalize`` on any failed
+    pass; the worker MUST treat this as a hard push
+    block and emit ``WORKER_RESULT_INVALID``."""
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +690,7 @@ def _committed_bytes(repo_root: Path, head_sha: str, rel_path: str) -> bytes:
 
 
 def _manifest_committed_sha(manifest: dict, dest: str) -> Optional[str]:
-    for _, rec, rec_dest, sha_field in _iter_records(manifest):
+    for _, rec, rec_dest, sha_field, _ in _iter_records(manifest):
         if rec_dest == dest:
             v = rec.get(sha_field)
             if isinstance(v, str):
@@ -535,7 +723,7 @@ def _all_manifest_expectations_for_dest(
             raise ProvenanceCheckError(
                 f"manifest {mp} cannot be parsed: {e}"
             ) from e
-        for _, rec, dest, sha_field in _iter_records(manifest):
+        for _, rec, dest, sha_field, _ in _iter_records(manifest):
             expected = rec.get(sha_field)
             if not isinstance(expected, str):
                 continue
@@ -550,7 +738,7 @@ def _all_manifest_expectations_for_dest(
         except (OSError, json.JSONDecodeError):
             continue
         seen_in_manifest: dict = {}
-        for _, rec, dest, sha_field in _iter_records(manifest):
+        for _, rec, dest, sha_field, _ in _iter_records(manifest):
             v = rec.get(sha_field)
             if not isinstance(v, str):
                 continue

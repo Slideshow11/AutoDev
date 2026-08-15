@@ -1743,29 +1743,43 @@ def build_directive(
     round; the remainder persist on the durable thread
     inventory and surface on subsequent rounds after the
     current head advances.
+
+    Round-591: a CI_FAILURE finding IS a mandatory
+    observation surface for the worker — the worker MUST
+    inspect, repair, or evidence-handle every failed
+    required check. Truncation of CI_FAILURE findings
+    is therefore FORBIDDEN. The cap applies only to the
+    per-directive REVIEW workload (P1 + P2); CI_FAILURE
+    findings survive any cap and are inserted in their
+    own block before P1/P2 in the directive. Promotion
+    of CI_FAILURE -> dropped is itself an
+    availability-defect.
     """
     if not findings:
         raise DirectiveContractError("build_directive requires at least one finding")
-    # Round-35: cap findings per directive. When the
-    # durable thread inventory has 76+ actionable
-    # threads, sending all of them to a single worker
-    # prompt produces an unworkable payload. Pick the
-    # first N (P1 first, then P2) and let subsequent
-    # rounds handle the remainder. The durable ledger
-    # already tracks which findings have been emitted on
-    # which head, so the un-emitted findings will surface
-    # after the worker pushes the next head.
-    if max_findings is not None and len(findings) > max_findings:
-        p1 = [
-            f for f in findings
-            if f.severity == SEVERITY_P1
-        ]
+    # Round-35: cap findings per directive.
+    # Round-591: split into three partitions:
+    #   ci_failures  (mandatory; never truncated)
+    #   p1           (review work; truncated if cap hit)
+    #   p2           (review work; truncated if cap hit)
+    # P0 still escalates separately (handled further down).
+    ci_failures = [
+        f for f in findings if f.severity == SEVERITY_CI_FAILURE
+    ]
+    review = [
+        f for f in findings if f.severity != SEVERITY_CI_FAILURE
+    ]
+    if max_findings is not None and len(review) > max_findings:
+        # Only the REVIEW partition is capped; CI_FAILURE
+        # findings are mandatory observations and never
+        # dropped regardless of the cap.
+        p1 = [f for f in review if f.severity == SEVERITY_P1]
         p2 = [
-            f for f in findings
-            if f.severity != SEVERITY_P1
+            f for f in review
+            if f.severity not in (SEVERITY_P1, SEVERITY_P0_ESCALATE)
         ]
-        capped = (p1 + p2)[:max_findings]
-        findings = capped
+        review = (p1 + p2)[:max_findings]
+    findings = list(ci_failures) + list(review)
     p0 = [f for f in findings if f.severity == SEVERITY_P0_ESCALATE]
     if p0:
         raise EscalateToHuman(
