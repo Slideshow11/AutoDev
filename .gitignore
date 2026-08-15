@@ -57,3 +57,6 @@ round*_canary1_signatures_index.txt
 round*_canary2_signatures_index.txt
 # Forward-only commits for control-plane infrastructure must not
 # accidentally stage these.
+
+# pytest tmp dirs
+tmp[a-z0-9_]*/
