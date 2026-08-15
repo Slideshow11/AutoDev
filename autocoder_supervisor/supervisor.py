@@ -110,90 +110,155 @@ from .orchestration_state_root import OrchestrationRootError, OrchestrationRootM
 # ---------------------------------------------------------------------------
 
 
-def _write_acceptance_runtime_identity(cfg: SupervisorConfig) -> None:
-    """Closure VIII §4: write the supervisor-owned
-    acceptance_runtime_identity.json atomically.
+# Closure IX §6: the production supervisor MUST
+# resolve the canonical binding for ALL 17 acceptance
+# modules INSIDE its own process. For each, the binding
+# is either:
+#   A. LOADED_MODULE: the module object is already loaded
+#   B. PRODUCTION_IMPORT_BINDING: import_spec resolution
+#      from the production sys.path.
+_ACCEPTANCE_RUNTIME_BINDINGS = [
+    # (logical_filename, dotted_import_path)
+    ("supervisor.py", "autocoder_supervisor.supervisor"),
+    ("_directive_prompt.py", "autocoder_supervisor._directive_prompt"),
+    ("worker_session.py", "autocoder_supervisor.worker_session"),
+    ("aed_worker_wrapper.py", "autocoder_supervisor.aed_worker_wrapper"),
+    ("directive_bridge.py", "autocoder_supervisor.directive_bridge"),
+    ("provenance_maintenance.py", "autocoder_supervisor.provenance_maintenance"),
+    ("hermes_fingerprint.py", "autocoder_supervisor.hermes_fingerprint"),
+    ("orchestration_state_root.py", "autocoder_supervisor.orchestration_state_root"),
+    ("relay_wiring.py", "autocoder_supervisor.relay_wiring"),
+    ("config.py", "autocoder_supervisor.config"),
+    ("contracts.py", "autocoder_supervisor.contracts"),
+    ("validate.py", "autocoder_supervisor.validate"),
+    ("worker_attempt.py", "autocoder_orchestration.worker_attempt"),
+    ("review_repair_relay.py", "autocoder_orchestration.review_repair_relay"),
+    ("controller.py", "autocoder_orchestration.controller"),
+    ("context.py", "autocoder_orchestration.context"),
+    ("store.py", "autocoder_orchestration.store"),
+]
 
-    This artifact is the production supervisor's
-    authoritative record of the resolved acceptance scope
-    and runtime identity. The independent evidence
-    generator MUST read this artifact (cross-checked
-    against /proc/<pid>/environ) instead of deriving the
-    observed scope from its own defaults.
+
+def _resolve_production_runtime_binding(
+    logical_filename: str,
+    import_path: str,
+) -> dict:
+    """Closure IX §6: resolve the production binding
+    from INSIDE the running supervisor process. Returns a
+    record with:
+
+      logical_module
+      binding_method: "loaded_module" | "import_spec"
+      production_process_pid
+      production_process_start_identity
+      actual_production_path
+      actual_production_sha256
+      exists
+    """
+    import hashlib as _hash_bind
+    import importlib as _importlib_bind
+    import importlib.util as _importlib_util_bind
+    import os as _os_bind
+    import sys as _sys_bind
+    import types as _types_bind
+    pid = _os_bind.getpid()
+    ppid = _os_bind.getppid()
+    start_id = _os_bind.environ.get(
+        "AED_PROCESS_START_IDENTITY", ""
+    ) or f"pid-{pid}-{ppid}"
+    record = {
+        "logical_module": logical_filename,
+        "binding_method": "import_spec",
+        "production_process_pid": pid,
+        "production_process_start_identity": start_id,
+        "actual_production_path": "",
+        "actual_production_sha256": None,
+        "exists": False,
+    }
+    # Try (A) LOADED_MODULE
+    loaded = _sys_bind.modules.get(import_path)
+    if loaded is not None and getattr(loaded, "__file__", None):
+        path = loaded.__file__
+        sha = None
+        try:
+            sha = _hash_bind.sha256(
+                open(path, "rb").read()
+            ).hexdigest()
+        except OSError:
+            pass
+        record["binding_method"] = "loaded_module"
+        record["actual_production_path"] = path
+        record["actual_production_sha256"] = sha
+        record["exists"] = bool(sha)
+        return record
+    # Try (B) PRODUCTION_IMPORT_BINDING via import_spec
+    try:
+        spec = _importlib_util_bind.find_spec(import_path)
+    except (ImportError, ValueError):
+        spec = None
+    if spec is not None and spec.origin and spec.origin != "frozen":
+        path = spec.origin
+        # For namespace packages spec.origin may be a
+        # namespace __init__.py location; that's still
+        # canonical.
+        if path.endswith("__init__.py"):
+            # Use the parent directory as the binding
+            # target so the SHA covers the actual module
+            # directory contents.
+            sha = None
+            try:
+                import hashlib as _h2
+                d = path.rsplit("/", 1)[0]
+                block = b""
+                if os.path.isfile(os.path.join(d, logical_filename)):
+                    block = open(
+                        os.path.join(d, logical_filename), "rb"
+                    ).read()
+                    path = os.path.join(d, logical_filename)
+                else:
+                    block = open(path, "rb").read()
+                sha = _h2.sha256(block).hexdigest()
+            except OSError:
+                pass
+        else:
+            sha = None
+            try:
+                sha = _hash_bind.sha256(
+                    open(path, "rb").read()
+                ).hexdigest()
+            except OSError:
+                pass
+        record["actual_production_path"] = path
+        record["actual_production_sha256"] = sha
+        record["exists"] = bool(sha)
+        return record
+    return record
+
+
+def _write_acceptance_runtime_identity(cfg: SupervisorConfig) -> None:
+    """Closure IX §6: write the supervisor-owned
+    acceptance_runtime_identity.json atomically with
+    PRODUCTION-PROCESS bindings for all 17 modules.
     """
     import hashlib as _hash_ari
     import json as _json_ari
     import os as _os_ari
     from datetime import datetime, timezone as _tz_ari
 
-    # Discover the supervisor's actual loaded module paths.
-    loaded_modules: dict = {}
-    try:
-        # Lazy-import acceptance-critical modules to prove
-        # they load from a single canonical runtime.
-        from autocoder_supervisor import (
-            hermes_fingerprint as _hf_ari,
-        )
-        loaded_modules["hermes_fingerprint"] = (
-            _hf_ari.__file__
-            if hasattr(_hf_ari, "__file__") and _hf_ari.__file__
-            else ""
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from autocoder_supervisor import supervisor as _self_ari
-        loaded_modules["supervisor"] = (
-            _self_ari.__file__
-            if hasattr(_self_ari, "__file__") and _self_ari.__file__
-            else ""
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from autocoder_orchestration import worker_attempt as _wa_ari
-        loaded_modules["worker_attempt"] = (
-            _wa_ari.__file__
-            if hasattr(_wa_ari, "__file__") and _wa_ari.__file__
-            else ""
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from autocoder_orchestration import review_repair_relay as _rrr_ari
-        loaded_modules["review_repair_relay"] = (
-            _rrr_ari.__file__
-            if hasattr(_rrr_ari, "__file__") and _rrr_ari.__file__
-            else ""
-        )
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        from autocoder_orchestration import controller as _ctl_ari
-        loaded_modules["controller"] = (
-            _ctl_ari.__file__
-            if hasattr(_ctl_ari, "__file__") and _ctl_ari.__file__
-            else ""
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Compute SHA256 for each loaded module.
+    # Closure IX §6: resolve ALL 17 production bindings
+    # from inside the running supervisor process.
     module_records: list = []
-    for name, path in loaded_modules.items():
-        if not path:
-            continue
-        try:
-            sha = _hash_ari.sha256(
-                open(path, "rb").read()
-            ).hexdigest()
-        except OSError:
-            sha = None
-        module_records.append({
-            "logical_module": name,
-            "actual_production_loaded_path": path,
-            "actual_production_sha256": sha,
-        })
+    for logical_filename, import_path in (
+        _ACCEPTANCE_RUNTIME_BINDINGS
+    ):
+        rec = _resolve_production_runtime_binding(
+            logical_filename, import_path
+        )
+        # Maintain backward-compat keys too.
+        rec["actual_production_loaded_path"] = (
+            rec.get("actual_production_path", "")
+        )
+        module_records.append(rec)
 
     # Determine the hermes binary actually used for launch.
     hermes_bin = _os_ari.environ.get(

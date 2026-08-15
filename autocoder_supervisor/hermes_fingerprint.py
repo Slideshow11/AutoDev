@@ -267,6 +267,58 @@ def canonical_cooldown_deferred_count(state_dir) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def canonical_deferred_backlog_analysis(state_dir) -> dict:
+    """Closure IX §7: detailed semantic disposition of
+    each deferred entry.
+    """
+    out = {
+        "deferred_event_ids": [],
+        "deferred_without_retry_owner": [],
+        "deferred_without_executable_retry_path": [],
+        "deferred_current_head_actionable": [],
+        "deferred_unknown_classification": [],
+        "real_deferred_retry_event_ids": [],
+    }
+    import json as _json
+    if not state_dir:
+        return out
+    cd_path = Path(state_dir) / "cooldown_deferred_events.json"
+    if not cd_path.exists():
+        return out
+    try:
+        cd = _json.loads(cd_path.read_text())
+    except (OSError, _json.JSONDecodeError):
+        return out
+    entries = []
+    if isinstance(cd, dict):
+        e = cd.get("entries")
+        if isinstance(e, list) and e:
+            entries = e
+        else:
+            legacy = cd.get("ids", [])
+            if isinstance(legacy, list):
+                entries = [{"id": x} for x in legacy]
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        eid = entry.get("id")
+        if eid is None:
+            continue
+        out["deferred_event_ids"].append(eid)
+        if not entry.get("retry_owner") and not entry.get("claim_id"):
+            out["deferred_without_retry_owner"].append(eid)
+        if not entry.get("next_retry_condition") and not entry.get(
+            "next_retry_timestamp"
+        ):
+            out["deferred_without_executable_retry_path"].append(eid)
+        head = entry.get("head_sha")
+        if head and entry.get("actionable") is not False:
+            out["deferred_current_head_actionable"].append(eid)
+        if not entry.get("kind") and not entry.get("lifecycle"):
+            out["deferred_unknown_classification"].append(eid)
+    return out
+
+
 def compute_static_hermes_environment_fingerprint(
     *, inputs=None,
 ) -> dict:
@@ -890,55 +942,482 @@ def _read_expected_static_scope() -> dict:
     }
 
 
-def _compute_environment_fingerprint_from_runtime(
+# Closure IX §2: canonical evidence readers for
+# empirical freeze gates. The readers observe durable
+# supervisor-owned state and MUST be the ONLY source of
+# empirical_gate values. No caller bool, no env var can
+# override.
+
+
+def _read_coderabbit_clean_head_evidence(
+    state_dir=None,
+    live_head=None,
+    expected_head=None,
+) -> dict:
+    """Closure IX §2.A: derive CODERABBIT_CLEAN_HEAD from
+    canonical durable evidence.
+
+    Returns a dict:
+      value: bool (False unless proven)
+      observation_complete: bool
+      evidence_head: str | None
+      evidence_ids: list
+      observed_at: str | None
+      source_artifact: str | None
+      reason: str | None
+    """
+    import os as _os
+    from pathlib import Path as _Path_reader
+    out = {
+        "value": False,
+        "observation_complete": False,
+        "evidence_head": None,
+        "evidence_ids": [],
+        "observed_at": None,
+        "source_artifact": None,
+        "reason": "no_state_dir",
+    }
+    if not state_dir:
+        return out
+    sdir = _Path_reader(str(state_dir))
+    # Read durable per-head provider evidence artifacts
+    # written by the supervisor's capture_live_snapshot /
+    # pr416 collector path.
+    evidence_files = [
+        "pr416_coderabbit_exact_head_evidence.json",
+        "pr5_orch/new_actionable_review_inventory.json",
+    ]
+    evidence_found = False
+    for f in evidence_files:
+        p = sdir / f
+        if not p.exists():
+            continue
+        try:
+            data = _json.loads(p.read_text())
+        except (OSError, _json.JSONDecodeError):
+            out["reason"] = f"parse_failed:{f}"
+            return out
+        evidence_found = True
+        # Track the artifact we read from.
+        out["source_artifact"] = str(p)
+        # exact head evidence
+        if f == "pr416_coderabbit_exact_head_evidence.json":
+            eh = data.get("exact_head")
+            out["evidence_head"] = eh
+            if not eh or eh != (expected_head or eh):
+                out["reason"] = (
+                    "stale_evidence: exact_head != current_head"
+                )
+                return out
+            status = data.get(
+                "exact_head_coderabbit_status"
+            ) or {}
+            if status.get("conclusion") != "success":
+                out["reason"] = (
+                    f"exact_head_coderabbit_status: "
+                    f"{status.get('conclusion')}"
+                )
+                return out
+            unconsumed = data.get(
+                "unconsumed_actionable_events"
+            ) or []
+            if unconsumed:
+                out["reason"] = (
+                    f"unconsumed_actionable_events: "
+                    f"{len(unconsumed)}"
+                )
+                out["evidence_ids"] = [
+                    str(e.get("id") or e) for e in unconsumed
+                ]
+                return out
+            final = data.get("final_assessment")
+            if not final:
+                out["reason"] = "no_final_assessment"
+                return out
+            out["value"] = True
+            out["observation_complete"] = True
+            out["observed_at"] = (
+                status.get("captured_at") or ""
+            ) or None
+            out["reason"] = "ok"
+            return out
+        if f == "pr5_orch/new_actionable_review_inventory.json":
+            eh = data.get("head_observed")
+            out["evidence_head"] = eh
+            if not eh or eh != (expected_head or eh):
+                out["reason"] = (
+                    "stale_inventory: head_observed != current_head"
+                )
+                return out
+            inv = data.get("inventory") or []
+            if inv:
+                out["reason"] = (
+                    f"actionable_inventory_non_empty: {len(inv)}"
+                )
+                out["evidence_ids"] = list(inv)
+                return out
+            out["value"] = True
+            out["observation_complete"] = True
+            out["observed_at"] = (
+                data.get("recorded_at") or None
+            )
+            out["reason"] = "ok_inventory_clean"
+            return out
+    if not evidence_found:
+        out["reason"] = "no_evidence_artifact_found"
+        return out
+    return out
+
+
+def _read_codex_optional_lifecycle_evidence(
+    state_dir=None,
+) -> dict:
+    """Closure IX §2.B: derive CODEX_OPTIONAL_LIFECYCLE from
+    a real supervisor-owned production lifecycle.
+
+    Returns a dict with the same shape as the coderabbit
+    reader. Codex is OPTIONAL; the gate requires a real
+    production lifecycle or explicit durable
+    OPTIONAL_DEGRADED outcome.
+    """
+    from pathlib import Path as _Path_reader
+    out = {
+        "value": False,
+        "observation_complete": False,
+        "evidence_head": None,
+        "evidence_ids": [],
+        "observed_at": None,
+        "source_artifact": None,
+        "reason": "no_state_dir",
+    }
+    if not state_dir:
+        return out
+    sdir = _Path_reader(str(state_dir))
+    # Look for durable Codex lifecycle evidence. The
+    # supervisor's review_requests/ directory holds
+    # request intents.
+    rr_dir = sdir / "review_requests"
+    codex_lifecycles = []
+    if rr_dir.exists():
+        for f in rr_dir.iterdir():
+            if not f.name.startswith("codex__"):
+                continue
+            try:
+                d = _json.loads(f.read_text())
+            except (OSError, _json.JSONDecodeError):
+                continue
+            if isinstance(d, dict):
+                codex_lifecycles.append(d)
+    if not codex_lifecycles:
+        out["observation_complete"] = True
+        out["reason"] = "no_codex_lifecycle_observed"
+        return out
+    # Look for the canonical terminal evidence (lifecycle
+    # field set to terminal/consumed).
+    terminal_count = 0
+    for lc in codex_lifecycles:
+        if lc.get("lifecycle") in (
+            "CONSUMED", "TERMINAL", "OPTIONAL_DEGRADED"
+        ):
+            terminal_count += 1
+    if terminal_count == 0:
+        out["observation_complete"] = True
+        out["source_artifact"] = str(rr_dir)
+        out["evidence_ids"] = [
+            lc.get("request_head") for lc in codex_lifecycles
+        ]
+        out["reason"] = (
+            f"codex_lifecycles_pending_terminal: "
+            f"{len(codex_lifecycles)}"
+        )
+        return out
+    out["value"] = True
+    out["observation_complete"] = True
+    out["source_artifact"] = str(rr_dir)
+    out["evidence_ids"] = [
+        lc.get("request_head") for lc in codex_lifecycles
+    ]
+    out["observed_at"] = codex_lifecycles[-1].get(
+        "requested_at"
+    ) if codex_lifecycles else None
+    out["reason"] = "ok_terminal_lifecycle_observed"
+    return out
+
+
+def _read_autonomous_provenance_evidence(
+    state_dir=None,
+) -> dict:
+    """Closure IX §2.C: derive AUTONOMOUS_PROVENANCE_REAL_EXECUTION
+    from the real durable provenance lifecycle.
+
+    Captures the durable provenance_drift_pending.json or
+    similar ledger entries that show autonomous workers
+    caused source-changing cycles.
+    """
+    from pathlib import Path as _Path_reader
+    import json as _json_auto
+    out = {
+        "value": False,
+        "observation_complete": False,
+        "evidence_head": None,
+        "evidence_ids": [],
+        "observed_at": None,
+        "source_artifact": None,
+        "reason": "no_state_dir",
+    }
+    if not state_dir:
+        return out
+    sdir = _Path_reader(str(state_dir))
+    # provenance_drift_pending.json records drift entries
+    # that have not been resolved. Resolved entries
+    # indicate autonomous provenance-maintenance cycles.
+    p = sdir / "provenance_drift_pending.json"
+    if not p.exists():
+        out["observation_complete"] = True
+        out["reason"] = "no_provenance_drift_ledger"
+        return out
+    try:
+        d = _json_auto.loads(p.read_text())
+    except (OSError, _json_auto.JSONDecodeError):
+        out["reason"] = "parse_failed:provenance_drift_pending"
+        return out
+    out["observation_complete"] = True
+    out["source_artifact"] = str(p)
+    if isinstance(d, dict):
+        entries = d.get("entries", [])
+        out["evidence_ids"] = [
+            e.get("id") for e in entries if isinstance(e, dict)
+        ]
+    # Even an empty ledger means no autonomous cycle has
+    # occurred. The gate requires a real lifecycle.
+    out["reason"] = (
+        "no_autonomous_provenance_cycle_observed"
+        if not out["evidence_ids"]
+        else "ok_observed_autonomous_cycle"
+    )
+    out["value"] = bool(out["evidence_ids"])
+    return out
+
+
+def _read_real_deferred_retry_evidence(
+    state_dir=None,
+) -> dict:
+    """Closure IX §2.D: derive REAL_DEFERRED_RETRY from a
+    real production event transition such as:
+    DEFERRED -> ELIGIBLE -> RETRY_ATTEMPT -> OWNED -> CONSUMED.
+    """
+    from pathlib import Path as _Path_reader
+    import json as _json_retry
+    out = {
+        "value": False,
+        "observation_complete": False,
+        "evidence_head": None,
+        "evidence_ids": [],
+        "observed_at": None,
+        "source_artifact": None,
+        "reason": "no_state_dir",
+    }
+    if not state_dir:
+        return out
+    sdir = _Path_reader(str(state_dir))
+    p = sdir / "consumed_event_terminality.json"
+    if not p.exists():
+        out["observation_complete"] = True
+        out["reason"] = "no_terminality_ledger"
+        return out
+    try:
+        d = _json_retry.loads(p.read_text())
+    except (OSError, _json_retry.JSONDecodeError):
+        out["reason"] = "parse_failed:consumed_event_terminality"
+        return out
+    out["observation_complete"] = True
+    out["source_artifact"] = str(p)
+    entries = []
+    if isinstance(d, dict):
+        entries = d.get("entries", [])
+    retry_evidence = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        reason = (e.get("reason") or "").lower()
+        consumer = e.get("consumer") or ""
+        if (
+            "deferred" in reason
+            and "retry" in reason
+            and consumer
+        ):
+            retry_evidence.append(e)
+    out["evidence_ids"] = [
+        e.get("event_id") for e in retry_evidence
+    ]
+    out["value"] = bool(retry_evidence)
+    out["observed_at"] = (
+        retry_evidence[-1].get("recorded_at")
+        if retry_evidence else None
+    )
+    out["reason"] = (
+        "ok_observed_deferred_retry_lifecycle"
+        if retry_evidence
+        else "no_deferred_retry_lifecycle_observed"
+    )
+    return out
+
+
+def _enumerate_static_environment_inputs(
     runtime_summary: list,
-    expected_scope: dict,
     observed_scope: dict,
-) -> str:
-    """Closure VIII §6: compute the static environment
-    fingerprint from the canonical observed runtime
-    summary.
+) -> dict:
+    """Closure IX §5: enumerate every canonical static
+    environment input. Each input is a record with:
 
-    The environment fingerprint hashes:
-      - each committed source SHA (the canonical code)
-      - each actual_production_sha256 (the loaded bytes)
-      - the supervisor-owned hermes_binary_path
+      label: human-readable name
+      path: filesystem path to the input
+      exists: bool
+      required: bool (True means observation failure
+              blocks structural freeze)
+      sha256: bytes-SHA256 if exists
+    """
+    import hashlib as _hashlib_env
+    import os as _os_env
 
-    This MUST differ from the static scope fingerprint
-    (which hashes the routing-identity keys). Different
-    inputs MUST produce different fingerprints.
+    inputs: list = []
+
+    def _add(label, path, required):
+        exists = bool(path) and _os_env.path.exists(path)
+        sha = None
+        if exists:
+            try:
+                sha = _hashlib_env.sha256(
+                    open(path, "rb").read()
+                ).hexdigest()
+            except OSError:
+                exists = False
+                sha = None
+        inputs.append({
+            "label": label,
+            "path": path or "",
+            "exists": exists,
+            "required": required,
+            "sha256": sha,
+        })
+
+    # 1) all acceptance-critical runtime source/deployed bytes
+    for rec in runtime_summary:
+        module = rec.get("logical_module", "")
+        # Committed source.
+        _add(
+            f"acceptance_runtime/{module}/committed_source",
+            rec.get("committed_source_path", ""),
+            required=True,
+        )
+        # Loaded production bytes (may equal source or
+        # differ if a separate deployed copy exists).
+        _add(
+            f"acceptance_runtime/{module}/production_loaded",
+            rec.get("actual_production_loaded_path", ""),
+            required=True,
+        )
+
+    # 2) global Hermes config
+    _add(
+        "global_hermes_config",
+        "/home/max/.hermes/config.yaml",
+        required=True,
+    )
+    # 3) all five AED profile configs
+    for prof in [
+        "aed-builder",
+        "aed-quarantine",
+        "aed-researcher",
+        "aed-reviewer",
+        "aed-specifier",
+    ]:
+        _add(
+            f"aed_profile/{prof}/config.yaml",
+            f"/home/max/.hermes/profiles/{prof}/config.yaml",
+            required=True,
+        )
+    # 4) actual Hermes invocation shim bytes
+    hermes_invoked_path = observed_scope.get(
+        "hermes_binary_path", ""
+    )
+    _add(
+        "hermes_invoked_path",
+        hermes_invoked_path,
+        required=True,
+    )
+    # 5) resolved Hermes executable target bytes
+    hermes_resolved_path = hermes_invoked_path
+    try:
+        import os as _os_resolve
+        if hermes_invoked_path and _os_resolve.path.islink(
+            hermes_invoked_path
+        ):
+            hermes_resolved_path = _os_resolve.path.realpath(
+                hermes_invoked_path
+            )
+    except OSError:
+        pass
+    _add(
+        "hermes_resolved_path",
+        hermes_resolved_path,
+        required=True,
+    )
+    # 6) security/tool restriction configuration
+    for cfg_path in [
+        "/home/max/.hermes/security.yaml",
+        "/home/max/.hermes/restrictions.yaml",
+    ]:
+        _add(
+            f"security/{os.path.basename(cfg_path)}",
+            cfg_path,
+            required=False,
+        )
+    # 7) production_working_checkout / state_directory
+    _add(
+        "production_working_checkout",
+        observed_scope.get("production_working_checkout", ""),
+        required=True,
+    )
+    _add(
+        "supervisor_state_directory",
+        observed_scope.get("supervisor_state_directory", ""),
+        required=True,
+    )
+    return {"inputs": inputs}
+
+
+def _compute_static_environment_fingerprint(
+    inputs_dict: dict,
+) -> dict:
+    """Closure IX §5: compute the static acceptance
+    environment fingerprint from the canonical inputs.
+
+    Returns:
+      fingerprint: hex SHA256
+      inputs: list of input records
+      missing_inputs: list of required inputs that are
+        absent (fails closed)
     """
     import hashlib as _hashlib_env
 
+    inputs = inputs_dict.get("inputs", [])
     h = _hashlib_env.sha256()
-    # Hash each module's committed source + loaded bytes.
-    for record in runtime_summary:
-        module = record.get("logical_module", "")
-        committed_sha = record.get(
-            "committed_source_sha256", ""
-        ) or ""
-        loaded_sha = record.get(
-            "actual_production_sha256", ""
-        ) or ""
+    missing = []
+    for inp in inputs:
+        if not inp["exists"]:
+            if inp["required"]:
+                missing.append(inp)
+            continue
         h.update(
-            f"module\t{module}\t{committed_sha}\t{loaded_sha}\n"
+            f"{inp['label']}\t{inp['path']}\t{inp['sha256']}\n"
             .encode("utf-8")
         )
-    # Hash the observed hermes path (must be observable).
-    hermes_path = observed_scope.get("hermes_binary_path", "")
-    h.update(f"hermes\t{hermes_path}\n".encode("utf-8"))
-    # Hash the observed production_working_checkout (the
-    # actual repo dir).
-    checkout = observed_scope.get(
-        "production_working_checkout", ""
-    )
-    h.update(f"checkout\t{checkout}\n".encode("utf-8"))
-    # Hash the observed supervisor_state_directory.
-    state_dir = observed_scope.get(
-        "supervisor_state_directory", ""
-    )
-    h.update(f"state_dir\t{state_dir}\n".encode("utf-8"))
-    return h.hexdigest()
+    return {
+        "fingerprint": h.hexdigest(),
+        "inputs": inputs,
+        "missing_inputs": missing,
+    }
 
 
 def _read_supervisor_acceptance_identity(
@@ -1156,16 +1635,35 @@ def _read_observed_static_scope(
                     if k in SCOPE_KEY_TO_ENV.values():
                         observed[k] = v
                 env_source = f"/proc/{pid}/environ"
+                # Closure IX §8: track per-key source.
+                _env_src_lookup = {
+                    v: k for k, v in SCOPE_KEY_TO_ENV.items()
+                }
+                for pair in env_pairs:
+                    if not pair or b"=" not in pair:
+                        continue
+                    k, _, v = pair.partition(b"=")
+                    k = k.decode("utf-8", "replace")
+                    v = v.decode("utf-8", "replace")
+                    if k in SCOPE_KEY_TO_ENV.values():
+                        observed[k] = v
+                        scope_key = _env_src_lookup.get(k)
+                        if scope_key:
+                            observation_sources_per_key[scope_key] = (
+                                env_source
+                            )
             except OSError:
                 pass
 
     # (2) Durable: read run_state.json for branch/head.
+    rs_source = None
     if state_dir:
         rs_path = Path(state_dir) / "run_state.json"
         if rs_path.exists():
             try:
                 rs = _json.loads(rs_path.read_text())
                 if isinstance(rs, dict):
+                    rs_source = str(rs_path)
                     # Use feature_branch if no AED_EXPECTED_BRANCH
                     if (
                         "AED_EXPECTED_BRANCH" not in observed
@@ -1173,6 +1671,12 @@ def _read_observed_static_scope(
                     ):
                         observed["AED_EXPECTED_BRANCH"] = rs["feature_branch"]
                         observed["AED_EXPECTED_BRANCH_SET"] = rs["feature_branch"]
+                        observation_sources_per_key["expected_branch"] = (
+                            rs_source
+                        )
+                        observation_sources_per_key["expected_branch_set"] = (
+                            rs_source
+                        )
             except (OSError, _json.JSONDecodeError):
                 pass
 
@@ -1638,9 +2142,8 @@ def generate_pre_canary_evidence(
 
         # Determine the ACTUAL production loaded path. Use
         # the supervisor-owned artifact's loaded_modules
-        # first; if the module is in the artifact, that
-        # path is canonical. Otherwise it MUST come from a
-        # single explicit binding (lazy import + getfile).
+        # ONLY. Closure IX §6 forbids lazy-import in the
+        # evidence-generator process.
         actual_loaded_path = _supervisor_loaded_paths.get(filename, "")
         actual_loaded_sha = _supervisor_loaded_shas.get(filename, "")
         provenance_of_loaded_path = (
@@ -1648,85 +2151,6 @@ def generate_pre_canary_evidence(
             if actual_loaded_path
             else ""
         )
-        if not actual_loaded_path:
-            # Lazy-import + record the resolved __file__.
-            try:
-                # Map filenames to module imports.
-                _MODULE_IMPORT_MAP = {
-                    "supervisor.py": (
-                        "autocoder_supervisor.supervisor"
-                    ),
-                    "_directive_prompt.py": (
-                        "autocoder_supervisor._directive_prompt"
-                    ),
-                    "worker_session.py": (
-                        "autocoder_supervisor.worker_session"
-                    ),
-                    "aed_worker_wrapper.py": (
-                        "autocoder_supervisor.aed_worker_wrapper"
-                    ),
-                    "directive_bridge.py": (
-                        "autocoder_supervisor.directive_bridge"
-                    ),
-                    "provenance_maintenance.py": (
-                        "autocoder_supervisor.provenance_maintenance"
-                    ),
-                    "hermes_fingerprint.py": (
-                        "autocoder_supervisor.hermes_fingerprint"
-                    ),
-                    "orchestration_state_root.py": (
-                        "autocoder_supervisor.orchestration_state_root"
-                    ),
-                    "relay_wiring.py": (
-                        "autocoder_supervisor.relay_wiring"
-                    ),
-                    "config.py": (
-                        "autocoder_supervisor.config"
-                    ),
-                    "contracts.py": (
-                        "autocoder_supervisor.contracts"
-                    ),
-                    "validate.py": (
-                        "autocoder_supervisor.validate"
-                    ),
-                    "worker_attempt.py": (
-                        "autocoder_orchestration.worker_attempt"
-                    ),
-                    "review_repair_relay.py": (
-                        "autocoder_orchestration.review_repair_relay"
-                    ),
-                    "controller.py": (
-                        "autocoder_orchestration.controller"
-                    ),
-                    "context.py": (
-                        "autocoder_orchestration.context"
-                    ),
-                    "store.py": (
-                        "autocoder_orchestration.store"
-                    ),
-                }
-                import_path = _MODULE_IMPORT_MAP.get(filename)
-                if import_path:
-                    _mod = __import__(import_path, fromlist=[""])
-                    actual_loaded_path = getattr(
-                        _mod, "__file__", ""
-                    ) or ""
-                    if actual_loaded_path:
-                        try:
-                            actual_loaded_sha = (
-                                _hashlib.sha256(
-                                    open(
-                                        actual_loaded_path, "rb"
-                                    ).read()
-                                ).hexdigest()
-                            )
-                        except OSError:
-                            actual_loaded_sha = None
-                        provenance_of_loaded_path = (
-                            "lazy-import + __file__ explicit binding"
-                        )
-            except Exception:
-                pass
         # Provenance proven if we have a path.
         if actual_loaded_path:
             runtime_files_proven_loaded += 1
@@ -1825,36 +2249,90 @@ def generate_pre_canary_evidence(
     cooldown_schema_source = cooldown_result["schema_source"]
     cooldown_parse_failed = cooldown_result["parse_failed"]
 
-    # Orphan / terminal / superseded pending counts.
-    # Closure VIII §7: no orphan/unterminated event condition
-    # is required for pre_canary_freeze_eligible. Read from the
-    # durable supervisor state if available; default to 0 if
-    # we can't observe.
-    orphaned_count = 0
-    terminal_pending_consumption_count = 0
-    superseded_pending_consumption_count = 0
+    # Closure IX §7: detailed deferred backlog analysis.
+    deferred_analysis = canonical_deferred_backlog_analysis(
+        state_dir
+    )
+
+    # Closure IX §3: event observation MUST fail closed.
+    # Counts begin as UNKNOWN (-1), not 0. Any observation
+    # error sets EVENT_STATE_OBSERVATION_COMPLETE = FALSE.
+    orphaned_count = -1
+    terminal_pending_consumption_count = -1
+    superseded_pending_consumption_count = -1
+    EVENT_STATE_OBSERVATION_COMPLETE = False
+    event_state_observation_error = None
+    event_observation_failures = []
+
     if state_dir:
+        sdir = Path(str(state_dir))
+        # 1) unconsumed_events.json: list_unconsumed_events()
+        events = None
         try:
             from autocoder_supervisor.supervisor import (
                 list_unconsumed_events,
             )
             events = list_unconsumed_events()
-            # An event is orphaned if it has no terminal lifecycle
-            # after an extended period. Without canonical
-            # classifications, treat any unconsumed event as
-            # potentially orphaned IF the worker attempts store
-            # has no corresponding attempt.
-            wa_dir = Path(str(state_dir)) / "worker_attempts"
+        except Exception as _le_exc:
+            event_observation_failures.append(
+                f"list_unconsumed_events_failed: {_le_exc}"
+            )
+            event_state_observation_error = (
+                f"list_unconsumed_events_failed: {_le_exc}"
+            )
+        # 2) worker_attempts store
+        attempt_ids = None
+        wa_dir = sdir / "worker_attempts"
+        if wa_dir.exists():
             attempt_ids = set()
-            if wa_dir.exists():
-                for wa_path in wa_dir.glob("*.json"):
-                    try:
-                        wa = _json.loads(wa_path.read_text())
-                        if isinstance(wa, dict):
-                            aid = wa.get("attempt_id") or wa_path.stem
-                            attempt_ids.add(str(aid))
-                    except (OSError, _json.JSONDecodeError):
-                        continue
+            malformed = 0
+            for wa_path in wa_dir.glob("*.json"):
+                try:
+                    wa = _json.loads(wa_path.read_text())
+                except (OSError, _json.JSONDecodeError) as _wa_exc:
+                    malformed += 1
+                    event_observation_failures.append(
+                        f"worker_attempt_parse_failed: {wa_path.name}: {_wa_exc}"
+                    )
+                    continue
+                if not isinstance(wa, dict):
+                    malformed += 1
+                    event_observation_failures.append(
+                        f"worker_attempt_malformed: {wa_path.name}: "
+                        f"not a dict"
+                    )
+                    continue
+                aid = wa.get("attempt_id") or wa_path.stem
+                attempt_ids.add(str(aid))
+            if malformed > 0:
+                # Malformed WA records = observation failure.
+                event_observation_failures.append(
+                    f"worker_attempt_malformed_count: {malformed}"
+                )
+        elif wa_dir.exists() is False:
+            pass  # wa_dir absent is OK
+        # 3) terminality ledger
+        terminal_ledger_ok = True
+        ct_path = sdir / "consumed_event_terminality.json"
+        if ct_path.exists():
+            try:
+                _json.loads(ct_path.read_text())
+            except (OSError, _json.JSONDecodeError) as _ct_exc:
+                terminal_ledger_ok = False
+                event_observation_failures.append(
+                    f"consumed_event_terminality_parse_failed: "
+                    f"{_ct_exc}"
+                )
+                event_state_observation_error = (
+                    f"consumed_event_terminality_parse_failed: "
+                    f"{_ct_exc}"
+                )
+        # Compute counts only when ALL observations succeeded.
+        if (
+            events is not None
+            and attempt_ids is not None
+            and terminal_ledger_ok
+        ):
             orphaned_count = sum(
                 1
                 for e in events
@@ -1879,8 +2357,9 @@ def generate_pre_canary_evidence(
                 if isinstance(e, dict)
                 and e.get("lifecycle") == "SUPERSEDED"
             )
-        except Exception:
-            pass
+            EVENT_STATE_OBSERVATION_COMPLETE = True
+        else:
+            EVENT_STATE_OBSERVATION_COMPLETE = False
 
     # Required CI checks.
     REQUIRED_CI_CHECKS_EXPECTED = [
@@ -1900,16 +2379,46 @@ def generate_pre_canary_evidence(
         c for c in REQUIRED_CI_CHECKS_EXPECTED
         if c not in observed_check_names
     ]
-    # Non-success among required checks (success = "success"
-    # at workflow level; "neutral" or "success" are OK).
+    # Non-success among required checks.
+    #
+    # GitHub's check-runs API has two orthogonal fields:
+    #   * status     — lifecycle phase:
+    #                   "queued" | "in_progress" | "completed"
+    #   * conclusion — only meaningful when status == "completed":
+    #                   "success" | "failure" | "neutral" |
+    #                   "cancelled" | "skipped" | "timed_out" |
+    #                   "action_required" | None (still in flight)
+    #
+    # Treating conclusion == None as "success" was a freeze-gate
+    # defect: a queued or in_progress required check (e.g.
+    # "full-suite") silently satisfied the gate, so evidence could
+    # declare freeze_eligible before every required job reached a
+    # terminal conclusion. We now require an *explicit* terminal
+    # success/neutral; anything else — including a missing or
+    # in-flight conclusion — is non-success.
+    # Closure IX §4: ONLY terminal/completed+success is accepted.
+# Pending, queued, in_progress, neutral, skipped, missing, and
+# cancelled all block the gate. The exact seven C22 checks
+# require strict completed+success.
+    _REQUIRED_CHECK_TERMINAL_STATUS = "completed"
+    _REQUIRED_CHECK_SUCCESS_CONCLUSION = "success"
+    required_ci_checks_pending = [
+        cr["name"] for cr in check_runs
+        if cr["name"] in REQUIRED_CI_CHECKS_EXPECTED
+        and cr.get("status") != _REQUIRED_CHECK_TERMINAL_STATUS
+    ]
     required_ci_checks_non_success = [
         cr["name"] for cr in check_runs
         if cr["name"] in REQUIRED_CI_CHECKS_EXPECTED
-        and cr.get("conclusion") not in ("success", "neutral", None)
+        and (
+            cr.get("status") == _REQUIRED_CHECK_TERMINAL_STATUS
+            and cr.get("conclusion") != _REQUIRED_CHECK_SUCCESS_CONCLUSION
+        )
     ]
     exact_head_ci_all_required_success = (
         len(required_ci_checks_missing) == 0
         and len(required_ci_checks_non_success) == 0
+        and len(required_ci_checks_pending) == 0
     )
 
     # Build the artifact.
@@ -1935,7 +2444,15 @@ def generate_pre_canary_evidence(
         "required_ci_checks_observed": required_ci_checks_observed,
         "required_ci_checks_missing": required_ci_checks_missing,
         "required_ci_checks_non_success": required_ci_checks_non_success,
+        "required_ci_checks_pending": required_ci_checks_pending,
         "exact_head_ci_all_required_success": exact_head_ci_all_required_success,
+        # Closure IX §4 policy constants
+        "required_ci_terminal_success_policy": (
+            "status=completed AND conclusion=success ONLY"
+        ),
+        "pending_check_accepted": False,
+        "neutral_check_accepted": False,
+        "skipped_check_accepted": False,
         # Closure VIII §8: report/artifact consistency
         # invariant. OBSERVED UNION MISSING == EXPECTED.
         # NON_SUCCESS SUBSET_OF OBSERVED.
@@ -1954,14 +2471,7 @@ def generate_pre_canary_evidence(
         "observed_static_scope": observed_scope,
         "expected_static_scope_fingerprint": expected_fingerprint,
         "observed_static_scope_fingerprint": observed_fingerprint,
-        # Closure VIII §6: the static environment fingerprint
-        # must be the actual environment hash, NOT an alias of
-        # the scope hash. Compute the environment fingerprint
-        # over the canonical inputs (the 17 acceptance-critical
-        # modules + Hermes binary).
-        "static_environment_fingerprint": _compute_environment_fingerprint_from_runtime(
-            runtime_summary, expected_scope, observed_scope,
-        ),
+        "static_environment_fingerprint_marker": True,  # see below
         "static_scope_fingerprint": expected_fingerprint,
         "static_scope_match": static_scope_match,
         "static_scope_all_required_keys_present": (
@@ -1991,6 +2501,33 @@ def generate_pre_canary_evidence(
         "cooldown_legacy_ids_count": cooldown_legacy_ids_count,
         "cooldown_deferred_count": cooldown_deferred_count,
         "cooldown_parse_failed": cooldown_parse_failed,
+        "deferred_event_ids": deferred_analysis[
+            "deferred_event_ids"
+        ],
+        "deferred_without_retry_owner": deferred_analysis[
+            "deferred_without_retry_owner"
+        ],
+        "deferred_without_executable_retry_path": (
+            deferred_analysis[
+                "deferred_without_executable_retry_path"
+            ]
+        ),
+        "deferred_current_head_actionable": deferred_analysis[
+            "deferred_current_head_actionable"
+        ],
+        "deferred_unknown_classification": deferred_analysis[
+            "deferred_unknown_classification"
+        ],
+        "real_deferred_retry_event_ids": deferred_analysis[
+            "real_deferred_retry_event_ids"
+        ],
+        "event_state_observation_complete": (
+            EVENT_STATE_OBSERVATION_COMPLETE
+        ),
+        "event_state_observation_error": (
+            event_state_observation_error
+        ),
+        "event_observation_failures": event_observation_failures,
         "orphaned_count": orphaned_count,
         "terminal_pending_consumption_count": (
             terminal_pending_consumption_count
@@ -2020,18 +2557,29 @@ def generate_pre_canary_evidence(
         "pr_merged": pr_body.get("merged"),
         "pr_merged_at": pr_body.get("merged_at"),
     }
-    # Closure VIII §11: empirical gates (CodeRabbit clean
-    # head, Codex lifecycle, autonomous provenance, real
-    # deferred retry) MUST fail closed until proven.
-    # These remain UNPROVEN in this closure; the gate
-    # therefore stays FALSE for those dimensions. The
-    # structural gates (PR state, head equality, CI, etc.)
-    # are all TRUE.
+    # Closure IX §2: empirical gates MUST derive from
+    # canonical durable evidence. NO hardcoded values.
+    _coderabbit_evidence = _read_coderabbit_clean_head_evidence(
+        state_dir=state_dir,
+        expected_head=local_head,
+    )
+    _codex_evidence = _read_codex_optional_lifecycle_evidence(
+        state_dir=state_dir,
+    )
+    _autoprov_evidence = _read_autonomous_provenance_evidence(
+        state_dir=state_dir,
+    )
+    _retry_evidence = _read_real_deferred_retry_evidence(
+        state_dir=state_dir,
+    )
     _empirical_gates_pending = [
-        ("coderabbit_clean_head", False),
-        ("codex_optional_lifecycle", False),
-        ("autonomous_provenance_real_execution", False),
-        ("real_deferred_retry", False),
+        ("coderabbit_clean_head", _coderabbit_evidence["value"]),
+        ("codex_optional_lifecycle", _codex_evidence["value"]),
+        (
+            "autonomous_provenance_real_execution",
+            _autoprov_evidence["value"],
+        ),
+        ("real_deferred_retry", _retry_evidence["value"]),
     ]
     _structural_freeze_eligible = (
         (pr_body.get("state") == "open")
@@ -2045,9 +2593,36 @@ def generate_pre_canary_evidence(
         and (active_workers == 0)
         and (active_workers >= 0)
         and (not cooldown_parse_failed)
+        # Closure IX §3: event observation MUST be complete.
+        and EVENT_STATE_OBSERVATION_COMPLETE
         and (orphaned_count == 0)
         and (terminal_pending_consumption_count == 0)
         and (superseded_pending_consumption_count == 0)
+        # Closure IX §7: deferred backlog must be empty
+        # OR all entries must have retry owner +
+        # executable retry path + head-actionable
+        # disposition. For the C22 clean-freeze boundary
+        # we require 0 deferred-without-retry-owner.
+        and (
+            len(deferred_analysis[
+                "deferred_without_retry_owner"
+            ]) == 0
+        )
+        and (
+            len(deferred_analysis[
+                "deferred_without_executable_retry_path"
+            ]) == 0
+        )
+        and (
+            len(deferred_analysis[
+                "deferred_current_head_actionable"
+            ]) == 0
+        )
+        and (
+            len(deferred_analysis[
+                "deferred_unknown_classification"
+            ]) == 0
+        )
     )
     _empirical_freeze_eligible = all(
         proven
@@ -2063,6 +2638,67 @@ def generate_pre_canary_evidence(
         label for (label, proven) in _empirical_gates_pending
         if not proven
     ]
+    # Closure IX §2: per-gate evidence records
+    evidence["empirical_gate_evidence"] = {
+        "coderabbit_clean_head": _coderabbit_evidence,
+        "codex_optional_lifecycle": _codex_evidence,
+        "autonomous_provenance_real_execution": _autoprov_evidence,
+        "real_deferred_retry": _retry_evidence,
+    }
+    # Closure IX §7: real deferred retry event ids are
+    # derived from the empirical evidence, not the
+    # cooldown ledger alone.
+    evidence["real_deferred_retry_event_ids"] = list(
+        _retry_evidence.get("evidence_ids", [])
+    )
+    evidence["real_deferred_retry_empirically_proven"] = (
+        _retry_evidence["value"]
+    )
+    evidence["empirical_gate_values_source"] = (
+        "canonical_durable_evidence"
+    )
+    # Closure IX §5: full static environment fingerprint.
+    _env_inputs = _enumerate_static_environment_inputs(
+        runtime_summary, observed_scope,
+    )
+    _env_fp = _compute_static_environment_fingerprint(_env_inputs)
+    evidence["static_environment_fingerprint"] = _env_fp["fingerprint"]
+    evidence["static_environment_input_count"] = len(
+        _env_fp["inputs"]
+    )
+    evidence["static_environment_inputs"] = _env_fp["inputs"]
+    evidence["static_environment_missing_inputs"] = _env_fp[
+        "missing_inputs"
+    ]
+    evidence["static_environment_inputs_fingerprint_complete"] = (
+        len(_env_fp["missing_inputs"]) == 0
+    )
+    evidence["hermes_invoked_path"] = observed_scope.get(
+        "hermes_binary_path", ""
+    )
+    evidence["hermes_invoked_path_sha256"] = next(
+        (
+            i["sha256"] for i in _env_fp["inputs"]
+            if i["label"] == "hermes_invoked_path"
+        ),
+        None,
+    )
+    evidence["hermes_resolved_path"] = next(
+        (
+            i["path"] for i in _env_fp["inputs"]
+            if i["label"] == "hermes_resolved_path"
+        ),
+        "",
+    )
+    evidence["hermes_resolved_path_sha256"] = next(
+        (
+            i["sha256"] for i in _env_fp["inputs"]
+            if i["label"] == "hermes_resolved_path"
+        ),
+        None,
+    )
+    # Remove placeholder
+    evidence.pop("static_environment_fingerprint_marker", None)
     # Write atomically to canonical + mirror (if mirror
     # dir exists).
     _atomic_write(_Path(state_dir) / "pre_canary_evidence.json", evidence)

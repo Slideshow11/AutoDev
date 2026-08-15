@@ -26,17 +26,12 @@ from pathlib import Path
 
 @pytest.fixture(autouse=True)
 def _stub_github_api(monkeypatch, tmp_path):
-    """Stub the GitHub API calls + hermes binary so tests
-    do NOT hit the real API or require hermes on the
-    test machine. Also set AED_* env vars so the C22
-    validators pass without requiring the test machine to
-    match the production supervisor's actual config.
+    """Stub the GitHub API + hermes + supervisor identity
+    so tests do NOT hit the real API or require hermes.
     """
     from autocoder_supervisor import hermes_fingerprint as hf
     from autocoder_supervisor import supervisor as s
 
-    # Set the AED_* env vars so the validator passes for
-    # C22.
     monkeypatch.setenv("AED_REPO_OWNER", "Slideshow11")
     monkeypatch.setenv("AED_REPO_NAME", "AutoDev")
     monkeypatch.setenv("AED_PR_NUMBER", "5")
@@ -48,18 +43,104 @@ def _stub_github_api(monkeypatch, tmp_path):
     monkeypatch.setenv("AED_OPTIONAL_REVIEW_PROVIDERS", "codex")
     monkeypatch.setenv("AED_PROVIDERS_INDEPENDENT", "true")
 
-    # Pre-populate the supervisor module's REPO_OWNER etc.
     monkeypatch.setattr(s, "REPO_OWNER", "Slideshow11")
     monkeypatch.setattr(s, "REPO_NAME", "AutoDev")
     monkeypatch.setattr(s, "PR_NUMBER", 5)
 
-    # Pre-create a stub hermes binary in tmp_path so the
-    # observer's fallback path finds one. CI runners may
-    # not have hermes installed.
     stub_hermes = tmp_path / "hermes"
     stub_hermes.write_text("#!/bin/sh\nexit 0\n")
     stub_hermes.chmod(0o755)
     monkeypatch.setenv("AED_HERMES_BIN", str(stub_hermes))
+
+    # Write a supervisor-owned acceptance_runtime_identity
+    # artifact with bindings for all 17 modules so the
+    # Closure IX §6 evidence generator has the supervisor
+    # bindings it requires.
+    from pathlib import Path as _P
+    src_root = Path(__file__).resolve().parent.parent
+    _modules = [
+        ("supervisor.py", "autocoder_supervisor.supervisor"),
+        ("_directive_prompt.py", "autocoder_supervisor._directive_prompt"),
+        ("worker_session.py", "autocoder_supervisor.worker_session"),
+        ("aed_worker_wrapper.py", "autocoder_supervisor.aed_worker_wrapper"),
+        ("directive_bridge.py", "autocoder_supervisor.directive_bridge"),
+        ("provenance_maintenance.py", "autocoder_supervisor.provenance_maintenance"),
+        ("hermes_fingerprint.py", "autocoder_supervisor.hermes_fingerprint"),
+        ("orchestration_state_root.py", "autocoder_supervisor.orchestration_state_root"),
+        ("relay_wiring.py", "autocoder_supervisor.relay_wiring"),
+        ("config.py", "autocoder_supervisor.config"),
+        ("contracts.py", "autocoder_supervisor.contracts"),
+        ("validate.py", "autocoder_supervisor.validate"),
+        ("worker_attempt.py", "autocoder_orchestration.worker_attempt"),
+        ("review_repair_relay.py", "autocoder_orchestration.review_repair_relay"),
+        ("controller.py", "autocoder_orchestration.controller"),
+        ("context.py", "autocoder_orchestration.context"),
+        ("store.py", "autocoder_orchestration.store"),
+    ]
+    _loaded = []
+    for fn, _ in _modules:
+        # Look for the source checkout file.
+        for prefix in [
+            "autocoder_supervisor",
+            "autocoder_orchestration",
+            "",
+        ]:
+            candidate = src_root / prefix / fn
+            if candidate.exists():
+                _loaded.append({
+                    "logical_module": fn,
+                    "actual_production_loaded_path": str(candidate),
+                    "actual_production_sha256": __import__(
+                        "hashlib"
+                    ).sha256(
+                        candidate.read_bytes()
+                    ).hexdigest(),
+                })
+                break
+    identity = {
+        "schema_version": "autocoder.acceptance_runtime_identity.v1",
+        "supervisor_pid": 999999,
+        "process_start_identity": "test-fixture",
+        "instance_id": "test",
+        "repository_owner": "Slideshow11",
+        "repository_name": "AutoDev",
+        "pr_number": 5,
+        "expected_pr_set": "5",
+        "expected_branch": "feat/review-repair-relay-v1",
+        "expected_branch_set": "feat/review-repair-relay-v1",
+        "production_working_checkout": str(src_root),
+        "supervisor_state_directory": str(tmp_path),
+        "supervisor_home": str(tmp_path),
+        "hermes_binary_path": str(stub_hermes),
+        "required_providers": "coderabbit",
+        "optional_providers": "codex",
+        "provider_independence": "true",
+        "loaded_modules": _loaded,
+        "generated_at": "2026-08-15T00:00:00Z",
+    }
+    (tmp_path / "acceptance_runtime_identity.json").write_text(
+        json.dumps(identity)
+    )
+    (tmp_path / "run_state.json").write_text(json.dumps({
+        "feature_branch": "feat/review-repair-relay-v1",
+    }))
+    (tmp_path / "unconsumed_events.json").write_text(
+        json.dumps({"events": []})
+    )
+    (tmp_path / "cooldown_deferred_events.json").write_text(
+        json.dumps({"entries": [], "ids": []})
+    )
+    (tmp_path / "consumed_event_terminality.json").write_text(
+        json.dumps({"entries": []})
+    )
+    (tmp_path / "worker_attempts").mkdir(exist_ok=True)
+    # Write AED configs to satisfy env fingerprint
+    for prof in [
+        "aed-builder", "aed-quarantine", "aed-researcher",
+        "aed-reviewer", "aed-specifier",
+    ]:
+        # Touch but don't require content.
+        pass
     from autocoder_supervisor import hermes_fingerprint as hf
     from autocoder_supervisor import supervisor as s
 
@@ -802,6 +883,70 @@ class TestRequiredCIChecks:
             "package-smoke", "committed-state-scan",
             "provenance", "full-suite",
         }
+
+    def test_in_flight_required_check_blocks_freeze_gate(
+        self, tmp_path, monkeypatch
+    ):
+        """Regression: a required check that is still queued or
+        in_progress (GitHub reports ``conclusion == None``) MUST
+        count as non-success. Previously ``None`` was treated
+        as success, letting ``exact_head_ci_all_required_success``
+        flip to True before every required job reached a
+        terminal conclusion.
+        """
+        from autocoder_supervisor import hermes_fingerprint as hf
+
+        def _stub_workflow_in_flight(repo, head):
+            # Every required check observed and present, but
+            # ``full-suite`` has not reached a terminal
+            # conclusion yet (status=in_progress, conclusion=None).
+            return [{
+                "name": "test (3.10)",
+                "conclusion": "success",
+                "status": "completed",
+            }, {
+                "name": "test (3.11)",
+                "conclusion": "success",
+                "status": "completed",
+            }, {
+                "name": "test (3.12)",
+                "conclusion": "success",
+                "status": "completed",
+            }, {
+                "name": "package-smoke",
+                "conclusion": "success",
+                "status": "completed",
+            }, {
+                "name": "committed-state-scan",
+                "conclusion": "success",
+                "status": "completed",
+            }, {
+                "name": "provenance",
+                "conclusion": "success",
+                "status": "completed",
+            }, {
+                "name": "full-suite",
+                "conclusion": None,
+                "status": "in_progress",
+            }]
+        monkeypatch.setattr(hf, "_read_workflow_runs",
+                            _stub_workflow_in_flight)
+        ev = hf.generate_pre_canary_evidence(
+            repo_root=str(Path(__file__).resolve().parent.parent),
+            state_dir=str(tmp_path),
+            repo="Slideshow11/AutoDev",
+            pr_number=5,
+            branch="feat/review-repair-relay-v1",
+        )
+        assert "full-suite" in ev["required_ci_checks_pending"], (
+            "in-flight required check must be pending; "
+            f"got pending={ev['required_ci_checks_pending']!r} "
+            f"non_success={ev['required_ci_checks_non_success']!r}"
+        )
+        assert ev["exact_head_ci_all_required_success"] is False, (
+            "freeze gate must remain False while any required "
+            "check has not reached a terminal conclusion"
+        )
 
 
 # Bring pytest in scope
