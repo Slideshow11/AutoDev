@@ -8115,6 +8115,127 @@ def fetch_live_pr_head_now() -> str:
     return ""
 
 
+def _promote_review_request_terminal(
+    provider: str,
+    head_sha: str,
+    *,
+    lifecycle: str,
+    reason: str,
+) -> bool:
+    """Round-54/C22 repair P1: advance a durable codex review
+    request to a TERMINAL lifecycle value.
+
+    The empirical gate in ``hermes_fingerprint.py``
+    (``codex_lifecycle_observed``) accepts ONLY
+    ``REVIEW_COMPLETE`` or ``OPTIONAL_DEGRADED`` as terminal;
+    ``REQUEST_INTENT`` / ``REQUEST_SENT`` / ``ACKNOWLEDGED``
+    are PROGRESS markers and DO NOT satisfy the gate.
+
+    Until this helper existed, no production path wrote
+    ``REVIEW_COMPLETE`` to the durable
+    ``review_requests/{provider}__{head}.json`` ledger, so
+    the gate could never pass under normal supervisor flow.
+    This helper merges the provider's most recent durable
+    request record with the new terminal lifecycle and
+    atomically replaces the file on disk. Returns True when
+    a record was promoted, False when no record existed.
+
+    Lifecycle values accepted here:
+
+      * ``REVIEW_COMPLETE`` — the provider's last classified
+        state was ``PROVIDER_STATE_REVIEW_COMPLETE`` (the
+        bot finished a review).
+      * ``OPTIONAL_DEGRADED`` — the OPTIONAL provider has no
+        review-request evidence on this head (it was never
+        invoked, or it timed out before sending). Codex is
+        the OPTIONAL provider; the gate accepts the
+        degraded sentinel so the empirical observation can
+        succeed for an OPTIONAL provider that did not
+        actually run.
+    """
+    if lifecycle not in ("REVIEW_COMPLETE", "OPTIONAL_DEGRADED"):
+        log(
+            "warning",
+            "_promote_review_request_terminal: rejected non-terminal lifecycle",
+            provider=provider,
+            head=head_sha[:12] if head_sha else "",
+            attempted_lifecycle=lifecycle,
+        )
+        return False
+    if not head_sha:
+        return False
+    import uuid as _uuid
+    p = review_request_path(provider, head_sha)
+    try:
+        existing = read_review_request(provider, head_sha) or {}
+    except Exception:
+        existing = {}
+    existing_lifecycle = existing.get("lifecycle") or ""
+    # Idempotent: a record already at this terminal value
+    # does NOT need to be re-promoted.
+    if existing_lifecycle == lifecycle:
+        return True
+    # ``OPTIONAL_DEGRADED`` is allowed to overwrite ANY prior
+    # progress lifecycle — it represents "we know the OPTIONAL
+    # provider did not produce a real review on this head".
+    # ``REVIEW_COMPLETE`` is only allowed to overwrite a
+    # progress lifecycle (REQUEST_INTENT/REQUEST_SENT/
+    # ACKNOWLEDGED); a record already at SUPERSEDED is left
+    # alone (supersession wins, per Closure X).
+    if lifecycle == "REVIEW_COMPLETE":
+        if existing_lifecycle in (
+            "REQUEST_INTENT",
+            "REQUEST_SENT",
+            "ACKNOWLEDGED",
+            "",
+        ):
+            pass
+        elif existing_lifecycle == "SUPERSEDED":
+            return False
+        elif existing_lifecycle == "REVIEW_COMPLETE":
+            return True
+        else:
+            return False
+    payload = dict(existing)
+    payload["lifecycle"] = lifecycle
+    payload["terminal_lifecycle"] = lifecycle
+    payload["terminal_at"] = now_iso()
+    payload["terminal_reason"] = reason
+    payload["request_head"] = head_sha
+    if "request_id" not in payload:
+        payload["request_id"] = (
+            f"terminal-{_uuid.uuid4().hex[:12]}"
+        )
+    if "actor" not in payload:
+        payload["actor"] = "round54_c22_terminal_promotion"
+    try:
+        write_review_request(
+            provider=provider,
+            head_sha=head_sha,
+            record=payload,
+        )
+        log(
+            "info",
+            "round-54/C22: promoted review request to terminal lifecycle",
+            provider=provider,
+            head=head_sha[:12],
+            from_lifecycle=existing_lifecycle or "<none>",
+            to_lifecycle=lifecycle,
+            reason=reason,
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-54/C22: terminal promotion write failed",
+            provider=provider,
+            head=head_sha[:12],
+            to_lifecycle=lifecycle,
+            error=str(exc)[:200],
+        )
+        return False
+
+
 def mark_review_request_superseded(
     provider: str,
     stale_head: str,
@@ -8759,6 +8880,72 @@ def process_provider_quotas(live: dict) -> dict:
                     "resuming normal schedule",
                 )
                 clear_provider_quota_state(provider)
+    # Round-54/C22 repair P1: persist TERMINAL Codex
+    # lifecycles so the empirical
+    # ``codex_lifecycle_observed`` gate can satisfy.
+    # Previously no production path wrote
+    # ``REVIEW_COMPLETE`` or ``OPTIONAL_DEGRADED`` to the
+    # durable ``codex__<head>.json`` ledger, so the gate
+    # could never pass under normal supervisor flow. The
+    # helper merges any existing record with the terminal
+    # lifecycle value and is idempotent.
+    try:
+        live_pr_head = (
+            live.get("head_sha") or AUTHORITATIVE_HEAD  # type: ignore[name-defined]
+        )
+        codex_cfg = PROVIDERS.get("codex", {})  # type: ignore[name-defined]
+        if codex_cfg:
+            codex_state = statuses.get("codex", "")
+            existing_codex = (
+                read_review_request("codex", live_pr_head)  # type: ignore[name-defined]
+                if live_pr_head
+                else None
+            )
+            existing_codex_lifecycle = (
+                (existing_codex or {}).get("lifecycle") or ""
+            )
+            if codex_state == PROVIDER_STATE_REVIEW_COMPLETE:
+                # A real review finished on the live head;
+                # promote any prior progress record.
+                _promote_review_request_terminal(  # type: ignore[name-defined]
+                    "codex",
+                    live_pr_head,
+                    lifecycle="REVIEW_COMPLETE",
+                    reason=(
+                        f"codex_state={codex_state} "
+                        f"prior_lifecycle={existing_codex_lifecycle or '<none>'}"
+                    ),
+                )
+            elif (
+                codex_state
+                not in (
+                    PROVIDER_STATE_REVIEW_IN_PROGRESS,
+                    PROVIDER_STATE_REVIEW_COMPLETE,
+                    PROVIDER_STATE_AUTO_PAUSED_ACTIVE_DEVELOPMENT,
+                    PROVIDER_STATE_QUOTA_PAUSED,
+                )
+                and not existing_codex
+            ):
+                # Codex is OPTIONAL; the gate accepts an
+                # explicit OPTIONAL_DEGRADED marker for the
+                # OPTIONAL provider when no review was
+                # produced on this head. UNKNOWN /
+                # cleared states map here.
+                _promote_review_request_terminal(  # type: ignore[name-defined]
+                    "codex",
+                    live_pr_head,
+                    lifecycle="OPTIONAL_DEGRADED",
+                    reason=(
+                        f"codex_state={codex_state or 'unknown'} "
+                        "no_review_record_on_live_head"
+                    ),
+                )
+    except Exception as exc:  # noqa: BLE001
+        log(
+            "warning",
+            "round-54/C22: terminal lifecycle promotion pass failed",
+            error=str(exc)[:200],
+        )
     return statuses
 
 
