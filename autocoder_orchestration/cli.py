@@ -22,7 +22,7 @@ import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from .context import RunContext, make_run_context, generate_run_id
 from .canonical_paths import canonical_paths as _canonical_artifact_paths
@@ -1690,14 +1690,27 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
     # findings still drives pending/failing required checks
     # through the CI-finding collector rather than silently
     # calling the head clean.
-    cli_required_check_names = tuple(
-        name for name in (args.required_check_names or "").split(",") if name
-    )
-    required_check_names = (
-        cli_required_check_names
-        if cli_required_check_names
-        else tuple(ctx.required_ci_jobs or ())
-    )
+    #
+    # Distinguish the three cases the operator can express:
+    #   - flag absent (``args.required_check_names is None``):
+    #     fall back to the persisted ``ctx.required_ci_jobs``
+    #     policy so older checks do not silently reappear.
+    #   - flag present with explicit empty value (``""``): the
+    #     operator is overriding the policy with an intentionally
+    #     empty required-check set; do NOT resurrect
+    #     ``ctx.required_ci_jobs`` — keep the override empty.
+    #   - flag present with comma-separated names: use them
+    #     verbatim, splitting on ``,`` and dropping empties.
+    raw_required = getattr(args, "required_check_names", None)
+    if raw_required is None:
+        cli_required_check_names: Tuple[str, ...] = tuple(
+            ctx.required_ci_jobs or ()
+        )
+    else:
+        cli_required_check_names = tuple(
+            name for name in raw_required.split(",") if name
+        )
+    required_check_names = cli_required_check_names
     max_rounds = int(args.max_rounds) if args.max_rounds else DEFAULT_MAX_ROUNDS
     loop = RelayLoop(
         context=ctx,
@@ -1885,8 +1898,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     help="Override the head SHA from the run context")
     rr.add_argument("--evidence-root", default=None,
                     help="Override the evidence root from the run context")
-    rr.add_argument("--required-check-names", default="",
-                    help="Comma-separated CI check names that must pass for the head to be clean")
+    rr.add_argument("--required-check-names", default=None,
+                    help=(
+                        "Comma-separated CI check names that must pass "
+                        "for the head to be clean. Default (omitted) "
+                        "falls back to the persisted ctx.required_ci_jobs "
+                        "policy; pass an empty string to override the "
+                        "policy with an intentionally empty set."
+                    ))
     rr.add_argument("--max-rounds", default=str(DEFAULT_MAX_ROUNDS),
                     help="Outer bound on relay rounds before BLOCKED")
     rr.add_argument("--focused-thread-id", default=None,
