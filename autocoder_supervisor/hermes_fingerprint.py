@@ -1492,17 +1492,8 @@ def _read_real_deferred_retry_evidence(
         entries = d.get("entries", [])
     # Closure X §5: require ordered lifecycle transitions.
     # Prose strings are NOT sufficient.
-    valid_progression = (
-        ("DEFERRED", "ELIGIBLE"),
-        ("ELIGIBLE", "RETRY_ATTEMPT"),
-        ("RETRY_ATTEMPT", "OWNED"),
-        ("OWNED", "TERMINAL"),
-        ("TERMINAL", "CONSUMED"),
-    )
-    valid_supersession = (
-        ("DEFERRED", "ELIGIBLE"),
-        ("ELIGIBLE", "SUPERSEDED"),
-    )
+    # (Chain orderings are encoded inline below as `expected`
+    # and `expected_super` so the index progression is enforced.)
     # Group entries by event_id
     by_event = {}
     for e in entries:
@@ -1523,30 +1514,59 @@ def _read_real_deferred_retry_evidence(
         lifecycles = [e.get("lifecycle") for e in evs_sorted]
         # Check supersession OR full progression
         matched = False
-        # Full DEFERRED -> ... -> CONSUMED progression
-        last_idx = -1
-        for prev, new in valid_progression:
-            for i, lc in enumerate(lifecycles):
-                if lc == prev and i > last_idx:
-                    last_idx = i
+        # Full DEFERRED -> ... -> CONSUMED progression.
+        # Closure X §5 requires strict monotonic ordering of every
+        # transition pair: each (prev, new) edge must occur with
+        # new.index > prev.index. Membership-only checks (e.g. `in`)
+        # admit reversed or interleaved ledgers like
+        # [DEFERRED, CONSUMED, TERMINAL, OWNED, RETRY_ATTEMPT,
+        #  ELIGIBLE], so we walk the chain in index order and
+        # confirm every stage advances past the previous one and
+        # the chain reaches the final CONSUMED stage.
+        full_match = False
+        if lifecycles and lifecycles[0] == "DEFERRED":
+            expected = [
+                "DEFERRED",
+                "ELIGIBLE",
+                "RETRY_ATTEMPT",
+                "OWNED",
+                "TERMINAL",
+                "CONSUMED",
+            ]
+            last_idx = -1
+            chain_ok = True
+            for stage in expected:
+                found_idx = -1
+                for i, lc in enumerate(lifecycles):
+                    if lc == stage and i > last_idx:
+                        found_idx = i
+                        break
+                if found_idx == -1:
+                    chain_ok = False
                     break
-            # If the next stage is observed AFTER prev...
-        full_match = (
-            lifecycles[0] == "DEFERRED"
-            and "ELIGIBLE" in lifecycles
-            and "RETRY_ATTEMPT" in lifecycles
-            and "OWNED" in lifecycles
-            and "TERMINAL" in lifecycles
-            and "CONSUMED" in lifecycles
-        )
+                last_idx = found_idx
+            if chain_ok:
+                full_match = True
         if full_match:
             matched = True
-        # Supersession
-        if not matched and lifecycles[0] == "DEFERRED":
-            if (
-                "ELIGIBLE" in lifecycles
-                and "SUPERSEDED" in lifecycles
-            ):
+        # Supersession: require monotonic ordering of the
+        # supersession chain (DEFERRED before ELIGIBLE before
+        # SUPERSEDED), not mere membership.
+        if not matched and lifecycles and lifecycles[0] == "DEFERRED":
+            expected_super = ["DEFERRED", "ELIGIBLE", "SUPERSEDED"]
+            last_idx = -1
+            super_ok = True
+            for stage in expected_super:
+                found_idx = -1
+                for i, lc in enumerate(lifecycles):
+                    if lc == stage and i > last_idx:
+                        found_idx = i
+                        break
+                if found_idx == -1:
+                    super_ok = False
+                    break
+                last_idx = found_idx
+            if super_ok:
                 matched = True
         if matched:
             retry_event_ids.append(eid)

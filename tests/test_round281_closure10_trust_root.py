@@ -714,6 +714,75 @@ class TestDeferredRetryOrderedTransitions:
         assert out["value"] is True
         assert len(out["real_deferred_retry_transitions"]) == 6
 
+    def test_reversed_ledger_does_not_prove_retry(self, tmp_path):
+        # P1: ordering must be enforced. A reversed chain
+        # (DEFERRED, CONSUMED, TERMINAL, OWNED, RETRY_ATTEMPT,
+        #  ELIGIBLE) contains every required lifecycle name but
+        # the transitions are reversed; this must NOT count as a
+        # real deferred retry.
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_real_deferred_retry_evidence,
+        )
+        reversed_order = [
+            "DEFERRED",
+            "CONSUMED",
+            "TERMINAL",
+            "OWNED",
+            "RETRY_ATTEMPT",
+            "ELIGIBLE",
+        ]
+        entries = []
+        for i, lc in enumerate(reversed_order):
+            entries.append({
+                "event_id": "ev-rev",
+                "consumer": "test",
+                "lifecycle": lc,
+                "recorded_at": f"2026-08-15T00:0{i}:00Z",
+            })
+        (tmp_path / "consumed_event_terminality.json").write_text(
+            json.dumps({"entries": entries})
+        )
+        out = _read_real_deferred_retry_evidence(
+            state_dir=str(tmp_path)
+        )
+        assert out["value"] is False
+        assert out["real_deferred_retry_event_ids"] == []
+        assert out["real_deferred_retry_transitions"] == []
+
+    def test_interleaved_ledger_does_not_prove_retry(self, tmp_path):
+        # P1: ordering must be enforced. An interleaved chain
+        # that visits every stage but out of order must NOT
+        # count as a real deferred retry.
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_real_deferred_retry_evidence,
+        )
+        # Visits DEFERRED, then jumps to TERMINAL before
+        # ELIGIBLE — monotonic ordering is violated.
+        interleaved = [
+            "DEFERRED",
+            "TERMINAL",
+            "ELIGIBLE",
+            "RETRY_ATTEMPT",
+            "OWNED",
+            "CONSUMED",
+        ]
+        entries = []
+        for i, lc in enumerate(interleaved):
+            entries.append({
+                "event_id": "ev-int",
+                "consumer": "test",
+                "lifecycle": lc,
+                "recorded_at": f"2026-08-15T00:0{i}:00Z",
+            })
+        (tmp_path / "consumed_event_terminality.json").write_text(
+            json.dumps({"entries": entries})
+        )
+        out = _read_real_deferred_retry_evidence(
+            state_dir=str(tmp_path)
+        )
+        assert out["value"] is False
+        assert out["real_deferred_retry_event_ids"] == []
+
 
 # ---------------------------------------------------------------------
 # §6 Deferred current-head comparison
