@@ -186,6 +186,58 @@ class TestEmpiricalGateEvidenceReaders:
         assert out["value"] is False
         assert out["observation_complete"] is True
 
+    def test_autonomous_provenance_evidence_parses_list_schema(
+        self, tmp_path,
+    ):
+        # The canonical drift ledger written by
+        # `_atomic_append_drift()` is a top-level JSON list,
+        # with each entry keyed by `attempt_id` and `head_sha`
+        # rather than `id`. The reader must accept this schema
+        # and surface real `evidence_ids`, otherwise real
+        # autonomous provenance cycles are reported as absent.
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_autonomous_provenance_evidence,
+        )
+        ledger = tmp_path / "provenance_drift_pending.json"
+        ledger.write_text(json.dumps([
+            {
+                "state": "DRIFT_DETECTED",
+                "detected_at": "2026-08-15T02:00:00Z",
+                "head_sha": (
+                    "abcdef1234567890abcdef1234567890abcdef12"
+                ),
+                "attempt_id": "att-20260815T020000Z-111",
+                "drifts": ["manifest_mismatch"],
+                "owner": "next_worker_round_autonomous",
+            },
+            {
+                "state": "DRIFT_RESOLVED",
+                "detected_at": "2026-08-15T02:30:00Z",
+                "head_sha": (
+                    "1234567890abcdef1234567890abcdef12345678"
+                ),
+                "attempt_id": "att-20260815T023000Z-222",
+                "drifts": [],
+                "owner": "next_worker_round_autonomous",
+            },
+        ]))
+        out = _read_autonomous_provenance_evidence(
+            state_dir=str(tmp_path),
+        )
+        assert out["observation_complete"] is True
+        assert out["value"] is True
+        assert out["evidence_ids"] == [
+            "att-20260815T020000Z-111",
+            "att-20260815T023000Z-222",
+        ]
+        assert (
+            out["evidence_head"]
+            == "1234567890abcdef1234567890abcdef12345678"
+        )
+        assert (
+            out["reason"] == "ok_observed_autonomous_cycle"
+        )
+
     def test_real_deferred_retry_evidence_returns_dict(
         self, tmp_path,
     ):

@@ -1169,11 +1169,42 @@ def _read_autonomous_provenance_evidence(
         return out
     out["observation_complete"] = True
     out["source_artifact"] = str(p)
-    if isinstance(d, dict):
-        entries = d.get("entries", [])
-        out["evidence_ids"] = [
-            e.get("id") for e in entries if isinstance(e, dict)
-        ]
+    # The canonical drift ledger is a top-level JSON list
+    # written by `_atomic_append_drift()`; each entry holds
+    # `attempt_id` and `head_sha` (no `id` field). Older
+    # dict-with-`entries` payloads are tolerated for backward
+    # compatibility with whatever may be left on disk.
+    entries: list = []
+    if isinstance(d, list):
+        entries = d
+    elif isinstance(d, dict):
+        entries = d.get("entries", []) if isinstance(
+            d.get("entries"), list
+        ) else []
+    def _entry_id(e: dict):
+        return (
+            e.get("attempt_id")
+            or e.get("head_sha")
+            or e.get("id")
+        )
+    out["evidence_ids"] = [
+        _entry_id(e) for e in entries if isinstance(e, dict)
+    ]
+    out["evidence_ids"] = [
+        eid for eid in out["evidence_ids"] if eid
+    ]
+    last = next(
+        (e for e in reversed(entries) if isinstance(e, dict)),
+        None,
+    )
+    if last is not None:
+        out["evidence_head"] = (
+            last.get("head_sha")
+            or last.get("attempt_id")
+        )
+        out["observed_at"] = last.get("detected_at") or last.get(
+            "recorded_at"
+        )
     # Even an empty ledger means no autonomous cycle has
     # occurred. The gate requires a real lifecycle.
     out["reason"] = (
