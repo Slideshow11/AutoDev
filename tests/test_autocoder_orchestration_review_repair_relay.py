@@ -2965,3 +2965,124 @@ def test_round45_c13_focused_thread_resolves_against_head():
         "round-45 C13: collector MUST exclude threads with no body, "
         "no path, AND a stale commit_oid (no current-head binding)"
     )
+
+
+def test_round684_p1_bind_target_only_when_thread_finding_survives():
+    """Round-684/P1: when ``focused_thread_id`` is set but the
+    targeted thread has been drained (resolved / outdated /
+    not in the live snapshot) before the live snapshot while a
+    required CI check is still pending or failing,
+    ``collect_findings`` correctly emits the CI failure
+    findings WITHOUT any ``thread:<id>`` finding. The
+    ``evaluate_round`` directive builder MUST NOT pass
+    ``target_thread_id`` in that case — passing it would trip
+    ``ReviewDirective.__post_init__``'s contract guard and
+    raise ``DirectiveContractError`` even though the surviving
+    CI findings are perfectly actionable.
+    """
+    from autocoder_orchestration.review_repair_relay import (
+        evaluate_round,
+    )
+
+    thread_id = "PRRT_kwDOTtyQLc6Zi5HK"
+    head_sha = "8" * 40
+    # Snapshot with NO ``review_threads`` entry for the
+    # focused thread (it was drained) and a pending CI
+    # required check. The CI finding MUST survive.
+    snap = {
+        "head_sha": head_sha,
+        "head_match": True,
+        "provider_surface_complete": True,
+        "review_threads": {},  # thread was drained
+        "review_comments": [],
+        "issue_comments": [],
+        "_provider_issue_comments": {},
+        "formal_reviews": [],
+        "providers": {},
+        "required_checks": {
+            "test (3.11)": {
+                "conclusion": "failure",
+                "status": "completed",
+                "run_id": "r1",
+            },
+        },
+    }
+    decision = evaluate_round(
+        snapshot=snap,
+        head_sha=head_sha,
+        repo="Slideshow11/AutoDev",
+        pr_number=5,
+        round_index=684,
+        required_check_names=("test (3.11)",),
+        coordinator_actor="controller",
+        focused_thread_id=thread_id,
+    )
+    # The directive MUST build successfully — round-684
+    # closes the contract gap where the call site used to
+    # pass ``target_thread_id`` unconditionally.
+    assert decision.action == "launch_worker", (
+        f"round-684/P1: evaluate_round MUST launch a worker "
+        f"for the drained-thread + CI-failure scenario; got "
+        f"action={decision.action!r} outcome={decision.outcome!r} "
+        f"escalate_reasons={decision.escalate_reasons!r}"
+    )
+    assert decision.ci_failure_count == 1
+    assert decision.directive is not None
+    # The targeted thread is gone, so the directive MUST
+    # NOT bind ``target_thread_id`` — the contract permits
+    # CI_FAILURE-only payloads when no scope is declared.
+    assert decision.directive.target_thread_id is None, (
+        f"round-684/P1: target_thread_id MUST be None when "
+        f"the focused thread finding was drained; got "
+        f"{decision.directive.target_thread_id!r}"
+    )
+    assert {f.finding_id for f in decision.directive.findings} == {
+        "ci:test (3.11):r1"
+    }
+
+
+def test_round684_p1_keeps_target_when_thread_finding_survives():
+    """Round-684/P1: when the focused thread DID survive in
+    the snapshot alongside CI failures, the directive MUST
+    still bind ``target_thread_id`` so the worker prompt
+    carries the round-676/P2 thread-scope signal. The fix
+    MUST NOT regress round-676/P2.
+    """
+    from autocoder_orchestration.review_repair_relay import (
+        evaluate_round,
+    )
+
+    thread_id = "PRRT_kwDOTtyQLc6Zi5HK"
+    head_sha = "8" * 40
+    # Snapshot with the focused thread PRESENT and actionable,
+    # plus a failing required CI check.
+    snap = _make_thread_snapshot(thread_id, head_sha)
+    snap["required_checks"] = {
+        "test (3.11)": {
+            "conclusion": "failure",
+            "status": "completed",
+            "run_id": "r1",
+        },
+    }
+    decision = evaluate_round(
+        snapshot=snap,
+        head_sha=head_sha,
+        repo="Slideshow11/AutoDev",
+        pr_number=5,
+        round_index=684,
+        required_check_names=("test (3.11)",),
+        coordinator_actor="controller",
+        focused_thread_id=thread_id,
+    )
+    assert decision.action == "launch_worker"
+    assert decision.directive is not None
+    # The thread survived AND CI failed: both must be present
+    # and ``target_thread_id`` MUST still be the focused thread.
+    assert decision.directive.target_thread_id == thread_id, (
+        f"round-684/P1: target_thread_id MUST remain bound "
+        f"when its thread finding survives alongside CI; got "
+        f"{decision.directive.target_thread_id!r}"
+    )
+    finding_ids = {f.finding_id for f in decision.directive.findings}
+    assert f"thread:{thread_id}" in finding_ids
+    assert "ci:test (3.11):r1" in finding_ids

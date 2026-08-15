@@ -2092,6 +2092,26 @@ def evaluate_round(
     p1 = sum(1 for f in findings if f.severity == SEVERITY_P1)
     p2 = sum(1 for f in findings if f.severity == SEVERITY_P2)
     ci = sum(1 for f in findings if f.severity == SEVERITY_CI_FAILURE)
+    # Round-684/P1: bind the targeted thread identity into
+    # the directive ONLY when its review finding actually
+    # survived ``collect_findings``. When the focused
+    # thread has been resolved, marked outdated, or
+    # disappeared from the live snapshot before this round
+    # ran, ``collect_findings`` correctly emits no
+    # ``thread:<id>`` finding while still surfacing any
+    # CI failures. Passing ``target_thread_id`` in that
+    # case would trip ``ReviewDirective.__post_init__``'s
+    # contract guard (the targeted ``thread:<id>`` finding
+    # is required when ``target_thread_id`` is set), so
+    # the directive would fail to build with
+    # ``DirectiveContractError`` even though the surviving
+    # CI findings are perfectly actionable. Bind the
+    # target only when its finding survives.
+    bound_target_thread_id: Optional[str] = None
+    if focused_thread_id is not None:
+        expected_finding_id = f"thread:{focused_thread_id}"
+        if any(f.finding_id == expected_finding_id for f in findings):
+            bound_target_thread_id = focused_thread_id
     try:
         directive = build_directive(
             round_index=round_index,
@@ -2107,7 +2127,13 @@ def evaluate_round(
             # rather than broad. ``focused_thread_id`` is
             # already in scope from the bound round entry;
             # passing it preserves the supervisor's scope.
-            target_thread_id=focused_thread_id,
+            #
+            # Round-684/P1: only when the targeted thread
+            # finding survived the snapshot filter. When the
+            # thread has been drained and only CI failures
+            # remain, leave ``target_thread_id=None`` so the
+            # directive contract permits the CI-only payload.
+            target_thread_id=bound_target_thread_id,
             # Round-35: cap findings per directive so a
             # worker is not overwhelmed by 76+ historical
             # threads in a single prompt. Subsequent
