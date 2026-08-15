@@ -371,6 +371,43 @@ class TestBuildDirective:
         assert "round 0" in str(exc.value)
         assert "P0" in str(exc.value)
 
+    def test_p0_escalates_when_max_findings_cap_hit(self) -> None:
+        """Round-665: a P0_ESCALATE must still escalate when
+        the per-directive ``max_findings`` cap would otherwise
+        truncate it. The previous three-way partition removed
+        P0 from ``p2`` and then capped ``p1 + p2``, silently
+        dropping the escalation so a repair directive was
+        launched instead of escalating to a human.
+        """
+        # One P0 plus enough P1/P2 that the cap triggers.
+        findings = [
+            _make_finding(severity=SEVERITY_P0_ESCALATE, body="P0 critical"),
+        ] + [
+            _make_finding(
+                severity=SEVERITY_P1,
+                body=f"p1 finding {i}",
+            )
+            for i in range(5)
+        ] + [
+            _make_finding(
+                severity=SEVERITY_P2,
+                body=f"p2 finding {i}",
+            )
+            for i in range(5)
+        ]
+        with pytest.raises(EscalateToHuman) as exc:
+            build_directive(
+                round_index=42,
+                head_sha="a" * 40,
+                repo="owner/repo",
+                pr_number=4,
+                findings=findings,
+                coordinator_actor="controller",
+                max_findings=3,
+            )
+        assert "round 42" in str(exc.value)
+        assert "P0" in str(exc.value)
+
     def test_escalation_keyword_blocks(self) -> None:
         findings = [_make_finding(severity=SEVERITY_P1, body="force push the branch")]
         with pytest.raises(EscalateToHuman) as exc:

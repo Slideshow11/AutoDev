@@ -1758,29 +1758,36 @@ def build_directive(
     if not findings:
         raise DirectiveContractError("build_directive requires at least one finding")
     # Round-35: cap findings per directive.
-    # Round-591: split into three partitions:
+    # Round-591: split into four partitions:
     #   ci_failures  (mandatory; never truncated)
+    #   p0           (mandatory; never truncated; always escalates)
     #   p1           (review work; truncated if cap hit)
     #   p2           (review work; truncated if cap hit)
-    # P0 still escalates separately (handled further down).
+    # Round-665: P0_ESCALATE must be extracted BEFORE the
+    # ``max_findings`` cap is applied. The previous
+    # three-way partition removed P0 from ``p2`` (it
+    # excluded ``P0_ESCALATE``) and then replaced ``review``
+    # with the capped ``p1 + p2`` list, so any P0 escalation
+    # in a long finding list silently vanished before the
+    # severity check below ran. A repair directive was then
+    # launched instead of the required human escalation.
     ci_failures = [
         f for f in findings if f.severity == SEVERITY_CI_FAILURE
     ]
+    p0 = [f for f in findings if f.severity == SEVERITY_P0_ESCALATE]
     review = [
-        f for f in findings if f.severity != SEVERITY_CI_FAILURE
+        f for f in findings
+        if f.severity not in (SEVERITY_CI_FAILURE, SEVERITY_P0_ESCALATE)
     ]
     if max_findings is not None and len(review) > max_findings:
-        # Only the REVIEW partition is capped; CI_FAILURE
-        # findings are mandatory observations and never
-        # dropped regardless of the cap.
+        # Only the REVIEW partition (P1 + P2) is capped.
+        # CI_FAILURE and P0_ESCALATE are mandatory
+        # observations / escalations and never dropped
+        # regardless of the cap.
         p1 = [f for f in review if f.severity == SEVERITY_P1]
-        p2 = [
-            f for f in review
-            if f.severity not in (SEVERITY_P1, SEVERITY_P0_ESCALATE)
-        ]
+        p2 = [f for f in review if f.severity == SEVERITY_P2]
         review = (p1 + p2)[:max_findings]
-    findings = list(ci_failures) + list(review)
-    p0 = [f for f in findings if f.severity == SEVERITY_P0_ESCALATE]
+    findings = list(ci_failures) + list(p0) + list(review)
     if p0:
         raise EscalateToHuman(
             f"round {round_index}: {len(p0)} P0 finding(s) require human review: "
