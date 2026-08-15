@@ -24,7 +24,6 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
-          AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
           AED_REPO_NAME: AutoDev
           AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
@@ -42,7 +41,6 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
-          AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
           AED_REPO_NAME: AutoDev
           AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
@@ -60,7 +58,6 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
-          AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
           AED_REPO_NAME: AutoDev
           AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
@@ -178,7 +175,6 @@ jobs:
           pytest -q tests/ --no-header \
             -p no:cacheprovider
         env:
-          AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
           AED_REPO_NAME: AutoDev
           AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
