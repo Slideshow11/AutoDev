@@ -232,6 +232,7 @@ class Controller:
         nonterminal = (
             FindingDisposition.STILL_ACTIONABLE,
             FindingDisposition.INCOMPLETE_EVIDENCE,
+            FindingDisposition.REAL_REPAIR_REQUIRED,
         )
         terminal_with_required_proof = (
             FindingDisposition.SUPERSEDED,

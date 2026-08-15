@@ -728,6 +728,57 @@ def test_incomplete_evidence_disposition_blocks_no_changes_required():
 
 
 # ===========================================================================
+# §15.10b — REAL_REPAIR_REQUIRED is also nonterminal (round-683/P1)
+# ===========================================================================
+
+
+def test_real_repair_required_disposition_blocks_no_changes_required():
+    """Round-683/P1: ``REAL_REPAIR_REQUIRED`` is mapped to
+    ``STILL_ACTIONABLE`` by the canonical disposition map
+    (``supervisor.py:1979``) and therefore MUST also block
+    a successful ``NO_CHANGES_REQUIRED`` proof. A proof that
+    carries ``REAL_REPAIR_REQUIRED`` means the worker has
+    authority+evidence to repair — submitting it under a
+    no-op proof is a class-A malformed proof."""
+    from autocoder_orchestration.controller import Controller, ControllerError
+    from autocoder_orchestration.context import (
+        SCHEMA_VERSION, make_run_context,
+    )
+    from autocoder_orchestration.store import StateStore
+    from autocoder_orchestration.state_machine import StateMachine
+    import tempfile
+    ctx = make_run_context(
+
+        run_id="test-rrr",
+        repo_owner="test", repo_name="test-repo",
+        local_checkout=str(PRODUCTION_ROOT), base_branch="main",
+        authorized_base_sha="a" * 40,
+        feature_branch="test-feat",
+        task_specification_path="/tmp/empty.txt",
+        task_specification_sha256="b" * 64,
+        required_ci_jobs=list(SEVEN_NAME_POLICY),
+        evidence_root="/tmp/evi",
+        implementation_worker_command=[], state_root="/tmp/state",
+        pr_number=5,
+    )
+    with tempfile.TemporaryDirectory() as td:
+        state_root = Path(td) / "state"
+        state_root.mkdir(parents=True)
+        store = StateStore(str(state_root))
+        store.write_atomic("run_context.json", ctx.to_dict())
+        store.write_atomic("state.json", StateMachine().to_dict())
+        c = Controller(ctx, store)
+        with pytest.raises(ControllerError):
+            c.report_no_changes_required(
+                head_observed="b" * 40,
+                proof={"findings": [{
+                    "finding_id": "thread:PRRT_kwDOTtyQLc6Zi1h3",
+                    "disposition": "REAL_REPAIR_REQUIRED",
+                }]},
+            )
+
+
+# ===========================================================================
 # §15.11 — SUPERSEDED requires actual supersession proof
 # ===========================================================================
 
