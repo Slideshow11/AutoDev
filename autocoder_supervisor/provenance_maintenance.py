@@ -184,6 +184,13 @@ def _atomic_write_json(path: Path, data) -> None:
                 os.fsync(f.fileno())
             except OSError:
                 pass
+        # os.fdopen took ownership of fd and the `with` block above has
+        # already closed it on exit. Release ownership here so the
+        # `finally` block does NOT call os.close(fd) a second time on a
+        # descriptor this function no longer owns (which could EBADF or,
+        # if the kernel has recycled the fd number, close an unrelated
+        # file opened by another thread between this point and finally).
+        fd = -1
         os.replace(tmp, path)
     except OSError as e:
         try:
