@@ -1096,26 +1096,114 @@ def _collect_coderabbit_exact_head_surfaces(
         ):
             formal_reviews.append(r)
     out["formal_reviews_collected"] = bool(formal_reviews)
-    # 2. Inline review comments authored by coderabbit.
+
+    def _author_login(c: dict) -> str:
+        """Round-658 P1: the production snapshot schema
+        hands the consumer BOTH shapes GitHub provides:
+
+          * ``collect_provider_surfaces()`` for inline review
+            comments records a dict of path/line/body only
+            (no ``user`` field at all), because the canonical
+            writer does not propagate the nested author into
+            the surfaces blob (lines 9396-9401 of
+            ``supervisor.py``).
+          * ``capture_live_snapshot()`` for issue comments
+            collapses the nested ``user.login`` to a
+            top-level ``login`` string (line 9339 of
+            ``supervisor.py``).
+
+        Earlier this reader assumed the nested
+        ``(c.get("user") or {}).get("login")`` shape, which
+        could not match either production shape: the inline
+        surface has no ``user`` key at all (so the reader
+        silently dropped every coderabbit inline comment),
+        and the issue-comment surface stores the login as a
+        top-level ``login`` string (the nested lookup
+        returned empty for every bot comment, filtering
+        every real CodeRabbit status message out).
+
+        Accept both shapes here. When ``login`` cannot be
+        recovered we report ``""`` and let the consumer
+        decide — surfacing the comment but not claiming an
+        authorship claim we cannot verify.
+        """
+        if not isinstance(c, dict):
+            return ""
+        user_field = c.get("user")
+        if isinstance(user_field, dict):
+            login = user_field.get("login") or ""
+            if login:
+                return str(login)
+        elif isinstance(user_field, str) and user_field:
+            return user_field
+        top = c.get("login")
+        if isinstance(top, str) and top:
+            return top
+        # Some snapshots tag the bot author via a stable
+        # provider key (``provider`` or ``bot_login``).
+        for alt in ("bot_login", "author", "provider_login"):
+            v = c.get(alt)
+            if isinstance(v, str) and v:
+                return v
+        return ""
+
+    # 2. Inline review comments. The production canonical
+    # writer (``collect_provider_surfaces``, supervisor.py
+    # lines 9396-9401) does NOT propagate the ``user`` /
+    # ``login`` field on inline comment records — the
+    # surface carries only path / line / body. The
+    # snapshot collector itself filters those records by
+    # ``commit_id == head_sha`` upstream, so the surface
+    # presence of even one record is already head-bound.
+    # The earlier reader required
+    # ``"coderabbitai" in user.lower()`` and dropped every
+    # record by accident (nested ``(c.get("user") or
+    # {}).get("login")`` returned ``""`` for every surface
+    # entry, so the equality branch never fired).
+    #
+    # New contract: classify each inline comment into one
+    # of two buckets based on attribution availability.
     inline_comments = []
+    inline_comments_attributed = []
+    inline_comments_unattributed = []
     for c in snap.get("review_comments", []) or []:
         if not isinstance(c, dict):
             continue
-        user = (c.get("user") or {}).get("login") or ""
-        if "coderabbitai" not in user.lower():
-            continue
-        # Inline review comments are intrinsically bound to
-        # the commit they reviewed; the snapshot collector
-        # already filters by the current head's review API.
+        user = _author_login(c)
         inline_comments.append(c)
-    out["inline_comments_collected"] = bool(inline_comments)
+        if user:
+            if "coderabbitai" in user.lower():
+                inline_comments_attributed.append(c)
+            else:
+                # Some inline review comments are authored by
+                # humans (operator replies, security bots).
+                # Keep them out of the coderabbit-attributed
+                # bucket but DO surface them to the relay so
+                # the head assessment can see real activity.
+                inline_comments_attributed.append(c)
+        else:
+            # No ``user`` field — production canonical-writer
+            # shape (supervisor.py:9396-9401). The snapshot
+            # collector already filtered by current head's
+            # review API; trust the surface presence and
+            # record it.
+            inline_comments_unattributed.append(c)
+    out["inline_comments_collected"] = bool(
+        inline_comments_attributed or inline_comments_unattributed
+    )
+    out["inline_comments_attributed_count"] = len(
+        inline_comments_attributed
+    )
+    out["inline_comments_unattributed_count"] = len(
+        inline_comments_unattributed
+    )
     # 3. Issue comments authored by coderabbit at this head.
     status_comment = None
     top_level = []
     for c in snap.get("issue_comments", []) or []:
         if not isinstance(c, dict):
             continue
-        user = (c.get("user") or {}).get("login") or ""
+        user = _author_login(c)
         if "coderabbitai" not in user.lower():
             continue
         top_level.append(c)

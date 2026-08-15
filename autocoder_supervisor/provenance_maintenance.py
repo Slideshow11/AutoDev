@@ -528,6 +528,20 @@ MANIFEST_CONTROLLED_PATHS: tuple[str, ...] = (
     "autocoder_supervisor/aed_worker_wrapper.py",
     "autocoder_supervisor/provenance_maintenance.py",
     "autocoder_supervisor/relay_wiring.py",
+    # Round-658 P1 follow-on: the CLI entry point is a
+    # manifest-controlled destination (it appears in the
+    # canonical extraction manifest's ``destination_path``
+    # list and is the worker interface invoked via
+    # ``python3 -m autocoder_orchestration.cli``) but the
+    # controlled-paths constant historically omitted it. A
+    # worker that edits ``autocoder_orchestration/cli.py``
+    # would leave the canonical manifest's destination
+    # SHA-256 stale and break CI ``provenance`` /
+    # ``test (3.10)`` / ``test (3.11)`` /
+    # ``test (3.12)`` / ``full-suite`` simultaneously. The
+    # canonical set MUST enumerate every manifest
+    # destination whose bytes the supervisor owns.
+    "autocoder_orchestration/cli.py",
 )
 
 
@@ -600,6 +614,41 @@ def provenance_finalize(
     # standalone ``check`` subcommand as well — a tight
     # round-trip coupling that catches drift immediately.
     import subprocess as _sp
+    # Step 2 (canonical): regenerate the audit artifact
+    # BEFORE the consistency check. The audit file embeds
+    # the same per-record ``destination_sha256`` /
+    # ``destination_size_bytes`` / ``source_sha256`` /
+    # ``source_size_bytes`` triple as the manifest, so a
+    # fresh regenerate_manifest pass that updates the
+    # manifest's ``destination_sha256`` MUST be mirrored to
+    # the audit or the consistency check below rejects the
+    # audit as drifted.
+    #
+    # Round-658 P1 follow-on: previously ``provenance_finalize``
+    # invoked only ``check`` here, leaving the audit
+    # permanently out of date whenever any ``allowed_paths``
+    # destination was edited. CI job ``provenance`` would
+    # then fail with ``audit manifest_records diverge from
+    # manifest`` even when the manifest was already correct.
+    proc_regen = _sp.run(
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "provenance_audit.py"),
+            "regenerate",
+            "--manifest", str(manifest_path),
+            "--audit", str(audit_path),
+        ],
+        cwd=str(repo_root),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if proc_regen.returncode != 0:
+        raise ProvenanceFinalizeError(
+            "provenance_audit.py regenerate failed: "
+            f"stdout={proc_regen.stdout!r} "
+            f"stderr={proc_regen.stderr!r}"
+        )
     proc = _sp.run(
         [
             sys.executable,
