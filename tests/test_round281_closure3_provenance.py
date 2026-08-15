@@ -316,6 +316,43 @@ class TestAtomicLedger:
         reloaded = _read_drift_ledger_or_failclosed(path)
         assert reloaded == original
 
+    def test_fsync_failure_fails_closed(
+        self, tmp_path: Path, monkeypatch: "pytest.MonkeyPatch",
+    ) -> None:
+        """Round-681 P2: fsync errors must surface, not be swallowed.
+
+        ``_atomic_write_json`` promises fail-closed crash consistency.
+        If ``os.fsync`` raises ``OSError`` while syncing the temp
+        file, the helper must propagate the error so the prior
+        ledger remains intact. Previously the helper swallowed the
+        error with ``except OSError: pass`` and proceeded to
+        ``os.replace``, which lets callers believe the durable
+        update succeeded even though a crash may lose the new
+        contents.
+        """
+        from autocoder_supervisor import provenance_maintenance as pm
+        from autocoder_supervisor.provenance_maintenance import (
+            _atomic_write_json,
+            AtomicWriteError,
+        )
+
+        path = tmp_path / "ledger.json"
+        _atomic_write_json(path, [{"old": True}])
+        prior_content = path.read_text()
+        prior_stat = path.stat()
+
+        def _boom(_fd: int) -> None:
+            raise OSError("simulated fsync failure")
+
+        monkeypatch.setattr(pm.os, "fsync", _boom)
+        with pytest.raises(AtomicWriteError):
+            _atomic_write_json(path, [{"new": True}])
+        # Prior ledger must be unchanged: tmp file unlinked,
+        # destination untouched.
+        assert path.read_text() == prior_content
+        assert path.stat().st_mtime_ns == prior_stat.st_mtime_ns
+        assert not (path.parent / (path.name + ".tmp")).exists()
+
 
 # ---------------------------------------------------------------------------
 # §7: lifecycle, head-supersession, ping-pong prevention

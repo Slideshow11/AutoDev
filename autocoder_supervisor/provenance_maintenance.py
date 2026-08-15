@@ -181,10 +181,7 @@ def _atomic_write_json(path: Path, data) -> None:
             json.dump(data, f, indent=2, sort_keys=True)
             f.write("\n")
             f.flush()
-            try:
-                os.fsync(f.fileno())
-            except OSError:
-                pass
+            os.fsync(f.fileno())
         # os.fdopen took ownership of fd and the `with` block above has
         # already closed it on exit. Release ownership here so the
         # `finally` block does NOT call os.close(fd) a second time on a
