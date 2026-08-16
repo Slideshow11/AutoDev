@@ -131,6 +131,7 @@ _ACCEPTANCE_RUNTIME_BINDINGS = [
     ("config.py", "autocoder_supervisor.config"),
     ("contracts.py", "autocoder_supervisor.contracts"),
     ("validate.py", "autocoder_supervisor.validate"),
+    ("push_gate.py", "autocoder_supervisor.push_gate"),
     ("worker_attempt.py", "autocoder_orchestration.worker_attempt"),
     ("review_repair_relay.py", "autocoder_orchestration.review_repair_relay"),
     ("controller.py", "autocoder_orchestration.controller"),

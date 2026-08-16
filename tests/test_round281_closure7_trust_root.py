@@ -71,6 +71,11 @@ def _stub_github_api(monkeypatch, tmp_path):
         ("config.py", "autocoder_supervisor.config"),
         ("contracts.py", "autocoder_supervisor.contracts"),
         ("validate.py", "autocoder_supervisor.validate"),
+        # Round-785 P1: push_gate.py is now part of the
+        # acceptance runtime inventory and must be loaded by
+        # the supervisor-owned artifact fixture so the
+        # Closure IX §6 evidence generator can resolve it.
+        ("push_gate.py", "autocoder_supervisor.push_gate"),
         ("worker_attempt.py", "autocoder_orchestration.worker_attempt"),
         ("review_repair_relay.py", "autocoder_orchestration.review_repair_relay"),
         ("controller.py", "autocoder_orchestration.controller"),
@@ -391,10 +396,15 @@ class TestAcceptanceRuntimeComparison:
     """
 
     def test_inventory_has_17_modules(self):
+        """Round-785 P1: push_gate.py was added to the
+        acceptance runtime inventory (now 18 modules) to
+        ensure the supervisor-side validator that gates
+        worker pushes is included in runtime_files_missing
+        accounting and in _ACCEPTANCE_RUNTIME_BINDINGS."""
         from autocoder_supervisor.hermes_fingerprint import (
             ACCEPTANCE_RUNTIME_INVENTORY,
         )
-        assert len(ACCEPTANCE_RUNTIME_INVENTORY) == 17
+        assert len(ACCEPTANCE_RUNTIME_INVENTORY) == 18
 
     def test_runtime_records_have_required_fields(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (
@@ -432,7 +442,7 @@ class TestAcceptanceRuntimeComparison:
             pr_number=5,
             branch="feat/review-repair-relay-v1",
         )
-        assert ev["acceptance_runtime_compared_count"] == 17
+        assert ev["acceptance_runtime_compared_count"] == 18
 
     def test_runtime_files_missing_empty(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (

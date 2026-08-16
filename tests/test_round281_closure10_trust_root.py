@@ -88,6 +88,12 @@ def _stub_github_api(monkeypatch, tmp_path):
         ("config.py", "autocoder_supervisor.config"),
         ("contracts.py", "autocoder_supervisor.contracts"),
         ("validate.py", "autocoder_supervisor.validate"),
+        # Round-785 P1: push_gate.py was added to the
+        # acceptance runtime inventory; the supervisor-owned
+        # identity fixture in this test MUST include it so
+        # the Closure X §9 evidence-generator sees a record
+        # for every module in the inventory.
+        ("push_gate.py", "autocoder_supervisor.push_gate"),
         ("worker_attempt.py", "autocoder_orchestration.worker_attempt"),
         ("review_repair_relay.py", "autocoder_orchestration.review_repair_relay"),
         ("controller.py", "autocoder_orchestration.controller"),

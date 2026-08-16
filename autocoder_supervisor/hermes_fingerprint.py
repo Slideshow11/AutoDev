@@ -63,6 +63,13 @@ ACCEPTANCE_RUNTIME_INVENTORY: tuple = (
     "config.py",
     "contracts.py",
     "validate.py",
+    # Round-697 P1: push_gate owns the canonical worker
+    # pre-push / supervisor post-push validation. supervisor.py
+    # imports it (see _validate_provenance_consistency) to
+    # delegate the provenance-consistency check; without this
+    # entry, a missing or stale deployed copy of push_gate would
+    # NOT appear in runtime_files_missing_count.
+    "push_gate.py",
     # autocoder_orchestration/ — modules supervisor.py
     # imports for the orchestration/result-contract/repair
     # pipeline.
