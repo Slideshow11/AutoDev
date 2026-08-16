@@ -375,8 +375,8 @@
     },
     {
       "destination_path": "autocoder_orchestration/cli.py",
-      "destination_sha256": "1fabc21a2b6a91885ef50a66c7eb2c9689357e88d27d4540e71b6a4825dee011",
-      "destination_size_bytes": 80961,
+      "destination_sha256": "debccc19cc444a1edd83026ba6b34f0361f165551df46afe683be6a7f7b2471c",
+      "destination_size_bytes": 80958,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
