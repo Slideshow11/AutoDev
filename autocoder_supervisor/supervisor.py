@@ -14263,6 +14263,23 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             canonical_pr = int(PR_NUMBER)  # type: ignore[name-defined]
             iteration: dict = {}
+            # Round-778 P1: the post-loop ``iteration.get(
+            # "head_match")`` gate (round-41 awaiting_ci
+            # advance), drain, and CI watch below MUST
+            # address the canonical PR's iteration result,
+            # not whichever PR happened to be last in
+            # ``pr_numbers``. The in-loop
+            # ``iteration = run_iteration_v5(...)``
+            # assignment overwrites the singleton on every
+            # tick, so when ``AED_PR_NUMBERS=4,5`` and the
+            # secondary PR ticks after the canonical PR,
+            # the canonical PR's result is lost and the
+            # downstream CI-advance gate keys off the wrong
+            # PR's head. Capture the canonical PR's
+            # iteration into ``canonical_iteration`` during
+            # its tick and rebind ``iteration`` to it
+            # before the post-loop block runs.
+            canonical_iteration: dict = {}
             log(
                 "info",
                 "per_pr_iteration_start",
@@ -14385,6 +14402,19 @@ def main(argv: Optional[list[str]] = None) -> int:
                     iteration = run_iteration_v5(
                         rs, token or "",
                     )
+                    # Round-778 P1: persist the
+                    # canonical PR's iteration result
+                    # into ``canonical_iteration`` so
+                    # the post-loop CI-advance / drain
+                    # / event dispatch / head-rebind
+                    # code below keys off the canonical
+                    # PR's ``head_match`` decision,
+                    # not whichever PR happened to be
+                    # last in ``pr_numbers``.
+                    if int(this_pr) == int(canonical_pr):
+                        canonical_iteration = dict(
+                            iteration or {},
+                        )
                     # Clear stale retry state after a
                     # successful relay round (the
                     # relay's success path persists
@@ -14409,6 +14439,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "AUTHORITATIVE_HEAD"
                     ] = canonical_authoritative_head
                     rs = canonical_rs
+            # Round-778 P1: rebind ``iteration`` to the
+            # canonical PR's captured iteration result so
+            # the round-41 awaiting_ci advance gate
+            # (``if iteration.get("head_match")``) and
+            # all downstream post-loop logic keys off the
+            # canonical PR's iteration, not whichever PR
+            # ticked last.
+            if canonical_iteration:
+                iteration = canonical_iteration
             cur_state = (
                 read_readiness_state().get("state")
                 or STATE_ACTIVE_REPAIR
