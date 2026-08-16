@@ -921,10 +921,19 @@ def _read_live_github_head(repo, pr_number):
 
 
 def _read_workflow_runs(repo, head):
-    """Read check-runs for the exact head."""
+    """Read check-runs for the exact head.
+
+    Requests the maximum page size (per_page=100) so matrix-heavy
+    workflows and re-runs do not leave required jobs on later pages
+    unobserved, which would otherwise cause the freeze report to mark
+    them as missing.
+    """
     import json as _json
     import urllib.request as _ur
-    url = f"https://api.github.com/repos/{repo}/commits/{head}/check-runs"
+    url = (
+        f"https://api.github.com/repos/{repo}/commits/{head}/check-runs"
+        "?per_page=100"
+    )
     req = _ur.Request(url, headers={"Accept": "application/vnd.github+json"})
     with _ur.urlopen(req, timeout=15) as resp:
         body = _json.loads(resp.read())
