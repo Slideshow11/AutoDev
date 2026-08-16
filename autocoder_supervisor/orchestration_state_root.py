@@ -438,8 +438,17 @@ def persist_orchestration_state_root(
         merged["last_bound_pr_number"] = int(pr_number)
     # Persist atomically.
     if writer is None:
-        from supervisor import write_json
-        writer_impl = write_json
+        # Import through the package path. ``from supervisor import
+        # write_json`` only works when ``supervisor.py`` is the
+        # script entry point; under ``python -m
+        # autocoder_supervisor.supervisor`` (or any package-based
+        # launch) the bare ``supervisor`` module does not exist and
+        # the previous form raised ``ModuleNotFoundError``, which
+        # the boot reconciliation silently swallowed and left the
+        # root unpersisted. The canonical writer lives at
+        # ``autocoder_supervisor.supervisor.write_json``.
+        from autocoder_supervisor.supervisor import write_json as _write_json
+        writer_impl = _write_json
     else:
         writer_impl = writer
     writer_impl(run_state_path, merged)
@@ -496,8 +505,12 @@ def init_run_state_safely(
         "first_initialized_at_utc": _utc_now_iso(),
     }
     if writer is None:
-        from supervisor import write_json
-        writer_impl = write_json
+        # See note in ``persist_orchestration_state_root``: the
+        # bare ``from supervisor import write_json`` form raised
+        # ``ModuleNotFoundError`` under package-mode launch. Use
+        # the canonical package path here too.
+        from autocoder_supervisor.supervisor import write_json as _write_json
+        writer_impl = _write_json
     else:
         writer_impl = writer
     writer_impl(run_state_path, new_doc)
