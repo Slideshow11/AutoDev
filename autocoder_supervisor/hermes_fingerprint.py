@@ -1294,6 +1294,24 @@ def _collect_coderabbit_exact_head_surfaces(
     actionable = []
     unowned = []
     threads = snap.get("review_threads", {}) or {}
+    # Round-686/P1: ``capture_live_snapshot()`` records
+    # ``review_threads_pagination_failed=True`` (and leaves
+    # ``review_threads={}``) when the GraphQL review-thread
+    # query fails or returns a malformed page. The previous
+    # code only checked ``isinstance(threads, dict)`` here,
+    # which is satisfied by the empty-dict fallback, so a
+    # failed pagination was still reported as a fully
+    # collected surface — letting ``surfaces_complete`` /
+    # ``clean`` go True on an incomplete inventory. Fail
+    # closed: when the snapshot explicitly marks the
+    # pagination as failed, ``review_threads_collected``
+    # MUST be False so the writer refuses to persist a
+    # clean assessment.
+    pagination_failed = bool(snap.get("review_threads_pagination_failed"))
+    out["review_threads_pagination_complete"] = (
+        not pagination_failed
+        and bool(snap.get("review_threads_pagination_complete", True))
+    )
     for tid, state in threads.items():
         if not isinstance(state, dict):
             continue
@@ -1305,7 +1323,9 @@ def _collect_coderabbit_exact_head_surfaces(
             unowned.append(str(tid))
     out["actionable_finding_ids"] = actionable
     out["unowned_actionable_finding_ids"] = unowned
-    out["review_threads_collected"] = isinstance(threads, dict)
+    out["review_threads_collected"] = (
+        isinstance(threads, dict) and not pagination_failed
+    )
     # 5. Completion proof: classify the latest status comment.
     completion_proof = {}
     if status_comment:
