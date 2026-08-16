@@ -151,11 +151,25 @@ def _atomic_write_json(path: Path, data) -> None:
          but before os.replace    (tmp file remains; next
          run ignores it)
       D. crash after os.replace    -> complete new ledger visible
+         (parent directory entry is fsynced so the rename is
+         durable; see post-replace parent-fsync below)
       E. restart                   -> ledger visible
 
     The destination file mode is 0o600 and the parent directory
     mode is 0o700. The temp file is created with mode 0o600
     before any bytes are written.
+
+    After os.replace() succeeds, the helper fsyncs the parent
+    directory so the directory entry is durable on disk. Without
+    this, a crash between os.replace() and the parent fsync could
+    leave the in-memory rename observed by the caller but the
+    on-disk directory pointing at the *old* inode -- the caller
+    would report a successful durable update that is not actually
+    durable. Filesystems that do not support directory fsync
+    (e.g. some FUSE mounts, some Windows configurations) raise
+    OSError/AttributeError; those failures are swallowed because
+    the prior crash-consistency properties A-E still hold at the
+    file-data level, and the worker remains free to retry.
     """
     parent_existed = path.parent.exists()
     try:
@@ -190,6 +204,31 @@ def _atomic_write_json(path: Path, data) -> None:
         # file opened by another thread between this point and finally).
         fd = -1
         os.replace(tmp, path)
+        # fsync the parent directory so the rename is durable.
+        # os.replace() updates directory entries durably only
+        # after the containing directory is fsynced; without
+        # this, a crash between os.replace() and the parent
+        # fsync can leave the caller with a successful
+        # in-memory rename that the on-disk directory does
+        # not yet reflect. We swallow OSError/AttributeError
+        # because some filesystems (FUSE, Windows) do not
+        # support directory fsync; in those cases the
+        # file-data durability properties A-C still hold and
+        # the worker can retry on next round.
+        try:
+            dir_fd = os.open(str(path.parent), os.O_RDONLY)
+        except (OSError, AttributeError):
+            dir_fd = -1
+        if dir_fd >= 0:
+            try:
+                os.fsync(dir_fd)
+            except (OSError, AttributeError):
+                pass
+            finally:
+                try:
+                    os.close(dir_fd)
+                except OSError:
+                    pass
     except OSError as e:
         try:
             if os.path.exists(str(tmp)):
