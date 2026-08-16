@@ -11187,20 +11187,52 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             ):
                 snap["review_comments"].append(inline)
         except Exception as exc:  # noqa: BLE001 - defensive
-            # Round-30: provider API failure is INCOMPLETE
-            # evidence. Mark the snapshot as such so the
-            # relay evaluation refuses to promote
-            # readiness and routes to a recoverable retry.
-            snap["provider_surface_complete"] = False
-            snap["provider_surface_failures"][provider_name] = str(exc)
-            log(
-                "error",
-                "collect_provider_surfaces failed; "
-                "provider_surface_complete=false; relay will "
-                "return recoverable retry, NOT readiness",
-                provider=provider_name,
-                error=str(exc),
+            # Round-30: required-provider API failure is
+            # INCOMPLETE evidence. Mark the snapshot as
+            # such so the relay evaluation refuses to
+            # promote readiness and routes to a
+            # recoverable retry.
+            # Round-759 P1: an OPTIONAL provider outage
+            # (e.g. Codex per-review comments API is
+            # unavailable) MUST NOT poison the global
+            # completeness gate. Only required
+            # providers (those marked
+            # ``required_for_current_repair_round=True``
+            # in PROVIDERS) gate readiness; optional
+            # providers are recorded in
+            # ``provider_surface_failures`` for
+            # observability but the snapshot's global
+            # ``provider_surface_complete`` stays True
+            # so ``evaluate_readiness()`` can still
+            # qualify the head based on every required
+            # CodeRabbit surface being complete.
+            provider_cfg = PROVIDERS.get(provider_name, {})
+            is_required = bool(
+                provider_cfg.get(
+                    "required_for_current_repair_round", False,
+                )
             )
+            snap["provider_surface_failures"][provider_name] = str(exc)
+            if is_required:
+                snap["provider_surface_complete"] = False
+                log(
+                    "error",
+                    "collect_provider_surfaces failed for required "
+                    "provider; provider_surface_complete=false; "
+                    "relay will return recoverable retry, NOT readiness",
+                    provider=provider_name,
+                    error=str(exc),
+                )
+            else:
+                log(
+                    "error",
+                    "collect_provider_surfaces failed for optional "
+                    "provider; provider_surface_complete stays True; "
+                    "optional outage is recorded but does NOT gate "
+                    "readiness",
+                    provider=provider_name,
+                    error=str(exc),
+                )
     all_threads: list[tuple[str, bool, bool, dict]] = []
     cursor = None
     pagination_failed: bool = False
