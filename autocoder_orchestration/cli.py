@@ -619,7 +619,7 @@ def cmd_migrate_required_ci_jobs(args: argparse.Namespace) -> int:
     except (StateStoreError, OSError) as exc:
         # Migration succeeded but audit-trail append failed.
         # ``append_journal`` calls ``chmod`` / ``open`` / ``write``
-        # directly on the filesystem, so a real disk-exhaustion
+        # directly on the filesystem, so a real out-of-space
         # or permission failure propagates as ``OSError`` rather
         # than as ``StateStoreError`` — both must surface the same
         # non-zero exit code so callers that check exit status
