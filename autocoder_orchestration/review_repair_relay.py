@@ -1189,9 +1189,12 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
 
     The snapshot shape is the supervisor's
     ``capture_live_snapshot`` output. The collector accepts
-    ``_provider_issue_comments`` (per-provider subset) and/or the
-    unfiltered ``issue_comments`` list. Provider matching is done
-    by bot-login substring because the supervisor records bot
+    the head-bound ``provider_surfaces[provider].issue_comments``
+    (preferred — Round-687/P1), the per-provider subset
+    ``_provider_issue_comments`` (raw records with only a
+    ``login`` field, no ``commit_id`` / ``review_cycle``), and/or
+    the unfiltered ``issue_comments`` list. Provider matching is
+    done by bot-login substring because the supervisor records bot
     logins under ``[bot]``-suffixed form for GitHub Apps.
 
     Status markers (walkthrough, in-progress, completion)
@@ -1215,10 +1218,51 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
     # the comment (the supervisor's snapshot already
     # filters by the current head's review API).
     current_head = snapshot.get("head_sha")
-    # Prefer the per-provider subset when present, fall back to
-    # the unfiltered list. The supervisor's snapshot guarantees
-    # that the subset is a filtered copy of the unfiltered list.
-    primary = snapshot.get("_provider_issue_comments") or {}
+    # Round-687/P1: consume the head-bound provider issue-comment
+    # surface first. Production ``capture_live_snapshot()`` records
+    # in ``_provider_issue_comments`` are raw GitHub issue-comment
+    # dicts with only a top-level ``login`` field and no
+    # ``commit_id`` / ``review_cycle`` provenance — selecting that
+    # raw index makes the primary loop below reject every such
+    # record (the head-binding check at lines 1252-1271 cannot
+    # match without those fields). The head-bound copies live in
+    # ``provider_surfaces[provider].issue_comments`` and carry
+    # ``commit_id`` + ``review_cycle`` for the freshest bot-authored
+    # comment in the current review cycle (per Round-31/140 in
+    # ``collect_provider_surfaces``). Prefer those; fall back to
+    # the raw subset only when a provider entry is absent from
+    # the surfaces dict (legacy tests + pre-round-666 snapshots).
+    primary: dict = {}
+    raw_subset_obj = snapshot.get("_provider_issue_comments")
+    raw_subset: dict = (
+        raw_subset_obj if isinstance(raw_subset_obj, dict) else {}
+    )
+    surfaces_obj = snapshot.get("provider_surfaces")
+    surfaces: dict = (
+        surfaces_obj if isinstance(surfaces_obj, dict) else {}
+    )
+    # Collect every provider that appears in EITHER source so the
+    # primary loop covers the full union without double-emitting.
+    provider_keys = set(raw_subset.keys()) | set(surfaces.keys())
+    for provider in provider_keys:
+        surface_entry = surfaces.get(provider)
+        surface_comments: list = []
+        if isinstance(surface_entry, dict):
+            sc = surface_entry.get("issue_comments", [])
+            if isinstance(sc, list):
+                surface_comments = sc
+        if surface_comments:
+            # Head-bound source wins; replace any raw subset
+            # entries for this provider so the primary loop only
+            # sees the head-bound records (which carry
+            # ``commit_id`` / ``review_cycle``).
+            primary[provider] = surface_comments
+        elif provider in raw_subset:
+            # Legacy / test path: no head-bound surface for this
+            # provider; use the raw subset (test fixtures still
+            # populate ``_provider_issue_comments`` with explicit
+            # ``commit_id`` / ``review_cycle``).
+            primary[provider] = raw_subset[provider]
     for provider, comments in primary.items():
         if not isinstance(comments, list):
             continue
