@@ -7577,9 +7577,9 @@
         "destination_path": "scripts/canonical_scanner.py",
         "transformation_classification": "standalone_ci_addition",
         "source_sha256": null,
-        "destination_sha256": "fd08bb25f60e4fcff28d0fdb74274c9f9d03a8676da8db2efce1ae5963cb4b72",
+        "destination_sha256": "e1dd29f87b90d7a04d6c7c368689859e6b258113fe775a7441f85a283e532c68",
         "source_size_bytes": null,
-        "destination_size_bytes": 15456,
+        "destination_size_bytes": 16281,
         "transformation_explanation": "Newly authored for the standalone repository. No source counterpart in AED."
       },
       {

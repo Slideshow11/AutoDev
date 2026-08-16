@@ -239,8 +239,8 @@
     },
     {
       "destination_path": "scripts/canonical_scanner.py",
-      "destination_sha256": "fd08bb25f60e4fcff28d0fdb74274c9f9d03a8676da8db2efce1ae5963cb4b72",
-      "destination_size_bytes": 15456,
+      "destination_sha256": "e1dd29f87b90d7a04d6c7c368689859e6b258113fe775a7441f85a283e532c68",
+      "destination_size_bytes": 16281,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_ci_addition",
