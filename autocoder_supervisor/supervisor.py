@@ -14280,6 +14280,23 @@ def main(argv: Optional[list[str]] = None) -> int:
             # its tick and rebind ``iteration`` to it
             # before the post-loop block runs.
             canonical_iteration: dict = {}
+            # Round-779 P1: accumulate every per-PR iteration
+            # result so secondary PR events are processed BEFORE
+            # the canonical rebinding below. The previous
+            # implementation only retained the canonical PR's
+            # iteration in ``iteration``, dropping the secondary
+            # PR's events and ``head_sha``. Although
+            # ``write_unconsumed_event`` (inside
+            # ``run_iteration_v5``) persists events to the
+            # unconsumed ledger, downstream ``handle_new_events``
+            # falls back to ``iteration.get("head_sha")`` for
+            # head attribution (lines 13557, 13569, 13783, 13815)
+            # and the head-rebinding logic at line 14779 uses
+            # ``iteration.get("head_sha")`` as ``live_head`` —
+            # both keys off the canonical PR's head, missing
+            # secondary PR head advances and mis-attributing
+            # secondary events to the canonical head.
+            per_pr_iterations: list = []
             log(
                 "info",
                 "per_pr_iteration_start",
@@ -14415,6 +14432,31 @@ def main(argv: Optional[list[str]] = None) -> int:
                         canonical_iteration = dict(
                             iteration or {},
                         )
+                    # Round-779 P1: capture every per-PR
+                    # iteration (events + head_sha) so the
+                    # post-loop block can dispatch secondary
+                    # PR events with their actual head_sha,
+                    # not whichever head happened to be
+                    # canonical's. Without this,
+                    # ``iteration.get("events")`` only carries
+                    # the LAST per-PR result and the canonical
+                    # rebinding below narrows it to canonical.
+                    per_pr_iterations.append({
+                        "pr_number": int(this_pr),
+                        "events": list(
+                            (iteration or {}).get("events", [])
+                            or [],
+                        ),
+                        "head_sha": (iteration or {}).get(
+                            "head_sha", "",
+                        ),
+                        "head_match": bool(
+                            (iteration or {}).get("head_match")
+                        ),
+                        "decision": (
+                            iteration or {}
+                        ).get("decision", "skip"),
+                    })
                     # Clear stale retry state after a
                     # successful relay round (the
                     # relay's success path persists
@@ -14718,6 +14760,45 @@ def main(argv: Optional[list[str]] = None) -> int:
                     head=iteration.get("head_sha", "")[:12],
                 )
             new_events = list(iteration.get("events", [])) + drain_events
+            # Round-779 P1: supplement ``new_events`` with
+            # secondary PR events from ``per_pr_iterations``
+            # BEFORE the canonical-only ``iteration`` rebind
+            # hides them. Each secondary PR's events are
+            # tagged with that PR's ``head_sha`` so
+            # ``handle_new_events`` (which falls back to
+            # ``iteration.get("head_sha")`` at lines 13557,
+            # 13569, 13783, 13815) attributes them to the
+            # correct head. Without this, secondary PR events
+            # are dispatched under the canonical PR's
+            # ``head_sha``, which is wrong whenever the
+            # secondary PR's head diverges.
+            for _per in per_pr_iterations or []:
+                if int(_per.get("pr_number", 0)) == int(canonical_pr):
+                    continue
+                _per_head = _per.get("head_sha") or ""
+                if not _per_head:
+                    continue
+                for _ev in list(_per.get("events", []) or []):
+                    if not isinstance(_ev, dict):
+                        continue
+                    # Attach the secondary PR's head_sha so
+                    # downstream head attribution is correct.
+                    if not _ev.get("head_sha"):
+                        _ev["head_sha"] = _per_head
+                    # Attach the secondary PR number so the
+                    # worker attempt can be scoped to the
+                    # correct PR context.
+                    if not _ev.get("pr_number"):
+                        _ev["pr_number"] = int(
+                            _per.get("pr_number", 0)
+                        )
+                    if any(
+                        isinstance(x, dict)
+                        and x.get("id") == _ev.get("id")
+                        for x in new_events
+                    ):
+                        continue
+                    new_events.append(_ev)
             # Round-39 P1#3: supplement ``new_events`` with
             # any durable unconsumed events that have not yet
             # been launched. ``run_iteration_v5`` derives
