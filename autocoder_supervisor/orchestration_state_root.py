@@ -34,9 +34,87 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+
+
+def _import_write_json() -> Callable[[Path, Dict[str, Any]], None]:
+    """Round-770 P1: resolve ``write_json`` regardless of how the
+    supervisor was launched.
+
+    Two production launch modes bind the supervisor module
+    differently:
+
+      1. Standalone launch (``scripts/restart_supervisor_multir.sh``
+         runs ``python3 $SUP_DIR/supervisor.py``). The module
+         rebinds ``__package__`` to a synthetic
+         ``_aed_supervisor_standalone`` package and registers
+         itself as ``_aed_supervisor_standalone.supervisor`` in
+         ``sys.modules``. The ``autocoder_supervisor`` package is
+         NOT in ``sys.path`` and the canonical
+         ``autocoder_supervisor.supervisor`` import therefore
+         raises ``ModuleNotFoundError``.
+
+      2. Package launch (``python -m autocoder_supervisor.supervisor``
+         or any installed-package invocation). The module is bound
+         as ``autocoder_supervisor.supervisor``. A bare
+         ``from supervisor import write_json`` therefore raises
+         ``ModuleNotFoundError`` because no top-level ``supervisor``
+         module exists.
+
+    The resolution order below picks whichever binding is live in
+    the current interpreter, and never raises ``ImportError`` for
+    modes that are not active here. We check the active
+    ``__package__`` first because that is the binding Python is
+    using right now for this very file; the second and third
+    branches are static fallbacks for atypical deployments
+    (e.g. legacy tests that manipulate ``sys.path``).
+
+    All branches use the exact same ``write_json`` symbol from the
+    same canonical function in ``supervisor.py``; this helper is
+    purely an import-path resolver.
+    """
+    # Branch 1: active __package__ binding (whatever the supervisor
+    # is currently running under). When ``this`` module was
+    # imported as ``<pkg>.orchestration_state_root`` then ``<pkg>``
+    # is also the package the supervisor was bound to, so the
+    # sibling ``<pkg>.supervisor`` is guaranteed registered.
+    active_pkg = __package__ or ""
+    if active_pkg:
+        try:
+            mod = sys.modules.get(active_pkg + ".supervisor")
+            if mod is not None:
+                return mod.write_json
+        except (AttributeError, KeyError):
+            pass
+    # Branch 2: canonical package path (production package launch).
+    try:
+        from autocoder_supervisor.supervisor import write_json as _wj
+        return _wj
+    except ImportError:
+        pass
+    # Branch 3: standalone module path (legacy ``from supervisor``
+    # import; equivalent to Branch 1 for the truly-standalone
+    # case where ``__package__`` is empty).
+    try:
+        from supervisor import write_json as _wj2  # type: ignore[no-redef]
+        return _wj2
+    except ImportError:
+        pass
+    # If every branch failed, raise the same error a caller would
+    # have seen without our fallback chain. The boot reconciliation
+    # already routes ``OrchestrationRootError`` to BLOCKED, so we
+    # do not silently swallow here.
+    raise ImportError(
+        "Round-770: cannot resolve supervisor.write_json in this interpreter. "
+        "Expected one of: <active_package>.supervisor (e.g. "
+        "_aed_supervisor_standalone.supervisor for standalone launch), "
+        "autocoder_supervisor.supervisor (package launch), or top-level "
+        "supervisor (legacy). No binding was found in sys.modules and no "
+        "package was importable."
+    )
 
 
 class OrchestrationRootError(Exception):
@@ -438,17 +516,30 @@ def persist_orchestration_state_root(
         merged["last_bound_pr_number"] = int(pr_number)
     # Persist atomically.
     if writer is None:
-        # Import through the package path. ``from supervisor import
-        # write_json`` only works when ``supervisor.py`` is the
-        # script entry point; under ``python -m
-        # autocoder_supervisor.supervisor`` (or any package-based
-        # launch) the bare ``supervisor`` module does not exist and
-        # the previous form raised ``ModuleNotFoundError``, which
-        # the boot reconciliation silently swallowed and left the
-        # root unpersisted. The canonical writer lives at
-        # ``autocoder_supervisor.supervisor.write_json``.
-        from autocoder_supervisor.supervisor import write_json as _write_json
-        writer_impl = _write_json
+        # Round-770 P1: resolve ``write_json`` from whichever
+        # supervisor module is currently loaded in this process.
+        # The canonical deployment runs ``supervisor.py`` standalone
+        # (``scripts/restart_supervisor_multir.sh`` invokes
+        # ``python3 $SUP_DIR/supervisor.py``); its top-level shim
+        # rebinds ``__package__`` to the synthetic
+        # ``_aed_supervisor_standalone`` package, so the canonical
+        # ``autocoder_supervisor.supervisor`` import path used by
+        # round-768 raises ``ModuleNotFoundError`` in that mode.
+        # Conversely, package-mode launches
+        # (``python -m autocoder_supervisor.supervisor``) do NOT
+        # load the standalone shim, so a bare ``from supervisor``
+        # import raises ``ModuleNotFoundError`` there. Both modes
+        # are production deployment paths.
+        #
+        # Resolution order: prefer the module already registered
+        # under the active ``__package__`` (this is what the
+        # supervisor currently sees); fall back to the canonical
+        # package path; fall back to the bare module path. The
+        # explicit ``try/except`` per branch lets each mode fail
+        # cleanly into the next without an ``ImportError`` escaping
+        # into ``persist_orchestration_state_root``'s caller, where
+        # the boot reconciliation would otherwise swallow it.
+        writer_impl = _import_write_json()
     else:
         writer_impl = writer
     writer_impl(run_state_path, merged)
@@ -505,12 +596,11 @@ def init_run_state_safely(
         "first_initialized_at_utc": _utc_now_iso(),
     }
     if writer is None:
-        # See note in ``persist_orchestration_state_root``: the
-        # bare ``from supervisor import write_json`` form raised
-        # ``ModuleNotFoundError`` under package-mode launch. Use
-        # the canonical package path here too.
-        from autocoder_supervisor.supervisor import write_json as _write_json
-        writer_impl = _write_json
+        # See ``persist_orchestration_state_root`` for the round-770
+        # rationale. The same three-branch resolution handles
+        # standalone (synthetic ``_aed_supervisor_standalone``
+        # package), canonical package, and bare-module launches.
+        writer_impl = _import_write_json()
     else:
         writer_impl = writer
     writer_impl(run_state_path, new_doc)
