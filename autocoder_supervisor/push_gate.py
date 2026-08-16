@@ -154,20 +154,31 @@ def validate_provenance_consistency_at_sha(
 
     # Importing manifest helpers from provenance_maintenance
     # avoids any divergent reimplementation. We use
-    # ``enumerate_controlled_destinations_strict`` which
-    # already fails closed on malformed manifests.
+    # ``enumerate_controlled_destinations_strict`` only as a
+    # structural reference; the validator itself does NOT
+    # call it because it requires on-disk path inputs and
+    # reads mutable working-tree state. The validator must
+    # operate only against committed bytes, so it walks the
+    # already-parsed ``manifest_data`` dict via the local
+    # helper ``_controlled_destinations_from_manifest``.
+    #
+    # Round-817 (P1 repair): the controlled_set MUST also
+    # include any destination that was controlled at
+    # prelaunch_head but is being *removed* from the
+    # outgoing manifest. Otherwise a worker can modify a
+    # controlled file and drop its manifest record in the
+    # same commit; the outgoing manifest would no longer
+    # list the path, ``controlled_changed`` would be empty,
+    # and the validator would self-exempt.
     from autocoder_supervisor.provenance_maintenance import (  # noqa: E402
-        enumerate_controlled_destinations_strict,
         ManifestEnumerationError,
     )
 
-    # Step 1: derive the controlled destination set from the
-    # MANIFEST AS COMMITTED AT outgoing_head. This is the
-    # crucial generalization vs supervisor.py's prior
-    # implementation: that function read the manifest from
-    # the on-disk file (which is fine post-push but unsafe
-    # pre-push where the manifest in the working tree may
-    # not yet be committed).
+    # Read the committed outgoing manifest. The validator
+    # derives controlled_set and the manifest_index from
+    # THIS dict; no on-disk file is consulted. This
+    # invariant is what makes the validator deterministic
+    # against ``git show <sha>:path`` bytes only.
     manifest_show = subprocess.run(
         ["git", "-C", str(repo_root), "show",
          f"{outgoing_head}:{_MANIFEST_RELPATH}"],
@@ -191,10 +202,63 @@ def validate_provenance_consistency_at_sha(
             f"is not valid JSON: {e}"
         ])
 
+    # Round-817 (P1 repair): also read the PRELAUNCH
+    # committed manifest so the controlled_set still
+    # includes destinations that the outgoing commit is
+    # *removing* from the manifest. Without this, a worker
+    # could modify a controlled file and drop its manifest
+    # record in the same commit; the outgoing manifest
+    # would no longer list the path, ``controlled_changed``
+    # would be empty, and the validator would self-exempt.
+    #
+    # Missing prelaunch manifest is treated as "no prior
+    # controlled set" — this is acceptable because the
+    # prelaunch_head can be a synthetic fixture in unit
+    # tests, and the validator still catches
+    # shrink-by-removal against the empty prelaunch set
+    # (it falls through to outgoing-only).
+    prelaunch_manifest_data = None
+    prelaunch_show = subprocess.run(
+        ["git", "-C", str(repo_root), "show",
+         f"{prelaunch_head}:{_MANIFEST_RELPATH}"],
+        capture_output=True, timeout=15,
+    )
+    if prelaunch_show.returncode == 0:
+        try:
+            prelaunch_manifest_data = json.loads(
+                prelaunch_show.stdout.decode("utf-8")
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            prelaunch_manifest_data = None
+
     try:
-        controlled_set = set(
-            enumerate_controlled_destinations_strict([manifest_path_for(repo_root)])
+        # Derive the controlled-set from the COMMITTED
+        # outgoing manifest, not the on-disk file. The
+        # on-disk file may differ from the committed
+        # outgoing tree (worker uncommitted changes, index
+        # state, etc.), and using it would let a worker
+        # self-exempt by editing the manifest on disk
+        # without committing those edits.
+        outgoing_controlled = set(
+            _controlled_destinations_from_manifest(manifest_data)
         )
+        prelaunch_controlled = set(
+            _controlled_destinations_from_manifest(prelaunch_manifest_data)
+            if prelaunch_manifest_data is not None else []
+        )
+        controlled_set = outgoing_controlled | prelaunch_controlled
+        if not controlled_set:
+            # Mirror the strict-helper's empty-set
+            # fail-closed semantic: an empty controlled_set
+            # after the union means the manifests enumerate
+            # zero destinations, which is a structural
+            # drift from the canonical round-697 contract.
+            return (False, [
+                "manifest-controlled-path derivation failed: "
+                "controlled-destination enumeration produced an "
+                "empty set; manifests have no records or are "
+                "wrong-format"
+            ])
     except ManifestEnumerationError as e:
         return (False, [f"manifest-controlled-path derivation failed: {e}"])
 
@@ -299,12 +363,70 @@ def validate_provenance_consistency_at_sha(
 
 def manifest_path_for(repo_root: Path) -> Path:
     """Return the canonical on-disk path to the extraction
-    manifest. Used only for ``enumerate_controlled_destinations_strict``
-    which accepts an iterable of manifest paths; the function
-    reads them from disk because that is its expected input
-    contract. The committed-tree bytes are read separately
-    earlier in the validator."""
+    manifest. Kept for backwards-compatibility with the
+    ``enumerate_controlled_destinations_strict`` helper from
+    ``provenance_maintenance`` (which accepts iterable
+    manifest paths and reads them from disk).
+
+    Round-817 (P1 repair): the validator NO LONGER calls
+    this function. Reading the manifest from disk leaks
+    mutable working-tree state into the validator's
+    controlled-set derivation and lets a worker
+    self-exempt by editing the manifest on disk without
+    committing those edits. The validator now derives
+    its controlled_set from the committed outgoing and
+    prelaunch manifests via
+    ``_controlled_destinations_from_manifest``.
+    """
     return Path(repo_root).resolve() / _MANIFEST_RELPATH
+
+
+def _controlled_destinations_from_manifest(manifest_obj) -> list:
+    """Walk a parsed manifest object and yield every destination
+    path it enumerates.
+
+    Round-817 (P1 repair): the validator MUST NOT depend on
+    the on-disk manifest bytes. The canonical helper
+    ``enumerate_controlled_destinations_strict`` requires a
+    Path on disk, which leaks mutable working-tree state
+    into the validator's controlled-set derivation. This
+    helper operates on the *already-parsed* committed manifest
+    so the validator stays deterministic and works against
+    ``git show <sha>:path`` bytes only.
+
+    The extraction semantics mirror ``provenance_maintenance.
+    _iter_records`` so the validator and the rest of the
+    supervisor agree on what "controlled" means. If the
+    manifest is not a dict (the file was decoded but has the
+    wrong shape), the function returns an empty list rather
+    than raising — the caller is responsible for the
+    fail-closed empty-set handling because that is a
+    validator-level policy, not a parsing-level concern.
+    """
+    if not isinstance(manifest_obj, dict):
+        return []
+    out: list = []
+    def _walk(obj, parents):
+        if isinstance(obj, dict):
+            dest = (
+                obj.get("autodev_destination")
+                if isinstance(obj.get("autodev_destination"), str)
+                else (
+                    obj.get("destination_path")
+                    if isinstance(obj.get("destination_path"), str)
+                    else None
+                )
+            )
+            if dest is not None:
+                out.append(dest)
+                return
+            for k, v in obj.items():
+                _walk(v, parents + [k])
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                _walk(item, parents + [str(i)])
+    _walk(manifest_obj, [])
+    return out
 
 
 # ---------------------------------------------------------------------------
