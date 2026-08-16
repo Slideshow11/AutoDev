@@ -50,9 +50,11 @@ from pathlib import Path
 import pytest
 
 
-AUTOCODER_SUPERVISOR_DIR = Path(
-    "/home/max/AutoDev/autocoder_supervisor"
-)
+# Derive the supervisor directory from this test file so the
+# test works on any checkout (including CI runners that clone
+# to a different absolute path). The repo layout has
+# ``autocoder_supervisor/`` as a sibling of ``tests/``.
+AUTOCODER_SUPERVISOR_DIR = Path(__file__).resolve().parent.parent / "autocoder_supervisor"
 
 
 @pytest.fixture
