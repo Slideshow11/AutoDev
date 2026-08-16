@@ -176,6 +176,42 @@ def _resolve_production_runtime_binding(
         "actual_production_sha256": None,
         "exists": False,
     }
+    # Round-773 P1: the production supervisor is launched in
+    # two modes. Under package launch (e.g.
+    # ``python -m autocoder_supervisor.supervisor``) every
+    # sibling lives under ``autocoder_supervisor.*`` and the
+    # canonical ``import_path`` resolves cleanly. Under the
+    # standalone launch used by
+    # ``scripts/restart_supervisor_multir.sh`` (which runs
+    # ``python3 $SUP_DIR/supervisor.py``) the top-of-file shim
+    # rebinds ``__package__`` to the synthetic
+    # ``_aed_supervisor_standalone`` package, so sibling
+    # modules get loaded as ``_aed_supervisor_standalone.<x>``
+    # and ``autocoder_supervisor`` is not even on ``sys.path``.
+    # Detect the standalone mode by the presence of the
+    # synthetic package in ``sys.modules`` and build an
+    # ordered list of candidate dotted-paths so the existing
+    # LOADED_MODULE / find_spec resolution succeeds in BOTH
+    # launch modes without changing the canonical contract.
+    standalone_pkg = ""
+    for _k in _sys_bind.modules:
+        if _k == "_aed_supervisor_standalone" or _k.startswith(
+            "_aed_supervisor_standalone."
+        ):
+            standalone_pkg = "_aed_supervisor_standalone"
+            break
+    short_name = import_path.rsplit(".", 1)[-1]
+    candidate_paths = [import_path]
+    if (
+        standalone_pkg
+        and import_path.startswith("autocoder_supervisor.")
+    ):
+        # Standalone launch: try the synthetic-package
+        # binding first, then fall back to canonical.
+        candidate_paths = [
+            standalone_pkg + "." + short_name,
+            import_path,
+        ]
     # Closure X §11: special-case the currently executing
     # supervisor module. When running ``python3 -m supervisor``,
     # the module is registered under multiple keys. We
@@ -217,8 +253,15 @@ def _resolve_production_runtime_binding(
         record["actual_production_sha256"] = sha
         record["exists"] = bool(sha)
         return record
-    # Try (A) LOADED_MODULE
-    loaded = _sys_bind.modules.get(import_path)
+    # Try (A) LOADED_MODULE — try every candidate dotted-path
+    # so standalone launch (synthetic-package siblings) and
+    # package launch (canonical siblings) both resolve.
+    loaded = None
+    for _cand in candidate_paths:
+        loaded = _sys_bind.modules.get(_cand)
+        if loaded is not None and getattr(loaded, "__file__", None):
+            break
+        loaded = None
     if loaded is not None and getattr(loaded, "__file__", None):
         path = loaded.__file__
         sha = None
@@ -233,13 +276,27 @@ def _resolve_production_runtime_binding(
         record["actual_production_sha256"] = sha
         record["exists"] = bool(sha)
         return record
-    # Try (B) PRODUCTION_IMPORT_BINDING via import_spec
-    try:
-        spec = _importlib_util_bind.find_spec(import_path)
-    except (ImportError, ValueError):
+    # Try (B) PRODUCTION_IMPORT_BINDING via import_spec —
+    # walk the candidate list so the synthetic-package binding
+    # is reachable when ``autocoder_supervisor`` is not on
+    # ``sys.path`` (standalone launch).
+    spec = None
+    spec_origin = ""
+    for _cand in candidate_paths:
+        try:
+            spec = _importlib_util_bind.find_spec(_cand)
+        except (ImportError, ValueError):
+            spec = None
+        if (
+            spec is not None
+            and spec.origin
+            and spec.origin != "frozen"
+        ):
+            spec_origin = spec.origin
+            break
         spec = None
-    if spec is not None and spec.origin and spec.origin != "frozen":
-        path = spec.origin
+    if spec is not None and spec_origin and spec_origin != "frozen":
+        path = spec_origin
         # For namespace packages spec.origin may be a
         # namespace __init__.py location; that's still
         # canonical.
