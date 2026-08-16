@@ -72,32 +72,40 @@ def main(argv: list[str] | None = None) -> int:
     # canonical finalizer.
     generated = result.get("provenance_finalize", {}) or {}
     changed_files = result.get("changed_files") or []
-    # We trust the finalizer to expose the canonical
-    # regenerated list under ``changed_files`` (which mirrors
-    # ``git diff --name-only HEAD`` plus untracked). For
-    # narrow purposes: stage the canonical manifest and audit
-    # artifact specifically.
-    for relpath in generated.get("canonical_artifacts_staged", []) or []:
-        cp = repo_root / relpath
+    # The canonical finalizer (``provenance_finalize``)
+    # returns ``manifest_path`` and ``audit_path`` as the
+    # authoritative list of regenerated artifacts. These are
+    # the only files the worker MUST stage as part of a
+    # controlled-source-change commit; staging anything else
+    # would violate the round-39 no-op contract.
+    canonical_artifacts: list[str] = []
+    for key in ("manifest_path", "audit_path"):
+        relpath = generated.get(key)
+        if not relpath:
+            continue
+        # ``manifest_path`` / ``audit_path`` may be returned
+        # as absolute paths; normalize to a repo-relative
+        # form before staging.
+        rp = Path(str(relpath))
+        try:
+            rel = rp.resolve().relative_to(repo_root).as_posix()
+        except (OSError, ValueError):
+            # Fallback: strip the repo-root prefix as text.
+            rp_s = str(rp)
+            root_s = str(repo_root)
+            if rp_s.startswith(root_s + "/"):
+                rel = rp_s[len(root_s) + 1:]
+            else:
+                # Path is outside the repo; skip silently.
+                continue
+        cp = repo_root / rel
         if not cp.is_file():
             continue
         subprocess.run(
-            ["git", "-C", str(repo_root), "add", "--", relpath],
+            ["git", "-C", str(repo_root), "add", "--", rel],
             check=False, timeout=10,
         )
-
-    # Also stage any file marked as regenerated under the
-    # finalizer result's ``provenance_finalize.changed_files``
-    # if the canonical author chose to expose it. We do not
-    # guess.
-    for relpath in (generated.get("regenerated") or []):
-        cp = repo_root / relpath
-        if not cp.is_file():
-            continue
-        subprocess.run(
-            ["git", "-C", str(repo_root), "add", "--", relpath],
-            check=False, timeout=10,
-        )
+        canonical_artifacts.append(rel)
 
     # Report to stdout so the hook log shows what we did.
     print(
@@ -105,10 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             "ok": True,
             "attempt_label": args.attempt_label,
             "changed_files": sorted(set(changed_files)),
-            "staged_canonical": sorted(set(
-                list(generated.get("canonical_artifacts_staged", []) or [])
-                + list(generated.get("regenerated", []) or [])
-            )),
+            "staged_canonical": sorted(set(canonical_artifacts)),
         })
     )
     return 0
