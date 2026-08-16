@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "14401fdef8b149f47b0436aea07fd5cd14981d762cf78d667a99f3473b051863",
-      "destination_size_bytes": 622110,
+      "destination_sha256": "1b20249930a9fe793348f20850c5967c8709f6fa1e644d6c9688de85036db2fa",
+      "destination_size_bytes": 638341,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
@@ -375,8 +375,8 @@
     },
     {
       "destination_path": "autocoder_orchestration/cli.py",
-      "destination_sha256": "e05ef58f6af1db166902b7a6ea8e65742fb34266a5844396cf2c78e525d8039f",
-      "destination_size_bytes": 79060,
+      "destination_sha256": "1fabc21a2b6a91885ef50a66c7eb2c9689357e88d27d4540e71b6a4825dee011",
+      "destination_size_bytes": 80961,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",

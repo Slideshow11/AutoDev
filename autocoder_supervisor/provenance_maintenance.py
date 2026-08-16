@@ -1222,6 +1222,179 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# Final pre-canary worker-side integration helper.
+# Round-695: deterministic worker provenance finalization.
+# A worker that intends to commit + push must first call
+# ``run_provenance_finalize_if_needed`` immediately AFTER
+# finalize of all source edits and BEFORE ``git commit``.
+# The helper computes the diff between the worker's prelaunch
+# head and the CURRENT working tree, intersects against
+# MANIFEST_CONTROLLED_PATHS derived from the canonical
+# manifest, and runs the canonical ``provenance_finalize``
+# compositing pipeline if and only if at least one controlled
+# destination changed.
+#
+# This is the worker-side analog of the SUPERVISOR-side
+# ``_validate_provenance_consistency`` check. The supervisor
+# check is the authoritative gate; the worker-side helper is
+# the assisting integration that lets the worker produce a
+# push-ready commit deterministically. The two share the same
+# controlled-path set, the same manifest, and the same
+# sha256/size_bytes invariants, so a worker that runs the
+# helper satisfies the supervisor check, and a worker that
+# does not is rejected by the supervisor check.
+#
+# Per directive §6 ordering: the worker must run this helper
+# AFTER all source edits and BEFORE
+# ``git diff --cached | git commit`` so the regeneration
+# captures the final on-disk bytes. If the worker edits a
+# controlled destination AFTER running the helper, the
+# helper must be run again before the commit.
+#
+# Per directive §5 round-39 no-op semantics: if no controlled
+# destination changed, the helper is a no-op and returns
+# ``{"ran": False, "reason": "no controlled-file changes"}``.
+# The worker MUST NOT manufacture a provenance-only commit.
+#
+# The helper is intentionally cheap. It raises
+# ``ProvenanceFinalizeError`` on any failure. The worker
+# MUST treat that as a hard push block and emit
+# ``result_type=WORKER_RESULT_INVALID``.
+def run_provenance_finalize_if_needed(
+    *,
+    repo_root: Path,
+    prelaunch_head: str,
+    manifest_path: Path | None = None,
+    audit_path: Path | None = None,
+) -> dict:
+    """Worker-side deterministic provenance finalization.
+
+    Returns a structured dict:
+
+      - ``{"ran": False, "reason": "..."}`` when no
+        controlled-file change was detected (no-op).
+      - ``{"ran": True, "changed_files": [...],
+            "controlled_files": [...], "provenance_finalize":
+            <provenance_finalize output>}`` when the
+        canonical finalization ran.
+
+    The caller MUST call this AFTER every source edit and
+    BEFORE every push. The supervisor's
+    ``_validate_provenance_consistency`` is the
+    authoritative fail-closed gate; this helper is the
+    worker-side integration that lets the worker produce a
+    push-ready commit deterministically.
+    """
+    repo_root = Path(repo_root).resolve()
+    if not _HEX_SHA_RE.match(prelaunch_head or ""):
+        raise ProvenanceFinalizeError(
+            f"invalid prelaunch_head: {prelaunch_head!r}"
+        )
+    if manifest_path is None:
+        manifest_path = (
+            repo_root / "provenance" / "aed-pr417-source-manifest.json"
+        )
+    if audit_path is None:
+        audit_path = (
+            repo_root / "provenance" / "AUTOCODER_SOURCE_COMPLETENESS.json"
+        )
+    # Step 1: enumerate the canonical controlled-destination
+    # set from the manifest at the prelaunch head. The
+    # worker does NOT use the on-disk hash; it uses the
+    # SHAPE of the manifest so the path set matches what the
+    # supervisor will validate against.
+    if not manifest_path.is_file():
+        raise ProvenanceFinalizeError(
+            f"manifest not found: {manifest_path}"
+        )
+    try:
+        controlled_set = set(
+            enumerate_controlled_destinations_strict([manifest_path])
+        )
+    except ManifestEnumerationError as e:
+        raise ProvenanceFinalizeError(
+            f"manifest-controlled-path derivation failed: {e}"
+        ) from e
+    # Step 2: compute the diff between prelaunch_head and
+    # the CURRENT working tree. Use ``git diff --name-only``
+    # (uncommitted) AND ``git diff --name-only prelaunch_head
+    # HEAD --`` (committed) union. The helper is invoked
+    # BEFORE the commit so only the uncommitted side matters.
+    # The worker is expected to have staged-but-not-committed
+    # changes; both uncommitted and staged are merged.
+    try:
+        # Changed tracked files (staged + working tree) vs HEAD.
+        proc1 = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--name-only", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        # Untracked files (e.g. new files added).
+        proc2 = subprocess.run(
+            [
+                "git", "-C", str(repo_root), "ls-files",
+                "--others", "--exclude-standard",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        proc3 = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--name-only",
+             "--diff-filter=AM", prelaunch_head],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if proc1.returncode != 0 or proc2.returncode != 0 or proc3.returncode != 0:
+            raise ProvenanceFinalizeError(
+                "git diff/ls-files failed: "
+                f"diff_rc={proc1.returncode} "
+                f"untracked_rc={proc2.returncode} "
+                f"against_prelaunch_rc={proc3.returncode} "
+                f"stderr={proc1.stderr[:200]!r}"
+            )
+        changed_files = set()
+        for out in (proc1.stdout, proc2.stdout, proc3.stdout):
+            for line in out.splitlines():
+                line = line.strip()
+                if line:
+                    changed_files.add(line)
+    except subprocess.TimeoutExpired as e:
+        raise ProvenanceFinalizeError(
+            f"git diff/ls-files timed out: {e}"
+        ) from e
+    except OSError as e:
+        raise ProvenanceFinalizeError(
+            f"git diff/ls-files OSError: {e}"
+        ) from e
+    # Step 3: intersection with the controlled set.
+    controlled_changed = sorted(
+        path for path in changed_files
+        if path in controlled_set
+    )
+    if not controlled_changed:
+        return {
+            "ran": False,
+            "reason": "no controlled-file changes",
+            "changed_files": sorted(changed_files),
+            "controlled_files": [],
+        }
+    # Step 4: run the canonical provenance_finalize.
+    pf_out = provenance_finalize(
+        repo_root=repo_root,
+        manifest_path=manifest_path,
+        audit_path=audit_path,
+    )
+    return {
+        "ran": True,
+        "changed_files": sorted(changed_files),
+        "controlled_files": controlled_changed,
+        "provenance_finalize": pf_out,
+    }
+
+
 __all__ = [
     # Head-advance state model
     "HEAD_ADVANCE_UNRELATED",
@@ -1268,4 +1441,6 @@ __all__ = [
     "DRIFT_STATE_PROVENANCE_BLOCKED",
     "DRIFT_TERMINAL_STATES",
     "_drift_ledger_path",
+    "run_provenance_finalize_if_needed",
+    "ProvenanceFinalizeError",
 ]

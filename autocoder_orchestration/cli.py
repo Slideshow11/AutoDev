@@ -616,8 +616,14 @@ def cmd_migrate_required_ci_jobs(args: argparse.Namespace) -> int:
     }
     try:
         state_store.append_journal("required_ci_jobs_migrations.json", audit_entry)
-    except StateStoreError as exc:
+    except (StateStoreError, OSError) as exc:
         # Migration succeeded but audit-trail append failed.
+        # ``append_journal`` calls ``chmod`` / ``open`` / ``write``
+        # directly on the filesystem, so a real disk-exhaustion
+        # or permission failure propagates as ``OSError`` rather
+        # than as ``StateStoreError`` — both must surface the same
+        # non-zero exit code so callers that check exit status
+        # alone do not record the migration as fully audited.
         # The durable run_context.json change is the canonical
         # record (do not roll back), BUT the audit trail is the
         # stated control for this command, so the loss MUST be

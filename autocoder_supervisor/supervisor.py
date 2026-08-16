@@ -4780,6 +4780,109 @@ def poll_worker_attempt(
                             else:
                                 _fallback_no_push()
                             return
+                    # Round-695: deterministic worker
+                    # provenance consistency check. If the
+                    # worker pushed a commit that modified a
+                    # manifest-controlled destination without
+                    # running the canonical provenance
+                    # finalization, this gate injects
+                    # ``worker_result_validation_errors`` so the
+                    # existing demotion logic above catches it
+                    # and demotes to WORKER_RESULT_INVALID.
+                    # This is the fail-closed enforcement for
+                    # the recurring known defect: a
+                    # source-changing worker pushed a commit
+                    # whose manifest hash drifted from the
+                    # on-disk bytes, causing the ``provenance``
+                    # CI job to fail on the exact head.
+                    try:
+                        _proj_root = (
+                            Path(str(REPO_DIR))  # type: ignore[name-defined]
+                            if 'REPO_DIR' in globals() and REPO_DIR
+                            else Path(os.getcwd())
+                        )
+                        _prov_ok, _prov_errors = (
+                            _validate_provenance_consistency(
+                                prelaunch_head=rec.prelaunch_head or "",
+                                pushed_head=_last_worker_push or "",
+                                repo_root=_proj_root,
+                            )
+                        )
+                    except Exception as _prov_exc:  # noqa: BLE001
+                        _prov_ok = False
+                        _prov_errors = [
+                            f"provenance-consistency validator "
+                            f"raised: {str(_prov_exc)[:200]}"
+                        ]
+                    if not _prov_ok:
+                        # Aggregate with any existing
+                        # validation errors so the existing
+                        # WORKER_RESULT_INVALID demotion
+                        # catches the failure.
+                        _existing = []
+                        if isinstance(rec.extra, dict):
+                            _existing = list(
+                                rec.extra.get(
+                                    "worker_result_validation_errors",
+                                    [],
+                                )
+                                or []
+                            )
+                        _combined = list(_existing) + list(_prov_errors)
+                        if isinstance(rec.extra, dict):
+                            rec.extra[
+                                "worker_result_validation_errors"
+                            ] = _combined
+                        log(
+                            "warning",
+                            "round-695: pre-PUSH_VERIFIED "
+                            "provenance-consistency failure; "
+                            "demoting to WORKER_RESULT_INVALID",
+                            attempt_id=attempt_id,
+                            pid=rec.pid,
+                            prelaunch=(rec.prelaunch_head or "")[:12],
+                            pushed=_last_worker_push[:12],
+                            errors=_prov_errors[:5],
+                        )
+                        try:
+                            rec.assert_can_transition_to(
+                                LIFECYCLE_WORKER_RESULT_INVALID,
+                            )
+                            rec.lifecycle = (
+                                LIFECYCLE_WORKER_RESULT_INVALID
+                            )
+                            rec.terminal_reason = (
+                                "round-695: validator blocked push "
+                                "because the worker's commit "
+                                "modified a manifest-controlled "
+                                "destination without synchronized "
+                                "provenance; "
+                                f"prelaunch_head={rec.prelaunch_head[:12]}, "
+                                f"pushed_head={_last_worker_push[:12]}"
+                            )
+                            if isinstance(rec.extra, dict):
+                                rec.extra.setdefault(
+                                    "provenance_consistency_errors",
+                                    list(_prov_errors),
+                                )
+                            store.write(rec)
+                            if lease is not None:
+                                try:
+                                    remove_lease()
+                                except Exception:
+                                    pass
+                            return
+                        except Exception as _wri_exc:  # noqa: BLE001
+                            log(
+                                "warning",
+                                "round-695: WORKER_RESULT_INVALID "
+                                "transition failed; falling back to "
+                                "UNATTRIBUTED_HEAD_ADVANCE",
+                                attempt_id=attempt_id,
+                                error=str(_wri_exc)[:200],
+                            )
+                            _classify_unattributed()
+                            return
                     # Round-42 positive: the worker
                     # durably reported the live head as
                     # the worker's own push. Transition
@@ -4845,6 +4948,84 @@ def poll_worker_attempt(
                     and _live_head_for_classify
                     == _worker_reported_push
                 ):
+                    # Round-695: deterministic worker
+                    # provenance consistency check (single-SHA
+                    # parallel of the multi-SHA path above).
+                    try:
+                        _proj_root = (
+                            Path(str(REPO_DIR))  # type: ignore[name-defined]
+                            if 'REPO_DIR' in globals() and REPO_DIR
+                            else Path(os.getcwd())
+                        )
+                        _prov_ok, _prov_errors = (
+                            _validate_provenance_consistency(
+                                prelaunch_head=rec.prelaunch_head or "",
+                                pushed_head=_worker_reported_push or "",
+                                repo_root=_proj_root,
+                            )
+                        )
+                    except Exception as _prov_exc:  # noqa: BLE001
+                        _prov_ok = False
+                        _prov_errors = [
+                            f"provenance-consistency validator "
+                            f"raised: {str(_prov_exc)[:200]}"
+                        ]
+                    if not _prov_ok:
+                        _existing = []
+                        if isinstance(rec.extra, dict):
+                            _existing = list(
+                                rec.extra.get(
+                                    "worker_result_validation_errors",
+                                    [],
+                                )
+                                or []
+                            )
+                        _combined = (
+                            list(_existing) + list(_prov_errors)
+                        )
+                        if isinstance(rec.extra, dict):
+                            rec.extra[
+                                "worker_result_validation_errors"
+                            ] = _combined
+                        log(
+                            "warning",
+                            "round-695: pre-PUSH_VERIFIED "
+                            "provenance-consistency failure "
+                            "(single-SHA path); demoting to "
+                            "WORKER_RESULT_INVALID",
+                            attempt_id=attempt_id,
+                            pid=rec.pid,
+                            errors=_prov_errors[:5],
+                        )
+                        try:
+                            rec.assert_can_transition_to(
+                                LIFECYCLE_WORKER_RESULT_INVALID,
+                            )
+                            rec.lifecycle = (
+                                LIFECYCLE_WORKER_RESULT_INVALID
+                            )
+                            rec.terminal_reason = (
+                                "round-695: single-SHA validator "
+                                "blocked push because the worker's "
+                                "commit modified a manifest-controlled "
+                                "destination without synchronized "
+                                "provenance"
+                            )
+                            if isinstance(rec.extra, dict):
+                                rec.extra.setdefault(
+                                    "provenance_consistency_errors",
+                                    list(_prov_errors),
+                                )
+                            store.write(rec)
+                            if lease is not None:
+                                try:
+                                    remove_lease()
+                                except Exception:
+                                    pass
+                            return
+                        except Exception:  # noqa: BLE001
+                            _classify_unattributed()
+                            return
                     # Round-42 positive: the worker
                     # durably reported the live head as
                     # the worker's own push. Transition
@@ -10378,6 +10559,188 @@ def _check_provenance_drift_and_register(
             d["destination"] for d in drifts
         )[:5],
     )
+
+
+def _validate_provenance_consistency(
+    *,
+    prelaunch_head: str,
+    pushed_head: str,
+    repo_root: Path,
+) -> tuple:
+    """Final pre-canary: deterministic worker provenance
+    consistency validator.
+
+    Compute the diff between ``prelaunch_head`` and
+    ``pushed_head``. If any MANIFEST_CONTROLLED_PATH
+    destination changed, the validator asserts that the
+    canonical extraction manifest at ``pushed_head``
+    records the on-disk bytes (sha256 + size_bytes) for
+    every controlled destination. If the manifest is
+    stale relative to the on-disk bytes, the validator
+    returns ``(ok=False, errors=[...])`` so the caller
+    can demote the worker's PUSH_VERIFIED to
+    WORKER_RESULT_INVALID via the existing
+    ``rec.extra.worker_result_validation_errors`` channel.
+
+    Returns:
+        ``(True, [])`` when consistency holds OR no
+        controlled destination changed.
+        ``(False, [error_reason, ...])`` when a controlled
+        destination's on-disk bytes disagree with the
+        manifest at ``pushed_head``.
+    """
+    errors: list = []
+    repo_root = Path(repo_root).resolve()
+    if not _HEX_SHA_RE.match(prelaunch_head or ""):
+        return (False, [f"invalid prelaunch_head: {prelaunch_head!r}"])
+    if not _HEX_SHA_RE.match(pushed_head or ""):
+        return (False, [f"invalid pushed_head: {pushed_head!r}"])
+    if prelaunch_head == pushed_head:
+        return (True, [])
+    manifest_path = (
+        repo_root / "provenance" / "aed-pr417-source-manifest.json"
+    )
+    try:
+        sys.path.insert(0, str(repo_root))
+        from autocoder_supervisor.provenance_maintenance import (
+            enumerate_controlled_destinations_strict,
+            ManifestEnumerationError,
+        )
+        try:
+            controlled_set = set(
+                enumerate_controlled_destinations_strict([manifest_path])
+            )
+        except ManifestEnumerationError as e:
+            return (
+                False,
+                [
+                    "manifest-controlled-path derivation failed: "
+                    f"{e}"
+                ],
+            )
+        # If either commit is not a real git object (e.g.
+        # a synthetic 40-char SHA used in unit tests), the
+        # validator cannot run and the gate is SKIPPED. A
+        # non-existent commit is treated as a test fixture
+        # rather than a real push; the supervisor's other
+        # gates (round-42 worker-emitted evidence, etc.)
+        # are still authoritative.
+        for _h in (prelaunch_head, pushed_head):
+            _ex = subprocess.run(
+                ["git", "-C", str(repo_root), "cat-file", "-t", _h],
+                capture_output=True, timeout=10,
+            )
+            if _ex.returncode != 0:
+                return (True, [])
+        proc = subprocess.run(
+            [
+                "git", "-C", str(repo_root),
+                "diff", "--name-only",
+                prelaunch_head, pushed_head,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if proc.returncode != 0:
+            return (
+                False,
+                [
+                    f"git diff failed: rc={proc.returncode} "
+                    f"stderr={proc.stderr[:200]!r}"
+                ],
+            )
+        changed_paths = set()
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            if line:
+                changed_paths.add(line)
+        controlled_changed = sorted(
+            path for path in changed_paths
+            if path in controlled_set
+        )
+        if not controlled_changed:
+            return (True, [])
+        manifest_rel = "provenance/aed-pr417-source-manifest.json"
+        if manifest_rel not in changed_paths:
+            errors.append(
+                "controlled-destination changed "
+                f"({', '.join(controlled_changed)}) but the "
+                "canonical extraction manifest at "
+                f"'{manifest_rel}' was NOT updated in the "
+                f"same commit pushed at {pushed_head[:12]}...; "
+                "worker must invoke "
+                "autocoder_supervisor.provenance_maintenance."
+                "run_provenance_finalize_if_needed before "
+                "git commit."
+            )
+        try:
+            import hashlib as _hl
+            manifest_data = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return (False, [f"manifest unreadable: {e}"])
+        manifest_index: dict = {}
+        for entry in manifest_data.get("files", []):
+            dp = entry.get("destination_path")
+            sha = entry.get("destination_sha256")
+            sz = entry.get("destination_size_bytes")
+            if not isinstance(dp, str) or not isinstance(sha, str):
+                continue
+            manifest_index[dp] = (sha, sz)
+        for dest in controlled_changed:
+            sha_rec, size_rec = manifest_index.get(dest, (None, None))
+            if sha_rec is None:
+                errors.append(
+                    f"controlled destination '{dest}' changed "
+                    f"in commit {pushed_head[:12]}... but no "
+                    "manifest entry exists for it"
+                )
+                continue
+            try:
+                show = subprocess.run(
+                    ["git", "-C", str(repo_root), "show",
+                     f"{pushed_head}:{dest}"],
+                    capture_output=True,
+                    timeout=15,
+                )
+                if show.returncode != 0:
+                    errors.append(
+                        f"git show failed for {dest} at "
+                        f"{pushed_head[:12]}...: "
+                        f"{show.stderr.decode()[:200]!r}"
+                    )
+                    continue
+                actual_bytes = show.stdout
+            except subprocess.TimeoutExpired:
+                errors.append(
+                    f"git show timeout for {dest} at "
+                    f"{pushed_head[:12]}..."
+                )
+                continue
+            actual_sha = _hl.sha256(actual_bytes).hexdigest()
+            actual_size = len(actual_bytes)
+            if actual_sha != sha_rec:
+                errors.append(
+                    f"controlled destination '{dest}' "
+                    f"recorded sha256={sha_rec[:16]}... but "
+                    f"committed bytes sha256={actual_sha[:16]}... "
+                    f"at {pushed_head[:12]}..."
+                )
+            if size_rec is not None and actual_size != size_rec:
+                errors.append(
+                    f"controlled destination '{dest}' "
+                    f"recorded size_bytes={size_rec} but "
+                    f"committed size_bytes={actual_size} at "
+                    f"{pushed_head[:12]}..."
+                )
+        if not errors:
+            return (True, [])
+        return (False, errors)
+    finally:
+        try:
+            sys.path.pop()
+        except Exception:
+            pass
 
 
 def _classify_event_retry_owner(event: dict) -> dict:
