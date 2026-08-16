@@ -103,10 +103,16 @@ LIFECYCLE_WORKER_RESULT_MISSING = (
 
 # Terminal failure lifecycle values — the attempt is finished
 # but the work item is RETRY_PENDING.
+# Round-50.1 Section 6: ``WORKER_RESULT_MISSING`` is a worker
+# failure (the worker DID push a commit but failed to write
+# the canonical WorkerResultArtifact). The attempt is
+# RETRY_PENDING so a future retry can claim the same
+# generation.
 TERMINAL_FAILURE_LIFECYCLES = frozenset({
     LIFECYCLE_WORKER_EXITED_NO_PUSH,
     LIFECYCLE_WORKER_STARTUP_FAILED,
     LIFECYCLE_WORKER_EXECUTION_FAILED,
+    LIFECYCLE_WORKER_RESULT_MISSING,
 })
 
 # All lifecycle values that mark the attempt as finished
@@ -122,6 +128,11 @@ TERMINAL_FAILURE_LIFECYCLES = frozenset({
 # / result-contract validation. The artifact is preserved
 # for forensic chain-of-custody; the finding remains
 # RETRY_PENDING.
+# Round-50.1 Section 6: ``WORKER_RESULT_MISSING`` is also
+# a terminal state — the worker pushed but didn't write
+# the canonical artifact, so the head movement is
+# UNATTRIBUTED_HEAD_ADVANCE for this generation and the
+# worker's finding remains RETRY_PENDING.
 TERMINAL_LIFECYCLES = frozenset({
     LIFECYCLE_TERMINAL_REPAIRED,
     LIFECYCLE_NO_CHANGES_REQUIRED,
@@ -130,6 +141,7 @@ TERMINAL_LIFECYCLES = frozenset({
     LIFECYCLE_WORKER_RESULT_INVALID,
     LIFECYCLE_WORKER_STARTUP_FAILED,
     LIFECYCLE_WORKER_EXECUTION_FAILED,
+    LIFECYCLE_WORKER_RESULT_MISSING,
 })
 
 
@@ -184,6 +196,15 @@ _ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
         # remains RETRY_PENDING so a future retry can produce
         # a valid artifact.
         LIFECYCLE_WORKER_RESULT_INVALID,
+        # Round-50.1 Section 6: the worker DID push a commit
+        # (the remote head advanced past prelaunch_head) but
+        # did NOT write the canonical WorkerResultArtifact.
+        # The head movement is UNATTRIBUTED_HEAD_ADVANCE for
+        # this generation (the worker pushed, but we cannot
+        # rebind the head to the worker because no artifact
+        # was produced). The finding remains RETRY_PENDING so
+        # a future retry can claim the same generation.
+        LIFECYCLE_WORKER_RESULT_MISSING,
     }),
     LIFECYCLE_COMMIT_PRODUCED: frozenset({
         LIFECYCLE_PUSH_VERIFIED,
