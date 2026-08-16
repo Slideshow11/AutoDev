@@ -153,6 +153,85 @@ def test_migrate_required_ci_jobs_returns_audit_trail(tmp_path: Path):
     assert entry["by"] == "test"
 
 
+def test_migrate_required_ci_jobs_signals_audit_append_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round-689/P2: when the audit-trail append fails after
+    the CAS commit succeeds, the migration MUST surface a
+    non-zero exit code and an explicit ``error`` key — the
+    audit trail is the stated control for this command, so
+    callers that only check exit status must not record the
+    migration as fully audited.
+
+    The durable ``run_context.json`` change is intentionally
+    preserved (no rollback) because it is the canonical
+    record; the visible signal is what changes.
+    """
+    from autocoder_orchestration.store import (
+        StateStore, StateStoreError,
+    )
+    from autocoder_orchestration.context import make_run_context
+
+    state_root = tmp_path / "state"
+    store = StateStore(str(state_root))
+    ctx = make_run_context(
+        run_id="test-run-aaf",
+        repo_owner="test",
+        repo_name="test-repo",
+        local_checkout=str(PRODUCTION_ROOT),
+        base_branch="main",
+        authorized_base_sha="a" * 40,
+        feature_branch="test-feat",
+        task_specification_path="/tmp/empty.txt",
+        task_specification_sha256="b" * 64,
+        required_ci_jobs=["test", "lint"],
+        evidence_root=str(tmp_path / "evidence"),
+        implementation_worker_command=[],
+        state_root=str(state_root),
+        pr_number=5,
+    )
+    store.write_atomic("run_context.json", ctx.to_dict())
+
+    # Monkey-patch StateStore.append_journal on the class to
+    # simulate audit-trail append failure AFTER a successful
+    # CAS commit. We leave compare_and_swap intact so the
+    # run_context revision bump still happens (canonical
+    # record) — only the journal append fails.
+    def _raise_audit(
+        self: StateStore, key: str, entry: object,
+    ) -> None:
+        raise StateStoreError(
+            "simulated audit-trail append failure"
+        )
+
+    monkeypatch.setattr(StateStore, "append_journal", _raise_audit)
+
+    sys.path.insert(0, str(PRODUCTION_ROOT))
+    from autocoder_orchestration import cli as orch_cli
+
+    parser_args = [
+        "--json",
+        "migrate-required-ci-jobs",
+        "--state-root", str(state_root),
+        "--run-id", "test-run-aaf",
+        "--expected-old", "test,lint",
+        "--new-required-ci-jobs", ",".join(SEVEN_NAME_POLICY),
+        "--by", "test",
+        "--reason", "round-689 audit-failure signal",
+    ]
+    rc = orch_cli.main(parser_args)
+    assert rc != 0, (
+        "audit-trail append failure must signal a non-zero "
+        f"exit code; got rc={rc}"
+    )
+    # The run_context.json revision bump must still have
+    # happened (canonical record, no rollback).
+    new_ctx = json.loads(
+        (state_root / "run_context.json").read_text()
+    )
+    assert tuple(new_ctx["required_ci_jobs"]) == SEVEN_NAME_POLICY
+
+
 def test_migrate_required_ci_jobs_fails_closed_on_wrong_expected_old(
     tmp_path: Path,
 ):

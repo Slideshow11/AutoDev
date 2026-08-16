@@ -617,17 +617,27 @@ def cmd_migrate_required_ci_jobs(args: argparse.Namespace) -> int:
     try:
         state_store.append_journal("required_ci_jobs_migrations.json", audit_entry)
     except StateStoreError as exc:
-        # Migration succeeded but audit-trail append failed;
-        # surface the error but DO NOT roll back (the durable
-        # run_context.json change is the canonical record).
+        # Migration succeeded but audit-trail append failed.
+        # The durable run_context.json change is the canonical
+        # record (do not roll back), BUT the audit trail is the
+        # stated control for this command, so the loss MUST be
+        # visible: signal a non-zero exit code and an explicit
+        # ``error`` key so callers that check exit status alone
+        # do not record the migration as fully audited.
         return _emit(
             {
-                "warning": f"migration committed (rev {new_rev.revision}) "
-                           f"but audit-trail append failed: {exc}",
+                "error": (
+                    f"migration committed (rev {new_rev.revision}) "
+                    f"but audit-trail append failed: {exc}"
+                ),
+                "warning": (
+                    f"migration committed (rev {new_rev.revision}) "
+                    f"but audit-trail append failed: {exc}"
+                ),
                 "migration": audit_entry,
             },
             json_mode=args.json,
-            exit_code=EXIT_OK,
+            exit_code=EXIT_STATE,
         )
     return _emit(
         {
