@@ -2260,6 +2260,25 @@ def _read_real_deferred_retry_evidence(
                 if found_idx == -1:
                     chain_ok = False
                     break
+                # Round-761 P1: reject intervening invalid stages
+                # between consecutive expected stages. The
+                # previous implementation only checked an
+                # ordered subsequence and silently skipped any
+                # stages that did not match the current
+                # expected stage, so a non-monotonic ledger
+                # like
+                # [DEFERRED, TERMINAL, ELIGIBLE, RETRY_ATTEMPT,
+                #  OWNED, TERMINAL, CONSUMED] advanced past
+                # the leading TERMINAL and satisfied the
+                # empirical freeze. Strict monotonicity
+                # requires the next expected stage to be the
+                # IMMEDIATE next entry in the lifecycles list;
+                # any foreign stage between two expected
+                # transitions indicates a non-monotonic
+                # ledger and MUST fail closed.
+                if found_idx != last_idx + 1:
+                    chain_ok = False
+                    break
                 last_idx = found_idx
             if chain_ok:
                 full_match = True
@@ -2279,6 +2298,14 @@ def _read_real_deferred_retry_evidence(
                         found_idx = i
                         break
                 if found_idx == -1:
+                    super_ok = False
+                    break
+                # Round-761 P1: same strict-monotonicity guard
+                # as the full chain above. Foreign stages
+                # between DEFERRED, ELIGIBLE, and SUPERSEDED
+                # indicate a non-monotonic supersession
+                # ledger.
+                if found_idx != last_idx + 1:
                     super_ok = False
                     break
                 last_idx = found_idx

@@ -1008,6 +1008,47 @@ class TestDeferredRetryOrderedTransitions:
         assert out["value"] is False
         assert out["real_deferred_retry_event_ids"] == []
 
+    def test_interleaved_with_two_terminals_does_not_prove_retry(
+        self, tmp_path
+    ):
+        # Round-761 P1: a non-monotonic ledger that includes
+        # a foreign TERMINAL between DEFERRED and ELIGIBLE,
+        # followed by the full chain, MUST fail closed.
+        # The previous subsequence matcher accepted this
+        # shape because it silently skipped the leading
+        # TERMINAL and continued looking for ELIGIBLE past
+        # it. After the strict-monotonicity guard, the
+        # leading TERMINAL invalidates the chain.
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_real_deferred_retry_evidence,
+        )
+        lifecycles = [
+            "DEFERRED",
+            "TERMINAL",
+            "ELIGIBLE",
+            "RETRY_ATTEMPT",
+            "OWNED",
+            "TERMINAL",
+            "CONSUMED",
+        ]
+        entries = []
+        for i, lc in enumerate(lifecycles):
+            entries.append({
+                "event_id": "ev-761",
+                "consumer": "test",
+                "lifecycle": lc,
+                "recorded_at": f"2026-08-15T00:0{i}:00Z",
+            })
+        (tmp_path / "consumed_event_terminality.json").write_text(
+            json.dumps({"entries": entries})
+        )
+        out = _read_real_deferred_retry_evidence(
+            state_dir=str(tmp_path)
+        )
+        assert out["value"] is False
+        assert out["real_deferred_retry_event_ids"] == []
+        assert out["real_deferred_retry_transitions"] == []
+
 
 # ---------------------------------------------------------------------
 # §6 Deferred current-head comparison
