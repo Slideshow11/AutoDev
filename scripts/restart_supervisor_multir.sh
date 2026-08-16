@@ -60,16 +60,28 @@ if [ -n "$PIDS" ]; then
     done
 fi
 
-# 2. Wait for the lock file to be released (max 30 s), regardless of whether
-#    a PID was found. A stale lock with no live owner must also be cleared
-#    before we attempt to start a new supervisor.
+# 2. Wait for the lock to be RELEASED (max 30 s), regardless of whether a
+#    PID was found. We must probe lock OWNERSHIP, not file existence: the
+#    supervisor's acquire_lock() opens the file with O_CREAT and holds it
+#    via fcntl.flock; on TERM the process dies and the OS releases the
+#    flock, but the file itself is left on disk. A `[ -f "$LOCK" ]` poll
+#    would therefore always wait the full 30 s and refuse to start the
+#    replacement. `flock -n` succeeds only when no process currently holds
+#    the lock, which is the correct readiness signal.
 WAITED=0
-while [ -f "$LOCK" ] && [ "$WAITED" -lt 30 ]; do
+while [ "$WAITED" -lt 30 ]; do
+    if [ -f "$LOCK" ] && flock -n "$LOCK" true 2>/dev/null; then
+        break
+    fi
+    if [ ! -f "$LOCK" ]; then
+        # File is gone entirely — nothing to probe, lock is free.
+        break
+    fi
     sleep 1
     WAITED=$((WAITED + 1))
 done
-if [ -f "$LOCK" ]; then
-    echo "ERROR: lock $LOCK still present after 30 s; refusing to start a second supervisor" >&2
+if [ -f "$LOCK" ] && ! flock -n "$LOCK" true 2>/dev/null; then
+    echo "ERROR: lock $LOCK still held after 30 s; refusing to start a second supervisor" >&2
     exit 1
 fi
 
