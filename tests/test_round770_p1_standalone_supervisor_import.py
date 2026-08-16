@@ -39,6 +39,7 @@ failure pattern the round-768 commit was attempting to repair).
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import sys
 import types
@@ -205,18 +206,18 @@ def _reload_under_standalone_shim() -> types.ModuleType:
     pkg = types.ModuleType(pkg_name)
     pkg.__path__ = [str(AUTOCODER_SUPERVISOR_DIR)]  # type: ignore[attr-defined]
     sys.modules[pkg_name] = pkg
-    # Load a fresh module under the synthetic package by reading
-    # the file source and exec'ing it. This avoids polluting the
-    # canonical ``autocoder_supervisor.orchestration_state_root``
-    # binding for other tests.
+    # Load a fresh module under the synthetic package via the
+    # standard importlib loader rather than raw exec().
     src_path = AUTOCODER_SUPERVISOR_DIR / "orchestration_state_root.py"
-    src = src_path.read_text()
-    compiled = compile(src, str(src_path), "exec")
-    mod = types.ModuleType(pkg_name + ".orchestration_state_root")
+    spec = importlib.util.spec_from_file_location(
+        pkg_name + ".orchestration_state_root", str(src_path)
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
     mod.__file__ = str(src_path)
     mod.__package__ = pkg_name  # type: ignore[misc]
     sys.modules[pkg_name + ".orchestration_state_root"] = mod
-    exec(compiled, mod.__dict__)
+    spec.loader.exec_module(mod)
     return mod
 
 
