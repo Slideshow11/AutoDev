@@ -1308,10 +1308,21 @@ def _collect_coderabbit_exact_head_surfaces(
     # MUST be False so the writer refuses to persist a
     # clean assessment.
     pagination_failed = bool(snap.get("review_threads_pagination_failed"))
-    out["review_threads_pagination_complete"] = (
+    # Round-755/P1: ``review_threads_pagination_complete`` MUST
+    # also gate ``review_threads_collected``. The previous
+    # code only checked ``pagination_failed``, which let a
+    # 6-page pagination exhaustion (``hasNextPage=True`` on
+    # the sixth page so neither branch fires) report a
+    # complete inventory even though the snapshot still
+    # carries threads beyond page 6. When the explicit
+    # ``review_threads_pagination_complete`` flag is False,
+    # the inventory is incomplete regardless of whether an
+    # error was raised.
+    pagination_complete = (
         not pagination_failed
         and bool(snap.get("review_threads_pagination_complete", True))
     )
+    out["review_threads_pagination_complete"] = pagination_complete
     for tid, state in threads.items():
         if not isinstance(state, dict):
             continue
@@ -1323,8 +1334,17 @@ def _collect_coderabbit_exact_head_surfaces(
             unowned.append(str(tid))
     out["actionable_finding_ids"] = actionable
     out["unowned_actionable_finding_ids"] = unowned
+    # Round-755/P1: require BOTH ``not pagination_failed``
+    # AND ``pagination_complete``. Otherwise a 6-page
+    # hasNextPage=True exhaustion path (where the loop hits
+    # ``for _ in range(6)`` exit with both flags at their
+    # initialized False values) would mark the inventory
+    # complete despite the snapshot still carrying the
+    # unresolved remainder.
     out["review_threads_collected"] = (
-        isinstance(threads, dict) and not pagination_failed
+        isinstance(threads, dict)
+        and not pagination_failed
+        and pagination_complete
     )
     # 5. Completion proof: classify the latest status comment.
     completion_proof = {}
