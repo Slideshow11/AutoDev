@@ -170,6 +170,25 @@ def main() -> int:
         help="Environment overrides, e.g. KEY=VALUE. May be passed multiple times.",
     )
     parser.add_argument(
+        "--worker-hooks-path",
+        default="",
+        help=(
+            "Round-697: absolute path to the source-controlled "
+            "AED worker-only Git hook directory "
+            "(autocoder_worker_hooks/). When provided, the "
+            "wrapper injects (1) AED_AUTODEV_WORKER=1, "
+            "AED_WORKER_PRELAUNCH_HEAD=<--prelaunch-head>, "
+            "AED_WORKER_ATTEMPT_ID=<--attempt-id>, "
+            "AED_WORKER_HOOKS_PATH=<this-path> into the child "
+            "environment; (2) a worker-only core.hooksPath "
+            "via GIT_CONFIG_COUNT/_KEY_n/_VALUE_n that "
+            "preserves any inherited Git config entries. "
+            "If empty, the wrapper does not install the "
+            "push gate and falls back to the historical "
+            "behaviour."
+        ),
+    )
+    parser.add_argument(
         "child_argv",
         nargs=argparse.REMAINDER,
         help="The original worker command (after --).",
@@ -194,6 +213,102 @@ def main() -> int:
         if "=" in kv:
             k, v = kv.split("=", 1)
             child_env[k] = v
+
+    # Round-697: worker-only push boundary.
+    #
+    # When the supervisor passes --worker-hooks-path, this
+    # wrapper does TWO things for the worker child environment
+    # and ONLY for the worker child environment:
+    #
+    #   1. Inject the round-697 worker-env contract so the
+    #      pre-commit / pre-push hooks can identify themselves
+    #      as AED worker sessions and read the prelaunch head.
+    #   2. Inject a worker-only core.hooksPath via the safe
+    #      per-process Git mechanism (GIT_CONFIG_COUNT /
+    #      GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n). This DOES
+    #      NOT mutate the operator's ~/.gitconfig or any
+    #      persistent repository-local hooksPath setting;
+    #      those only affect interactive git invocations.
+    #      The operator's interactive git installation is
+    #      untouched.
+    if args.worker_hooks_path:
+        # Defence in depth: refuse to launch a worker whose
+        # prelaunch-head arg is missing or malformed.
+        import re as _re
+        if not _re.fullmatch(r"[0-9a-f]{40}", args.prelaunch_head or ""):
+            print(
+                "aed_worker_wrapper: refusing to install "
+                "worker hooks without a valid --prelaunch-head "
+                f"(got {args.prelaunch_head!r})",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        # Note: --attempt-id is already required elsewhere in
+        # the wrapper; we trust it for log correlation only.
+        child_env["AED_AUTODEV_WORKER"] = "1"
+        child_env["AED_WORKER_PRELAUNCH_HEAD"] = args.prelaunch_head
+        child_env["AED_WORKER_ATTEMPT_ID"] = args.attempt_id or ""
+        child_env["AED_WORKER_HOOKS_PATH"] = args.worker_hooks_path
+
+        # Build the GIT_CONFIG_COUNT/_KEY_n/_VALUE_n triplet.
+        # Preserve any inherited Git config env entries so the
+        # operator's standard config (signing, identity, etc.)
+        # still applies during the worker session, just with
+        # the worker-only hooksPath shadowing core.hooksPath
+        # for child git processes.
+        #
+        # NOTE: Git's per-process config env is ZERO-INDEXED;
+        # see the git-config(1) man page:
+        #   "If GIT_CONFIG_COUNT is set to a positive number, all
+        #    environment pairs GIT_CONFIG_KEY_<n> and
+        #    GIT_CONFIG_VALUE_<n> up to that number will be added
+        #    to the process's runtime configuration. The config
+        #    pairs are zero-indexed."
+        # We key N=0..N-1, not 1..N. Writing KEY_<N> instead
+        # of KEY_<N-1> would cause "missing config key" fatal
+        # errors at every child git invocation.
+        existing = []
+        try:
+            existing_count = int(child_env.get("GIT_CONFIG_COUNT", "0") or "0")
+        except (TypeError, ValueError):
+            # Malformed inherited Git config: refuse to launch.
+            print(
+                "aed_worker_wrapper: inherited GIT_CONFIG_COUNT "
+                f"is malformed ({child_env.get('GIT_CONFIG_COUNT')!r}); "
+                "refusing to launch worker to avoid dropping the "
+                "push gate silently",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 1
+        for i in range(0, existing_count):
+            k = child_env.get(f"GIT_CONFIG_KEY_{i}")
+            if k is None:
+                continue
+            v = child_env.get(f"GIT_CONFIG_VALUE_{i}", "")
+            existing.append((k, v))
+        # Append the worker hooksPath. The new index is
+        # existing_count (zero-indexed).
+        new_entry = (
+            "core.hooksPath", args.worker_hooks_path,
+        )
+        new_count = existing_count + 1
+        # Wipe inherited keys then rewrite in deterministic
+        # order — keys are 0..N-1.
+        for k in ("GIT_CONFIG_COUNT",):
+            child_env.pop(k, None)
+        for i in range(0, max(existing_count, new_count)):
+            child_env.pop(f"GIT_CONFIG_KEY_{i}", None)
+            child_env.pop(f"GIT_CONFIG_VALUE_{i}", None)
+        # Re-emit in order, then append new entry at index
+        # existing_count.
+        child_env["GIT_CONFIG_COUNT"] = str(new_count)
+        for i, (k, v) in enumerate(existing):
+            child_env[f"GIT_CONFIG_KEY_{i}"] = k
+            child_env[f"GIT_CONFIG_VALUE_{i}"] = v
+        child_env[f"GIT_CONFIG_KEY_{existing_count}"] = new_entry[0]
+        child_env[f"GIT_CONFIG_VALUE_{existing_count}"] = new_entry[1]
 
     # Open stdout log for tee
     stdout_log_path = Path(args.stdout_log_path)

@@ -7971,6 +7971,17 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
                 f"{REPO_OWNER}/{REPO_NAME}"  # type: ignore[name-defined]
             ),
             "cwd": str(REPO_DIR),  # type: ignore[name-defined]
+            # Round-697: install the worker-only push boundary
+            # into the worker's child environment by passing
+            # the absolute path to the source-controlled
+            # worker hooks directory. The wrapper converts
+            # this kwarg to the --worker-hooks-path argv flag
+            # and uses it to inject AED_AUTODEV_WORKER=1,
+            # AED_WORKER_PRELAUNCH_HEAD=<sha>, and the
+            # worker-only core.hooksPath via GIT_CONFIG_*.
+            "worker_hooks_path": str(
+                Path(str(REPO_DIR)) / "autocoder_worker_hooks"  # type: ignore[name-defined]
+            ),
         }
         # The wrapper also writes a copy under the orch dir
         # when the orch path is resolvable.
@@ -10643,180 +10654,28 @@ def _validate_provenance_consistency(
     pushed_head: str,
     repo_root: Path,
 ) -> tuple:
-    """Final pre-canary: deterministic worker provenance
-    consistency validator.
+    """Final pre-canary / round-697: deterministic worker
+    provenance consistency validator.
 
-    Compute the diff between ``prelaunch_head`` and
-    ``pushed_head``. If any MANIFEST_CONTROLLED_PATH
-    destination changed, the validator asserts that the
-    canonical extraction manifest at ``pushed_head``
-    records the on-disk bytes (sha256 + size_bytes) for
-    every controlled destination. If the manifest is
-    stale relative to the on-disk bytes, the validator
-    returns ``(ok=False, errors=[...])`` so the caller
-    can demote the worker's PUSH_VERIFIED to
-    WORKER_RESULT_INVALID via the existing
-    ``rec.extra.worker_result_validation_errors`` channel.
+    Round-697 delegation: this function is now a thin
+    re-export shim over the single canonical implementation
+    in :mod:`autocoder_supervisor.push_gate`. The supervisor
+    (post-push defense in depth) and the worker pre-push
+    hook call the *same* function so the supervisor-side
+    validation cannot diverge from the worker-side push gate.
 
-    Returns:
-        ``(True, [])`` when consistency holds OR no
-        controlled destination changed.
-        ``(False, [error_reason, ...])`` when a controlled
-        destination's on-disk bytes disagree with the
-        manifest at ``pushed_head``.
+    Behavioural contract is preserved — returns
+    ``(ok: bool, errors: list[str])`` — and the canonical
+    implementation reads *committed Git object bytes only*
+    so it is safe to call against either pre-push or
+    post-push SHAs.
     """
-    errors: list = []
-    repo_root = Path(repo_root).resolve()
-    if not _HEX_SHA_RE.match(prelaunch_head or ""):
-        return (False, [f"invalid prelaunch_head: {prelaunch_head!r}"])
-    if not _HEX_SHA_RE.match(pushed_head or ""):
-        return (False, [f"invalid pushed_head: {pushed_head!r}"])
-    if prelaunch_head == pushed_head:
-        return (True, [])
-    manifest_path = (
-        repo_root / "provenance" / "aed-pr417-source-manifest.json"
+    from autocoder_supervisor import push_gate as _pg
+    return _pg.validate_provenance_consistency_at_sha(
+        prelaunch_head=prelaunch_head,
+        outgoing_head=pushed_head,
+        repo_root=repo_root,
     )
-    try:
-        sys.path.insert(0, str(repo_root))
-        from autocoder_supervisor.provenance_maintenance import (
-            enumerate_controlled_destinations_strict,
-            ManifestEnumerationError,
-        )
-        try:
-            controlled_set = set(
-                enumerate_controlled_destinations_strict([manifest_path])
-            )
-        except ManifestEnumerationError as e:
-            return (
-                False,
-                [
-                    "manifest-controlled-path derivation failed: "
-                    f"{e}"
-                ],
-            )
-        # If either commit is not a real git object (e.g.
-        # a synthetic 40-char SHA used in unit tests), the
-        # validator cannot run and the gate is SKIPPED. A
-        # non-existent commit is treated as a test fixture
-        # rather than a real push; the supervisor's other
-        # gates (round-42 worker-emitted evidence, etc.)
-        # are still authoritative.
-        for _h in (prelaunch_head, pushed_head):
-            _ex = subprocess.run(
-                ["git", "-C", str(repo_root), "cat-file", "-t", _h],
-                capture_output=True, timeout=10,
-            )
-            if _ex.returncode != 0:
-                return (True, [])
-        proc = subprocess.run(
-            [
-                "git", "-C", str(repo_root),
-                "diff", "--name-only",
-                prelaunch_head, pushed_head,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        if proc.returncode != 0:
-            return (
-                False,
-                [
-                    f"git diff failed: rc={proc.returncode} "
-                    f"stderr={proc.stderr[:200]!r}"
-                ],
-            )
-        changed_paths = set()
-        for line in proc.stdout.splitlines():
-            line = line.strip()
-            if line:
-                changed_paths.add(line)
-        controlled_changed = sorted(
-            path for path in changed_paths
-            if path in controlled_set
-        )
-        if not controlled_changed:
-            return (True, [])
-        manifest_rel = "provenance/aed-pr417-source-manifest.json"
-        if manifest_rel not in changed_paths:
-            errors.append(
-                "controlled-destination changed "
-                f"({', '.join(controlled_changed)}) but the "
-                "canonical extraction manifest at "
-                f"'{manifest_rel}' was NOT updated in the "
-                f"same commit pushed at {pushed_head[:12]}...; "
-                "worker must invoke "
-                "autocoder_supervisor.provenance_maintenance."
-                "run_provenance_finalize_if_needed before "
-                "git commit."
-            )
-        try:
-            import hashlib as _hl
-            manifest_data = json.loads(manifest_path.read_text())
-        except (OSError, json.JSONDecodeError) as e:
-            return (False, [f"manifest unreadable: {e}"])
-        manifest_index: dict = {}
-        for entry in manifest_data.get("files", []):
-            dp = entry.get("destination_path")
-            sha = entry.get("destination_sha256")
-            sz = entry.get("destination_size_bytes")
-            if not isinstance(dp, str) or not isinstance(sha, str):
-                continue
-            manifest_index[dp] = (sha, sz)
-        for dest in controlled_changed:
-            sha_rec, size_rec = manifest_index.get(dest, (None, None))
-            if sha_rec is None:
-                errors.append(
-                    f"controlled destination '{dest}' changed "
-                    f"in commit {pushed_head[:12]}... but no "
-                    "manifest entry exists for it"
-                )
-                continue
-            try:
-                show = subprocess.run(
-                    ["git", "-C", str(repo_root), "show",
-                     f"{pushed_head}:{dest}"],
-                    capture_output=True,
-                    timeout=15,
-                )
-                if show.returncode != 0:
-                    errors.append(
-                        f"git show failed for {dest} at "
-                        f"{pushed_head[:12]}...: "
-                        f"{show.stderr.decode()[:200]!r}"
-                    )
-                    continue
-                actual_bytes = show.stdout
-            except subprocess.TimeoutExpired:
-                errors.append(
-                    f"git show timeout for {dest} at "
-                    f"{pushed_head[:12]}..."
-                )
-                continue
-            actual_sha = _hl.sha256(actual_bytes).hexdigest()
-            actual_size = len(actual_bytes)
-            if actual_sha != sha_rec:
-                errors.append(
-                    f"controlled destination '{dest}' "
-                    f"recorded sha256={sha_rec[:16]}... but "
-                    f"committed bytes sha256={actual_sha[:16]}... "
-                    f"at {pushed_head[:12]}..."
-                )
-            if size_rec is not None and actual_size != size_rec:
-                errors.append(
-                    f"controlled destination '{dest}' "
-                    f"recorded size_bytes={size_rec} but "
-                    f"committed size_bytes={actual_size} at "
-                    f"{pushed_head[:12]}..."
-                )
-        if not errors:
-            return (True, [])
-        return (False, errors)
-    finally:
-        try:
-            sys.path.pop()
-        except Exception:
-            pass
 
 
 def _classify_event_retry_owner(event: dict) -> dict:
