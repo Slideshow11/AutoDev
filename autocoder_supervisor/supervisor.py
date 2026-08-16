@@ -13852,6 +13852,166 @@ def handle_new_events(
         )
 
 
+def _dispatch_events_per_pr(
+    events: list,
+    *,
+    token: str,
+    canonical_pr: int,
+    canonical_iteration: dict,
+    canonical_rs: dict,
+    per_pr_iterations: list,
+) -> None:
+    """Round-780 P1: dispatch ``events`` per-PR under each
+    PR's own globals.
+
+    ``AED_PR_NUMBERS`` may include secondary PRs with new
+    actionable events. The post-loop single
+    ``handle_new_events(rs, new_events, token, iteration)`` call
+    runs after ``PR_NUMBER``, ``AUTHORITATIVE_HEAD``, ``rs``,
+    and ``iteration`` have been restored to the canonical PR,
+    so secondary PR events would dispatch under the canonical
+    PR's globals. ``_invoke_relay_for_events`` reads the
+    singleton ``AUTHORITATIVE_HEAD`` and ``PR_NUMBER`` to
+    build the snapshot and the orchestration state root, and
+    ``revoke_readiness`` /
+    ``_reopen_qualifying_head_if_needed`` /
+    ``_persist_round_budget_retry`` all fall back to
+    ``iteration.get("head_sha")`` -- every one of those keys
+    was mis-attributed to the canonical PR for secondary
+    events. Round-779 already tagged secondary events with
+    their PR's ``head_sha`` and ``pr_number``; this helper
+    partitions the events and dispatches each partition
+    under that PR's globals so the relay invocation,
+    readiness gate, lease, and worker launch all address
+    the correct PR.
+
+    The canonical PR's partition is dispatched first; the
+    secondary PR partitions follow in the same order they
+    appear in ``per_pr_iterations``. Cooldown-deferred
+    bookkeeping (the caller invokes
+    ``_mark_cooldown_deferred`` for the full batch) is
+    intentionally NOT touched here: the deferred ledger is
+    global and does not carry PR context. The
+    ``handle_new_events`` invocation is the PR-scoped path.
+
+    Events that carry no ``pr_number`` attribute default to
+    the canonical PR -- they are pre-round-779 events that
+    were persisted to ``unconsumed_events.json`` before
+    secondary events were tagged, or synthetic events
+    (durable-thread drain, provenance drift, round-budget
+    retry) that always address the canonical PR.
+    """
+    if not events:
+        return
+    # Partition by ``pr_number``. Default to canonical_pr when
+    # the attribute is absent. Stable ordering is preserved by
+    # iterating ``events`` in order and appending in arrival
+    # order.
+    partitions: "dict[int, list]" = {}
+    order: list = []
+    for _ev in events or []:
+        if not isinstance(_ev, dict):
+            continue
+        _pn_raw = _ev.get("pr_number")
+        if _pn_raw is None or _pn_raw == 0:
+            _pn = int(canonical_pr)
+        else:
+            try:
+                _pn = int(_pn_raw)
+            except (TypeError, ValueError):
+                _pn = int(canonical_pr)
+        if _pn not in partitions:
+            partitions[_pn] = []
+            order.append(_pn)
+        partitions[_pn].append(_ev)
+    # Build the per-PR dispatch context: head_sha + iteration
+    # shape + rs snapshot. The canonical PR uses the captured
+    # ``canonical_iteration`` and ``canonical_rs``; each
+    # secondary PR uses its ``per_pr_iterations`` row.
+    contexts: "dict[int, dict]" = {}
+    # Canonical first.
+    contexts[int(canonical_pr)] = {
+        "head_sha": (
+            str((canonical_iteration or {}).get("head_sha") or "")
+        ),
+        "iteration": dict(canonical_iteration or {}),
+        "rs": canonical_rs,
+    }
+    for _per in per_pr_iterations or []:
+        try:
+            _pn = int(_per.get("pr_number", 0))
+        except (TypeError, ValueError):
+            continue
+        if _pn == int(canonical_pr):
+            continue
+        if not _pn:
+            continue
+        contexts[_pn] = {
+            "head_sha": str(_per.get("head_sha") or ""),
+            "iteration": {
+                "head_sha": str(_per.get("head_sha") or ""),
+                "head_match": bool(_per.get("head_match")),
+                "decision": _per.get("decision", "skip"),
+                "events": list(_per.get("events", []) or []),
+            },
+            "rs": canonical_rs,
+        }
+    # Dispatch each partition under its PR's globals. Order
+    # is canonical first, then secondaries in their
+    # ``per_pr_iterations`` arrival order (which preserves
+    # the ``pr_numbers`` iteration order from the per-PR
+    # loop).
+    _canonical_pr_number = int(canonical_pr)
+    _saved_pr_number = globals().get("PR_NUMBER")
+    _saved_authoritative_head = globals().get(
+        "AUTHORITATIVE_HEAD", "",
+    )
+    try:
+        for _pn in order:
+            _ctx = contexts.get(_pn)
+            if _ctx is None:
+                # No context for this partition (the
+                # ``per_pr_iterations`` row was missing for
+                # a secondary). Fall back to canonical
+                # globals -- better than silently dropping
+                # the partition.
+                _ctx = contexts[_canonical_pr_number]
+            _events_p = partitions.get(_pn) or []
+            if not _events_p:
+                continue
+            _head_sha = str(_ctx.get("head_sha") or "")
+            _iter_p = dict(_ctx.get("iteration") or {})
+            if _head_sha and not _iter_p.get("head_sha"):
+                _iter_p["head_sha"] = _head_sha
+            _rs_p = _ctx.get("rs", canonical_rs)
+            globals()["PR_NUMBER"] = _pn
+            if _head_sha:
+                globals()["AUTHORITATIVE_HEAD"] = _head_sha
+            try:
+                handle_new_events(
+                    _rs_p, _events_p, token, _iter_p,
+                )
+            except Exception as _dispatch_exc:
+                # One PR's dispatch MUST NOT break the
+                # others. Log and continue.
+                log(
+                    "warning",
+                    "round-780 P1: per-PR dispatch failed",
+                    pr_number=_pn,
+                    head_sha=_head_sha[:12],
+                    event_count=len(_events_p),
+                    error=str(_dispatch_exc)[:200],
+                )
+    finally:
+        # Restore canonical globals so post-loop logic
+        # (qualifying-readiness promotion, head rebind,
+        # controller transitions) keys off the canonical PR.
+        globals()["PR_NUMBER"] = _saved_pr_number
+        globals()["AUTHORITATIVE_HEAD"] = (
+            _saved_authoritative_head
+        )
+
+
 def capture_and_store_snapshot(
     slot: str, rs: dict, token: str,
 ) -> dict:
@@ -15430,7 +15590,29 @@ def main(argv: Optional[list[str]] = None) -> int:
                     error=str(exc),
                 )
             if new_events and not cooldown_active():
-                handle_new_events(rs, new_events, token, iteration)
+                # Round-780 P1: dispatch each partition
+                # under its PR's own globals
+                # (``PR_NUMBER``, ``AUTHORITATIVE_HEAD``,
+                # ``rs``, ``iteration``). The previous
+                # single call routed secondary PR events
+                # through the canonical PR's globals, so
+                # ``_invoke_relay_for_events`` built a
+                # snapshot/state-root off the canonical
+                # PR and ``revoke_readiness`` /
+                # ``_reopen_qualifying_head_if_needed`` /
+                # ``_persist_round_budget_retry`` keyed
+                # off the canonical PR's head_sha --
+                # mis-attributing secondary events.
+                _dispatch_events_per_pr(
+                    new_events,
+                    token=token or "",
+                    canonical_pr=int(canonical_pr),
+                    canonical_iteration=(
+                        canonical_iteration or iteration
+                    ),
+                    canonical_rs=rs,
+                    per_pr_iterations=per_pr_iterations,
+                )
             elif new_events and cooldown_active():
                 # Round-33 P1#1 (cooldown-skipped event loss):
                 # events that arrive during cooldown are
@@ -15500,8 +15682,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                             ):
                                 _replayed_payloads.append(ev)
                         if _replayed_payloads:
-                            handle_new_events(
-                                rs, _replayed_payloads, token, iteration
+                            # Round-780 P1: dispatch each
+                            # replayed partition under its
+                            # PR's own globals. The
+                            # replayed payloads were
+                            # persisted via
+                            # ``write_unconsumed_event``
+                            # during prior heartbeats;
+                            # secondary PR events carry
+                            # the ``pr_number`` tag from
+                            # round-779.
+                            _dispatch_events_per_pr(
+                                _replayed_payloads,
+                                token=token or "",
+                                canonical_pr=int(canonical_pr),
+                                canonical_iteration=(
+                                    canonical_iteration
+                                    or iteration
+                                ),
+                                canonical_rs=rs,
+                                per_pr_iterations=(
+                                    per_pr_iterations
+                                ),
                             )
                     except Exception as _replay_dispatch_exc:
                         log(
