@@ -530,6 +530,65 @@ class TestReviewDirective:
                 coordinator_actor="controller",
             )
 
+    # Round-767/P2: ``target_thread_id`` must survive
+    # ``to_dict`` -> ``from_dict`` round-trip. Without this
+    # binding the focused directive's scope is silently lost
+    # when ``DirectiveStore.write_directive`` rehydrates the
+    # artifact.
+    def test_target_thread_id_roundtrips(self) -> None:
+        thread_id = "PRRT_kwDOTtyQLc6Round767"
+        head_sha = "f" * 40
+        snap = _make_thread_snapshot(thread_id, head_sha)
+        # Drive the production collector / builder path so the
+        # finding carries the exact ``thread:<id>`` key the
+        # focused-mode ``__post_init__`` validates.
+        from autocoder_orchestration.review_repair_relay import (
+            build_directive, collect_findings,
+        )
+        findings = collect_findings(snap, focused_thread_id=thread_id)
+        assert len(findings) == 1
+        d = build_directive(
+            round_index=767,
+            head_sha=head_sha,
+            repo="Slideshow11/AutoDev",
+            pr_number=5,
+            findings=findings,
+            coordinator_actor="controller",
+            target_thread_id=thread_id,
+        )
+        # Pre-repair guard: the in-memory directive carries
+        # the scope.
+        assert d.target_thread_id == thread_id
+        # The actual round-trip (this is what the bug
+        # regressed). Persist via ``to_dict`` then rehydrate.
+        d2 = ReviewDirective.from_dict(d.to_dict())
+        assert d2.target_thread_id == thread_id, (
+            f"round-767/P2: target_thread_id lost on to_dict/"
+            f"from_dict round-trip (got {d2.target_thread_id!r})"
+        )
+
+    # Round-767/P2: ``from_dict`` must accept the legacy
+    # payload shape (no ``target_thread_id`` key) for
+    # backward-compat with directives persisted before the
+    # round-767 repair.
+    def test_from_dict_missing_target_thread_id_defaults_to_none(self) -> None:
+        finding = _make_finding(severity=SEVERITY_P1, body="legacy finding")
+        legacy_payload = {
+            "schema_version": RELAY_SCHEMA_VERSION,
+            "directive_id": "dir-legacy",
+            "round_index": 0,
+            "head_sha": "a" * 40,
+            "repo": "owner/repo",
+            "pr_number": 4,
+            "created_at": "2026-08-16T00:00:00Z",
+            "summary": "legacy",
+            "coordinator_actor": "controller",
+            "findings": [finding.to_dict()],
+            # NO ``target_thread_id`` key on purpose.
+        }
+        d = ReviewDirective.from_dict(legacy_payload)
+        assert d.target_thread_id is None
+
 
 # === RoundTranscript round-trip ===
 

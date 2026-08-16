@@ -907,6 +907,12 @@ class ReviewDirective:
             "summary": self.summary,
             "coordinator_actor": self.coordinator_actor,
             "findings": [f.to_dict() for f in self.findings],
+            # Round-767/P2: persist ``target_thread_id`` so a
+            # focused directive survives ``write_directive``
+            # -> ``from_dict`` round-trip. Without this field
+            # the persisted artifact reconstructs as broad and
+            # the worker receives the wrong scope.
+            "target_thread_id": self.target_thread_id,
         }
 
     @classmethod
@@ -920,6 +926,15 @@ class ReviewDirective:
         ):
             if field_name not in payload:
                 raise DirectiveContractError(f"directive missing required field: {field_name!r}")
+        # Round-767/P2: ``target_thread_id`` is optional and
+        # absent from broad directives persisted before this
+        # round. Tolerate the missing key for backward-compat
+        # with older artifacts (the field defaults to ``None``
+        # on the dataclass).
+        target_thread_id_raw = payload.get("target_thread_id")
+        target_thread_id = (
+            str(target_thread_id_raw) if target_thread_id_raw is not None else None
+        )
         return cls(
             schema_version=str(payload["schema_version"]),
             directive_id=str(payload["directive_id"]),
@@ -931,6 +946,7 @@ class ReviewDirective:
             summary=str(payload["summary"]),
             coordinator_actor=str(payload["coordinator_actor"]),
             findings=tuple(Finding.from_dict(f) for f in payload["findings"]),
+            target_thread_id=target_thread_id,
         )
 
     def compute_sha256(self) -> str:
