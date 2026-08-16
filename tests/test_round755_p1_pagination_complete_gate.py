@@ -145,7 +145,7 @@ def test_pagination_exhaustion_marks_review_threads_incomplete():
     snap = _snap_with_threads(
         pagination_failed=False,
         pagination_complete=False,  # 6-page hasNextPage=True exhaustion
-        thread_count=600,            # 6 pages × 100 threads
+        thread_count=600,            # 6 pages x 100 threads
     )
     out = _eval(snap)
     assert out["review_threads_pagination_complete"] is False, (
