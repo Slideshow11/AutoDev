@@ -9603,6 +9603,25 @@ def collect_provider_surfaces(
                 f"/reviews/{review['id']}/comments",
                 token,
             )
+            # Round-752/P1: ``github_get`` returns ``None`` on
+            # HTTP/network error. The previous ``if inline:``
+            # check treated ``None`` identically to an empty list
+            # and silently swallowed the failure, so the inline
+            # surface was reported as successfully fetched while
+            # the per-review comments were never observed. That
+            # let ``surfaces_complete`` / ``clean`` go True on an
+            # incomplete inventory (``collect_provider_surfaces``
+            # only tracks the reviews-list failure). Fail closed:
+            # when the per-review inline request returns ``None``,
+            # stamp the failure and let the snapshot loop refuse
+            # qualification on a silent outage, exactly like the
+            # reviews-list endpoint already does.
+            if inline is None:
+                api_failure = (
+                    "review_comments_api_unreachable:"
+                    f"{review.get('id')}"
+                )
+                continue
             if inline:
                 for c in inline:
                     surfaces["review_comments"].append({
