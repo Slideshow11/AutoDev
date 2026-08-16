@@ -2219,6 +2219,38 @@ def _read_real_deferred_retry_evidence(
         if not eid:
             continue
         by_event.setdefault(eid, []).append(e)
+
+    def _has_complete_transition_provenance(entry: dict) -> bool:
+        """Round-766 P1: a transition entry cannot prove
+        retry without empirical provenance. The function
+        contract declares ``head``, ``consumer``,
+        ``transition_source`` (stored as ``reason`` in the
+        ledger), and ``previous_lifecycle`` as mandatory
+        fields on every transition. None of these may be
+        null, empty, or missing -- a partial, corrupted, or
+        externally generated ledger whose entries carry the
+        expected lifecycle strings in order but no
+        provenance is NOT empirical proof and MUST fail
+        closed.
+        """
+        if not isinstance(entry, dict):
+            return False
+        head = entry.get("head")
+        consumer = entry.get("consumer")
+        # transition_source is stored under the ``reason``
+        # key in the ledger (see the producer side).
+        transition_source = entry.get("transition_source")
+        if transition_source in (None, ""):
+            transition_source = entry.get("reason")
+        previous_lifecycle = entry.get("previous_lifecycle")
+        for v in (head, consumer, transition_source,
+                  previous_lifecycle):
+            if v is None:
+                return False
+            if isinstance(v, str) and v.strip() == "":
+                return False
+        return True
+
     # For each event, check monotonic lifecycle progression
     retry_evidence = []
     retry_event_ids = []
@@ -2228,6 +2260,16 @@ def _read_real_deferred_retry_evidence(
             evs, key=lambda e: e.get("recorded_at") or ""
         )
         lifecycles = [e.get("lifecycle") for e in evs_sorted]
+        # Round-766 P1: reject groups whose entries lack
+        # mandatory provenance fields. A chain of lifecycle
+        # strings without head/consumer/transition_source/
+        # previous_lifecycle cannot be empirical proof of
+        # a real deferred retry.
+        if not evs_sorted or not all(
+            _has_complete_transition_provenance(e)
+            for e in evs_sorted
+        ):
+            continue
         # Check supersession OR full progression
         matched = False
         # Full DEFERRED -> ... -> CONSUMED progression.

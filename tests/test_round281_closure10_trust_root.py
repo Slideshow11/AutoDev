@@ -914,21 +914,33 @@ class TestDeferredRetryOrderedTransitions:
         (tmp_path / "consumed_event_terminality.json").write_text(
             json.dumps({"entries": [
                 {"event_id": "ev-1", "consumer": "test",
+                 "head": "cd15d30c", "reason": "deferred",
+                 "previous_lifecycle": "REQUEST_INTENT",
                  "lifecycle": "DEFERRED",
                  "recorded_at": "2026-08-15T00:00:00Z"},
                 {"event_id": "ev-1", "consumer": "test",
+                 "head": "cd15d30c", "reason": "eligible",
+                 "previous_lifecycle": "DEFERRED",
                  "lifecycle": "ELIGIBLE",
                  "recorded_at": "2026-08-15T00:01:00Z"},
                 {"event_id": "ev-1", "consumer": "test",
+                 "head": "cd15d30c", "reason": "retry_attempt",
+                 "previous_lifecycle": "ELIGIBLE",
                  "lifecycle": "RETRY_ATTEMPT",
                  "recorded_at": "2026-08-15T00:02:00Z"},
                 {"event_id": "ev-1", "consumer": "test",
+                 "head": "cd15d30c", "reason": "owned",
+                 "previous_lifecycle": "RETRY_ATTEMPT",
                  "lifecycle": "OWNED",
                  "recorded_at": "2026-08-15T00:03:00Z"},
                 {"event_id": "ev-1", "consumer": "test",
+                 "head": "cd15d30c", "reason": "terminal",
+                 "previous_lifecycle": "OWNED",
                  "lifecycle": "TERMINAL",
                  "recorded_at": "2026-08-15T00:04:00Z"},
                 {"event_id": "ev-1", "consumer": "test",
+                 "head": "cd15d30c", "reason": "consumed",
+                 "previous_lifecycle": "TERMINAL",
                  "lifecycle": "CONSUMED",
                  "recorded_at": "2026-08-15T00:05:00Z"},
             ]})
@@ -938,6 +950,148 @@ class TestDeferredRetryOrderedTransitions:
         )
         assert out["value"] is True
         assert len(out["real_deferred_retry_transitions"]) == 6
+
+    def test_chain_without_provenance_does_not_prove_retry(
+        self, tmp_path,
+    ):
+        # Round-766 P1: the function contract declares
+        # head, consumer, transition_source, and
+        # previous_lifecycle as mandatory on every transition.
+        # A ledger whose entries carry the expected lifecycle
+        # strings in order but lack any of these provenance
+        # fields MUST fail closed.
+
+        from autocoder_supervisor.hermes_fingerprint import (
+            _read_real_deferred_retry_evidence,
+        )
+        # Cycle 1: missing ``head`` on every entry.
+        (tmp_path / "consumed_event_terminality.json").write_text(
+            json.dumps({"entries": [
+                {"event_id": "ev-nohead", "consumer": "test",
+                 "reason": "deferred",
+                 "previous_lifecycle": "REQUEST_INTENT",
+                 "lifecycle": "DEFERRED",
+                 "recorded_at": "2026-08-15T00:00:00Z"},
+                {"event_id": "ev-nohead", "consumer": "test",
+                 "reason": "eligible",
+                 "previous_lifecycle": "DEFERRED",
+                 "lifecycle": "ELIGIBLE",
+                 "recorded_at": "2026-08-15T00:01:00Z"},
+                {"event_id": "ev-nohead", "consumer": "test",
+                 "reason": "retry_attempt",
+                 "previous_lifecycle": "ELIGIBLE",
+                 "lifecycle": "RETRY_ATTEMPT",
+                 "recorded_at": "2026-08-15T00:02:00Z"},
+                {"event_id": "ev-nohead", "consumer": "test",
+                 "reason": "owned",
+                 "previous_lifecycle": "RETRY_ATTEMPT",
+                 "lifecycle": "OWNED",
+                 "recorded_at": "2026-08-15T00:03:00Z"},
+                {"event_id": "ev-nohead", "consumer": "test",
+                 "reason": "terminal",
+                 "previous_lifecycle": "OWNED",
+                 "lifecycle": "TERMINAL",
+                 "recorded_at": "2026-08-15T00:04:00Z"},
+                {"event_id": "ev-nohead", "consumer": "test",
+                 "reason": "consumed",
+                 "previous_lifecycle": "TERMINAL",
+                 "lifecycle": "CONSUMED",
+                 "recorded_at": "2026-08-15T00:05:00Z"},
+            ]})
+        )
+        out = _read_real_deferred_retry_evidence(
+            state_dir=str(tmp_path)
+        )
+        assert out["value"] is False
+        assert out["real_deferred_retry_event_ids"] == []
+        assert out["real_deferred_retry_transitions"] == []
+
+        # Cycle 2: a single entry drops ``previous_lifecycle``.
+        # The whole chain MUST fail closed; provenance gaps
+        # in any entry poison the empirical proof.
+        (tmp_path / "consumed_event_terminality.json").write_text(
+            json.dumps({"entries": [
+                {"event_id": "ev-gap", "consumer": "test",
+                 "head": "cd15d30c", "reason": "deferred",
+                 "previous_lifecycle": "REQUEST_INTENT",
+                 "lifecycle": "DEFERRED",
+                 "recorded_at": "2026-08-15T00:00:00Z"},
+                {"event_id": "ev-gap", "consumer": "test",
+                 "head": "cd15d30c", "reason": "eligible",
+                 "previous_lifecycle": "DEFERRED",
+                 "lifecycle": "ELIGIBLE",
+                 "recorded_at": "2026-08-15T00:01:00Z"},
+                # previous_lifecycle omitted on this entry
+                {"event_id": "ev-gap", "consumer": "test",
+                 "head": "cd15d30c", "reason": "retry_attempt",
+                 "lifecycle": "RETRY_ATTEMPT",
+                 "recorded_at": "2026-08-15T00:02:00Z"},
+                {"event_id": "ev-gap", "consumer": "test",
+                 "head": "cd15d30c", "reason": "owned",
+                 "previous_lifecycle": "RETRY_ATTEMPT",
+                 "lifecycle": "OWNED",
+                 "recorded_at": "2026-08-15T00:03:00Z"},
+                {"event_id": "ev-gap", "consumer": "test",
+                 "head": "cd15d30c", "reason": "terminal",
+                 "previous_lifecycle": "OWNED",
+                 "lifecycle": "TERMINAL",
+                 "recorded_at": "2026-08-15T00:04:00Z"},
+                {"event_id": "ev-gap", "consumer": "test",
+                 "head": "cd15d30c", "reason": "consumed",
+                 "previous_lifecycle": "TERMINAL",
+                 "lifecycle": "CONSUMED",
+                 "recorded_at": "2026-08-15T00:05:00Z"},
+            ]})
+        )
+        out = _read_real_deferred_retry_evidence(
+            state_dir=str(tmp_path)
+        )
+        assert out["value"] is False
+        assert out["real_deferred_retry_event_ids"] == []
+        assert out["real_deferred_retry_transitions"] == []
+
+        # Cycle 3: an empty-string transition_source is the
+        # same defect as a missing one.
+        (tmp_path / "consumed_event_terminality.json").write_text(
+            json.dumps({"entries": [
+                {"event_id": "ev-empty", "consumer": "test",
+                 "head": "cd15d30c", "reason": "",
+                 "previous_lifecycle": "REQUEST_INTENT",
+                 "lifecycle": "DEFERRED",
+                 "recorded_at": "2026-08-15T00:00:00Z"},
+                {"event_id": "ev-empty", "consumer": "test",
+                 "head": "cd15d30c", "reason": "eligible",
+                 "previous_lifecycle": "DEFERRED",
+                 "lifecycle": "ELIGIBLE",
+                 "recorded_at": "2026-08-15T00:01:00Z"},
+                {"event_id": "ev-empty", "consumer": "test",
+                 "head": "cd15d30c", "reason": "retry_attempt",
+                 "previous_lifecycle": "ELIGIBLE",
+                 "lifecycle": "RETRY_ATTEMPT",
+                 "recorded_at": "2026-08-15T00:02:00Z"},
+                {"event_id": "ev-empty", "consumer": "test",
+                 "head": "cd15d30c", "reason": "owned",
+                 "previous_lifecycle": "RETRY_ATTEMPT",
+                 "lifecycle": "OWNED",
+                 "recorded_at": "2026-08-15T00:03:00Z"},
+                {"event_id": "ev-empty", "consumer": "test",
+                 "head": "cd15d30c", "reason": "terminal",
+                 "previous_lifecycle": "OWNED",
+                 "lifecycle": "TERMINAL",
+                 "recorded_at": "2026-08-15T00:04:00Z"},
+                {"event_id": "ev-empty", "consumer": "test",
+                 "head": "cd15d30c", "reason": "consumed",
+                 "previous_lifecycle": "TERMINAL",
+                 "lifecycle": "CONSUMED",
+                 "recorded_at": "2026-08-15T00:05:00Z"},
+            ]})
+        )
+        out = _read_real_deferred_retry_evidence(
+            state_dir=str(tmp_path)
+        )
+        assert out["value"] is False
+        assert out["real_deferred_retry_event_ids"] == []
+        assert out["real_deferred_retry_transitions"] == []
 
     def test_reversed_ledger_does_not_prove_retry(self, tmp_path):
         # P1: ordering must be enforced. A reversed chain
