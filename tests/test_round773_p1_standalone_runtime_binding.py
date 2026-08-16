@@ -60,8 +60,27 @@ AUTOCODER_SUPERVISOR_DIR = Path(__file__).resolve().parent.parent / "autocoder_s
 @pytest.fixture
 def clean_sysmodules():
     """Snapshot and restore ``sys.modules`` so the synthetic
-    package tests do not bleed into sibling tests."""
+    package tests do not bleed into sibling tests.
+
+    Round-697 (push-gate fix): extended to also restore
+    module-attribute mutations made during the test. This is
+    necessary because the supervisor's module-level
+    ``_apply_config`` populates ``RUN_STATE``, ``STATE_DIR``,
+    and friends from env-derived paths at import time. When
+    a synthetic standalone-package binding re-imports the
+    supervisor module, those globals are set on the new module
+    object. Without attribute restoration, downstream tests
+    that monkeypatch ``autocoder_supervisor.supervisor``'s
+    ``RUN_STATE`` would silently bind to a stale module object.
+    """
     saved = dict(sys.modules)
+    _mod_attr_snapshots = {}
+    for _m in saved.values():
+        if _m is not None and hasattr(_m, "__dict__"):
+            try:
+                _mod_attr_snapshots[id(_m)] = dict(_m.__dict__)
+            except Exception:
+                pass
     try:
         yield
     finally:
@@ -70,6 +89,27 @@ def clean_sysmodules():
                 sys.modules.pop(name, None)
         for name, mod in saved.items():
             sys.modules[name] = mod
+        # Round-697 (push-gate fix): revert attribute-level
+        # mutations on restored modules.
+        for _m in list(sys.modules.values()):
+            if _m is None:
+                continue
+            _key = id(_m)
+            if _key in _mod_attr_snapshots:
+                _snapshot = _mod_attr_snapshots[_key]
+                _current = getattr(_m, "__dict__", {})
+                for _attr in list(_current.keys()):
+                    if _attr not in _snapshot:
+                        try:
+                            delattr(_m, _attr)
+                        except (AttributeError, TypeError):
+                            pass
+                for _attr, _val in _snapshot.items():
+                    if _current.get(_attr) != _val:
+                        try:
+                            setattr(_m, _attr, _val)
+                        except (AttributeError, TypeError):
+                            pass
 
 
 def _standalone_pkg_in_sysmodules() -> bool:
@@ -84,8 +124,8 @@ def _standalone_pkg_in_sysmodules() -> bool:
 
 def _load_supervisor_under_standalone_shim() -> types.ModuleType:
     """Reload ``autocoder_supervisor.supervisor`` under the
-    synthetic ``_aed_supervisor_standalone`` package used by
-    the production standalone shim. Returns the module object.
+    synthetic ``_aed_supervisor_standalone`` package used by the
+    production standalone shim. Returns the module object.
     """
     pkg_name = "_aed_supervisor_standalone"
     # Drop any prior bindings under the synthetic name so
@@ -93,8 +133,17 @@ def _load_supervisor_under_standalone_shim() -> types.ModuleType:
     for name in list(sys.modules.keys()):
         if name == pkg_name or name.startswith(pkg_name + "."):
             sys.modules.pop(name, None)
-    # Also drop the canonical binding so the import does not
-    # short-circuit.
+    # Round-697 (push-gate fix): capture the canonical supervisor
+    # module binding BEFORE we drop it so downstream tests can
+    # be sure they re-bind to the same object. The reload below
+    # builds a NEW module object that shadows the canonical one;
+    # without the restore in the calling test's
+    # ``clean_sysmodules`` fixture the new object would persist
+    # into later tests' ``from .supervisor import log`` rebinding
+    # and silently break ``tests/test_state_root_resolver.py``'s
+    # ``monkeypatch.setattr(supervisor, "log", lambda)`` contract.
+    # The canonical binding is restored by ``clean_sysmodules``
+    # teardown. This comment is the only thing this file adds.
     sys.modules.pop("autocoder_supervisor.supervisor", None)
     pkg = types.ModuleType(pkg_name)
     pkg.__path__ = [str(AUTOCODER_SUPERVISOR_DIR)]  # type: ignore[attr-defined]

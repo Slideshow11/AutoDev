@@ -69,8 +69,30 @@ def _make_write_json_marker(sentinel: str):
 @pytest.fixture
 def clean_sysmodules():
     """Snapshot and restore ``sys.modules`` so the synthetic
-    package tests do not bleed into sibling tests."""
+    package tests do not bleed into sibling tests.
+
+    Round-697 (push-gate fix): the basic shallow-restoration
+    above restores the ``sys.modules`` mapping but NOT module
+    attribute mutations made during the test body. Several
+    tests in this module delete ``autocoder_supervisor.supervisor``
+    from ``sys.modules`` and re-import it under a synthetic
+    standalone-package binding, which causes a fresh module
+    object to be loaded with module-level code (``_apply_config``)
+    mutating its globals. The original module object's
+    ``__dict__`` may also be mutated by these tests. We extend
+    the fixture to capture module-level attribute snapshots
+    and restore them on teardown, so downstream tests see a
+    fully-rolled-back supervisor module state.
+    """
+    import builtins as _b_builtins
     saved = dict(sys.modules)
+    _mod_attr_snapshots = {}
+    for _m in saved.values():
+        if _m is not None and hasattr(_m, "__dict__"):
+            try:
+                _mod_attr_snapshots[id(_m)] = dict(_m.__dict__)
+            except Exception:
+                pass
     try:
         yield
     finally:
@@ -81,6 +103,34 @@ def clean_sysmodules():
         # Restore prior bindings in place.
         for name, mod in saved.items():
             sys.modules[name] = mod
+        # Round-697 (push-gate fix): revert attribute-level
+        # mutations on the restored modules. Only restores
+        # attributes that existed in the snapshot AND that the
+        # current module is the same object id (so we don't
+        # touch freshly-loaded replacement modules).
+        for _m in list(sys.modules.values()):
+            if _m is None:
+                continue
+            _key = id(_m)
+            if _key in _mod_attr_snapshots:
+                _snapshot = _mod_attr_snapshots[_key]
+                _current = getattr(_m, "__dict__", {})
+                # Delete attributes that were added during the
+                # test but not in the snapshot.
+                for _attr in list(_current.keys()):
+                    if _attr not in _snapshot:
+                        try:
+                            delattr(_m, _attr)
+                        except (AttributeError, TypeError):
+                            pass
+                # Restore snapshot values for attributes that
+                # were re-set during the test.
+                for _attr, _val in _snapshot.items():
+                    if _current.get(_attr) != _val:
+                        try:
+                            setattr(_m, _attr, _val)
+                        except (AttributeError, TypeError):
+                            pass
 
 
 # ----------------------------------------------------------------------
@@ -159,11 +209,28 @@ def test_helper_raises_when_no_binding(clean_sysmodules) -> None:
     )
     saved_pkg = mod.__package__
     mod.__package__ = ""  # type: ignore[misc]
+    _supervisor_module_prior = sys.modules.get(
+        "autocoder_supervisor.supervisor"
+    )
     try:
         # Remove the canonical package binding so branch (b) fails.
         # We must be careful not to remove the just-loaded
         # orchestration_state_root itself, otherwise re-importing
         # it re-runs the helper tests and breaks the assertion.
+        # Round-697 (push-gate fix): capture the prior supervisor
+        # module binding BEFORE deleting so we can restore it in
+        # the finally-block. ``test_state_root_resolver.py`` runs
+        # later in the full suite and depends on
+        # ``from .supervisor import log`` rebinding to the live
+        # supervisor module attribute. Without this re-import, the
+        # upstream test pollution causes three downstream
+        # ``test_state_root_resolver.py`` tests to silently bypass
+        # their ``monkeypatch.setattr(supervisor, "log", lambda)``
+        # contract. The supervisor module is itself stable, so
+        # restoring this one binding does not change the intent
+        # of this test (branch (b) is still evaluated under the
+        # ``mod.__package__ = ""`` condition, which is the
+        # contract being verified).
         if "autocoder_supervisor.supervisor" in sys.modules:
             del sys.modules["autocoder_supervisor.supervisor"]
         # We can't remove the autocoder_supervisor package itself
@@ -181,6 +248,15 @@ def test_helper_raises_when_no_binding(clean_sysmodules) -> None:
         assert callable(resolved)
     finally:
         mod.__package__ = saved_pkg  # type: ignore[misc]
+        # Round-697 (push-gate fix): restore the deleted
+        # supervisor module binding so downstream tests that
+        # depend on ``monkeypatch.setattr(supervisor, "log", ...)``
+        # honour the live module reference rather than a
+        # fresh re-import.
+        if _supervisor_module_prior is not None:
+            sys.modules["autocoder_supervisor.supervisor"] = (
+                _supervisor_module_prior
+            )
 
 
 # ----------------------------------------------------------------------
