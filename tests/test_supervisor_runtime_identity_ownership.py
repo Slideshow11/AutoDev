@@ -364,38 +364,67 @@ class TestRuntimeIdentityOwnership:
 def test_acquire_lock_remains_real_flock_unchanged():
     """The fix does NOT introduce a parallel ownership framework. The
     canonical ``acquire_lock()`` mechanism (fcntl.flock on the lock
-    file) is preserved unchanged."""
-    import subprocess
-    r = subprocess.run(['grep','-n','fcntl.flock\\|acquire_lock' ,
-                        _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"],
-                       capture_output=True, text=True)
-    out = r.stdout
+    file) is preserved unchanged.
+
+    Verifies the working-copy supervisor.py source. If the production
+    copy also exists (operator's machine), also verifies that.
+    CI environments don't have the production supervisor.py; this
+    test is then satisfied by the working-copy alone.
+    """
+    import subprocess, os
+    work_path = _HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py"
+    prod_path = _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"
+
+    def _grep(src_path, pattern):
+        r = subprocess.run(['grep','-n',pattern,src_path],
+                           capture_output=True, text=True)
+        return r.stdout
+
+    out = _grep(work_path, 'fcntl.flock\\|acquire_lock')
     assert 'fcntl.flock' in out, "fcntl.flock must remain in supervisor.py"
     assert 'def acquire_lock' in out, "acquire_lock must remain a function"
     # The acquire_lock body uses LOCK_EX | LOCK_NB.
     assert 'LOCK_EX' in out, "acquire_lock must use LOCK_EX"
     assert 'LOCK_NB' in out, "acquire_lock must use LOCK_NB"
 
+    # If production also exists, verify the same invariants there.
+    if os.path.exists(prod_path):
+        prod_out = _grep(prod_path, 'fcntl.flock\\|acquire_lock')
+        assert 'fcntl.flock' in prod_out
+        assert 'def acquire_lock' in prod_out
+        assert 'LOCK_EX' in prod_out
+        assert 'LOCK_NB' in prod_out
+
 
 def test_canonical_identity_writer_preserved():
     """The fix preserves the existing canonical/atomic identity writer
     rather than creating a new identity mechanism. _write_acceptance_runtime_identity
     must still exist with the same signature.
+
+    Verifies the working-copy supervisor.py source. If the production
+    copy also exists (operator's machine), also verifies that.
     """
-    import subprocess
-    r = subprocess.run(['grep','-n','def _write_acceptance_runtime_identity\\|acceptance_runtime_identity.json' ,
-                        _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"],
-                       capture_output=True, text=True)
-    out = r.stdout
-    assert 'def _write_acceptance_runtime_identity' in out, (
-        "_write_acceptance_runtime_identity must still exist"
-    )
-    # The atomic write (tmp.replace) is preserved.
-    assert 'tmp.replace(target)' in open(_HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py").read(), (
-        "The atomic write pattern (tmp.replace(target)) must be preserved"
-    )
+    import subprocess, os
+    work_path = _HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py"
+    prod_path = _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"
 
+    def _verify_path(path):
+        r = subprocess.run(['grep','-n',
+                            'def _write_acceptance_runtime_identity\\|acceptance_runtime_identity.json',
+                            path],
+                           capture_output=True, text=True)
+        out = r.stdout
+        assert 'def _write_acceptance_runtime_identity' in out, (
+            f"_write_acceptance_runtime_identity must still exist in {path}"
+        )
+        # The atomic write (tmp.replace) is preserved.
+        assert 'tmp.replace(target)' in open(path).read(), (
+            f"The atomic write pattern (tmp.replace(target)) must be preserved in {path}"
+        )
 
+    _verify_path(work_path)
+    if os.path.exists(prod_path):
+        _verify_path(prod_path)
 def test_module_level_identity_publication_removed():
     """The module-level call to _write_acceptance_runtime_identity that
     fired during bare import must be REMOVED. Identity publication
