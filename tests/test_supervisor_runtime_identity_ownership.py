@@ -454,10 +454,25 @@ def test_production_copy_receives_fix_after_deployment():
 
     The test SKIPs while production still has the bug (so it doesn't
     fail during the engineering cycle before deployment).
+
+    Also SKIPS if production doesn't exist (CI environments don't have
+    the operator's production supervisor.py at all).
     """
     import re
-    src_prod = open(_HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py").read()
-    src_work = open(_HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py").read()
+    prod_path = _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"
+    work_path = _HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py"
+
+    import os
+    if not os.path.exists(prod_path):
+        pytest.skip(
+            f"Production supervisor.py does not exist at {prod_path}. "
+            f"This is expected in CI environments that don't have the "
+            f"operator's production supervisor deployed. The fix is "
+            f"verified against the working-copy source instead."
+        )
+
+    src_prod = open(prod_path).read()
+    src_work = open(work_path).read()
 
     def get_call_site(src):
         """Return the offset of the FIRST non-def call site, or None."""
