@@ -7467,9 +7467,9 @@
         "destination_path": "autocoder_supervisor/supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
-        "destination_sha256": "ee3dce6e150ea640d76c0eeaaa771592636c52f7cdf542de4ad33cad9d152d7a",
+        "destination_sha256": "dc40bcb57ee2396b0466569d63204a173adc9242b03240b59e27c055380f37ae",
         "source_size_bytes": 86428,
-        "destination_size_bytes": 652440,
+        "destination_size_bytes": 653265,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
       },
       {

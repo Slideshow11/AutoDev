@@ -940,21 +940,11 @@ except (ValueError, OSError):
     # re-raised by the bare-except branch below.
     _BOOTSTRAPPED_FROM = None  # type: ignore[assignment]
     _APPLIED = {}
-# Closure VIII §4: write the supervisor-owned
-# acceptance_runtime_identity.json atomically on module load
-# so the independent evidence generator can read the
-# production supervisor's actual resolved values rather
-# than deriving them in the evidence-generator process.
-try:
-    if _BOOTSTRAPPED_FROM is not None:
-        _write_acceptance_runtime_identity(_BOOTSTRAPPED_FROM)
-except Exception as _ari_exc:  # noqa: BLE001
-    import sys as _sys_ari
-    print(
-        f"warning: failed to write acceptance_runtime_identity: "
-        f"{_ari_exc}",
-        file=_sys_ari.stderr,
-    )
+# Round-697 (push-gate fix): acceptance_runtime_identity.json is
+# published ONLY AFTER acquire_lock() succeeds inside main() —
+# never at module import. Importing this module must NOT publish
+# evidence claiming process authority. A losing/transient supervisor
+# must exit before it can publish itself as the canonical supervisor.
 if _BOOTSTRAPPED_FROM is not None:
     POLICY: dict[str, Any] = _default_policy(_BOOTSTRAPPED_FROM)
     PROVIDERS: dict[str, dict[str, Any]] = _default_providers(
@@ -14008,6 +13998,28 @@ def main(argv: Optional[list[str]] = None) -> int:
             "another supervisor already owns this PR; exiting",
         )
         return 0
+
+    # Round-697 (push-gate fix): publish the canonical
+    # acceptance_runtime_identity.json ONLY after acquire_lock()
+    # succeeded. The previous module-level call (Closure VIII §4)
+    # fired during bare import, so a competing supervisor that
+    # later failed acquire_lock() still atomically published its
+    # own PID into acceptance_runtime_identity.json, leaving the
+    # canonical evidence referencing a dead PID while the
+    # authoritative lock owner was elsewhere. Now identity
+    # publication happens AFTER the singleton lock is acquired,
+    # so the canonical runtime identity always represents the
+    # actual lock-owning process. Preserve the existing
+    # canonical/atomic identity writer.
+    if _BOOTSTRAPPED_FROM is not None:
+        try:
+            _write_acceptance_runtime_identity(_BOOTSTRAPPED_FROM)
+        except Exception as _ari_exc:  # noqa: BLE001
+            log(
+                "warning",
+                "failed to write acceptance_runtime_identity after lock acquisition",
+                error=str(_ari_exc)[:200],
+            )
 
     # Round-40: reconcile AUTHORITATIVE_HEAD against
     # canonical durable + live evidence at boot. The
