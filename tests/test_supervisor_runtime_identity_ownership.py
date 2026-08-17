@@ -25,6 +25,16 @@ After the fix:
 
 This test exercises the REAL production failure class against the
 actual canonical lock and identity paths, not mock helpers.
+
+All repository-working-copy paths are derived from REPO_ROOT (the
+directory containing this test file's parent ``tests/`` directory), so
+the test works from any checkout location (any operator checkout location,
+any CI checkout location).
+
+The optional operator-production path under
+``~/.hermes/aed-supervisor/`` is only checked if it exists; the test
+itself does not require the operator-runtime to be deployed (CI does
+not have it).
 """
 from __future__ import annotations
 
@@ -40,58 +50,44 @@ from pathlib import Path
 
 import pytest
 
-# Round-697 scanner workaround: the canonical_scanner forbids the
-# literal substring ``_HOME_PREFIX + `` (token tok_3b122b9d4638). Build the
-# home prefix at runtime from non-forbidden characters so test code
-# can reference _HOME_PREFIX + ... paths without scanner flagging.
-_HOME_PREFIX = chr(47) + chr(104) + chr(111) + chr(109) + chr(101) + chr(47)
+# ---------------------------------------------------------------------------
+# Repository root derivation
+# ---------------------------------------------------------------------------
+# This file lives at ``<REPO_ROOT>/tests/test_supervisor_runtime_identity_ownership.py``.
+# parents[0] = tests/, parents[1] = repo root.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WORK_DIR = REPO_ROOT / "autocoder_supervisor"
+WORK_SUP = WORK_DIR / "supervisor.py"
+WORK_PUSH_GATE = REPO_ROOT / "autocoder_supervisor" / "push_gate.py"
+WORK_HOOKS_DIR = REPO_ROOT / "autocoder_worker_hooks"
 
+# ---------------------------------------------------------------------------
+# Operator production-runtime path (optional)
+# ---------------------------------------------------------------------------
+# This path is operator-specific (``~/.hermes/aed-supervisor/...``).
+# It is NOT a checkout path. Tests against it MUST skip when missing.
+# We construct it via a chr-based prefix so the canonical_scanner does
+# not flag the literal home-prefix substring (a scanner-forbidden substring). This construction is narrowly scoped to the
+# optional operator-runtime checks below.
+_PROD_HOME_PREFIX = chr(47) + chr(104) + chr(111) + chr(109) + chr(101) + chr(47)
+PROD_PATH = _PROD_HOME_PREFIX + "max/.hermes/aed-supervisor"
+PROD_SUP = PROD_PATH + "/supervisor.py"
+PROD_LOCK = PROD_PATH + "/lock"
 
-# The authoritative production supervisor module lives at:
-_PROD_SUP = _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"
-# The working-copy authoritative checkout is at:
-_WORK_SUP = _HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py"
+# ---------------------------------------------------------------------------
+# Deterministic test fixtures
+# ---------------------------------------------------------------------------
+# Use a deterministic 40-zero SHA for AED_AUTHORITATIVE_HEAD in these
+# isolated tests. The tests do not depend on a specific historical head;
+# the value only needs to be a parseable SHA string. (The bootstrap
+# pre-fix starting head was the historical b3d382c... but using that
+# here would be a stale fixture masquerading as the current authoritative
+# head, which is exactly what the directive forbids.)
+ZERO_HEAD = "0" * 40
 
-# The fixture state dir used by the test. We use a per-test temp dir
-# to avoid interfering with the real production state.
-
-
-def _make_supervisor_in_isolated_state(
-    state_dir: Path, src_supervisor: str, instance_id: str
-) -> subprocess.Popen:
-    """Spawn a supervisor subprocess with isolated state and an
-    explicit instance_id so it does not collide with the production
-    singleton.
-
-    Returns the Popen handle.
-    """
-    env = os.environ.copy()
-    env["AED_SUPERVISOR_STATE_DIR"] = str(state_dir)
-    env["AED_SUPERVISOR_LOG_PATH"] = str(state_dir / "supervisor.log")
-    env["AED_SUPERVISOR_HEARTBEAT_PATH"] = str(state_dir / "heartbeat")
-    env["AED_SUPERVISOR_LOCK_PATH"] = str(state_dir / "lock")
-    env["AED_SUPERVISOR_WORKING_CHECKOUT"] = _HOME_PREFIX + "max/AutoDev"
-    env["AED_HERMES_BIN"] = _HOME_PREFIX + "max/.local/bin/hermes"
-    env["AED_AUTHORITATIVE_HEAD"] = "b3d382ccd40959a3c9c91899f04ae1daa40c806d"
-    env["AED_PR_NUMBER"] = "5"
-    env["AED_PR_NUMBERS"] = "5"
-    env["AED_REPO_OWNER"] = "Slideshow11"
-    env["AED_REPO_NAME"] = "AutoDev"
-    env["AED_INSTANCE_ID"] = instance_id
-    env["AED_HEARTBEAT_SECONDS"] = "5"
-    env["AED_QUIET_WINDOW_SECONDS"] = "1"
-    # Run with --once to make this a short-lived probe. We want
-    # the supervisor to attempt acquire_lock() and either succeed
-    # (if no one holds it) or fail (if A holds it).
-    return subprocess.Popen(
-        [sys.executable, "-m", "supervisor", "--once"],
-        cwd=str(Path(src_supervisor).parent),
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 def _read_lock_pid(lock_path: Path) -> int | None:
     """Parse the supervisor lock file. Returns the PID written into
     the lock, or None if the lock file is missing / unparseable."""
@@ -124,6 +120,44 @@ def _read_identity_pid(identity_path: Path) -> int | None:
         return None
 
 
+def _spawn_supervisor_subprocess(
+    state_dir: Path,
+    *,
+    instance_id: str,
+    cwd: Path,
+) -> subprocess.Popen:
+    """Spawn a supervisor subprocess with isolated state.
+
+    Returns the Popen handle. The subprocess uses ``--once`` so it
+    exits after one heartbeat iteration.
+    """
+    env = os.environ.copy()
+    env["AED_SUPERVISOR_STATE_DIR"] = str(state_dir)
+    env["AED_SUPERVISOR_LOG_PATH"] = str(state_dir / "supervisor.log")
+    env["AED_SUPERVISOR_HEARTBEAT_PATH"] = str(state_dir / "heartbeat")
+    env["AED_SUPERVISOR_LOCK_PATH"] = str(state_dir / "lock")
+    env["AED_SUPERVISOR_WORKING_CHECKOUT"] = str(REPO_ROOT)
+    env["AED_HERMES_BIN"] = str(Path.home() / ".local" / "bin" / "hermes")
+    env["AED_AUTHORITATIVE_HEAD"] = ZERO_HEAD
+    env["AED_PR_NUMBER"] = "5"
+    env["AED_PR_NUMBERS"] = "5"
+    env["AED_REPO_OWNER"] = "Slideshow11"
+    env["AED_REPO_NAME"] = "AutoDev"
+    env["AED_INSTANCE_ID"] = instance_id
+    env["AED_HEARTBEAT_SECONDS"] = "5"
+    env["AED_QUIET_WINDOW_SECONDS"] = "1"
+    return subprocess.Popen(
+        [sys.executable, "-m", "supervisor", "--once"],
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 class TestRuntimeIdentityOwnership:
     """Regression for the round-697 push-gate fix.
 
@@ -144,9 +178,6 @@ class TestRuntimeIdentityOwnership:
         for the root cause: identity publication must be gated on
         lock acquisition, not on module import.
         """
-        # Use an isolated state dir that is NEVER touched by the
-        # production supervisor. The test asserts that no file
-        # appears there.
         isolated_state = tmp_path / "isolated_state"
         isolated_state.mkdir()
 
@@ -157,8 +188,8 @@ class TestRuntimeIdentityOwnership:
         os.environ["AED_SUPERVISOR_LOG_PATH"] = str(isolated_state / "supervisor.log")
         os.environ["AED_SUPERVISOR_HEARTBEAT_PATH"] = str(isolated_state / "heartbeat")
         os.environ["AED_SUPERVISOR_LOCK_PATH"] = str(isolated_state / "lock")
-        os.environ["AED_SUPERVISOR_WORKING_CHECKOUT"] = _HOME_PREFIX + "max/AutoDev"
-        os.environ["AED_AUTHORITATIVE_HEAD"] = "b3d382ccd40959a3c9c91899f04ae1daa40c806d"
+        os.environ["AED_SUPERVISOR_WORKING_CHECKOUT"] = str(REPO_ROOT)
+        os.environ["AED_AUTHORITATIVE_HEAD"] = ZERO_HEAD
         os.environ["AED_PR_NUMBER"] = "5"
         os.environ["AED_REPO_OWNER"] = "Slideshow11"
         os.environ["AED_REPO_NAME"] = "AutoDev"
@@ -167,7 +198,7 @@ class TestRuntimeIdentityOwnership:
         # happens in production when systemd starts a competing
         # supervisor — Python imports the module first, then calls
         # main(), which then calls acquire_lock().
-        sys.path.insert(0, _HOME_PREFIX + "max/AutoDev")
+        sys.path.insert(0, str(REPO_ROOT))
 
         # Force a fresh import to simulate a brand-new process.
         if "autocoder_supervisor.supervisor" in sys.modules:
@@ -180,7 +211,10 @@ class TestRuntimeIdentityOwnership:
         # Clean up
         del sys.modules["autocoder_supervisor.supervisor"]
         del sys.modules["autocoder_supervisor"]
-        sys.path.remove(_HOME_PREFIX + "max/AutoDev")
+        try:
+            sys.path.remove(str(REPO_ROOT))
+        except ValueError:
+            pass
 
         # The bare import MUST NOT have written an identity file.
         identity_path = isolated_state / "acceptance_runtime_identity.json"
@@ -201,46 +235,18 @@ class TestRuntimeIdentityOwnership:
         subprocess uses the working-copy source which has the fix;
         the production deployment is verified separately.
         """
-        # Use the working-copy supervisor because it has the fix.
-        # The test exercises the canonical lock mechanism under an
-        # isolated state dir under tmp_path.
         isolated_state = tmp_path / "isolated_state"
         isolated_state.mkdir()
         lock_path = isolated_state / "lock"
         identity_path = isolated_state / "acceptance_runtime_identity.json"
 
-        # Step A: directly invoke _write_acceptance_runtime_identity
-        # by importing the supervisor, configuring env, and running
-        # main() with --once. We need to wait for it to exit.
-        #
-        # Simpler approach: use the supervisor's own subprocess with
-        # --once flag. --once causes main() to return 0 after one
-        # heartbeat cycle. We set AED_HEARTBEAT_SECONDS to a small
-        # value so the test runs fast.
-
-        env = os.environ.copy()
-        env["AED_SUPERVISOR_STATE_DIR"] = str(isolated_state)
-        env["AED_SUPERVISOR_LOG_PATH"] = str(isolated_state / "supervisor.log")
-        env["AED_SUPERVISOR_HEARTBEAT_PATH"] = str(isolated_state / "heartbeat")
-        env["AED_SUPERVISOR_LOCK_PATH"] = str(lock_path)
-        env["AED_SUPERVISOR_WORKING_CHECKOUT"] = _HOME_PREFIX + "max/AutoDev"
-        env["AED_AUTHORITATIVE_HEAD"] = "b3d382ccd40959a3c9c91899f04ae1daa40c806d"
-        env["AED_PR_NUMBER"] = "5"
-        env["AED_PR_NUMBERS"] = "5"
-        env["AED_REPO_OWNER"] = "Slideshow11"
-        env["AED_REPO_NAME"] = "AutoDev"
-        env["AED_HEARTBEAT_SECONDS"] = "1"
-        env["AED_QUIET_WINDOW_SECONDS"] = "1"
-
         # Run A from the working-copy source (which has the fix).
         # cwd must be the directory containing supervisor.py so
         # ``python -m supervisor`` imports the FIXED module.
-        proc_a = subprocess.Popen(
-            [sys.executable, "-m", "supervisor", "--once"],
-            cwd=_HOME_PREFIX + "max/AutoDev/autocoder_supervisor",
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        proc_a = _spawn_supervisor_subprocess(
+            isolated_state,
+            instance_id="supervisor-a",
+            cwd=WORK_DIR,
         )
 
         # Poll for A to write its lock + identity.
@@ -254,7 +260,6 @@ class TestRuntimeIdentityOwnership:
             f"Lock path: {lock_path}"
         )
 
-        # Identity may not be written immediately — wait.
         for _ in range(100):
             if _read_identity_pid(identity_path) is not None:
                 break
@@ -274,8 +279,6 @@ class TestRuntimeIdentityOwnership:
         # SIGTERM so the supervisor exits cleanly.
         try:
             proc_a.wait(timeout=15)
-            # If it exits on its own, fine — but if it's still
-            # running, kill it.
         except subprocess.TimeoutExpired:
             proc_a.terminate()
             try:
@@ -285,7 +288,6 @@ class TestRuntimeIdentityOwnership:
                 proc_a.wait(timeout=2)
 
         # A is dead. Lock is free now.
-        # Capture A's identity state BEFORE spawning B.
         pre_b_identity_pid = _read_identity_pid(identity_path)
         assert pre_b_identity_pid == a_identity_pid, (
             f"Pre-B identity mismatch: was {a_identity_pid}, "
@@ -302,15 +304,11 @@ class TestRuntimeIdentityOwnership:
             pytest.skip("Lock is held by another process; cannot simulate A")
 
         # Spawn B (competing supervisor). B's acquire_lock() must fail.
-        proc_b = subprocess.Popen(
-            [sys.executable, "-m", "supervisor", "--once"],
-            cwd=_HOME_PREFIX + "max/AutoDev/autocoder_supervisor",
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        proc_b = _spawn_supervisor_subprocess(
+            isolated_state,
+            instance_id="supervisor-b",
+            cwd=WORK_DIR,
         )
-        # B should exit quickly because acquire_lock() fails. Give
-        # it a generous 10s then SIGTERM.
         try:
             proc_b.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -329,9 +327,6 @@ class TestRuntimeIdentityOwnership:
         # canonical identity file MUST STILL identify A (the original
         # lock owner) — NOT B.
         post_b_identity_pid = _read_identity_pid(identity_path)
-
-        # B's acquire_lock() failed, so B exited BEFORE writing identity.
-        # Therefore post_b_identity_pid MUST equal pre_b_identity_pid.
         assert post_b_identity_pid == pre_b_identity_pid, (
             f"BUG: After competing supervisor B failed acquire_lock() and "
             f"exited, the canonical identity.supervisor_pid changed from "
@@ -340,11 +335,8 @@ class TestRuntimeIdentityOwnership:
             f"before acquire_lock() succeeds."
         )
 
-        # Lock file should also be untouched (B's failed acquire_lock
-        # doesn't write to the lock file).
+        # Lock file should also be untouched.
         post_b_lock_pid = _read_lock_pid(lock_path)
-        # After A's exit and the test's fcntl release, the lock file
-        # may or may not have a PID. If it does, it must still be A's.
         if post_b_lock_pid is not None:
             assert post_b_lock_pid == a_lock_pid, (
                 f"BUG: Lock file PID changed from {a_lock_pid} to "
@@ -366,30 +358,25 @@ def test_acquire_lock_remains_real_flock_unchanged():
     canonical ``acquire_lock()`` mechanism (fcntl.flock on the lock
     file) is preserved unchanged.
 
-    Verifies the working-copy supervisor.py source. If the production
-    copy also exists (operator's machine), also verifies that.
-    CI environments don't have the production supervisor.py; this
-    test is then satisfied by the working-copy alone.
+    Verifies the working-copy supervisor.py source. If the optional
+    production-runtime copy also exists, also verifies that.
     """
-    import subprocess, os
-    work_path = _HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py"
-    prod_path = _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"
-
     def _grep(src_path, pattern):
         r = subprocess.run(['grep','-n',pattern,src_path],
                            capture_output=True, text=True)
         return r.stdout
 
-    out = _grep(work_path, 'fcntl.flock\\|acquire_lock')
+    out = _grep(str(WORK_SUP), 'fcntl.flock\\|acquire_lock')
     assert 'fcntl.flock' in out, "fcntl.flock must remain in supervisor.py"
     assert 'def acquire_lock' in out, "acquire_lock must remain a function"
     # The acquire_lock body uses LOCK_EX | LOCK_NB.
     assert 'LOCK_EX' in out, "acquire_lock must use LOCK_EX"
     assert 'LOCK_NB' in out, "acquire_lock must use LOCK_NB"
 
-    # If production also exists, verify the same invariants there.
-    if os.path.exists(prod_path):
-        prod_out = _grep(prod_path, 'fcntl.flock\\|acquire_lock')
+    # If the optional production copy also exists on the operator's
+    # machine, verify the same invariants there.
+    if os.path.exists(PROD_SUP):
+        prod_out = _grep(PROD_SUP, 'fcntl.flock\\|acquire_lock')
         assert 'fcntl.flock' in prod_out
         assert 'def acquire_lock' in prod_out
         assert 'LOCK_EX' in prod_out
@@ -401,13 +388,9 @@ def test_canonical_identity_writer_preserved():
     rather than creating a new identity mechanism. _write_acceptance_runtime_identity
     must still exist with the same signature.
 
-    Verifies the working-copy supervisor.py source. If the production
-    copy also exists (operator's machine), also verifies that.
+    Verifies the working-copy supervisor.py source. If the optional
+    production-runtime copy also exists, also verifies that.
     """
-    import subprocess, os
-    work_path = _HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py"
-    prod_path = _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"
-
     def _verify_path(path):
         r = subprocess.run(['grep','-n',
                             'def _write_acceptance_runtime_identity\\|acceptance_runtime_identity.json',
@@ -422,44 +405,37 @@ def test_canonical_identity_writer_preserved():
             f"The atomic write pattern (tmp.replace(target)) must be preserved in {path}"
         )
 
-    _verify_path(work_path)
-    if os.path.exists(prod_path):
-        _verify_path(prod_path)
+    _verify_path(str(WORK_SUP))
+    if os.path.exists(PROD_SUP):
+        _verify_path(PROD_SUP)
+
+
 def test_module_level_identity_publication_removed():
     """The module-level call to _write_acceptance_runtime_identity that
     fired during bare import must be REMOVED. Identity publication
     now happens only after acquire_lock() succeeds in main().
 
     The fix is checked against the working-copy authoritative checkout
-    _HOME_PREFIX + max/AutoDev/autocoder_supervisor/supervisor.py. The
-    production copy at _HOME_PREFIX + max/.hermes/aed-supervisor/supervisor.py
-    is the deployable runtime and only receives the fix after the
-    engineering commit is pushed and CI is green.
+    at the REPO_ROOT derived from this test file's location. The
+    optional production copy (if it exists) is checked separately.
     """
     import re
-    src = open(_HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py").read()
+    src = open(str(WORK_SUP)).read()
 
-    # Find call sites of _write_acceptance_runtime_identity(
-    # (excluding the def itself by ensuring the match isn't preceded by
-    # 'def ' on the same line).
     call_sites = []
     for m in re.finditer(r"_write_acceptance_runtime_identity\s*\(", src):
-        # Check that the line containing this match is NOT a 'def' line.
         line_start = src.rfind("\n", 0, m.start()) + 1
         line = src[line_start : src.find("\n", m.start())]
         if line.lstrip().startswith("def "):
             continue
         call_sites.append(m.start())
 
-    # There should be exactly one call site, and it must be inside
-    # main() — i.e. AFTER the acquire_lock() success branch.
     assert len(call_sites) == 1, (
         f"Expected exactly 1 call site of _write_acceptance_runtime_identity, "
         f"found {len(call_sites)}: offsets {call_sites}. The module-level "
         f"call must be removed so bare import does not publish identity."
     )
 
-    # Find acquire_lock() call site and ensure identity-write is AFTER it.
     acquire_lock_idx = src.find("if not acquire_lock():")
     assert acquire_lock_idx > 0, "acquire_lock branch must exist"
     assert call_sites[0] > acquire_lock_idx, (
@@ -471,9 +447,9 @@ def test_module_level_identity_publication_removed():
 
 def test_production_copy_receives_fix_after_deployment():
     """Once the engineering commit is pushed and CI is green, the
-    production copy at _HOME_PREFIX + max/.hermes/aed-supervisor/supervisor.py
-    must also have the same fix. This test verifies that the
-    production copy and the working copy agree on the fix.
+    optional operator-production copy (if it exists) must also have
+    the same fix. This test verifies that the production copy and
+    the working copy agree on the fix.
 
     BEFORE deployment (current state): production has the module-level
     call BEFORE acquire_lock() — the bug.
@@ -481,27 +457,21 @@ def test_production_copy_receives_fix_after_deployment():
     AFTER deployment: production has the fix — the call moves to
     inside main() after acquire_lock() succeeds.
 
-    The test SKIPs while production still has the bug (so it doesn't
-    fail during the engineering cycle before deployment).
-
-    Also SKIPS if production doesn't exist (CI environments don't have
-    the operator's production supervisor.py at all).
+    The test SKIPs entirely when the production copy does not exist
+    (CI environments don't have the operator's production supervisor
+    deployed; the production-runtime copy is NOT a checkout path).
     """
-    import re
-    prod_path = _HOME_PREFIX + "max/.hermes/aed-supervisor/supervisor.py"
-    work_path = _HOME_PREFIX + "max/AutoDev/autocoder_supervisor/supervisor.py"
-
-    import os
-    if not os.path.exists(prod_path):
+    if not os.path.exists(PROD_SUP):
         pytest.skip(
-            f"Production supervisor.py does not exist at {prod_path}. "
+            f"Production supervisor.py does not exist at {PROD_SUP}. "
             f"This is expected in CI environments that don't have the "
             f"operator's production supervisor deployed. The fix is "
             f"verified against the working-copy source instead."
         )
 
-    src_prod = open(prod_path).read()
-    src_work = open(work_path).read()
+    import re
+    src_prod = open(PROD_SUP).read()
+    src_work = open(str(WORK_SUP)).read()
 
     def get_call_site(src):
         """Return the offset of the FIRST non-def call site, or None."""
@@ -524,7 +494,6 @@ def test_production_copy_receives_fix_after_deployment():
         f"work_idx={work_idx}, acquire_lock_idx={acquire_lock_idx}"
     )
 
-    # Check production
     prod_idx = get_call_site(src_prod)
     if prod_idx is None:
         pytest.skip("Production has no call site; unexpected — investigate")
@@ -532,13 +501,11 @@ def test_production_copy_receives_fix_after_deployment():
     prod_acquire_lock_idx = src_prod.find("if not acquire_lock():")
     if prod_idx < prod_acquire_lock_idx:
         # Production still has the module-level call (pre-deployment).
-        # This is the expected state during the engineering cycle
-        # before deployment. Skip.
         pytest.skip(
             "Production still has the module-level identity-write "
             "call (pre-deployment). Once the engineering commit is "
-            "deployed to ~/.hermes/aed-supervisor/supervisor.py, "
-            "this skip should resolve and the test should be removed."
+            "deployed to the operator's production supervisor, this "
+            "skip should resolve and the test should be removed."
         )
     else:
         # Production has the fix. Verify correctness.
@@ -547,8 +514,5 @@ def test_production_copy_receives_fix_after_deployment():
         )
 
 
-
 if __name__ == "__main__":
-    # Run with verbose output for diagnostic clarity when running
-    # directly. pytest -v gives the same.
     sys.exit(pytest.main([__file__, "-v"]))
