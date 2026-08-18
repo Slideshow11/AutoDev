@@ -82,7 +82,20 @@ def main(argv: list[str] | None = None) -> int:
     for key in ("manifest_path", "audit_path"):
         relpath = generated.get(key)
         if not relpath:
-            continue
+            # Round-1064 P2: a missing key means the finalizer
+            # declared ``ran=True`` but did not regenerate
+            # BOTH canonical artifacts. A worker that
+            # commits without both pieces would re-fail at
+            # the pre-push gate instead of the pre-commit
+            # gate; surface the failure here so the commit is
+            # blocked at the earliest deterministic point.
+            print(
+                f"aed-pre-commit driver: finalizer omitted {key}; "
+                "blocking commit so the worker cannot publish "
+                "an incomplete provenance pair",
+                file=sys.stderr,
+            )
+            return 2
         # ``manifest_path`` / ``audit_path`` may be returned
         # as absolute paths; normalize to a repo-relative
         # form before staging.
@@ -96,15 +109,53 @@ def main(argv: list[str] | None = None) -> int:
             if rp_s.startswith(root_s + "/"):
                 rel = rp_s[len(root_s) + 1:]
             else:
-                # Path is outside the repo; skip silently.
-                continue
+                # Round-1064 P2: an out-of-repo path means the
+                # finalizer is staging something outside the
+                # worker's working tree. Block the commit
+                # rather than silently skipping.
+                print(
+                    f"aed-pre-commit driver: {key} outside repo: {rp_s}; "
+                    "blocking commit to prevent staging "
+                    "out-of-tree paths",
+                    file=sys.stderr,
+                )
+                return 2
         cp = repo_root / rel
         if not cp.is_file():
-            continue
-        subprocess.run(
-            ["git", "-C", str(repo_root), "add", "--", rel],
-            check=False, timeout=10,
-        )
+            # Round-1064 P2: the finalizer said it regenerated
+            # this artifact but the file is not on disk. A
+            # missing artifact would re-fail at the pre-push
+            # gate; surface it here.
+            print(
+                f"aed-pre-commit driver: {key} missing on disk: {rel}; "
+                "blocking commit so the worker cannot publish "
+                "an incomplete provenance pair",
+                file=sys.stderr,
+            )
+            return 2
+        # Round-1064 P2: a nonzero ``git add`` return code or
+        # any subprocess error means the staging step failed;
+        # block the commit instead of silently proceeding.
+        try:
+            stage = subprocess.run(
+                ["git", "-C", str(repo_root), "add", "--", rel],
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.SubprocessError as e:
+            print(
+                f"aed-pre-commit driver: git add subprocess error "
+                f"for {rel}: {e!r}",
+                file=sys.stderr,
+            )
+            return 2
+        if stage.returncode != 0:
+            print(
+                "aed-pre-commit driver: git add failed for "
+                f"{rel}: rc={stage.returncode} "
+                f"stderr={stage.stderr[:200]!r}",
+                file=sys.stderr,
+            )
+            return 2
         canonical_artifacts.append(rel)
 
     # Report to stdout so the hook log shows what we did.

@@ -64,16 +64,6 @@ if [[ -z "${repo_root}" ]]; then
     exit 1
 fi
 
-# Resolved path to the canonical finalizer. Use python -m so
-# we honour whatever Python the active supervisor is using.
-helper_rc=0
-python3 -m autocoder_supervisor.provenance_maintenance \
-    --help >/dev/null 2>&1 || python3 -c "" # tolerate oddities
-# The canonical entry point is the function itself; we
-# invoke it via a tiny driver to keep this shell hook
-# declarative. The driver lives in the same repo and is
-# source-controlled.
-
 # Use the source-controlled worker-hook driver. It must
 # live inside the source-controlled hooks directory so it
 # is always available alongside this hook.
@@ -94,8 +84,8 @@ if ! python3 "${driver}" \
         --prelaunch-head "${AED_WORKER_PRELAUNCH_HEAD}" \
         --attempt-label "${attempt_label}"; then
     echo "aed-pre-commit: finalize driver failed; aborting commit" >&2
-    echo "  -> run interactively:  python3 -m autocoder_supervisor.provenance_maintenance" >&2
-    echo "                          (no such module call exists; see precommit_finalize.py)" >&2
+    echo "  -> reproduce interactively:" >&2
+    echo "     PYTHONPATH=. python3 ${driver} --repo-root ${repo_root} --prelaunch-head ${AED_WORKER_PRELAUNCH_HEAD}" >&2
     echo "  -> see test_round_push_gate_hooks.py case PRE_COMMIT_FINALIZER_FAILURE" >&2
     exit 1
 fi

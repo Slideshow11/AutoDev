@@ -172,7 +172,9 @@ class TestRuntimeIdentityOwnership:
     acquire_lock() success may publish.
     """
 
-    def test_bare_import_does_not_publish_identity(self, tmp_path):
+    def test_bare_import_does_not_publish_identity(
+        self, tmp_path, monkeypatch,
+    ):
         """Step 1: Bare import of supervisor.py must NOT publish
         acceptance_runtime_identity.json. This is the direct fix
         for the root cause: identity publication must be gated on
@@ -183,22 +185,40 @@ class TestRuntimeIdentityOwnership:
 
         # Set env vars to point the supervisor at the isolated
         # state dir BEFORE import. This is the same setup the
-        # production supervisor uses at boot.
-        os.environ["AED_SUPERVISOR_STATE_DIR"] = str(isolated_state)
-        os.environ["AED_SUPERVISOR_LOG_PATH"] = str(isolated_state / "supervisor.log")
-        os.environ["AED_SUPERVISOR_HEARTBEAT_PATH"] = str(isolated_state / "heartbeat")
-        os.environ["AED_SUPERVISOR_LOCK_PATH"] = str(isolated_state / "lock")
-        os.environ["AED_SUPERVISOR_WORKING_CHECKOUT"] = str(REPO_ROOT)
-        os.environ["AED_AUTHORITATIVE_HEAD"] = ZERO_HEAD
-        os.environ["AED_PR_NUMBER"] = "5"
-        os.environ["AED_REPO_OWNER"] = "Slideshow11"
-        os.environ["AED_REPO_NAME"] = "AutoDev"
+        # production supervisor uses at boot. Round-1064 P2:
+        # use ``monkeypatch.setenv`` so pytest restores the
+        # original process env at teardown; a stale
+        # ``AED_SUPERVISOR_STATE_DIR`` etc. would otherwise
+        # poison later tests that import supervisor code.
+        monkeypatch.setenv(
+            "AED_SUPERVISOR_STATE_DIR", str(isolated_state),
+        )
+        monkeypatch.setenv(
+            "AED_SUPERVISOR_LOG_PATH",
+            str(isolated_state / "supervisor.log"),
+        )
+        monkeypatch.setenv(
+            "AED_SUPERVISOR_HEARTBEAT_PATH",
+            str(isolated_state / "heartbeat"),
+        )
+        monkeypatch.setenv(
+            "AED_SUPERVISOR_LOCK_PATH", str(isolated_state / "lock"),
+        )
+        monkeypatch.setenv(
+            "AED_SUPERVISOR_WORKING_CHECKOUT", str(REPO_ROOT),
+        )
+        monkeypatch.setenv("AED_AUTHORITATIVE_HEAD", ZERO_HEAD)
+        monkeypatch.setenv("AED_PR_NUMBER", "5")
+        monkeypatch.setenv("AED_REPO_OWNER", "Slideshow11")
+        monkeypatch.setenv("AED_REPO_NAME", "AutoDev")
 
         # Add the working copy to sys.path and import. This is what
         # happens in production when systemd starts a competing
         # supervisor — Python imports the module first, then calls
         # main(), which then calls acquire_lock().
-        sys.path.insert(0, str(REPO_ROOT))
+        # Round-1064 P2: use ``monkeypatch.syspath_prepend`` so
+        # pytest restores the original ``sys.path`` at teardown.
+        monkeypatch.syspath_prepend(str(REPO_ROOT))
 
         # Force a fresh import to simulate a brand-new process.
         if "autocoder_supervisor.supervisor" in sys.modules:
@@ -211,10 +231,6 @@ class TestRuntimeIdentityOwnership:
         # Clean up
         del sys.modules["autocoder_supervisor.supervisor"]
         del sys.modules["autocoder_supervisor"]
-        try:
-            sys.path.remove(str(REPO_ROOT))
-        except ValueError:
-            pass
 
         # The bare import MUST NOT have written an identity file.
         identity_path = isolated_state / "acceptance_runtime_identity.json"
@@ -499,6 +515,16 @@ def test_production_copy_receives_fix_after_deployment():
         pytest.skip("Production has no call site; unexpected — investigate")
 
     prod_acquire_lock_idx = src_prod.find("if not acquire_lock():")
+    # Round-1064 P2: ``find`` returns -1 when the marker is
+    # absent. The previous comparison ``prod_idx < -1`` was
+    # always False, so the test silently passed even when the
+    # production copy lost the ``acquire_lock()`` branch
+    # entirely. Fail explicitly instead.
+    if prod_acquire_lock_idx < 0:
+        pytest.fail(
+            "Production copy has no 'if not acquire_lock():' "
+            "branch; ownership gating cannot be verified"
+        )
     if prod_idx < prod_acquire_lock_idx:
         # Production still has the module-level call (pre-deployment).
         pytest.skip(

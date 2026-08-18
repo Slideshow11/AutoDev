@@ -193,34 +193,79 @@ def _setup_controlled_layout(tmp_path: Path, env: Dict[str, str]) -> Tuple[Path,
     return work, remote, manifest_path
 
 
-def _hook_dir_with(variant: str = "full") -> Path:
-    """Return the hooks dir for a given variant. The hooks dir
-    contains the pre-push + pre-commit hooks that Git invokes.
-    Variants are siblings within autocoder_worker_hooks/:
+def _hook_dir_with(variant: str, base: Path) -> Path:
+    """Return the appropriate ``core.hooksPath`` directory for
+    the requested variant. The hooks dir contains the
+    pre-push + pre-commit hooks that Git invokes.
+
+    Variants are siblings within ``autocoder_worker_hooks/``:
       - "full": standard pre-push (scanner + provenance)
       - "prov-only": provenance only; skips the canonical
         committed-state scanner. Used by hermetic tests whose
         fixture does not mirror the production occurrence
-        allowlist shape."""
-    full = WORKER_HOOKS_DIR / "pre-push"
+        allowlist shape.
+
+    Round-1064 P2: take ``base`` (typically the per-test
+    ``tmp_path``) instead of calling ``tempfile.mkdtemp``
+    so the directory is removed automatically when the test
+    session exits. Previously the helper leaked a temp
+    directory on every invocation; cases C, D, E, G, and H
+    each left one behind per run.
+
+    Round-1064 P2: when the symlink fails (e.g. on Windows
+    or sandboxed runners), fall back to copying the entry
+    rather than silently dropping it. An incomplete hook
+    directory would let the ``pre-commit`` or ``pre-push``
+    hooks fail to find ``lib/precommit_finalize.py`` while
+    cases C, D, and E still assert ``rc == 0`` on the
+    resulting push.
+
+    The helper is idempotent: a second call with the same
+    ``base`` reuses the existing directory and only
+    re-creates links that are missing or broken. Case G
+    exercises this when round 1 and round 2 share the same
+    ``tmp_path``.
+    """
     if variant == "full":
         return WORKER_HOOKS_DIR
     if variant == "prov-only":
-        # Use a temp sibling that symlinks everything except
-        # pre-push, which is overridden to the provenance-only
-        # variant.
-        import tempfile
-        d = Path(tempfile.mkdtemp(prefix="prov_only_hooks_"))
+        d = base / "prov_only_hooks"
+        d.mkdir(parents=True, exist_ok=True)
         for f in WORKER_HOOKS_DIR.iterdir():
             if f.name in ("pre-push",):
                 continue
+            target = d / f.name
+            if target.is_symlink() or target.exists():
+                # Already wired up by a prior call (Case G
+                # invokes the helper twice with the same
+                # ``tmp_path``). Skip rather than failing
+                # the second call.
+                continue
             try:
-                (d / f.name).symlink_to(f)
+                target.symlink_to(f)
             except OSError:
-                pass
+                # Fallback: copy the entry so the test
+                # cannot silently run against a half-populated
+                # hook directory. If both symlink and copy
+                # fail, propagate the failure.
+                if f.is_dir():
+                    shutil.copytree(f, d / f.name)
+                else:
+                    shutil.copy2(f, d / f.name)
+                    (d / f.name).chmod(f.stat().st_mode)
         # pre-push: use provenance-only script.
-        (d / "pre-push").symlink_to(WORKER_HOOKS_DIR / "pre-push-provenance-only")
-        (d / "pre-push").chmod(0o755)
+        target = d / "pre-push"
+        if not (target.is_symlink() or target.exists()):
+            try:
+                target.symlink_to(
+                    WORKER_HOOKS_DIR / "pre-push-provenance-only",
+                )
+            except OSError:
+                shutil.copy2(
+                    WORKER_HOOKS_DIR / "pre-push-provenance-only",
+                    d / "pre-push",
+                )
+                (d / "pre-push").chmod(0o755)
         return d
     raise ValueError(variant)
 
@@ -359,14 +404,28 @@ def test_case_b_scanner_failure_blocks_push(tmp_path):
              },
         timeout=60,
     )
-    # We accept either:
-    #   rc==1 + scanner rejected (good — proves the case fires),
-    #   rc==0 + scanner passes (the scanner config evolved; case-
-    #   sensitive flag added/removed). The CASE-A guard above
-    #   proves the pre-push gate itself fires.
-    # Either way the pre-push gate invocation below is the real
-    # assertion. (We do not assert on the scanner rc directly.)
+    # Round-1064 P2: the scanner result is a PRECONDITION for
+    # the rest of this case, not something we decide to skip
+    # AFTER the push. If the scanner already passes this
+    # commit, this case cannot exercise the scanner-failure
+    # path; skip BEFORE pushing so the remote never advances
+    # under an irrelevant push. The previous implementation
+    # pushed first and skipped after, which would advance the
+    # remote branch on every test run where the scanner
+    # config had evolved past the fixture.
+    if scanner_check.returncode == 0:
+        pytest.skip(
+            "canonical_scanner config evolved past the test "
+            "fixture leak token; the scanner half of the "
+            "pre-push gate would pass on this commit so this "
+            "case cannot exercise the scanner-failure path"
+        )
 
+    # We accept either:
+    #   rc==1 + scanner rejected (good — proves the case fires).
+    # The CASE-A guard above proves the pre-push gate itself
+    # fires; this case additionally proves the scanner half
+    # of the gate is wired to the scanner contract.
     push_env = _make_worker_env(
         env, prelaunch=remote_sha_pre, attempt_id="att-caseB",
     )
@@ -376,16 +435,6 @@ def test_case_b_scanner_failure_blocks_push(tmp_path):
 
     rc, _, err = _git(push_env, work, "push", "origin", "main:main",
                       "--no-tags")
-    if scanner_check.returncode == 0:
-        # Scanner config has evolved; the pre-push gate's scanner
-        # check would also pass on this commit. The non-scanner
-        # half of the pre-push gate (provenance, controlled-
-        # destination check) still fires because we did not run
-        # the finalize, so push will still be blocked.
-        # Test passes by the CASE-A mechanic, not by the scanner.
-        pytest.skip(
-            "canonical_scanner config evolved past the test fixture leak token"
-        )
     assert rc != 0, f"push unexpectedly succeeded: rc={rc}; err={err}"
 
     # Remote SHA must not have advanced.
@@ -450,7 +499,7 @@ def test_case_c_valid_controlled_change_push_proceeds(tmp_path):
     )
     push_env["GIT_CONFIG_COUNT"] = "1"
     push_env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-    _prov_dir = _hook_dir_with("prov-only")
+    _prov_dir = _hook_dir_with("prov-only", tmp_path)
     push_env["GIT_CONFIG_VALUE_0"] = str(_prov_dir)
     rc, out, err = _git(push_env, work, "push", "origin", "main:main",
                         "--no-tags")
@@ -491,7 +540,7 @@ def test_case_d_safe_uncontrolled_push_proceeds(tmp_path):
     )
     push_env["GIT_CONFIG_COUNT"] = "1"
     push_env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-    _prov_dir = _hook_dir_with("prov-only")
+    _prov_dir = _hook_dir_with("prov-only", tmp_path)
     push_env["GIT_CONFIG_VALUE_0"] = str(_prov_dir)
     rc, _, err = _git(push_env, work, "push", "origin", "main:main",
                       "--no-tags")
@@ -528,7 +577,7 @@ def test_case_e_noop_worker_does_not_push(tmp_path):
     )
     push_env["GIT_CONFIG_COUNT"] = "1"
     push_env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-    _prov_dir = _hook_dir_with("prov-only")
+    _prov_dir = _hook_dir_with("prov-only", tmp_path)
     push_env["GIT_CONFIG_VALUE_0"] = str(_prov_dir)
     rc, out, err = _git(push_env, work, "push", "origin", "main:main",
                         "--no-tags")
@@ -537,18 +586,34 @@ def test_case_e_noop_worker_does_not_push(tmp_path):
             or "up-to-date" in out or "Everything up-to-date" in err)
 
 
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # CASE F: finalize failure — pushes cannot succeed
-# ---------------------------------------------------------------------------
+# -------------------------------------------------------------------
 def test_case_f_finalizer_failure_blocks_commit_via_driver(tmp_path, monkeypatch):
-    """Simulate a finalizer raise. The pre-commit driver should
-    return rc=2; bash should propagate that as commit failure
-    (we simulate the same end-state via the test calling the
-    driver directly with a controlled-failing input)."""
+    """Simulate a finalizer raise. The pre-commit driver must
+    return rc=2.
+
+    Round-1064 P2: the previous implementation launched
+    ``precommit_finalize.py`` as a subprocess; the child
+    re-imported ``autocoder_supervisor.provenance_maintenance``
+    and bypassed the in-process monkeypatch, so the simulated
+    raise never actually fired. The driver then returned
+    non-zero only because ``tmp_path`` was not a git repo;
+    the test could not actually exercise the finalizer-failure
+    contract. The corrected version invokes the driver's
+    ``main()`` function in-process after the monkeypatch so the
+    patched finalizer is the one that runs.
+
+    The driver short-circuits with rc=1 when ``tmp_path`` is not
+    a git repo, so seed ``tmp_path/.git`` before invoking it.
+    """
     sys.path.insert(0, str(REPO_ROOT))
     from autocoder_supervisor.provenance_maintenance import (
         ProvenanceFinalizeError,
     )
+    # Seed ``.git`` so the driver's first check passes and the
+    # mocked finalizer is actually reached.
+    (tmp_path / ".git").mkdir()
 
     # Monkey-patch run_provenance_finalize_if_needed to raise.
     import autocoder_supervisor.provenance_maintenance as pm
@@ -559,24 +624,19 @@ def test_case_f_finalizer_failure_blocks_commit_via_driver(tmp_path, monkeypatch
         ),
     )
 
-    # Invoke the pre-commit driver. It must return rc=2.
-    r = subprocess.run(
-        [sys.executable,
-         str(WORKER_HOOKS_DIR / "lib" / "precommit_finalize.py"),
-         "--repo-root", str(tmp_path),
-         "--prelaunch-head", "deadbeef" * 5,
-         "--attempt-label", "caseF"],
-        capture_output=True, text=True, timeout=30,
+    # Invoke the driver's ``main()`` in-process so the
+    # monkeypatch above is the one the driver sees. The driver
+    # MUST return rc=2 per the round-697 contract.
+    from autocoder_worker_hooks.lib import precommit_finalize
+    rc = precommit_finalize.main([
+        "--repo-root", str(tmp_path),
+        "--prelaunch-head", "deadbeef" * 5,
+        "--attempt-label", "caseF",
+    ])
+    assert rc == 2, (
+        f"precommit_finalize.main() must return 2 on finalizer "
+        f"failure; got rc={rc}"
     )
-    # Driver must error-out on the simulated raise.
-    # rc==2 is the contract; rc==1 is acceptable if the
-    # driver hit operator-style error first. We accept any
-    # non-zero rc as long as the error message names the
-    # finalizer.
-    assert r.returncode != 0
-    combined = r.stdout + r.stderr
-    assert "simulated finalizer failure" in combined or \
-           "finalizer" in combined.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +673,7 @@ def test_case_g_late_edit_after_finalize_blocks_push(tmp_path):
                                 attempt_id="att-caseG-r1")
     push_env["GIT_CONFIG_COUNT"] = "1"
     push_env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-    _prov_dir1 = _hook_dir_with("prov-only")
+    _prov_dir1 = _hook_dir_with("prov-only", tmp_path)
     push_env["GIT_CONFIG_VALUE_0"] = str(_prov_dir1)
     rc, _, err = _git(push_env, work, "push", "origin", "main:main",
                       "--no-tags")
@@ -636,7 +696,7 @@ def test_case_g_late_edit_after_finalize_blocks_push(tmp_path):
                                  attempt_id="att-caseG-r2")
     push_env2["GIT_CONFIG_COUNT"] = "1"
     push_env2["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-    _prov_dir2 = _hook_dir_with("prov-only")
+    _prov_dir2 = _hook_dir_with("prov-only", tmp_path)
     push_env2["GIT_CONFIG_VALUE_0"] = str(_prov_dir2)
     rc, _, err = _git(push_env2, work, "push", "origin", "main:main",
                       "--no-tags")
@@ -677,7 +737,7 @@ def test_case_h_no_verify_bypasses_local_hook(monkeypatch, tmp_path):
     )
     bypass_env["GIT_CONFIG_COUNT"] = "1"
     bypass_env["GIT_CONFIG_KEY_0"] = "core.hooksPath"
-    _prov_dirh = _hook_dir_with("prov-only")
+    _prov_dirh = _hook_dir_with("prov-only", tmp_path)
     bypass_env["GIT_CONFIG_VALUE_0"] = str(_prov_dirh)
     # NB: --no-verify is a pre-commit flag; for pre-push Git has
     # no analogous flag (the hook is per-branch via --no-verify at

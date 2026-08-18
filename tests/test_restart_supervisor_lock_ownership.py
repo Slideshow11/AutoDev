@@ -95,36 +95,68 @@ def _run_restart_script(sup_dir: Path, env_overrides: dict[str, str]) -> subproc
     src = SCRIPT.read_text()
     home_segment = chr(0x2f) + "home" + chr(0x2f) + "max" + chr(0x2f)
     hardcoded_sup_dir = home_segment + ".hermes" + chr(0x2f) + "aed-supervisor"
+
+    def _sub(text: str, old: str, new: str, count: int) -> str:
+        """Apply a single anchored substitution. Fail closed
+        if the anchor is absent: a missing anchor means the
+        production script no longer matches the expected
+        layout, in which case this test would run against
+        real production paths and silently report false
+        success. Round-1064 P2 explicit guard.
+        """
+        replaced = text.replace(old, new, count)
+        assert replaced != text, (
+            f"sandbox rewrite failed: {old!r} not found in "
+            f"{SCRIPT}; the test would run against production paths"
+        )
+        return replaced
+
     sandbox_src = src
-    sandbox_src = sandbox_src.replace(
+    sandbox_src = _sub(
+        sandbox_src,
         f'SUP_DIR={hardcoded_sup_dir}',
         f'SUP_DIR={sup_dir}',
         1,
     )
-    sandbox_src = sandbox_src.replace(
+    sandbox_src = _sub(
+        sandbox_src,
         'LOCK="$SUP_DIR/lock"',
         f'LOCK="{sup_dir}/lock"',
         1,
     )
-    sandbox_src = sandbox_src.replace(
+    sandbox_src = _sub(
+        sandbox_src,
         'HEARTBEAT="$SUP_DIR/heartbeat"',
         f'HEARTBEAT="{sup_dir}/heartbeat"',
         1,
     )
-    sandbox_src = sandbox_src.replace(
+    sandbox_src = _sub(
+        sandbox_src,
         'cat "$HEARTBEAT"',
         f'cat "{sup_dir}/heartbeat"',
         1,
     )
-    sandbox_src = sandbox_src.replace(
+    sandbox_src = _sub(
+        sandbox_src,
         '"$SUP_DIR/logs/supervisor.out"',
         f'"{sup_dir}/logs/supervisor.out"',
         1,
     )
-    sandbox_src = sandbox_src.replace(
+    sandbox_src = _sub(
+        sandbox_src,
         '"$SUP_DIR/supervisor.py"',
         f'"{sup_dir}/supervisor.py"',
         2,  # appears once in the nohup line; the test stub also uses this name
+    )
+    # Round-1064 P2: assert the hardcoded operator path was
+    # actually removed. A passing substitution can leave a
+    # stray occurrence if the count argument was too small;
+    # this assertion catches that case before the sandbox
+    # script is launched.
+    assert hardcoded_sup_dir not in sandbox_src, (
+        f"sandbox rewrite left hardcoded_sup_dir "
+        f"{hardcoded_sup_dir!r} in script; an anchored "
+        "substitution count was too small"
     )
     sandbox_script = sup_dir / "_sandbox_restart.sh"
     sandbox_script.write_text(sandbox_src)

@@ -95,6 +95,89 @@ def hash_file_sha256(path: Path) -> str:
         return ""
 
 
+def _resolve_pid_in_path(path_str: str, pid: int) -> str:
+    """Replace the ``<PID>`` token in a path template with the
+    actual wrapper PID. The worker-attempt artifact path uses
+    this token so concurrent attempts do not collide.
+    """
+    if "<PID>" in path_str:
+        return path_str.replace("<PID>", str(pid))
+    return path_str
+
+
+def _write_launch_failure_artifact(
+    args: argparse.Namespace,
+    launch_failure: str,
+) -> int:
+    """Write a canonical ``WORKER_EXECUTION_FAILED`` artifact
+    at ``args.result_artifact_path`` and return 127 so the
+    wrapper exits with the conventional launch-failure code.
+
+    Round-1064 P2: extracted from the ``Popen`` failure
+    branch into a module-level helper so other pre-launch
+    validation paths (worker-hooks-path, malformed
+    GIT_CONFIG_COUNT, etc.) can report failures the same
+    way. The supervisor ingests the artifact; a bare
+    ``return 1`` would leave the launch failure unobservable.
+    """
+    _wrapper_pid = os.getpid()
+    _resolved_attempt_id = f"{args.attempt_id}-{_wrapper_pid}"
+    _resolved_claim_id = args.claim_id or _resolved_attempt_id
+    _failure_artifact = {
+        "schema_version": "autocoder.worker_result.v1",
+        "attempt_id": _resolved_attempt_id,
+        "claim_id": _resolved_claim_id,
+        "directive_digest": args.directive_digest,
+        "result_type": "WORKER_EXECUTION_FAILED",
+        "produced_commit_shas": [],
+        "pushed_commit_shas": [],
+        "completed_at": now_iso(),
+        "no_changes_required_proof": None,
+        "tests_run": 0,
+        "tests_passed": 0,
+        "attempt_nonce": args.attempt_id.rsplit("-", 1)[0],
+        "repo": args.repo,
+        "pr_number": args.pr_number,
+        "expected_branch": args.expected_branch,
+        "prelaunch_head": args.prelaunch_head,
+        "worker_pid": _wrapper_pid,
+        "extra": {
+            "launch_failure": launch_failure,
+            "worker_result_envelope_seen": False,
+            "worker_envelope_source": "round167_p2_launch_failure",
+            "envelope_status": "missing",
+            "envelope_match_count": 0,
+            "result_contract_id": args.result_contract_id or "",
+        },
+    }
+    try:
+        target = Path(_resolve_pid_in_path(
+            args.result_artifact_path, _wrapper_pid,
+        ))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(
+            prefix=target.name + ".", suffix=".tmp", dir=str(target.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.write(json.dumps(_failure_artifact, indent=2))
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, target)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError as write_err:
+        print(
+            f"aed_worker_wrapper: failed to write launch-failure artifact: {write_err}",
+            file=sys.stderr,
+        )
+    return 127
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Worker wrapper that captures the result envelope and writes the canonical artifact."
@@ -244,6 +327,33 @@ def main() -> int:
                 flush=True,
             )
             return 1
+        # Round-1064 P2: require an absolute existing hook
+        # directory so Git cannot silently skip the
+        # pre-commit/pre-push gates. A relative path or a
+        # missing directory would let Git run ``git push``
+        # with no hooks at all, which bypasses the
+        # round-697 contract. The wrapper writes a canonical
+        # WORKER_EXECUTION_FAILED artifact on rejection so
+        # the supervisor observes the launch failure instead
+        # of seeing an empty launch.
+        _hooks_path = Path(args.worker_hooks_path)
+        if not _hooks_path.is_absolute() or not _hooks_path.is_dir():
+            print(
+                "aed_worker_wrapper: refusing to install "
+                "worker hooks at a non-absolute or non-existent "
+                f"--worker-hooks-path ({args.worker_hooks_path!r}); "
+                "would silently drop the push gate",
+                file=sys.stderr,
+                flush=True,
+            )
+            return _write_launch_failure_artifact(
+                args,
+                launch_failure=(
+                    f"invalid --worker-hooks-path: "
+                    f"{args.worker_hooks_path!r} is not an "
+                    "absolute existing directory"
+                ),
+            )
         # Note: --attempt-id is already required elsewhere in
         # the wrapper; we trust it for log correlation only.
         child_env["AED_AUTODEV_WORKER"] = "1"
@@ -270,7 +380,8 @@ def main() -> int:
         # errors at every child git invocation.
         existing = []
         try:
-            existing_count = int(child_env.get("GIT_CONFIG_COUNT", "0") or "0")
+            existing_count_raw = child_env.get("GIT_CONFIG_COUNT", "0") or "0"
+            existing_count = int(existing_count_raw)
         except (TypeError, ValueError):
             # Malformed inherited Git config: refuse to launch.
             print(
@@ -282,33 +393,91 @@ def main() -> int:
                 flush=True,
             )
             return 1
+        # Round-1064 P2: a negative GIT_CONFIG_COUNT would be
+        # rewritten by the wrapper as ``GIT_CONFIG_COUNT=0`` plus a
+        # ``GIT_CONFIG_KEY_-1`` entry that Git silently ignores —
+        # so the worker hook would never be installed and the
+        # push gate would be bypassed. Reject negative counts
+        # up front and emit a canonical WORKER_EXECUTION_FAILED
+        # artifact so the supervisor observes the launch failure.
+        if existing_count < 0:
+            print(
+                "aed_worker_wrapper: inherited GIT_CONFIG_COUNT "
+                f"is negative ({existing_count!r}); refusing to "
+                "launch worker to avoid dropping the push gate silently",
+                file=sys.stderr,
+                flush=True,
+            )
+            return _write_launch_failure_artifact(
+                args,
+                launch_failure=(
+                    f"invalid inherited GIT_CONFIG_COUNT: "
+                    f"{existing_count!r} (must be non-negative)"
+                ),
+            )
+        # Round-1064 P2: each inherited index MUST carry both a
+        # key AND a value. A partial entry (e.g. ``GIT_CONFIG_KEY_2``
+        # with no ``GIT_CONFIG_VALUE_2``) would otherwise leave a
+        # gap in the rewritten config; Git treats a declared-but-
+        # missing ``GIT_CONFIG_KEY_<n>`` as a fatal error and the
+        # worker would fail every child git invocation.
         for i in range(0, existing_count):
             k = child_env.get(f"GIT_CONFIG_KEY_{i}")
             if k is None:
                 continue
-            v = child_env.get(f"GIT_CONFIG_VALUE_{i}", "")
+            v = child_env.get(f"GIT_CONFIG_VALUE_{i}")
+            if v is None:
+                # Incomplete inherited pair: drop it AND every
+                # later index (Git would also reject those as a
+                # result of the count-vs-entries mismatch).
+                # Treat this as a malformed launch and emit a
+                # canonical WORKER_EXECUTION_FAILED artifact so
+                # the supervisor observes the failure rather
+                # than a worker that exits immediately.
+                print(
+                    "aed_worker_wrapper: inherited "
+                    f"GIT_CONFIG_VALUE_{i} is missing while "
+                    f"GIT_CONFIG_KEY_{i}={k!r}; refusing to "
+                    "launch worker because the partial config "
+                    "would crash every child git invocation",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return _write_launch_failure_artifact(
+                    args,
+                    launch_failure=(
+                        f"incomplete inherited GIT_CONFIG "
+                        f"pair at index {i}: "
+                        f"GIT_CONFIG_KEY_{i}={k!r} present but "
+                        f"GIT_CONFIG_VALUE_{i} missing"
+                    ),
+                )
             existing.append((k, v))
         # Append the worker hooksPath. The new index is
-        # existing_count (zero-indexed).
+        # ``len(existing)`` (zero-indexed), so the rewritten
+        # config is always contiguous 0..new_count-1.
         new_entry = (
             "core.hooksPath", args.worker_hooks_path,
         )
-        new_count = existing_count + 1
+        new_count = len(existing) + 1
         # Wipe inherited keys then rewrite in deterministic
         # order — keys are 0..N-1.
         for k in ("GIT_CONFIG_COUNT",):
             child_env.pop(k, None)
+        # The upper bound is the maximum of the inherited
+        # count (for cleanup) and the new count (so we wipe
+        # any stale KEY/VALUE pairs the caller may have set).
         for i in range(0, max(existing_count, new_count)):
             child_env.pop(f"GIT_CONFIG_KEY_{i}", None)
             child_env.pop(f"GIT_CONFIG_VALUE_{i}", None)
         # Re-emit in order, then append new entry at index
-        # existing_count.
+        # ``len(existing)``.
         child_env["GIT_CONFIG_COUNT"] = str(new_count)
         for i, (k, v) in enumerate(existing):
             child_env[f"GIT_CONFIG_KEY_{i}"] = k
             child_env[f"GIT_CONFIG_VALUE_{i}"] = v
-        child_env[f"GIT_CONFIG_KEY_{existing_count}"] = new_entry[0]
-        child_env[f"GIT_CONFIG_VALUE_{existing_count}"] = new_entry[1]
+        child_env[f"GIT_CONFIG_KEY_{len(existing)}"] = new_entry[0]
+        child_env[f"GIT_CONFIG_VALUE_{len(existing)}"] = new_entry[1]
 
     # Open stdout log for tee
     stdout_log_path = Path(args.stdout_log_path)
@@ -379,64 +548,9 @@ def main() -> int:
             stdout_log_fh.close()
         except Exception:
             pass
-        _wrapper_pid = os.getpid()
-        _resolved_attempt_id = f"{args.attempt_id}-{_wrapper_pid}"
-        _resolved_claim_id = args.claim_id or _resolved_attempt_id
-        _failure_artifact = {
-            "schema_version": "autocoder.worker_result.v1",
-            "attempt_id": _resolved_attempt_id,
-            "claim_id": _resolved_claim_id,
-            "directive_digest": args.directive_digest,
-            "result_type": "WORKER_EXECUTION_FAILED",
-            "produced_commit_shas": [],
-            "pushed_commit_shas": [],
-            "completed_at": now_iso(),
-            "no_changes_required_proof": None,
-            "tests_run": 0,
-            "tests_passed": 0,
-            "attempt_nonce": args.attempt_id.rsplit("-", 1)[0],
-            "repo": args.repo,
-            "pr_number": args.pr_number,
-            "expected_branch": args.expected_branch,
-            "prelaunch_head": args.prelaunch_head,
-            "worker_pid": _wrapper_pid,
-            "extra": {
-                "launch_failure": str(e),
-                "worker_result_envelope_seen": False,
-                "worker_envelope_source": "round167_p2_launch_failure",
-                "envelope_status": "missing",
-                "envelope_match_count": 0,
-                "result_contract_id": args.result_contract_id or "",
-            },
-        }
-        def _resolve_pid_lf(path_str: str) -> str:
-            if "<PID>" in path_str:
-                return path_str.replace("<PID>", str(_wrapper_pid))
-            return path_str
-        try:
-            target = Path(_resolve_pid_lf(args.result_artifact_path))
-            target.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_path = tempfile.mkstemp(
-                prefix=target.name + ".", suffix=".tmp", dir=str(target.parent)
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as tmp:
-                    tmp.write(json.dumps(_failure_artifact, indent=2))
-                    tmp.flush()
-                    os.fsync(tmp.fileno())
-                os.replace(tmp_path, target)
-            except BaseException:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
-        except OSError as write_err:
-            print(
-                f"aed_worker_wrapper: failed to write launch-failure artifact: {write_err}",
-                file=sys.stderr,
-            )
-        return 127
+        return _write_launch_failure_artifact(
+            args, launch_failure=str(e),
+        )
 
     # Read in a thread (blocking)
     def _reader():

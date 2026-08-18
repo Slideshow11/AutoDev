@@ -76,11 +76,15 @@ def clean_sysmodules():
     saved = dict(sys.modules)
     _mod_attr_snapshots = {}
     for _m in saved.values():
-        if _m is not None and hasattr(_m, "__dict__"):
-            try:
-                _mod_attr_snapshots[id(_m)] = dict(_m.__dict__)
-            except Exception:
-                pass
+        if _m is None or not hasattr(_m, "__dict__"):
+            continue
+        # Round-1064 P2: restrict snapshot capture to valid
+        # module objects and let any unexpected error from
+        # ``dict(_m.__dict__)`` propagate. The previous
+        # ``except Exception: pass`` silenced real failures
+        # such that a missing snapshot could leak mutated
+        # module attributes into later tests.
+        _mod_attr_snapshots[id(_m)] = dict(_m.__dict__)
     try:
         yield
     finally:
@@ -163,9 +167,15 @@ def _load_supervisor_under_standalone_shim() -> types.ModuleType:
     return mod
 
 
-def test_standalone_pkg_detection_helper() -> None:
+def test_standalone_pkg_detection_helper(clean_sysmodules) -> None:
     """The detection helper correctly reports standalone mode
-    after the shim has been installed."""
+    after the shim has been installed.
+
+    Round-1064 P2: the test now uses the ``clean_sysmodules``
+    fixture so any prior ``_aed_supervisor_standalone*``
+    bindings are restored after the test instead of being
+    permanently removed.
+    """
     # Reset.
     for k in list(sys.modules.keys()):
         if k == "_aed_supervisor_standalone" or k.startswith(
@@ -188,7 +198,18 @@ def test_resolve_sibling_under_standalone_package(
     """When the supervisor runs under
     ``_aed_supervisor_standalone``, ``_resolve_production_runtime_binding``
     MUST resolve every ``autocoder_supervisor.*`` acceptance
-    sibling to a real file with a non-empty SHA."""
+    sibling to a real file with a non-empty SHA.
+
+    Round-1064 P2: the supervisor is loaded as a synthetic
+    module via ``_load_supervisor_under_standalone_shim``;
+    that path leaves ``__main__.__file__`` pointing at the
+    pytest launcher (``__main__.py``). The
+    ``executing_module`` resolver branch keys on
+    ``__main__.__file__`` and would otherwise hash the
+    pytest binary instead of the production source. Save
+    and restore ``__main__.__file__`` here so the resolver
+    exercises its production executing_module path.
+    """
     sup_mod = _load_supervisor_under_standalone_shim()
 
     # Sanity: the standalone package is registered.
@@ -197,35 +218,58 @@ def test_resolve_sibling_under_standalone_package(
     # The function lives on the reloaded supervisor module.
     resolver = sup_mod._resolve_production_runtime_binding
 
-    # Each (logical_filename, import_path) pair must resolve
-    # to an existing file with a non-empty SHA under
-    # standalone launch. We use a deliberately small subset
-    # that proves the fix without re-running every binding.
-    bindings = sup_mod._ACCEPTANCE_RUNTIME_BINDINGS
-    for logical_filename, import_path in bindings:
-        rec = resolver(logical_filename, import_path)
-        assert rec["logical_module"] == logical_filename
-        # All 17 bindings MUST be loadable on disk in
-        # standalone launch. Before the fix, every
-        # ``autocoder_supervisor.*`` entry was ``exists=False``.
-        assert rec["actual_production_path"], (
-            f"{logical_filename} ({import_path}) returned empty "
-            f"actual_production_path; binding_method={rec['binding_method']}"
-        )
-        assert rec["actual_production_sha256"], (
-            f"{logical_filename} ({import_path}) returned empty "
-            f"actual_production_sha256; binding_method={rec['binding_method']}"
-        )
-        assert rec["exists"] is True, (
-            f"{logical_filename} ({import_path}) reports exists=False "
-            f"under standalone launch; binding_method={rec['binding_method']}"
-        )
-        # The binding method is one of the supported three.
-        assert rec["binding_method"] in {
-            "loaded_module",
-            "import_spec",
-            "executing_module",
-        }
+    # Round-1064 P2: pin ``__main__.__file__`` to the
+    # synthetic supervisor's source path so the
+    # ``executing_module`` resolver branch returns the
+    # production file, not the pytest launcher. Restore
+    # the original value at teardown so other tests do not
+    # observe the synthetic module's file path.
+    saved_main_file = getattr(sys.modules["__main__"], "__file__", None)
+    try:
+        sys.modules["__main__"].__file__ = str(AUTOCODER_SUPERVISOR_DIR / "supervisor.py")
+
+        # Each (logical_filename, import_path) pair must resolve
+        # to an existing file with a non-empty SHA under
+        # standalone launch. We use a deliberately small subset
+        # that proves the fix without re-running every binding.
+        bindings = sup_mod._ACCEPTANCE_RUNTIME_BINDINGS
+        for logical_filename, import_path in bindings:
+            rec = resolver(logical_filename, import_path)
+            assert rec["logical_module"] == logical_filename
+            # All 17 bindings MUST be loadable on disk in
+            # standalone launch. Before the fix, every
+            # ``autocoder_supervisor.*`` entry was ``exists=False``.
+            # Round-1064 P2: assert the basename matches the
+            # logical filename so an unrelated existing file
+            # cannot satisfy the check.
+            actual_path = Path(rec["actual_production_path"])
+            assert actual_path.name == logical_filename, (
+                f"{logical_filename} ({import_path}) resolved to "
+                f"{actual_path!r}; the basename must equal the "
+                f"logical filename, got {actual_path.name!r}"
+            )
+            assert rec["actual_production_sha256"], (
+                f"{logical_filename} ({import_path}) returned empty "
+                f"actual_production_sha256; binding_method={rec['binding_method']}"
+            )
+            assert rec["exists"] is True, (
+                f"{logical_filename} ({import_path}) reports exists=False "
+                f"under standalone launch; binding_method={rec['binding_method']}"
+            )
+            # The binding method is one of the supported three.
+            assert rec["binding_method"] in {
+                "loaded_module",
+                "import_spec",
+                "executing_module",
+            }
+    finally:
+        if saved_main_file is None:
+            try:
+                delattr(sys.modules["__main__"], "__file__")
+            except AttributeError:
+                pass
+        else:
+            sys.modules["__main__"].__file__ = saved_main_file
 
 
 def test_canonical_package_unchanged(clean_sysmodules) -> None:

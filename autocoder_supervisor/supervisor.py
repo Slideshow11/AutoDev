@@ -10842,12 +10842,22 @@ def _validate_provenance_consistency(
     implementation reads *committed Git object bytes only*
     so it is safe to call against either pre-push or
     post-push SHAs.
+
+    Round-1064 P2: the supervisor's post-push defense in
+    depth historically tolerated synthetic outgoing SHAs
+    (unit tests construct ``a*40`` / ``d*40`` placeholders).
+    We preserve that legacy behavior here by passing
+    ``allow_synthetic_outgoing=True``. The production
+    worker pre-push hook MUST NOT pass ``True``: it is the
+    security boundary and must always fail closed for
+    unknown outgoing SHAs.
     """
     from autocoder_supervisor import push_gate as _pg
     return _pg.validate_provenance_consistency_at_sha(
         prelaunch_head=prelaunch_head,
         outgoing_head=pushed_head,
         repo_root=repo_root,
+        allow_synthetic_outgoing=True,
     )
 
 

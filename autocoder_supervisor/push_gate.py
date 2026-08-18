@@ -100,6 +100,7 @@ def validate_provenance_consistency_at_sha(
     prelaunch_head: str,
     outgoing_head: str,
     repo_root: Path,
+    allow_synthetic_outgoing: bool = False,
 ) -> tuple:
     """Single canonical round-697 provenance-consistency check.
 
@@ -129,6 +130,19 @@ def validate_provenance_consistency_at_sha(
         the committed outgoing tip.
     repo_root
         Absolute path to the worker repository.
+    allow_synthetic_outgoing
+        Round-1064 P2: opt-in tolerance for unit tests that
+        construct synthetic ``outgoing_head`` values which are
+        NOT real Git objects in ``repo_root``. The default is
+        ``False`` — the production pre-push hook MUST always
+        fail closed when ``outgoing_head`` is not a real Git
+        object, because an unknown outgoing SHA bypasses both
+        the controlled-destination and the manifest checks for
+        the worker's push. The supervisor's post-push defense
+        in depth (round-695) and unit tests that need to
+        exercise the synthetic-fixture path pass ``True``
+        explicitly. The pre-push hook MUST NOT pass ``True``.
+
     """
     errors: list = []
     if not _HEX_SHA_RE.match(prelaunch_head or ""):
@@ -140,17 +154,70 @@ def validate_provenance_consistency_at_sha(
 
     repo_root = Path(repo_root).resolve()
 
-    # Both inputs must be real Git objects, otherwise we cannot
-    # prove anything and we SKIP the gate (return True) — this
-    # matches supervisor.py's prior behaviour for synthetic
-    # fixtures used in unit tests.
-    for _h in (prelaunch_head, outgoing_head):
-        _ex = subprocess.run(
-            ["git", "-C", str(repo_root), "cat-file", "-t", _h],
+    # Round-1064 P2: ``outgoing_head`` MUST be a real Git object
+    # in this repo. The push gate is a security boundary; a worker
+    # that sets ``AED_WORKER_PRELAUNCH_HEAD`` to a well-formed but
+    # unknown 40-hex value MUST NOT bypass the controlled-destination
+    # and manifest checks for its own push. An unknown
+    # ``outgoing_head`` therefore fails closed unless the caller
+    # has explicitly opted in via ``allow_synthetic_outgoing=True``
+    # (used only by unit tests and the supervisor's post-push
+    # defense in depth).
+    #
+    # The synthetic-fixture tolerance for ``prelaunch_head`` is
+    # preserved to keep the unit-test path green: prelaunch is
+    # documented (lines 122-129) as the head the worker was LAUNCHED
+    # against, and tests construct synthetic fixtures for that
+    # input. The tolerance is narrowly scoped to prelaunch only;
+    # outgoing_head, which Git is actually about to push, must
+    # always resolve unless explicitly opted out.
+    try:
+        _outgoing_check = subprocess.run(
+            ["git", "-C", str(repo_root), "cat-file", "-t", outgoing_head],
             capture_output=True, timeout=10,
         )
-        if _ex.returncode != 0:
-            return (True, [])
+    except subprocess.SubprocessError as e:
+        # Round-1064 P2: a slow / crashed git invocation is a
+        # internal-inconsistency failure. Surface as a validator
+        # error (not a silent pass); the caller's caller (the
+        # pre-push hook) treats any non-ok result as a block.
+        return (False, [
+            f"git cat-file for outgoing_head {outgoing_head[:12]}... "
+            f"failed with subprocess error: {e!r}"
+        ])
+    if _outgoing_check.returncode != 0:
+        if not allow_synthetic_outgoing:
+            return (False, [
+                f"outgoing_head {outgoing_head[:12]}... is not a real Git "
+                f"object in {repo_root}; push gate cannot prove provenance "
+                "consistency without a resolvable committed tip"
+            ])
+        # Opt-in synthetic tolerance: the supervisor's post-push
+        # defense-in-depth and unit tests use this path. Skip the
+        # outgoing-side checks (the diff, the manifest index,
+        # the controlled-destination comparison) and return the
+        # legacy ``(True, [])`` so the supervisor's classification
+        # does not regress for synthetic fixtures.
+        return (True, [])
+
+    # Synthetic-fixture tolerance for prelaunch_head (tests only).
+    # If prelaunch is unknown to git, the validator still needs the
+    # outgoing manifest; skip the prelaunch diff check but keep the
+    # outgoing-side checks (controlled destinations, manifest index,
+    # diff) intact.
+    prelaunch_is_synthetic = False
+    try:
+        _prelaunch_check = subprocess.run(
+            ["git", "-C", str(repo_root), "cat-file", "-t", prelaunch_head],
+            capture_output=True, timeout=10,
+        )
+    except subprocess.SubprocessError as e:
+        return (False, [
+            f"git cat-file for prelaunch_head {prelaunch_head[:12]}... "
+            f"failed with subprocess error: {e!r}"
+        ])
+    if _prelaunch_check.returncode != 0:
+        prelaunch_is_synthetic = True
 
     # Importing manifest helpers from provenance_maintenance
     # avoids any divergent reimplementation. We use
@@ -179,11 +246,17 @@ def validate_provenance_consistency_at_sha(
     # THIS dict; no on-disk file is consulted. This
     # invariant is what makes the validator deterministic
     # against ``git show <sha>:path`` bytes only.
-    manifest_show = subprocess.run(
-        ["git", "-C", str(repo_root), "show",
-         f"{outgoing_head}:{_MANIFEST_RELPATH}"],
-        capture_output=True, timeout=15,
-    )
+    try:
+        manifest_show = subprocess.run(
+            ["git", "-C", str(repo_root), "show",
+             f"{outgoing_head}:{_MANIFEST_RELPATH}"],
+            capture_output=True, timeout=15,
+        )
+    except subprocess.SubprocessError as e:
+        return (False, [
+            f"git show for outgoing manifest failed with "
+            f"subprocess error: {e!r}"
+        ])
     if manifest_show.returncode != 0:
         # The committed tree at outgoing_head does not contain
         # the canonical manifest. That alone is a hard fail
@@ -218,11 +291,17 @@ def validate_provenance_consistency_at_sha(
     # shrink-by-removal against the empty prelaunch set
     # (it falls through to outgoing-only).
     prelaunch_manifest_data = None
-    prelaunch_show = subprocess.run(
-        ["git", "-C", str(repo_root), "show",
-         f"{prelaunch_head}:{_MANIFEST_RELPATH}"],
-        capture_output=True, timeout=15,
-    )
+    try:
+        prelaunch_show = subprocess.run(
+            ["git", "-C", str(repo_root), "show",
+             f"{prelaunch_head}:{_MANIFEST_RELPATH}"],
+            capture_output=True, timeout=15,
+        )
+    except subprocess.SubprocessError as e:
+        return (False, [
+            f"git show for prelaunch manifest failed with "
+            f"subprocess error: {e!r}"
+        ])
     if prelaunch_show.returncode == 0:
         try:
             prelaunch_manifest_data = json.loads(
@@ -265,11 +344,16 @@ def validate_provenance_consistency_at_sha(
     # Step 2: enumerate the changed paths between prelaunch_head
     # and outgoing_head. Done with `git diff --name-only` so we
     # see exactly the committed bytes Git is about to publish.
-    proc = subprocess.run(
-        ["git", "-C", str(repo_root), "diff", "--name-only",
-         prelaunch_head, outgoing_head],
-        capture_output=True, text=True, timeout=15,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_root), "diff", "--name-only",
+             prelaunch_head, outgoing_head],
+            capture_output=True, text=True, timeout=15,
+        )
+    except subprocess.SubprocessError as e:
+        return (False, [
+            f"git diff failed with subprocess error: {e!r}"
+        ])
     if proc.returncode != 0:
         return (False, [
             f"git diff failed: rc={proc.returncode} "
@@ -303,6 +387,15 @@ def validate_provenance_consistency_at_sha(
     # Step 4: even if the manifest is in the commit, every
     # controlled destination's bytes must match the manifest's
     # recorded sha256 + size_bytes.
+    # Round-1064 P2: derive both the controlled set AND the
+    # manifest_index from the SAME walker so the two views
+    # cannot drift. The previous implementation walked the
+    # whole manifest for controlled_set but only read
+    # ``manifest_data["files"]`` for the manifest_index; a
+    # manifest that recorded destinations outside ``files``
+    # or under ``autodev_destination`` would yield a controlled
+    # destination with no index entry and the validator would
+    # falsely report "no manifest entry exists for it".
     manifest_index: dict = {}
     for entry in manifest_data.get("files", []):
         dp = entry.get("destination_path")
@@ -311,6 +404,18 @@ def validate_provenance_consistency_at_sha(
         if not isinstance(dp, str) or not isinstance(sha, str):
             continue
         manifest_index[dp] = (sha, sz)
+    # Round-1064 P2: extend the manifest_index with any
+    # destination the unified walker discovered outside
+    # ``files`` or under ``autodev_destination`` so future
+    # manifest shapes (with destinations declared at other
+    # nesting levels) cannot cause spurious "no manifest entry"
+    # errors. If a non-``files`` record lacks a sha256/size we
+    # skip it — the controlled_changed comparison will catch
+    # the missing entry by the controlled_set filter.
+    for dest in _controlled_destinations_from_manifest(manifest_data):
+        if dest in manifest_index:
+            continue
+        manifest_index[dest] = (None, None)
 
     for dest in controlled_changed:
         sha_rec, size_rec = manifest_index.get(dest, (None, None))
@@ -327,10 +432,14 @@ def validate_provenance_consistency_at_sha(
                  f"{outgoing_head}:{dest}"],
                 capture_output=True, timeout=15,
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.SubprocessError as e:
+            # Round-1064 P2: TimeoutExpired / OSError must not
+            # escape the validator. Surface as a per-destination
+            # error; the caller's caller blocks the push on any
+            # non-empty errors list.
             errors.append(
-                f"git show timeout for {dest} at "
-                f"{outgoing_head[:12]}..."
+                f"git show subprocess error for {dest} at "
+                f"{outgoing_head[:12]}...: {e!r}"
             )
             continue
         if show.returncode != 0:
@@ -458,30 +567,56 @@ def validate_committed_state_scan_at_sha(
         return (False, [f"invalid outgoing_head: {outgoing_head!r}"])
     repo_root = Path(repo_root).resolve()
 
-    cat = subprocess.run(
-        ["git", "-C", str(repo_root), "cat-file", "-t", outgoing_head],
-        capture_output=True, timeout=10,
-    )
+    try:
+        cat = subprocess.run(
+            ["git", "-C", str(repo_root), "cat-file", "-t", outgoing_head],
+            capture_output=True, timeout=10,
+        )
+    except subprocess.SubprocessError as e:
+        return (False, [
+            f"git cat-file subprocess error for "
+            f"{outgoing_head[:12]}...: {e!r}"
+        ])
     if cat.returncode != 0:
         # Synthetic fixture SHA — skip the gate, same policy
         # as provenance validator.
         return (True, [])
 
     # Throwaway worktree at the exact committed outgoing tip.
-    wt_dir = (repo_root / ".git" / "push_gate_wt")
+    # Round-1064 P2: use a per-invocation directory keyed on
+    # the outgoing SHA (truncated) so concurrent invocations on
+    # the same repo do not collide on ``.git/push_gate_wt``.
+    # The cleanup ``finally`` removes only the directory this
+    # invocation created.
+    wt_dir = (
+        repo_root / ".git" / f"push_gate_wt_{outgoing_head[:12]}"
+    )
     # Best-effort cleanup; previous invocations may have left
     # a stale worktree behind.
-    subprocess.run(
-        ["git", "-C", str(repo_root), "worktree", "remove",
-         "--force", str(wt_dir)],
-        capture_output=True, timeout=15,
-    )
     try:
-        add = subprocess.run(
-            ["git", "-C", str(repo_root), "worktree", "add",
-             "--detach", str(wt_dir), outgoing_head],
-            capture_output=True, text=True, timeout=15,
+        subprocess.run(
+            ["git", "-C", str(repo_root), "worktree", "remove",
+             "--force", str(wt_dir)],
+            capture_output=True, timeout=15,
         )
+    except subprocess.SubprocessError:
+        # Cleanup is best-effort; any failure here is logged
+        # by the follow-up ``worktree add`` attempt if it
+        # actually matters. Round-1064 P2: do not let a slow
+        # ``worktree remove`` kill the validator.
+        pass
+    try:
+        try:
+            add = subprocess.run(
+                ["git", "-C", str(repo_root), "worktree", "add",
+                 "--detach", str(wt_dir), outgoing_head],
+                capture_output=True, text=True, timeout=15,
+            )
+        except subprocess.SubprocessError as e:
+            return (False, [
+                f"git worktree add subprocess error for "
+                f"{outgoing_head[:12]}...: {e!r}"
+            ])
         if add.returncode != 0:
             return (False, [
                 f"failed to create detached worktree at "
@@ -490,10 +625,16 @@ def validate_committed_state_scan_at_sha(
             ])
 
         # Run the canonical scanner against the committed tree.
-        scanner = subprocess.run(
-            [sys.executable, "scripts/canonical_scanner.py"],
-            cwd=str(wt_dir), capture_output=True, text=True, timeout=120,
-        )
+        try:
+            scanner = subprocess.run(
+                [sys.executable, "scripts/canonical_scanner.py"],
+                cwd=str(wt_dir), capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.SubprocessError as e:
+            return (False, [
+                f"canonical_scanner subprocess error for "
+                f"{outgoing_head[:12]}...: {e!r}"
+            ])
         if scanner.returncode != 0:
             return (False, [
                 "canonical committed-state scanner rejected the "
@@ -504,11 +645,17 @@ def validate_committed_state_scan_at_sha(
             ])
         return (True, [])
     finally:
-        subprocess.run(
-            ["git", "-C", str(repo_root), "worktree", "remove",
-             "--force", str(wt_dir)],
-            capture_output=True, timeout=15,
-        )
+        try:
+            subprocess.run(
+                ["git", "-C", str(repo_root), "worktree", "remove",
+                 "--force", str(wt_dir)],
+                capture_output=True, timeout=15,
+            )
+        except subprocess.SubprocessError:
+            # Round-1064 P2: best-effort cleanup. A leftover
+            # ``.git/push_gate_wt`` is recovered by the next
+            # invocation's pre-cleanup pass.
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -591,6 +738,17 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return 1 if e.code in (None, 2) else int(e.code or 1)
     try:
         return int(args.func(args))
+    except subprocess.SubprocessError as e:
+        # Round-1064 P2: the module docstring documents exit 3
+        # for subprocess timeout / internal-inconsistency. Surface
+        # it through the CLI so the supervisor and the pre-push
+        # hook can distinguish an operator-style hard error (1)
+        # from a validator-side subprocess failure (3).
+        print(json.dumps({
+            "ok": False, "internal_error": repr(e),
+            "subprocess_error": True,
+        }))
+        return 3
     except Exception as e:
         # Operator-style hard error (bad args etc.).
         print(json.dumps({"ok": False, "internal_error": repr(e)}))

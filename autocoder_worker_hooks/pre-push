@@ -81,15 +81,25 @@ while read -r local_ref local_sha remote_ref remote_sha ; do
     if [[ "${AED_WORKER_PRELAUNCH_HEAD}" == "${local_sha}" ]]; then
         continue
     fi
-    python3 -m autocoder_supervisor.push_gate validate \
+    # Round-1064 P2: capture the gate output via command
+# substitution instead of writing to a predictable
+# ``/tmp/.aed-prepush-out.$$.txt`` file. The previous
+# implementation allowed another user on a shared ``/tmp``
+# to pre-create the file as a symlink (TOCTOU) and it
+# leaked the temp file when ``python3`` was killed because
+# ``rm -f`` only ran on the normal path. Command
+# substitution has neither problem. Capture ``$?``
+# immediately after the substitution so the gate's true
+# exit code is preserved (the earlier ``if !`` form
+# lost the code because ``$?`` after the test reflects
+# the inverted test result, not the original exit code).
+    gate_out="$(python3 -m autocoder_supervisor.push_gate validate \
             --repo-root "${repo_root}" \
             --prelaunch "${AED_WORKER_PRELAUNCH_HEAD}" \
             --outgoing "${local_sha}" \
             --check scanner \
-            --check provenance > /tmp/.aed-prepush-out.$$.txt 2>&1
+            --check provenance 2>&1)"
     gate_rc=$?
-    gate_out="$(cat /tmp/.aed-prepush-out.$$.txt)"
-    rm -f /tmp/.aed-prepush-out.$$.txt
     case "${gate_rc}" in
         0) ;;
         2)
@@ -97,7 +107,7 @@ while read -r local_ref local_sha remote_ref remote_sha ; do
             echo "--- structured payload ---" >&2
             echo "${gate_out}" >&2
             echo "--- fix and retry ---" >&2
-            echo "  - run interactively: PYTHONPATH=. python3 -m autocoder_supervisor.push_gate validate --repo-root . --prelaunch ${AED_WORKER_PRELAUNCH_HEAD} --outgoing ${local_sha}" >&2
+            echo "  - run interactively: PYTHONPATH=. python3 -m autocoder_supervisor.push_gate validate --repo-root . --prelaunch ${AED_WORKER_PRELAUNCH_HEAD} --outgoing ${local_sha} --check scanner --check provenance" >&2
             echo "  - if scanner failure: see scripts/canonical_scanner.py" >&2
             echo "  - if provenance failure: see tests/test_round_push_gate_hooks.py case PRE_COMMIT_FINALIZER_FAILURE" >&2
             exit_code=1

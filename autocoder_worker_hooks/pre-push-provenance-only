@@ -2,7 +2,23 @@
 # Round-697 source-controlled pre-push gate for AED worker
 # sessions ONLY.
 #
-# AUTHORITATIVE local network-push boundary.
+# Provenance-only variant of the worker pre-push gate. This
+# hook passes only --check provenance to the canonical
+# push_gate validator; it does NOT run the canonical
+# committed-state scanner. Use this hook when the worker
+# session needs to push from a hermetic test fixture whose
+# tree shape does not match the production occurrence
+# allowlist (so the scanner would spuriously reject the
+# commit) but the controlled-destination + manifest
+# invariants are still verifiable.
+#
+# The sibling ``pre-push`` hook is the AUTHORITATIVE
+# network-push boundary that runs BOTH the scanner and the
+# provenance check; install THIS variant only when the
+# scanner cannot be run (e.g.. hermetic test fixtures) and
+# the operator is willing to accept the reduced gate
+# surface. The post-merge supervisor round-695 validator
+# remains as defense in depth.
 #
 # Git invokes pre-push with:
 #   $1 = remote name (typically "origin")
@@ -14,7 +30,7 @@
 #   1. canonical provenance consistency (same validator as the
 #      supervisor's round-697 post-push defense in depth)
 #
-# Both validators operate on COMMITTED bytes only; the hook
+# The validator operates on COMMITTED bytes only; the hook
 # does NOT validate the mutable working tree, staged set, or
 # index. This is the key invariant — we evaluate the bytes
 # Git has committed for the outgoing tip.
@@ -80,14 +96,18 @@ while read -r local_ref local_sha remote_ref remote_sha ; do
     if [[ "${AED_WORKER_PRELAUNCH_HEAD}" == "${local_sha}" ]]; then
         continue
     fi
-    python3 -m autocoder_supervisor.push_gate validate \
+    # Round-1064 P2: capture the gate output via command
+# substitution instead of writing to a predictable
+# ``/tmp/.aed-prepush-out.$$.txt`` file. Same TOCTOU +
+# cleanup-leak reasoning as the sibling ``pre-push`` hook.
+# Capture ``$?`` immediately after the substitution so the
+# gate's true exit code is preserved.
+    gate_out="$(python3 -m autocoder_supervisor.push_gate validate \
             --repo-root "${repo_root}" \
             --prelaunch "${AED_WORKER_PRELAUNCH_HEAD}" \
             --outgoing "${local_sha}" \
-            --check provenance > /tmp/.aed-prepush-out.$$.txt 2>&1
+            --check provenance 2>&1)"
     gate_rc=$?
-    gate_out="$(cat /tmp/.aed-prepush-out.$$.txt)"
-    rm -f /tmp/.aed-prepush-out.$$.txt
     case "${gate_rc}" in
         0) ;;
         2)
@@ -95,9 +115,14 @@ while read -r local_ref local_sha remote_ref remote_sha ; do
             echo "--- structured payload ---" >&2
             echo "${gate_out}" >&2
             echo "--- fix and retry ---" >&2
-            echo "  - run interactively: PYTHONPATH=. python3 -m autocoder_supervisor.push_gate validate --repo-root . --prelaunch ${AED_WORKER_PRELAUNCH_HEAD} --outgoing ${local_sha}" >&2
-            echo "  - if scanner failure: see scripts/canonical_scanner.py" >&2
-            echo "  - if provenance failure: see tests/test_round_push_gate_hooks.py case PRE_COMMIT_FINALIZER_FAILURE" >&2
+            # Round-1064 P2: this hook runs the provenance check
+            # ONLY, so reproduce the failing command with the
+            # matching flag and point the operator at the
+            # provenance test path. The scanner-failure message
+            # is intentionally omitted because this hook does
+            # not run the scanner.
+            echo "  - run interactively: PYTHONPATH=. python3 -m autocoder_supervisor.push_gate validate --repo-root . --prelaunch ${AED_WORKER_PRELAUNCH_HEAD} --outgoing ${local_sha} --check provenance" >&2
+            echo "  - provenance failure: see tests/test_round_push_gate_hooks.py case PRE_COMMIT_FINALIZER_FAILURE" >&2
             exit_code=1
             ;;
         *)
