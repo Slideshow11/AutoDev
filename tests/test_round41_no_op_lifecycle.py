@@ -478,6 +478,9 @@ def test_controller_report_no_changes_required_advances_state(
         state_root, current_state=STATE_REPAIRING_REVIEW_FINDINGS,
     )
 
+    # Round-1064 P2: ALREADY_SATISFIED is a terminal-with-proof
+    # disposition and MUST carry a concrete ``evidence`` string
+    # (parallel to SUPERSEDED / REPAIRED / INVALID / INCONCLUSIVE).
     new_sm = ctrl.report_no_changes_required(
         head_observed="b" * 40,
         proof={
@@ -485,6 +488,13 @@ def test_controller_report_no_changes_required_advances_state(
                 {
                     "disposition": FindingDisposition.ALREADY_SATISFIED,
                     "finding_id": "thread:X",
+                    "evidence": (
+                        "round-41 fixture: inspected current exact-head "
+                        "code at thread:X's bound path; the required "
+                        "behaviour is already implemented by the prior "
+                        "commit on this branch, so the finding is moot "
+                        "in current state"
+                    ),
                 }
             ],
         },

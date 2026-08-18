@@ -1301,6 +1301,19 @@ def test_round664_p1_terminal_disposition_with_evidence_passes(tmp_path: Path) -
                     {
                         "finding_id": "thread:A",
                         "disposition": "ALREADY_SATISFIED",
+                        # Round-1064 P2: ALREADY_SATISFIED is a
+                        # terminal-with-proof disposition and MUST
+                        # carry a concrete ``evidence`` string,
+                        # parallel to SUPERSEDED / REPAIRED /
+                        # INVALID / INCONCLUSIVE.
+                        "evidence": (
+                            "round-664 fixture: inspected current "
+                            "exact-head code at thread:A's bound "
+                            "path; the required behaviour is already "
+                            "implemented by a prior commit on this "
+                            "branch, so the finding is moot in "
+                            "current state"
+                        ),
                     },
                     {
                         "finding_id": "thread:B",
