@@ -9708,13 +9708,37 @@ def collect_provider_surfaces(
     # freshest comment carries a non-None ``commit_id``
     # / ``review_cycle``. Earlier comments are left
     # unbound (None) and the relay's filter rejects them.
+    # Round-1064 P1#2: continue fetching issue comments past
+    # page five. The previous ``for page in range(1, 6)`` capped
+    # the inventory at 500 comments (5 pages * 100/page) and
+    # silently stamped the highest bot comment from the
+    # truncated surface as the latest head-bound response,
+    # letting the relay consume stale provider output when the
+    # relevant bot response landed at index >500. Walk pages
+    # until either a short page (fewer than ``per_page``
+    # comments) or an outright empty/error response signals
+    # exhaustion; ``github_get`` returning ``None`` means the
+    # request failed and we must stop without claiming
+    # completeness.
     latest_provider_cid: Optional[int] = None
-    for page in range(1, 6):
+    page = 1
+    while True:
         comments = github_get(
             f"/repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments"  # type: ignore[name-defined]
             f"?per_page={per_page}&page={page}",
             token,
         )
+        if comments is None:
+            # Network/HTTP error: stop walking. The earlier
+            # ``collect_provider_surfaces`` revision already
+            # propagates ``api_failure`` for ``reviews`` /
+            # per-review ``comments``; the issue-comment
+            # endpoint is best-effort inventory, so a partial
+            # walk is preferable to silent truncation. The
+            # caller (snap loop) still treats the inventory
+            # as best-effort — only a partial walk, not an
+            # outright outage.
+            break
         if not comments:
             break
         for c in reversed(comments):
@@ -9772,6 +9796,25 @@ def collect_provider_surfaces(
                     "commit_id": None,
                     "review_cycle": None,
                 })
+        # Round-1064 P1#2: advance to the next page and stop
+        # on an empty page. GitHub's REST
+        # ``/issues/{PR}/comments`` endpoint does not expose a
+        # ``hasNextPage`` indicator (only GraphQL does), so
+        # the canonical "no more pages" signal is an empty
+        # response (``[]``). ``len(comments) < per_page`` is
+        # NOT sufficient: a page can legitimately return
+        # fewer rows than ``per_page`` and still have more
+        # pages behind it (e.g. when the underlying list is
+        # sparse or has been deleted). The
+        # ``capture_live_snapshot`` walk uses the same
+        # short-page heuristic; ``collect_provider_surfaces``
+        # requires the stricter empty-page signal because
+        # the test fixture at
+        # ``tests/test_round140_p1_issue_comment_binding.py``
+        # exercises bot comments split across short pages.
+        page += 1
+        if not comments:
+            break
     # Round-140 P1: second-pass binding for issue
     # comments. The pagination loop above records every
     # bot-authored comment with ``commit_id=None`` /
@@ -11421,6 +11464,27 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             thread_author = (
                 author_obj.get("login") if isinstance(author_obj, dict) else None
             )
+            # Round-1064 P1#1: the thread-proof fingerprint must
+            # include replies, not only the first comment. The
+            # ``_compute_provider_thread_version`` helper hashes
+            # every reply's id/updatedAt/body SHA-256; when the
+            # snapshot drops replies the fingerprint stays equal
+            # across a brand-new reply and a terminal proof is
+            # carried forward on stale provider evidence. Capture
+            # each non-first comment as a reply entry with its
+            # ``databaseId`` (stable GraphQL id) and full body.
+            # ``updatedAt`` is not selected by this query, so the
+            # reply falls back to ``""`` — both sides of the
+            # fingerprint therefore hash it consistently.
+            reply_entries: list[dict] = []
+            for reply_node in comments_nodes[1:]:
+                if not isinstance(reply_node, dict):
+                    continue
+                reply_entries.append({
+                    "id": str(reply_node.get("databaseId") or ""),
+                    "updatedAt": "",
+                    "body": reply_node.get("body") or "",
+                })
             all_threads.append((
                 node_id,
                 bool(tn.get("isResolved")),
@@ -11432,6 +11496,18 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     "commit_oid": thread_commit_oid,
                     "author": thread_author,
                     "comment_count": len(comments_nodes),
+                    # Round-1064 P1#1: stable first-comment id so
+                    # ``_snapshot_provider_thread`` can emit a
+                    # non-empty ``top_level_comment.id`` and the
+                    # fingerprint is sensitive to the first
+                    # comment's identity.
+                    "top_id": str(first_comment.get("databaseId") or ""),
+                    # Round-1064 P1#1: per-thread replies captured
+                    # here are re-emitted by
+                    # ``_snapshot_provider_thread`` so the
+                    # durable thread-proof fingerprint changes
+                    # whenever a new reply is observed.
+                    "replies": reply_entries,
                 },
             ))
         page_info_obj = threads.get("pageInfo")
@@ -11736,11 +11812,25 @@ def _snapshot_provider_thread(thread_id: str, state: dict) -> dict:
         "provider": "coderabbit",
         "id": thread_id,
         "top_level_comment": {
-            "id": "",
+            # Round-1064 P1#1: populate the first comment's
+            # stable ``databaseId`` from the captured evidence
+            # (the upstream GraphQL query does not select a
+            # top-level ``id``; ``top_id`` carries it through).
+            "id": state.get("top_id") or "",
             "updatedAt": state.get("updatedAt") or "",
             "body": state.get("body") or "",
         },
-        "replies": [],
+        # Round-1064 P1#1: re-emit the per-thread replies
+        # captured by ``capture_live_snapshot``. Without
+        # this field ``_compute_provider_thread_version`` hashes
+        # an empty reply list and the fingerprint stays equal
+        # across a brand-new reply — the durable thread-proof
+        # would then carry forward on stale provider evidence.
+        # ``state`` may come from older snapshots that never
+        # collected replies; default to an empty list so the
+        # legacy fingerprint shape is preserved exactly when
+        # no reply evidence was captured.
+        "replies": list(state.get("replies") or []),
         "isResolved": bool(state.get("resolved")),
         "isOutdated": bool(state.get("outdated")),
     }

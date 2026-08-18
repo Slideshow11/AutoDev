@@ -1723,8 +1723,14 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
             ctx.required_ci_jobs or ()
         )
     else:
+        # Round-1064 P2: trim explicit names before use. The
+        # raw ``--required-check-names "ci-A, ci-B"`` value
+        # arrived with embedded whitespace, so without the
+        # ``strip()`` the second name became ``" ci-B"`` and
+        # the relay treated the actual ``ci-B`` check as
+        # missing — launching unnecessary repair rounds.
         cli_required_check_names = tuple(
-            name for name in raw_required.split(",") if name
+            name.strip() for name in raw_required.split(",") if name.strip()
         )
     required_check_names = cli_required_check_names
     max_rounds = int(args.max_rounds) if args.max_rounds else DEFAULT_MAX_ROUNDS

@@ -21,6 +21,7 @@ canonical manifests live in the source-controlled checkout.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -210,11 +211,15 @@ def _atomic_write_json(path: Path, data) -> None:
         # this, a crash between os.replace() and the parent
         # fsync can leave the caller with a successful
         # in-memory rename that the on-disk directory does
-        # not yet reflect. We swallow OSError/AttributeError
-        # because some filesystems (FUSE, Windows) do not
-        # support directory fsync; in those cases the
-        # file-data durability properties A-C still hold and
-        # the worker can retry on next round.
+        # not yet reflect. Tolerate the documented "not
+        # supported" failures (some filesystems / FUSE /
+        # Windows do not implement directory fsync) but
+        # PROPAGATE every other OSError so a real I/O,
+        # permission, or storage error is not silently
+        # swallowed — round-681 already established this
+        # fail-closed contract for the drift ledger itself,
+        # and the round-1064 review reaffirmed it for the
+        # parent-directory fsync step.
         try:
             dir_fd = os.open(str(path.parent), os.O_RDONLY)
         except (OSError, AttributeError):
@@ -222,7 +227,26 @@ def _atomic_write_json(path: Path, data) -> None:
         if dir_fd >= 0:
             try:
                 os.fsync(dir_fd)
-            except (OSError, AttributeError):
+            except OSError as exc:
+                # ENOTSUP / EOPNOTSUPP / EINVAL mean the
+                # filesystem does not support directory
+                # fsync; the file-data durability properties
+                # still hold and the worker can retry on the
+                # next round. Every other OSError is a real
+                # I/O / permission / storage failure that
+                # must be surfaced so the caller knows the
+                # ledger update is NOT durable.
+                if exc.errno not in (
+                    getattr(errno, "ENOTSUP", 0),
+                    getattr(errno, "EOPNOTSUPP", 0),
+                    getattr(errno, "EINVAL", 0),
+                ):
+                    raise
+            except AttributeError:
+                # ``os.fsync`` is unavailable (e.g. weird
+                # embedded platform) — same semantics as
+                # ENOTSUP: not supported, but not a real
+                # failure.
                 pass
             finally:
                 try:
@@ -628,7 +652,26 @@ def manifest_controlled_paths(
 # test_round591_engineering_bootstrap remain valid.
 def __getattr__(name: str):  # pragma: no cover - import hook
     if name == "MANIFEST_CONTROLLED_PATHS":
-        return manifest_controlled_paths()
+        # Round-1064 P2: ``manifest_controlled_paths`` may
+        # raise ``ManifestEnumerationError`` (or any other
+        # non-``AttributeError``) when the manifest is
+        # missing, unreadable, malformed, or empty. Python
+        # treats module attribute access as a lookup, and
+        # ``hasattr(pm, "MANIFEST_CONTROLLED_PATHS")``
+        # suppresses ``AttributeError`` only — every other
+        # exception leaks out of the import hook. Convert
+        # non-``AttributeError`` failures back to
+        # ``AttributeError`` so ``hasattr`` semantics stay
+        # correct and the failure is no longer confused
+        # with a real attribute miss.
+        try:
+            return manifest_controlled_paths()
+        except AttributeError:
+            raise
+        except Exception as exc:
+            raise AttributeError(
+                f"manifest_controlled_paths() failed: {exc}"
+            ) from exc
     raise AttributeError(name)
 
 

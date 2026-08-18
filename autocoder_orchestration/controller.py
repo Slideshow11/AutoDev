@@ -234,11 +234,25 @@ class Controller:
             FindingDisposition.INCOMPLETE_EVIDENCE,
             FindingDisposition.REAL_REPAIR_REQUIRED,
         )
+        # Round-1064 P2: ``ALREADY_SATISFIED`` is a
+        # terminal-with-proof disposition (the worker has
+        # concrete evidence that the defect is moot in
+        # current state). It MUST be in the
+        # terminal-with-required-proof set so a worker
+        # that returns ``ALREADY_SATISFIED`` without an
+        # ``evidence`` field is rejected, exactly like
+        # ``SUPERSEDED`` / ``REPAIRED`` / ``INVALID`` /
+        # ``INCONCLUSIVE``. Without this entry the
+        # classifier silently falls through to the
+        # permissive branch and accepts a proof-less
+        # ``ALREADY_SATISFIED`` as a no-op, which is a
+        # round-591 contract violation.
         terminal_with_required_proof = (
             FindingDisposition.SUPERSEDED,
             FindingDisposition.REPAIRED,
             FindingDisposition.INVALID,
             FindingDisposition.INCONCLUSIVE,
+            FindingDisposition.ALREADY_SATISFIED,
         )
         for idx, entry in enumerate(findings_proof):
             if not isinstance(entry, dict):

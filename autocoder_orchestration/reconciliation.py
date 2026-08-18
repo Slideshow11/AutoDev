@@ -87,6 +87,23 @@ class Finding:
             raise ValueError("head_sha must be 40 or 64 lowercase hex chars")
 
     def is_resolvable(self) -> bool:
+        # Round-1064 P2: both ``is_resolvable`` and the
+        # controller's two-tuples enumerate a subset of the
+        # enum and treat the remainder by default. A new
+        # member that neither list names silently takes the
+        # permissive branch. Enumerate the disposition space
+        # explicitly so the function is exhaustive on the
+        # current enum (any new member requires an explicit
+        # decision here). ``REAL_REPAIR_REQUIRED`` and
+        # ``STILL_ACTIONABLE`` are non-terminal work that
+        # must remain executable for a later attempt; they
+        # are NOT resolvable here. ``ALREADY_SATISFIED`` is
+        # terminal with proof and is settled elsewhere (the
+        # controller validates it through its own
+        # ``terminal_with_required_proof`` set), so the
+        # Finding/ThreadResolution flow treats it as
+        # non-resolvable. ``INCOMPLETE_EVIDENCE`` is
+        # non-terminal and must be re-observed.
         return self.disposition in (
             FindingDisposition.REPAIRED,
             FindingDisposition.SUPERSEDED,
