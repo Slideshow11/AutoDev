@@ -745,6 +745,490 @@ def test_k_clean_status_with_unresolved_thread_blocks_readiness():
     )
 
 
+def _terminal_thread_snap(thread_id="PRRT_FINISH_LINE", head=AUTH,
+                          body="review finding"):
+    snap = _clean_snap(head)
+    snap["review_threads"] = {thread_id: {
+        "resolved": False,
+        "outdated": False,
+        "path": "",
+        "line": None,
+        "body": body,
+        "updatedAt": "2026-08-17T20:00:00Z",
+    }}
+    return snap
+
+
+def _record_terminal_thread_proof(snap, disposition):
+    thread_id, state = next(iter(snap["review_threads"].items()))
+    assert supervisor._record_thread_proof(
+        thread_id=thread_id,
+        provider="coderabbit",
+        disposition=disposition,
+        proof_head=snap["head_sha"],
+        source_path=state.get("path") or "",
+        line=state.get("line"),
+        provider_thread=supervisor._snapshot_provider_thread(
+            thread_id, state,
+        ),
+        worker_attempt_id="att-finish-line",
+        directive_digest="directive-finish-line",
+        evaluated_head=snap["head_sha"],
+    )
+
+
+@pytest.mark.parametrize("disposition", [
+    supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    supervisor.THREAD_DISPOSITION_SUPERSEDED,
+])
+def test_finish_line_terminal_thread_proof_allows_readiness_after_restart(
+    isolated_state, monkeypatch, disposition,
+):
+    """Durable exact-head terminality, not the raw UI bit, is canonical."""
+    monkeypatch.setenv("HOME", str(isolated_state))
+    snap = _terminal_thread_snap()
+    _record_terminal_thread_proof(snap, disposition)
+
+    # Reading the append-only proof again models an ordinary process restart.
+    result = supervisor.evaluate_readiness(snap, AUTH)
+
+    assert result["ready"] is True
+    assert supervisor.threads_block_readiness(snap, AUTH) == []
+
+
+def test_finish_line_outdated_thread_does_not_block(isolated_state):
+    snap = _terminal_thread_snap()
+    snap["review_threads"]["PRRT_FINISH_LINE"]["outdated"] = True
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+
+
+def test_finish_line_incomplete_identity_and_current_p1_fail_closed(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    incomplete = _terminal_thread_snap(thread_id="")
+    result = supervisor.evaluate_readiness(incomplete, AUTH)
+    assert result["ready"] is False
+    assert result["blockers"][0]["thread_work_reason"] == "incomplete_identity"
+
+    current_p1 = _terminal_thread_snap(body="P1: current defect remains")
+    result = supervisor.evaluate_readiness(current_p1, AUTH)
+    assert result["ready"] is False
+    assert result["reason"] == "unresolved_threads"
+
+
+def test_finish_line_head_advance_revalidates_and_changed_finding_blocks(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    snap_a = _terminal_thread_snap()
+    _record_terminal_thread_proof(snap_a,
+        supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED)
+    head_b = "b" * 40
+    monkeypatch.setattr(supervisor, "_is_ancestor", lambda _a, _b: True)
+
+    unchanged_b = _terminal_thread_snap(head=head_b)
+    assert supervisor.evaluate_readiness(unchanged_b, head_b)["ready"] is True
+
+    changed_b = _terminal_thread_snap(
+        head=head_b, body="P1: new current-head evidence",
+    )
+    result = supervisor.evaluate_readiness(changed_b, head_b)
+    assert result["ready"] is False
+    assert result["blockers"][0]["thread_work_reason"] == (
+        supervisor.INVALIDATION_REASON_PROVIDER_THREAD_CHANGED
+    )
+
+    # A new worker terminalization at B is a distinct durable generation;
+    # it must not be deduplicated against A's otherwise-identical disposition.
+    _record_terminal_thread_proof(
+        changed_b, supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    assert supervisor.evaluate_readiness(changed_b, head_b)["ready"] is True
+
+
+def test_finish_line_resolution_pending_is_remote_sync_not_source_work(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    monkeypatch.setenv("AED_OPERATOR_THREAD_RESOLUTION_DISABLED", "1")
+    snap = _terminal_thread_snap()
+    _record_terminal_thread_proof(snap,
+        supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED)
+
+    with patch("subprocess.run") as run:
+        status = supervisor._try_resolve_github_thread(
+            thread_id="PRRT_FINISH_LINE",
+            provider="coderabbit",
+            disposition=supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED,
+            worker_attempt_id="att-finish-line",
+        )
+    assert status == "pending"
+    run.assert_not_called()  # governance deferral cannot flood GitHub
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+    rows = [json.loads(line) for line in
+            supervisor._thread_dispositions_ledger_path().read_text().splitlines()]
+    assert rows[-1]["disposition"] == "RESOLUTION_PENDING"
+
+
+def test_finish_line_qualification_stops_at_human_merge_boundary(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    snap = _terminal_thread_snap()
+    _record_terminal_thread_proof(snap,
+        supervisor.THREAD_DISPOSITION_SUPERSEDED)
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+    supervisor.enter_readiness(
+        supervisor.STATE_AWAITING_MERGE_AUTHORIZATION, head_sha=AUTH,
+    )
+    state = supervisor.read_readiness_state()
+    assert state["state"] == supervisor.STATE_AWAITING_MERGE_AUTHORIZATION
+    assert supervisor.POLICY["human_boundary"] == "merge_only"
+
+
+def _read_thread_proofs():
+    path = supervisor._thread_proof_audit_path()
+    return [
+        json.loads(line) for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+
+
+def test_finish_line_production_no_changes_path_persists_canonical_proof(
+    isolated_state, monkeypatch,
+):
+    """Exercise the natural worker-result terminalization path end to end."""
+    monkeypatch.setenv("HOME", str(isolated_state))
+    monkeypatch.setenv("AED_OPERATOR_THREAD_RESOLUTION_DISABLED", "1")
+    source_blob = "1" * 40
+    monkeypatch.setattr(
+        supervisor, "_git_show_blob",
+        lambda head, path: source_blob if head == AUTH and path == "src/app.py" else None,
+    )
+    snap = _terminal_thread_snap()
+    state = snap["review_threads"]["PRRT_FINISH_LINE"]
+    state.update({"path": "src/app.py", "line": 17})
+    event_id = "unresolved_thread_drain:PRRT_FINISH_LINE"
+    supervisor.write_unconsumed_event({
+        "id": event_id,
+        "kind": "unresolved_thread_drain",
+        "thread_id": "PRRT_FINISH_LINE",
+        "head_sha": AUTH,
+        **state,
+    })
+    natural_result = {"findings": [{
+        "finding_id": "thread:PRRT_FINISH_LINE",
+        "disposition": "ALREADY_SATISFIED",
+        "evidence": "the current source already satisfies the finding",
+    }]}
+    rows = list(supervisor.extract_per_finding_thread_dispositions(
+        natural_result,
+        evaluated_head=AUTH,
+        directive_digest="directive-natural-noop",
+        worker_attempt_id="att-natural-noop",
+    ))
+    assert len(rows) == 1
+    outcome = supervisor.consume_thread_drain_event_in_terminal_disposition(
+        event_id=event_id,
+        thread_id=rows[0]["thread_id"],
+        provider="coderabbit",
+        evaluated_head=rows[0]["evaluated_head"],
+        disposition_raw=rows[0]["disposition_raw"],
+        evidence=rows[0]["evidence"],
+        worker_attempt_id=rows[0]["worker_attempt_id"],
+        directive_digest=rows[0]["directive_digest"],
+        result_identity={
+            "repo": "owner/repo", "pr_number": 4,
+            "thread_id": "PRRT_FINISH_LINE", "current_live_head": AUTH,
+        },
+        # This intentionally matches the sparse normal caller shape.  The
+        # canonical source/provider evidence must come from the durable event.
+        thread_record={"thread_id": "PRRT_FINISH_LINE", "commit_oid": AUTH},
+        extra_identity=rows[0]["extra"],
+    )
+    assert outcome["terminalized"] is True
+
+    # Re-open the append-only file, rather than retaining the producer object,
+    # to model readiness after an ordinary supervisor restart.
+    proof = [
+        row for row in _read_thread_proofs()
+        if row.get("kind") == "THREAD_PROOF_RECORDED"
+    ][-1]
+    assert proof["thread_id"] == "PRRT_FINISH_LINE"
+    assert proof["proof_head"] == proof["evaluated_head"] == AUTH
+    assert proof["provider_thread_version"] == (
+        supervisor._compute_provider_thread_version(
+            supervisor._snapshot_provider_thread("PRRT_FINISH_LINE", state)
+        )
+    )
+    assert proof["source_path"] == "src/app.py"
+    assert proof["source_blob_sha"] == source_blob
+    assert proof["disposition"] == "ALREADY_SATISFIED"
+    assert proof["generation_id"]
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+
+
+def test_finish_line_source_change_blocks_with_provider_unchanged(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    snap_a = _terminal_thread_snap()
+    snap_a["review_threads"]["PRRT_FINISH_LINE"]["path"] = "src/app.py"
+    blobs = {AUTH: "a" * 40, "b" * 40: "c" * 40}
+    monkeypatch.setattr(
+        supervisor, "_git_show_blob", lambda head, path: blobs.get(head),
+    )
+    _record_terminal_thread_proof(
+        snap_a, supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    head_b = "b" * 40
+    monkeypatch.setattr(supervisor, "_is_ancestor", lambda _a, _b: True)
+    snap_b = _terminal_thread_snap(head=head_b)
+    snap_b["review_threads"]["PRRT_FINISH_LINE"]["path"] = "src/app.py"
+    result = supervisor.evaluate_readiness(snap_b, head_b)
+    assert result["ready"] is False
+    assert result["blockers"][0]["thread_work_reason"] == (
+        supervisor.INVALIDATION_REASON_SOURCES_BLOB_CHANGED
+    )
+
+
+def test_finish_line_source_bound_thread_rejects_pathless_proof(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    pathless = _terminal_thread_snap()
+    monkeypatch.setattr(supervisor, "_git_show_blob", lambda _h, _p: "d" * 40)
+    _record_terminal_thread_proof(
+        pathless, supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    source_bound = _terminal_thread_snap()
+    source_bound["review_threads"]["PRRT_FINISH_LINE"]["path"] = "src/app.py"
+    result = supervisor.evaluate_readiness(source_bound, AUTH)
+    assert result["ready"] is False
+    assert result["blockers"][0]["thread_work_reason"] == (
+        supervisor.INVALIDATION_REASON_PROOF_SOURCE_BINDING_MISSING
+    )
+
+
+def test_finish_line_missing_provider_proof_fails_closed(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    snap = _terminal_thread_snap()
+    path = supervisor._thread_proof_audit_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "kind": "THREAD_PROOF_RECORDED",
+        "thread_id": "PRRT_FINISH_LINE",
+        "provider": "coderabbit",
+        "proof_head": AUTH,
+        "evaluated_head": AUTH,
+        "source_path": "",
+        "source_blob_sha": "",
+        "provider_thread_version": "",
+        "disposition": "ALREADY_SATISFIED",
+        "generation_id": "legacy-incomplete-proof",
+    }) + "\n")
+    result = supervisor.evaluate_readiness(snap, AUTH)
+    assert result["ready"] is False
+    assert result["blockers"][0]["thread_work_reason"] == (
+        supervisor.INVALIDATION_REASON_PROVIDER_PROOF_MISSING
+    )
+
+
+def test_finish_line_authorized_remote_api_failure_persists_pending_once(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    monkeypatch.delenv("AED_OPERATOR_THREAD_RESOLUTION_DISABLED", raising=False)
+    monkeypatch.setattr(supervisor, "get_github_token", lambda: "token")
+    snap = _terminal_thread_snap()
+    _record_terminal_thread_proof(
+        snap, supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    failed = type("Failed", (), {"returncode": 1})()
+    with patch("subprocess.run", return_value=failed) as run:
+        status = supervisor._try_resolve_github_thread(
+            thread_id="PRRT_FINISH_LINE", provider="coderabbit",
+            disposition="ALREADY_SATISFIED", worker_attempt_id="att-api-fail",
+        )
+    assert status == "pending"
+    assert run.call_count == 2  # one REST attempt and one GraphQL fallback
+    rows = [json.loads(line) for line in
+            supervisor._thread_dispositions_ledger_path().read_text().splitlines()]
+    pending = [row for row in rows if row["disposition"] == "RESOLUTION_PENDING"]
+    assert len(pending) == 1
+    assert pending[0]["extra"]["reason"] == "github_api_failed"
+    # Remote synchronization failed truthfully, but the already-proven source
+    # work does not reopen and create a repair-analysis loop.
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+
+
+def test_finish_line_audit_signature_deduplicates_only_same_generation(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    base = {
+        "kind": "THREAD_PROOF_RECORDED", "thread_id": "PRRT_SIG",
+        "proof_head": AUTH, "provider_thread_version": "provider-v1",
+        "source_blob_sha": "blob-a", "disposition": "ALREADY_SATISFIED",
+        "generation_id": "generation-a",
+    }
+    assert supervisor._append_thread_proof_audit(base) is True
+    assert supervisor._append_thread_proof_audit(base) is False
+    newer = {**base, "proof_head": "b" * 40, "generation_id": "generation-b"}
+    assert supervisor._append_thread_proof_audit(newer) is True
+    assert len(_read_thread_proofs()) == 2
+
+
+def _terminalize_natural_thread(thread_id, head=AUTH):
+    proof = {"findings": [{
+        "finding_id": f"thread:{thread_id}",
+        "disposition": "ALREADY_SATISFIED",
+        "evidence": "current source already satisfies the finding",
+    }]}
+    row = list(supervisor.extract_per_finding_thread_dispositions(
+        proof, evaluated_head=head, directive_digest="directive-natural",
+        worker_attempt_id="att-natural",
+    ))[0]
+    return supervisor.consume_thread_drain_event_in_terminal_disposition(
+        event_id=f"unresolved_thread_drain:{thread_id}",
+        thread_id=thread_id,
+        provider="coderabbit",
+        evaluated_head=head,
+        disposition_raw=row["disposition_raw"],
+        evidence=row["evidence"],
+        worker_attempt_id=row["worker_attempt_id"],
+        directive_digest=row["directive_digest"],
+        result_identity={
+            "repo": "owner/repo", "pr_number": 4,
+            "thread_id": thread_id, "current_live_head": head,
+        },
+        thread_record={"thread_id": thread_id, "commit_oid": head},
+        extra_identity=row["extra"],
+    )
+
+
+def test_finish_line_new_thread_origin_produces_restart_durable_proof(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    monkeypatch.setenv("AED_OPERATOR_THREAD_RESOLUTION_DISABLED", "1")
+    monkeypatch.setattr(supervisor, "_git_show_blob", lambda _h, _p: "e" * 40)
+    snap = _terminal_thread_snap(thread_id="PRRT_NEW_THREAD")
+    state = snap["review_threads"]["PRRT_NEW_THREAD"]
+    state.update({"path": "src/new.py", "line": 9})
+    events = supervisor.detect_new_actionable_events(_clean_snap(), snap)
+    assert [event["id"] for event in events] == ["new_thread:PRRT_NEW_THREAD"]
+    assert events[0]["path"] == "src/new.py"
+    supervisor.write_unconsumed_event(events[0])
+    supervisor.write_snapshot("A", snap)
+
+    outcome = _terminalize_natural_thread("PRRT_NEW_THREAD")
+    assert outcome["terminalized"] is True
+    assert not any(
+        event["id"].startswith("unresolved_thread_drain:")
+        for event in supervisor.list_unconsumed_events()
+    )
+    proof = [row for row in _read_thread_proofs()
+             if row.get("kind") == "THREAD_PROOF_RECORDED"][-1]
+    assert proof["thread_id"] == "PRRT_NEW_THREAD"
+    assert proof["proof_head"] == AUTH
+    assert proof["source_path"] == "src/new.py"
+    assert proof["source_blob_sha"] == "e" * 40
+    assert proof["provider_thread_version"] == (
+        supervisor._compute_provider_thread_version(
+            supervisor._snapshot_provider_thread("PRRT_NEW_THREAD", state)
+        )
+    )
+    assert proof["disposition"] == "ALREADY_SATISFIED"
+    assert proof["generation_id"]
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+
+
+def test_finish_line_broad_worker_proves_each_thread_from_canonical_snapshot(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    monkeypatch.setenv("AED_OPERATOR_THREAD_RESOLUTION_DISABLED", "1")
+    monkeypatch.setattr(
+        supervisor, "_git_show_blob",
+        lambda _h, path: {"src/a.py": "a" * 40, "src/b.py": "b" * 40}.get(path),
+    )
+    snap = _clean_snap()
+    snap["review_threads"] = {
+        "PRRT_A": {"resolved": False, "outdated": False,
+                   "path": "src/a.py", "line": 1, "body": "finding A"},
+        "PRRT_B": {"resolved": False, "outdated": False,
+                   "path": "src/b.py", "line": 2, "body": "finding B"},
+    }
+    events = supervisor.detect_new_actionable_events(_clean_snap(), snap)
+    # Only A owns an event in this simulated launch; B is an additional review
+    # finding in the broad directive and must still use its own snapshot proof.
+    supervisor.write_unconsumed_event(events[0])
+    supervisor.write_snapshot("A", snap)
+    assert _terminalize_natural_thread("PRRT_A")["terminalized"] is True
+    assert _terminalize_natural_thread("PRRT_B")["terminalized"] is True
+    proofs = {row["thread_id"]: row for row in _read_thread_proofs()
+              if row.get("kind") == "THREAD_PROOF_RECORDED"}
+    assert proofs["PRRT_A"]["source_path"] == "src/a.py"
+    assert proofs["PRRT_A"]["source_blob_sha"] == "a" * 40
+    assert proofs["PRRT_B"]["source_path"] == "src/b.py"
+    assert proofs["PRRT_B"]["source_blob_sha"] == "b" * 40
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+
+
+def test_finish_line_source_path_disappearance_fails_closed(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    monkeypatch.setattr(supervisor, "_git_show_blob", lambda _h, _p: "f" * 40)
+    source_bound = _terminal_thread_snap()
+    source_bound["review_threads"]["PRRT_FINISH_LINE"]["path"] = "src/app.py"
+    _record_terminal_thread_proof(
+        source_bound, supervisor.THREAD_DISPOSITION_ALREADY_SATISFIED,
+    )
+    path_missing = _terminal_thread_snap()
+    result = supervisor.evaluate_readiness(path_missing, AUTH)
+    assert result["ready"] is False
+    assert result["blockers"][0]["thread_work_reason"] == (
+        supervisor.INVALIDATION_REASON_CURRENT_SOURCE_BINDING_MISSING
+    )
+
+
+def test_finish_line_legacy_lossy_proof_recovers_through_new_thread_work(
+    isolated_state, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(isolated_state))
+    monkeypatch.setenv("AED_OPERATOR_THREAD_RESOLUTION_DISABLED", "1")
+    monkeypatch.setattr(supervisor, "_git_show_blob", lambda _h, _p: "9" * 40)
+    snap = _terminal_thread_snap(thread_id="PRRT_LEGACY")
+    snap["review_threads"]["PRRT_LEGACY"]["path"] = "src/legacy.py"
+    audit = supervisor._thread_proof_audit_path()
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(json.dumps({
+        "kind": "THREAD_PROOF_RECORDED", "thread_id": "PRRT_LEGACY",
+        "proof_head": AUTH, "evaluated_head": AUTH,
+        "source_path": "", "source_blob_sha": "",
+        "provider_thread_version": "", "disposition": "ALREADY_SATISFIED",
+        "generation_id": "legacy-lossy",
+    }) + "\n")
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is False
+
+    events = supervisor.detect_new_actionable_events(_clean_snap(), snap)
+    supervisor.write_unconsumed_event(events[0])
+    supervisor.write_snapshot("A", snap)
+    assert _terminalize_natural_thread("PRRT_LEGACY")["terminalized"] is True
+    proofs = [row for row in _read_thread_proofs()
+              if row.get("kind") == "THREAD_PROOF_RECORDED"
+              and row.get("thread_id") == "PRRT_LEGACY"]
+    assert len(proofs) == 2
+    assert proofs[-1]["source_path"] == "src/legacy.py"
+    assert proofs[-1]["provider_thread_version"]
+    assert supervisor.evaluate_readiness(snap, AUTH)["ready"] is True
+
+
 # ---------------------------------------------------------------------------
 # L. Embedded reviewer commands are inert
 # ---------------------------------------------------------------------------
@@ -3292,6 +3776,10 @@ def _round46_setup_thread_drain_event(
         "thread_id": thread_id,
         "head_sha": evaluated_head,
         "source": "round46_test",
+        "path": "",
+        "body": "canonical pathless review evidence",
+        "resolved": False,
+        "outdated": False,
     })
     return eid
 
@@ -3572,10 +4060,14 @@ def test_round46_c14_multiple_drain_events_only_targeted_consumed(
         sup.write_unconsumed_event({
             "id": eid,
             "kind": "unresolved_thread_drain",
-            "thread_id": f"PRRT_kwDOTtyQLc6XX_{tid}",
-            "head_sha": head,
-            "source": "round46_test",
-        })
+                "thread_id": f"PRRT_kwDOTtyQLc6XX_{tid}",
+                "head_sha": head,
+                "source": "round46_test",
+                "path": "",
+                "body": f"canonical evidence {tid}",
+                "resolved": False,
+                "outdated": False,
+            })
     sup.consume_thread_drain_event_in_terminal_disposition(
         event_id=a_eid,
         thread_id="PRRT_kwDOTtyQLc6XX_A",
@@ -7559,4 +8051,3 @@ def test_round146_p1_per_pr_authoritative_head_rebind(
     # Post-loop invariant: canonical head is observed.
     assert sup.AUTHORITATIVE_HEAD == canonical_head
     assert sup.AUTHORITATIVE_HEAD != secondary_head
-

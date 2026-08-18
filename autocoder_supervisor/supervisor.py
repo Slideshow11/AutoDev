@@ -2469,6 +2469,11 @@ INVALIDATION_REASON_ANCESTRY_UNSAFE = "ANCESTRY_UNSAFE"
 INVALIDATION_REASON_SOURCE_PATH_MISSING = "SOURCE_PATH_MISSING"
 INVALIDATION_REASON_PRIOR_PROOF_MISSING = "PRIOR_PROOF_MISSING"
 INVALIDATION_REASON_PRIOR_PROOF_CORRUPT = "PRIOR_PROOF_CORRUPT"
+INVALIDATION_REASON_PROOF_SOURCE_BINDING_MISSING = "PROOF_SOURCE_BINDING_MISSING"
+INVALIDATION_REASON_SOURCE_PATH_CHANGED = "SOURCE_PATH_CHANGED"
+INVALIDATION_REASON_CURRENT_SOURCE_BINDING_MISSING = "CURRENT_SOURCE_BINDING_MISSING"
+INVALIDATION_REASON_PROVIDER_PROOF_MISSING = "PROVIDER_PROOF_MISSING"
+INVALIDATION_REASON_PROOF_DISPOSITION_NONTERMINAL = "PROOF_DISPOSITION_NONTERMINAL"
 INVALIDATION_REASON_HISTORICAL_TERMINAL_PROOF_UNRECOVERABLE = "HISTORICAL_TERMINAL_PROOF_UNRECOVERABLE"
 INVALIDATION_REASON_TIER2_REVALIDATION_FAILED = "TIER2_REVALIDATION_FAILED"
 INVALIDATION_REASON_REPAIRED_SOURCE_REGRESSED = "REPAIRED_SOURCE_REGRESSED"
@@ -2514,10 +2519,10 @@ def _thread_proof_index_path():
 def _round50_1_audit_signature(record):
     """Compute a stable signature for an audit record.
     Records with the same signature are considered the
-    same transition and are deduped. The signature
-    captures: thread_id, kind, reason, current_head,
-    provider_version_current, source_blob_current,
-    disposition, ancestry_result.
+    same transition and are deduped.  Both revalidation
+    fields and proof-generation fields are included: a new
+    terminal evaluation at a later head must not collide
+    with the prior head's ``THREAD_PROOF_RECORDED`` row.
 
     Newlines and pipes in the input fields are stripped
     so the signature is a single physical line.
@@ -2531,9 +2536,13 @@ def _round50_1_audit_signature(record):
             _str_or(record.get("kind"), ""),
             _str_or(record.get("reason"), ""),
             _str_or(record.get("current_head"), ""),
+            _str_or(record.get("proof_head"), ""),
             _str_or(record.get("provider_version_current"), ""),
+            _str_or(record.get("provider_thread_version"), ""),
             _str_or(record.get("source_blob_current"), ""),
+            _str_or(record.get("source_blob_sha"), ""),
             _str_or(record.get("disposition"), ""),
+            _str_or(record.get("generation_id"), ""),
             "1" if record.get("ancestry_result") else "0",
         ])
     )
@@ -2805,6 +2814,31 @@ def _try_carry_forward_thread_proof(
             "generation_id": "",
         })
         return ("invalidate", INVALIDATION_REASON_PRIOR_PROOF_MISSING)
+    if proof_disposition not in TERMINAL_THREAD_DISPOSITIONS:
+        return ("invalidate", INVALIDATION_REASON_PROOF_DISPOSITION_NONTERMINAL)
+    # A provider fingerprint is required for both source-bound and pathless
+    # threads.  Missing comparison evidence is unknown, never equality.
+    pv_current = _compute_provider_thread_version(current_provider_thread or {})
+    if not proof_provider_version or not pv_current:
+        return ("invalidate", INVALIDATION_REASON_PROVIDER_PROOF_MISSING)
+    # Source-bound current evidence requires the proof to be bound to the
+    # same path and blob.  Pathless proofs remain valid for genuinely
+    # pathless threads, but can never waive a later source-bound finding.
+    current_path = str(current_path or "")
+    proof_source_path = str(proof_source_path or "")
+    if proof_source_path and not current_path:
+        return (
+            "invalidate",
+            INVALIDATION_REASON_CURRENT_SOURCE_BINDING_MISSING,
+        )
+    if current_path:
+        if not proof_source_path:
+            return (
+                "invalidate",
+                INVALIDATION_REASON_PROOF_SOURCE_BINDING_MISSING,
+            )
+        if proof_source_path != current_path:
+            return ("invalidate", INVALIDATION_REASON_SOURCE_PATH_CHANGED)
     ancestry_ok = _is_ancestor(proof_head, current_head)
     if not ancestry_ok:
         _append_thread_proof_audit({
@@ -2847,11 +2881,14 @@ def _try_carry_forward_thread_proof(
             "generation_id": proof_generation_id,
         })
         return ("invalidate", INVALIDATION_REASON_SOURCE_PATH_MISSING)
+    if current_path and not proof_blob:
+        return (
+            "invalidate",
+            INVALIDATION_REASON_PROOF_SOURCE_BINDING_MISSING,
+        )
     blob_changed = bool(current_blob) and bool(proof_blob) and current_blob != proof_blob
-    pv_current = _compute_provider_thread_version(current_provider_thread or {})
     pv_changed = (
-        bool(pv_current) and bool(proof_provider_version)
-        and pv_current != proof_provider_version
+        pv_current != proof_provider_version
     )
     if proof_disposition == THREAD_DISPOSITION_REPAIRED and blob_changed:
         _append_thread_proof_audit({
@@ -3024,6 +3061,71 @@ def resolve_thread_drain_event_id(event_id):
     return event_id.split(":", 1)[1]
 
 
+def _terminalization_thread_evidence(
+    *, event_id, thread_id, evaluated_head, thread_record, extra_identity,
+):
+    """Recover the canonical evidence captured by the durable work event.
+
+    Worker result findings intentionally carry dispositions, not a second
+    copy of provider evidence.  The unresolved-thread event is the durable
+    hand-off of the live snapshot evidence that caused dispatch, so proof
+    generation must consume that exact representation rather than reconstruct
+    a lossy approximation from the result envelope.
+    """
+    supplied = {}
+    for candidate in (extra_identity, thread_record):
+        if isinstance(candidate, dict):
+            for key in (
+                "path", "line", "body", "updatedAt", "commit_oid",
+                "resolved", "outdated",
+            ):
+                if key in candidate and candidate.get(key) is not None:
+                    supplied[key] = candidate.get(key)
+    canonical_found = False
+    # A durable exact-head snapshot is the common authority for broad
+    # directives, which may contain threads that did not own the triggering
+    # event.  It also lets pre-patch ``new_thread`` events (which lacked the
+    # evidence fields) recover without manual ledger repair.
+    for slot in ("B", "A"):
+        try:
+            snapshot = read_snapshot(slot) or {}
+        except Exception:
+            snapshot = {}
+        if str(snapshot.get("head_sha") or "") != str(evaluated_head or ""):
+            continue
+        state = (snapshot.get("review_threads") or {}).get(thread_id)
+        if isinstance(state, dict):
+            supplied.update(state)
+            canonical_found = True
+            break
+    try:
+        events = list_unconsumed_events()
+        event = next((
+            item for item in events
+            if str(item.get("thread_id") or "") == str(thread_id or "")
+            and (
+                item.get("id") == event_id
+                or item.get("id") == f"new_thread:{thread_id}"
+                or item.get("id") == f"thread_reopened:{thread_id}"
+            )
+        ), None)
+    except Exception:
+        event = None
+    if isinstance(event, dict):
+        # The durable event is authoritative over result-envelope fallbacks.
+        for key in (
+            "path", "line", "body", "updatedAt", "commit_oid",
+            "resolved", "outdated",
+        ):
+            if key in event:
+                supplied[key] = event.get(key)
+        if any(key in event for key in ("path", "body", "updatedAt")):
+            canonical_found = True
+    return supplied, canonical_found, (
+        str(event.get("id") or "") if isinstance(event, dict) else ""
+    )
+
+
 def consume_thread_drain_event_in_terminal_disposition(
     *,
     event_id,
@@ -3114,6 +3216,28 @@ def consume_thread_drain_event_in_terminal_disposition(
         return {"consumed": False, "terminalized": False,
                 "github_resolution": "skipped",
                 "generation": "", "normalized_disposition": normalized}
+    # Capture the durable event evidence before consuming the event.  This is
+    # the canonical provider/source representation later used by readiness.
+    (canonical_thread, canonical_evidence_found,
+     canonical_origin_event_id) = _terminalization_thread_evidence(
+        event_id=event_id,
+        thread_id=thread_id,
+        evaluated_head=evaluated_head,
+        thread_record=thread_record,
+        extra_identity=extra_identity,
+    )
+    if not canonical_evidence_found:
+        log(
+            "warning",
+            "thread terminal disposition lacks canonical event/snapshot evidence; "
+            "refusing readiness-trusted proof",
+            event_id=event_id,
+            thread_id=thread_id,
+            evaluated_head=evaluated_head,
+        )
+        return {"consumed": False, "terminalized": False,
+                "github_resolution": "skipped", "generation": "",
+                "normalized_disposition": normalized}
     # Compute generation and persist (idempotent on generation).
     live_head = str(result_identity.get("current_live_head") or "")
     if not live_head:
@@ -3165,6 +3289,8 @@ def consume_thread_drain_event_in_terminal_disposition(
     # Consume the drain event from the unconsumed queue.
     try:
         consume_event(event_id)
+        if canonical_origin_event_id and canonical_origin_event_id != event_id:
+            consume_event(canonical_origin_event_id)
     except Exception as exc:  # noqa: BLE001
         log(
             "warning",
@@ -3201,29 +3327,14 @@ def consume_thread_drain_event_in_terminal_disposition(
         _path_for_cf = ""
         _line_for_cf = None
         _body_for_cf = ""
-        if isinstance(thread_record, dict):
+        if isinstance(canonical_thread, dict):
             _path_for_cf = (
-                thread_record.get("path")
-                or thread_record.get("commit_path")
+                canonical_thread.get("path")
+                or canonical_thread.get("commit_path")
                 or ""
             )
-            _line_for_cf = thread_record.get("line")
-            _body_for_cf = thread_record.get("body") or ""
-        # ``extra`` carries the snapshot evidence captured
-        # by the drain-event emitter when the directive was
-        # dispatched; fall back to it when thread_record
-        # omits the field.
-        if isinstance(extra_identity, dict):
-            if not _path_for_cf:
-                _path_for_cf = (
-                    extra_identity.get("path")
-                    or extra_identity.get("commit_path")
-                    or ""
-                )
-            if _line_for_cf is None:
-                _line_for_cf = extra_identity.get("line")
-            if not _body_for_cf:
-                _body_for_cf = extra_identity.get("body") or ""
+            _line_for_cf = canonical_thread.get("line")
+            _body_for_cf = canonical_thread.get("body") or ""
         # Round-49.1 C17: record the thread proof at the
         # evaluated head. Use the full provider thread state
         # (replies + updatedAt + full body digests) when
@@ -3234,12 +3345,12 @@ def consume_thread_drain_event_in_terminal_disposition(
             "id": str(thread_id or ""),
             "top_level_comment": {
                 "id": "",
-                "updatedAt": "",
+                "updatedAt": canonical_thread.get("updatedAt") or "",
                 "body": _body_for_cf or "",
             },
             "replies": [],
-            "isResolved": False,
-            "isOutdated": False,
+            "isResolved": bool(canonical_thread.get("resolved")),
+            "isOutdated": bool(canonical_thread.get("outdated")),
         }
         _record_thread_proof(
             thread_id=str(thread_id or ""),
@@ -3526,6 +3637,31 @@ def _try_resolve_github_thread(*, thread_id, provider, disposition,
     """
     if not thread_id or not str(thread_id).startswith("PRRT_"):
         return "skipped"
+    def _persist_pending(reason):
+        _record_thread_disposition_row({
+            "schema_version": THREAD_DISPOSITIONS_LEDGER_VERSION,
+            "generation": _thread_disposition_generation(
+                repo=str(REPO_OWNER),  # type: ignore[name-defined]
+                pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+                provider=provider,
+                thread_id=thread_id,
+                evaluated_head="RESOLUTION_PENDING:" + str(reason),
+            ),
+            "repo": str(REPO_OWNER),  # type: ignore[name-defined]
+            "pr_number": int(PR_NUMBER),  # type: ignore[name-defined]
+            "provider": provider,
+            "thread_id": thread_id,
+            "event_id": "unresolved_thread_drain:" + thread_id,
+            "evaluated_head": "",
+            "current_live_head": "",
+            "disposition": THREAD_DISPOSITION_RESOLUTION_PENDING,
+            "evidence": "remote resolution pending: " + str(reason),
+            "worker_attempt_id": worker_attempt_id,
+            "directive_digest": "",
+            "result_identity_thread_id": thread_id,
+            "completed_at": now_iso(),
+            "extra": {"reason": str(reason)},
+        })
     # Governance: REQUIRE operator authorization for resolution.
     # Existing operator authorization in run_state.json remains
     # in force per round-45 Section 13. Without that authorization
@@ -3564,6 +3700,7 @@ def _try_resolve_github_thread(*, thread_id, provider, disposition,
     try:
         token = get_github_token() or ""
         if not token:
+            _persist_pending("github_token_missing")
             return "pending"
         from subprocess import run as _run
         cmd = [
@@ -3595,8 +3732,10 @@ def _try_resolve_github_thread(*, thread_id, provider, disposition,
         proc2 = _run(cmd2, capture_output=True, text=True, timeout=30)
         if proc2.returncode == 0:
             return "resolved"
+        _persist_pending("github_api_failed")
         return "pending"
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        _persist_pending("github_transport_failed:" + type(exc).__name__)
         return "pending"
 
 
@@ -11586,11 +11725,74 @@ def snapshot_differs(a: dict, b: dict, expected_head: str) -> list:
     return reasons
 
 
-def threads_block_readiness(snap: dict) -> list:
+def _snapshot_provider_thread(thread_id: str, state: dict) -> dict:
+    """Build the canonical provider-version input from a live snapshot.
+
+    Snapshot collection and the durable drain intentionally expose the same
+    subset of GitHub's thread object.  Keeping the conversion here prevents
+    readiness and dispatch from fingerprinting that subset differently.
+    """
+    return {
+        "provider": "coderabbit",
+        "id": thread_id,
+        "top_level_comment": {
+            "id": "",
+            "updatedAt": state.get("updatedAt") or "",
+            "body": state.get("body") or "",
+        },
+        "replies": [],
+        "isResolved": bool(state.get("resolved")),
+        "isOutdated": bool(state.get("outdated")),
+    }
+
+
+def thread_work_blocks_at_head(
+    thread_id: str, state: dict, head: str,
+) -> tuple[bool, str]:
+    """Return the canonical current-head blocking decision for one thread.
+
+    GitHub's unresolved bit is discovery/synchronization state, not by itself
+    proof that repair work remains.  An unresolved, non-outdated thread blocks
+    unless the durable thread-proof authority can positively revalidate a
+    terminal disposition at ``head``.  Missing, corrupt, stale, changed-source,
+    or changed-provider evidence therefore fails closed.  Remote resolution
+    may remain ``RESOLUTION_PENDING`` without reopening source analysis: the
+    exact-head semantic proof is authoritative for qualification.
+    """
+    if state.get("resolved"):
+        return (False, "github_resolved")
+    if state.get("outdated"):
+        return (False, "github_outdated")
+    if not thread_id or not head:
+        return (True, "incomplete_identity")
+    decision, reason = _try_carry_forward_thread_proof(
+        thread_id=thread_id,
+        provider="coderabbit",
+        current_path=(state.get("path") or ""),
+        current_line=state.get("line"),
+        current_provider_thread=_snapshot_provider_thread(thread_id, state),
+        current_head=head,
+        disposition="",
+    )
+    if decision == "carry":
+        return (False, "terminal_thread_proof")
+    return (True, str(reason or "incomplete_terminal_proof"))
+
+
+def threads_block_readiness(snap: dict, head: Optional[str] = None) -> list:
+    """Return review threads whose canonical work remains nonterminal."""
+    current_head = str(head or snap.get("head_sha") or "")
     blockers = []
-    for tid, s in snap.get("review_threads", {}).items():
-        if (not s.get("resolved")) and (not s.get("outdated")):
-            blockers.append({"thread_id": tid, **s})
+    for tid, state in snap.get("review_threads", {}).items():
+        blocks, reason = thread_work_blocks_at_head(
+            str(tid or ""), state or {}, current_head,
+        )
+        if blocks:
+            blockers.append({
+                "thread_id": tid,
+                **(state or {}),
+                "thread_work_reason": reason,
+            })
     return blockers
 
 
@@ -11752,7 +11954,7 @@ def evaluate_readiness(
                 "provider_surface_failures", {}
             ),
         }
-    blockers = threads_block_readiness(snap)
+    blockers = threads_block_readiness(snap, h)
     if blockers:
         return {
             "ready": False,
@@ -11884,6 +12086,8 @@ def detect_new_actionable_events(
                 "id": f"new_thread:{tid}",
                 "kind": "new_unresolved_current_thread",
                 "thread_id": tid,
+                "head_sha": new_snap.get("head_sha"),
+                **s,
             })
     for tid in sorted(set(prev_t) & set(new_t)):
         prev_unresolved = (
@@ -11899,6 +12103,8 @@ def detect_new_actionable_events(
                 "id": f"thread_reopened:{tid}",
                 "kind": "thread_reopened",
                 "thread_id": tid,
+                "head_sha": new_snap.get("head_sha"),
+                **new_t[tid],
             })
     prev_cks = prev_snap.get("required_checks", {})
     new_cks = new_snap.get("required_checks", {})
@@ -14705,18 +14911,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # source changes that genuinely need a fresh
                 # worker round.
                 if current_head:
-                    _current_pt = {
-                        "provider": "coderabbit",
-                        "id": tid,
-                        "top_level_comment": {
-                            "id": "",
-                            "updatedAt": td.get("updatedAt") or "",
-                            "body": td.get("body") or "",
-                        },
-                        "replies": [],
-                        "isResolved": bool(td.get("resolved")),
-                        "isOutdated": bool(td.get("outdated")),
-                    }
+                    _current_pt = _snapshot_provider_thread(tid, td)
                     _cf_decision, _cf_tier_or_reason = (
                         _try_carry_forward_thread_proof(
                             thread_id=tid,
@@ -14773,8 +14968,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "path": td.get("path"),
                     "line": td.get("line"),
                     "body": td.get("body"),
+                    "updatedAt": td.get("updatedAt"),
                     "commit_oid": td.get("commit_oid"),
                     "author": td.get("author"),
+                    "resolved": bool(td.get("resolved")),
+                    "outdated": bool(td.get("outdated")),
                 })
                 break  # ONE per heartbeat (anti-burst)
             if drain_events:
