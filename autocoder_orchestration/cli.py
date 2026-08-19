@@ -1806,18 +1806,32 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     which is the single source of truth for the doctor behavior.
     The CLI wrapper is intentionally thin: it only adapts CLI
     args and forwards to ``doctor_main``.
+
+    The doctor's exit-code vocabulary (0=PASS/WARN, 1=FAIL,
+    2=internal doctor error) is mapped onto the CLI's canonical
+    exit-code table so callers reading ``autocoder-orchestration``
+    exit codes can distinguish an internal doctor error (5) from
+    an invalid-argument error (2). Otherwise both would surface
+    as exit 2.
     """
     from .doctor import doctor_main
+    from .doctor import EXIT_INTERNAL as DOCTOR_EXIT_INTERNAL
     # ``args.json`` is the repo-canonical top-level --json flag;
     # ``args.doctor_json`` is the doctor-subcommand ergonomic
     # variant (``autocoder-orchestration doctor --json``). Both
     # are honored; either one enables JSON mode.
     json_mode = bool(getattr(args, "doctor_json", False)) or bool(args.json)
-    return doctor_main(
+    rc = doctor_main(
         json_mode=json_mode,
         state_root_parent=args.state_root_parent,
         repo_root=args.repo_root,
     )
+    if rc == DOCTOR_EXIT_INTERNAL:
+        # Map doctor's EXIT_INTERNAL (2) onto the CLI's EXIT_INTERNAL (5)
+        # so the caller can distinguish internal-doctor-error from
+        # CLI invalid-argument-error.
+        return EXIT_INTERNAL
+    return rc
 
 
 def cmd_review_repair_status(args: argparse.Namespace) -> int:

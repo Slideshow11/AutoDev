@@ -154,12 +154,24 @@ def _check_github_cli(context: dict) -> CheckResult:
 
 
 def _check_git_repository(context: dict) -> CheckResult:
-    """Confirm ``context['cwd']`` is inside a git work tree."""
-    cwd = Path(context["cwd"])
+    """Confirm ``context['git_cwd']`` is inside a git work tree.
+
+    ``git_cwd`` is the directory the git probes run inside. When
+    the operator passes ``--repo-root`` explicitly, ``git_cwd``
+    is set to that explicit value; otherwise it falls back to
+    the process cwd. This guarantees that ``doctor
+    --repo-root /path/to/repo`` probes the explicitly-selected
+    repository, not whatever directory the operator happened to
+    be in when they ran the command.
+
+    Addresses Codex P2 finding: previously the Git probes always
+    used the process cwd even when ``--repo-root`` was set.
+    """
+    git_cwd = context["git_cwd"]
     try:
         out = subprocess.run(
             ["git", "rev-parse", "--is-inside-work-tree"],
-            cwd=str(cwd),
+            cwd=str(git_cwd),
             capture_output=True,
             text=True,
             timeout=10,
@@ -184,16 +196,17 @@ def _check_git_repository(context: dict) -> CheckResult:
 
 
 def _check_origin_remote(context: dict) -> CheckResult:
-    """Confirm the git repo has a configured ``origin`` remote.
+    """Confirm the git repo at ``context['git_cwd']`` has a
+    configured ``origin`` remote.
 
     A repository with no origin cannot receive pushes or trigger
     GitHub-based reviews. Read-only: does not mutate remotes.
     """
-    cwd = Path(context["cwd"])
+    git_cwd = context["git_cwd"]
     try:
         out = subprocess.run(
             ["git", "remote", "get-url", "origin"],
-            cwd=str(cwd),
+            cwd=str(git_cwd),
             capture_output=True,
             text=True,
             timeout=10,
@@ -218,15 +231,16 @@ def _check_origin_remote(context: dict) -> CheckResult:
 
 
 def _check_working_tree_readable(context: dict) -> CheckResult:
-    """Confirm ``git status`` can be read from the current checkout.
+    """Confirm ``git status`` can be read from
+    ``context['git_cwd']``.
 
     Read-only: ``git status`` does not mutate repo state.
     """
-    cwd = Path(context["cwd"])
+    git_cwd = context["git_cwd"]
     try:
         out = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=str(cwd),
+            cwd=str(git_cwd),
             capture_output=True,
             text=True,
             timeout=15,
@@ -254,9 +268,23 @@ def _check_state_root_writable(context: dict) -> CheckResult:
     """Verify the intended state-root parent can be created, written,
     and read back.
 
-    The probe is tightly scoped: it creates a single tiny file
-    inside the parent directory and immediately deletes it. No
-    persistent artifacts are left behind.
+    The probe is tightly scoped: it does NOT create the parent
+    directory. Instead, it walks up to the nearest existing
+    ancestor and performs a single-tiny-file write/read/delete
+    probe inside that ancestor. No persistent directory or file
+    artifact is left behind by the doctor.
+
+    This addresses two related concerns:
+
+      * Codex P2: ``parent.mkdir`` violated the read-only contract
+        when the operator's intended state-root parent did not
+        yet exist; the doctor would have created the whole
+        ancestor tree as a side effect.
+      * Sourcery bug-risk: a TOCTOU race between ``parent.exists()``
+        and ``parent.mkdir(exist_ok=False)`` could spuriously
+        fail the check on a concurrent creator. The new path
+        eliminates the race entirely because the probe never
+        creates directories.
     """
     parent = Path(context["state_root_parent"])
     # If the parent already exists and is not writable, FAIL fast
@@ -274,28 +302,40 @@ def _check_state_root_writable(context: dict) -> CheckResult:
                 STATUS_FAIL,
                 f"state-root parent {str(parent)!r} is not writable",
             )
+        probe_dir = parent
     else:
-        # Try to create it.
-        try:
-            parent.mkdir(parents=True, exist_ok=False)
-        except OSError as exc:
+        # Read-only path: walk up to the nearest existing ancestor
+        # and probe writability there. This satisfies the "doctor
+        # must not leave persistent artifacts" contract.
+        ancestor = parent
+        while not ancestor.exists() and ancestor.parent != ancestor:
+            ancestor = ancestor.parent
+        if (
+            not ancestor.exists()
+            or not ancestor.is_dir()
+            or not os.access(str(ancestor), os.W_OK | os.X_OK)
+        ):
             return CheckResult(
                 "state-root-writable",
                 STATUS_FAIL,
-                f"cannot create state-root parent {str(parent)!r}: "
-                f"{type(exc).__name__}",
+                f"state-root parent {str(parent)!r} does not exist and "
+                f"nearest existing ancestor {str(ancestor)!r} is not "
+                f"writable",
             )
+        probe_dir = ancestor
     # Tightly-scoped writeability probe: create one tiny file inside
-    # the parent, confirm we can read it back, then delete it.
+    # ``probe_dir``, confirm we can read it back, then delete it.
+    # Best-effort cleanup; leftover autocoder-doctor-* files in
+    # ``probe_dir`` can be removed by the operator manually.
     try:
         fd, name = tempfile.mkstemp(
-            prefix="autocoder-doctor-", dir=str(parent),
+            prefix="autocoder-doctor-", dir=str(probe_dir),
         )
     except OSError as exc:
         return CheckResult(
             "state-root-writable",
             STATUS_FAIL,
-            f"cannot create probe file in {str(parent)!r}: "
+            f"cannot create probe file in {str(probe_dir)!r}: "
             f"{type(exc).__name__}",
         )
     tmp_path = Path(name)
@@ -309,27 +349,35 @@ def _check_state_root_writable(context: dict) -> CheckResult:
                 "state-root-writable",
                 STATUS_FAIL,
                 f"probe file disappeared immediately after write in "
-                f"{str(parent)!r}",
+                f"{str(probe_dir)!r}",
             )
         data = tmp_path.read_text(encoding="utf-8")
         if data != "autocoder-doctor-probe\n":
             return CheckResult(
                 "state-root-writable",
                 STATUS_FAIL,
-                f"probe file readback mismatch in {str(parent)!r}",
+                f"probe file readback mismatch in {str(probe_dir)!r}",
+            )
+        if parent == probe_dir:
+            return CheckResult(
+                "state-root-writable",
+                STATUS_PASS,
+                f"state-root parent {str(parent)!r} is creatable, "
+                f"writable, and readable",
             )
         return CheckResult(
             "state-root-writable",
             STATUS_PASS,
-            f"state-root parent {str(parent)!r} is creatable, "
-            f"writable, and readable",
+            f"state-root parent {str(parent)!r} does not exist; "
+            f"nearest existing ancestor {str(probe_dir)!r} is "
+            f"writable and readable",
         )
     finally:
         try:
             tmp_path.unlink()
         except OSError:
             # Best-effort cleanup; the operator can remove any
-            # leftover autocoder-doctor-* file in the parent
+            # leftover autocoder-doctor-* file in the probe
             # directory manually if cleanup failed.
             pass
 
@@ -368,14 +416,25 @@ def _check_canonical_scanner(context: dict) -> CheckResult:
     """Confirm the canonical scanner entry point is importable or
     executable.
 
+    The probe anchors the file check to ``context['repo_root']``
+    when ``repo_root`` is set, so an operator who passed
+    ``--repo-root /path/to/repo`` is probed against that explicit
+    repo, not the process cwd. The ``cwd``-relative fallback is
+    only used when ``repo_root`` is genuinely unknown.
+
     Read-only: importing the script does not mutate repo state.
     """
     repo_root = context.get("repo_root")
     candidates = []
     if repo_root is not None:
         candidates.append(Path(repo_root) / "scripts" / "canonical_scanner.py")
-    # Fallback: search PATH.
-    candidates.append(Path("scripts") / "canonical_scanner.py")
+    else:
+        # Fallback: when repo_root is unknown, use cwd-relative
+        # scripts path. Anchored to git_cwd (not the bare process
+        # cwd) for symmetry with the Git probes.
+        git_cwd = context.get("git_cwd")
+        anchor = git_cwd if git_cwd is not None else context["cwd"]
+        candidates.append(Path(anchor) / "scripts" / "canonical_scanner.py")
     for cand in candidates:
         if cand.is_file():
             return CheckResult(
@@ -592,12 +651,26 @@ def build_context(
     When ``repo_root`` is None, the doctor attempts to auto-detect
     the git toplevel of ``cwd`` so the canonical-scanner and
     worker-hooks probes can run without an explicit override.
+
+    ``git_cwd`` is the directory the Git probes run inside. When
+    ``repo_root`` is provided (explicitly or via auto-detect),
+    ``git_cwd`` is set to ``repo_root`` so ``doctor --repo-root
+    /path/to/repo`` always probes the explicitly-selected
+    repository, not the operator's process cwd.
     """
     resolved_cwd = cwd if cwd is not None else os.getcwd()
     if repo_root is None:
         repo_root = _autodetect_repo_root(resolved_cwd)
+    # Git probes run in the explicitly-selected repository root
+    # when one was provided, or in the auto-detected repository
+    # toplevel, or in the process cwd as a last resort. This
+    # avoids the bug where ``doctor --repo-root /path/to/repo``
+    # ran the probes against the operator's cwd instead of the
+    # selected repo.
+    git_cwd = repo_root if repo_root is not None else resolved_cwd
     return {
         "cwd": resolved_cwd,
+        "git_cwd": git_cwd,
         "state_root_parent": (
             state_root_parent
             if state_root_parent is not None
