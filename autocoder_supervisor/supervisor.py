@@ -12654,6 +12654,35 @@ def apply_reviewer_plan(
     if not isinstance(head, str) or not head:
         snap["reviewer_plan"] = {}
         return {}
+    # Round-C23R1: resolve the phase from the per-run
+    # ``state.json`` journal (durable signal: ``control_plane.repair_pushed``
+    # entries). The default is ``PHASE_INITIAL_HEAD``; the
+    # supervisor's heartbeat loop passes the live
+    # orchestrator state root so production deployments
+    # see the correct phase on every slice.
+    from autocoder_supervisor.reviewer_policy import (
+        PHASE_INITIAL_HEAD,
+        resolve_phase as _resolve_phase,
+    )
+    state_root_path = None
+    try:
+        from .orchestration_state_root import (
+            resolve_orchestration_state_root,
+        )
+        state_root_path = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+        if not isinstance(state_root_path, str):
+            state_root_path = None
+    except Exception:
+        state_root_path = None
+    phase = _resolve_phase(
+        state_root=(
+            Path(state_root_path) if state_root_path else None
+        ),
+    )
     # The C23 directive fixes the per-provider
     # ``required`` / ``auto_trigger`` semantics for this
     # repository (codex MUST be required; sourcery is
@@ -12712,6 +12741,7 @@ def apply_reviewer_plan(
         policies=policies,
         ledger_path=ledger,
         superseded_records=superseded_records,
+        phase=phase,
     )
     # Apply REQUEST actions through the canonical
     # review-request seam. We only fire requests for the

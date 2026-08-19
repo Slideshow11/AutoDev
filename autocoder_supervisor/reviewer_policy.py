@@ -77,6 +77,136 @@ FRESHNESS_OPTIONAL_STALE = "OPTIONAL_STALE"
 FRESHNESS_NOT_NEEDED = "NOT_NEEDED"
 
 
+# === Phase vocabulary (Round-C23R1) ===
+
+#: The first reviewable head on the PR. CodeRabbit's
+#: initial-only budget applies; the planner may consume one
+#: explicit request for the providers that auto-review
+#: ``on_pr_creation``.
+PHASE_INITIAL_HEAD = "INITIAL_HEAD"
+#: A head reached after a worker pushed a repair commit.
+#: CodeRabbit becomes OPTIONAL by default (its quota was
+#: already consumed on the initial head); Codex remains
+#: REQUIRED because Codex's freshness is the operator's
+#: trust signal for code-correctness across repair heads.
+PHASE_REPAIR_HEAD = "REPAIR_HEAD"
+
+
+# === Phase signal ===
+
+# The phase is durable: the controller's state-machine
+# journal records ``control_plane.repair_pushed`` events at
+# the moment ``report_repair_pushed`` fires
+# (``StateMachine._apply`` writes the transition row with
+# ``event=control_plane.repair_pushed``). The canonical
+# per-run ``state.json`` carries the journal entries. The
+# phase resolver counts those entries on the current PR
+# lineage:
+#
+#   - 0 entries -> INITIAL_HEAD (no repair push observed yet
+#     for the current PR run)
+#   - 1+ entries -> REPAIR_HEAD
+#
+# The ``old_head_sha`` of the most recent repair push is also
+# exposed so callers can correlate the phase signal with the
+# relay's FindingLedger supersession evidence (round-C22R2).
+#
+# NOTE: the canary / test environments can pass a synthetic
+# phase signal explicitly (the planner does not require the
+# per-run state root to be readable).
+
+
+def resolve_phase_from_state_root(
+    *,
+    state_root: Optional["Path"],
+    run_id: Optional[str] = None,
+) -> Tuple[str, Optional[str], int]:
+    """Inspect the per-run ``state.json`` journal and return:
+
+    ``(phase, last_old_head_sha, repair_pushed_count)``
+
+    ``phase`` is one of ``PHASE_INITIAL_HEAD`` /
+    ``PHASE_REPAIR_HEAD``. ``last_old_head_sha`` is the
+    ``head_observed`` of the most recent
+    ``control_plane.repair_pushed`` row (or ``None`` when no
+    repair push has been observed). The third element is the
+    total number of repair-push entries on the current PR
+    lineage — useful for diagnostics.
+
+    The function NEVER raises. When ``state.json`` is missing,
+    malformed, or unreachable the resolver returns
+    ``(PHASE_INITIAL_HEAD, None, 0)`` (the conservative
+    default). Tests that require a non-default phase must
+    seed ``state.json`` or pass an explicit phase override.
+
+    A two-arg overload accepts a ``run_id`` for callers that
+    prefer to keep the JSON reading path generic; the
+    resolver does not actually consume ``run_id`` because
+    ``state.json`` is the canonical per-run document.
+    """
+    if state_root is None:
+        return (PHASE_INITIAL_HEAD, None, 0)
+    try:
+        path = Path(state_root) / "state.json"
+        if not path.exists():
+            return (PHASE_INITIAL_HEAD, None, 0)
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError):
+        return (PHASE_INITIAL_HEAD, None, 0)
+    if not isinstance(payload, dict):
+        return (PHASE_INITIAL_HEAD, None, 0)
+    journal = payload.get("journal") or []
+    if not isinstance(journal, list):
+        return (PHASE_INITIAL_HEAD, None, 0)
+    repair_pushed_rows: List[dict] = []
+    for entry in journal:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("event") == "control_plane.repair_pushed":
+            repair_pushed_rows.append(entry)
+    if not repair_pushed_rows:
+        return (PHASE_INITIAL_HEAD, None, 0)
+    last_row = repair_pushed_rows[-1]
+    last_old = (
+        last_row.get("head_observed")
+        or last_row.get("head_required")
+        or last_row.get("head_required_sha")
+        or None
+    )
+    return (PHASE_REPAIR_HEAD, last_old, len(repair_pushed_rows))
+
+
+def resolve_phase(
+    *,
+    state_root: Optional["Path"] = None,
+    explicit_phase: Optional[str] = None,
+    has_any_superseded_request: bool = False,
+) -> str:
+    """Round-C23R1 phase resolver.
+
+    Precedence:
+
+    1. ``explicit_phase`` (test fixture override).
+    2. ``resolve_phase_from_state_root`` (production path).
+    3. Fallback: ``PHASE_REPAIR_HEAD`` when
+       ``has_any_superseded_request`` is True (the relay
+       has previously promoted a request to SUPERSEDED,
+       implying a head advance that is consistent with a
+       repair push). Otherwise ``PHASE_INITIAL_HEAD``.
+    """
+    if isinstance(explicit_phase, str) and explicit_phase in (
+        PHASE_INITIAL_HEAD,
+        PHASE_REPAIR_HEAD,
+    ):
+        return explicit_phase
+    phase, _, _ = resolve_phase_from_state_root(state_root=state_root)
+    if phase == PHASE_REPAIR_HEAD:
+        return PHASE_REPAIR_HEAD
+    if has_any_superseded_request:
+        return PHASE_REPAIR_HEAD
+    return PHASE_INITIAL_HEAD
+
+
 # === Policy defaults (per Slideshow11/AutoDev observed behavior) ===
 
 # These defaults reflect the C23 directive's observations:
@@ -119,6 +249,25 @@ DEFAULT_POLICY_PROFILES: Dict[str, Dict[str, Any]] = {
         "freshness_grace_seconds": 180,  # bounded grace
         "unavailable_behavior": "BLOCK",  # fail closed
         "request_cooldown_seconds": 600,
+        # Round-C23R1: Codex remains REQUIRED on repair heads
+        # (operator's freshness trust signal). Budget is
+        # unlimited per PR; per-head dedup is the only cap.
+        "phase_required": {
+            PHASE_INITIAL_HEAD: True,
+            PHASE_REPAIR_HEAD: True,
+        },
+        "phase_budget_per_pr": {
+            PHASE_INITIAL_HEAD: None,
+            PHASE_REPAIR_HEAD: None,
+        },
+        "phase_max_requests_per_head": {
+            PHASE_INITIAL_HEAD: 1,
+            PHASE_REPAIR_HEAD: 1,
+        },
+        "phase_auto_trigger": {
+            PHASE_INITIAL_HEAD: True,
+            PHASE_REPAIR_HEAD: True,
+        },
     },
     "sourcery": {
         "required": False,
@@ -131,6 +280,24 @@ DEFAULT_POLICY_PROFILES: Dict[str, Dict[str, Any]] = {
         "freshness_grace_seconds": 300,
         "unavailable_behavior": "IGNORE",
         "request_cooldown_seconds": 3600,
+        # Round-C23R1: Sourcery is optional on both phases
+        # and the supervisor never auto-triggers it.
+        "phase_required": {
+            PHASE_INITIAL_HEAD: False,
+            PHASE_REPAIR_HEAD: False,
+        },
+        "phase_budget_per_pr": {
+            PHASE_INITIAL_HEAD: None,
+            PHASE_REPAIR_HEAD: None,
+        },
+        "phase_max_requests_per_head": {
+            PHASE_INITIAL_HEAD: 0,
+            PHASE_REPAIR_HEAD: 0,
+        },
+        "phase_auto_trigger": {
+            PHASE_INITIAL_HEAD: False,
+            PHASE_REPAIR_HEAD: False,
+        },
     },
     "coderabbit": {
         "required": True,
@@ -143,6 +310,32 @@ DEFAULT_POLICY_PROFILES: Dict[str, Dict[str, Any]] = {
         "freshness_grace_seconds": 180,
         "unavailable_behavior": "BLOCK",
         "request_cooldown_seconds": 600,
+        # Round-C23R1: CodeRabbit is REQUIRED on the initial
+        # head (the first review it can do) but OPTIONAL on
+        # repair heads. The operator's quota is consumed by
+        # the initial review; subsequent repair heads
+        # MUST NOT issue another explicit CodeRabbit
+        # request unless a deployment-specific override
+        # re-marks ``phase_required[REPAIR_HEAD] = True``.
+        # Stale CodeRabbit evidence on a repair head is
+        # therefore OPTIONAL_STALE / NOT_NEEDED — the
+        # readiness gate does NOT block.
+        "phase_required": {
+            PHASE_INITIAL_HEAD: True,
+            PHASE_REPAIR_HEAD: False,
+        },
+        "phase_budget_per_pr": {
+            PHASE_INITIAL_HEAD: 1,
+            PHASE_REPAIR_HEAD: 0,
+        },
+        "phase_max_requests_per_head": {
+            PHASE_INITIAL_HEAD: 1,
+            PHASE_REPAIR_HEAD: 0,
+        },
+        "phase_auto_trigger": {
+            PHASE_INITIAL_HEAD: True,
+            PHASE_REPAIR_HEAD: False,
+        },
     },
 }
 
@@ -186,6 +379,26 @@ class ReviewerPolicy:
     - ``request_cooldown_seconds``: minimum gap between two
       requests for the same provider. Prevents accidental
       spam across retries.
+
+    Round-C23R1 phase fields (the policy can vary per PR
+    lifecycle phase — initial head vs repair head):
+
+    - ``phase_required``: maps phase to whether the
+      provider's fresh review is required for qualification.
+      CodeRabbit defaults to ``{INITIAL: True, REPAIR:
+      False}``; ``required`` is the legacy alias (the
+      INITIAL_HEAD value) so existing test fixtures keep
+      working.
+    - ``phase_budget_per_pr``: per-phase lifetime budget.
+      ``None`` = unlimited; ``0`` = explicitly disabled
+      (CodeRabbit on repair heads).
+    - ``phase_max_requests_per_head``: per-phase per-head
+      dedup cap. ``0`` = no requests on that phase
+      regardless of evidence freshness.
+    - ``phase_auto_trigger``: per-phase auto-trigger
+      switch. CodeRabbit defaults to ``{INITIAL: True,
+      REPAIR: False}`` so the planner does not burn
+      CodeRabbit quota on every repair push.
     """
 
     name: str
@@ -199,6 +412,44 @@ class ReviewerPolicy:
     freshness_grace_seconds: int = 180
     unavailable_behavior: str = "BLOCK"
     request_cooldown_seconds: int = 600
+    # Round-C23R1 phase overrides. When empty dict, the
+    # default behavior applies (``required`` /
+    # ``auto_trigger`` / ``budget_per_pr`` /
+    # ``max_requests_per_head`` are used for both phases).
+    # When populated, the planner resolves the value for
+    # the current phase via ``policy.value_for_phase``.
+    phase_required: Mapping[str, bool] = field(default_factory=dict)
+    phase_budget_per_pr: Mapping[str, Optional[int]] = field(
+        default_factory=dict
+    )
+    phase_max_requests_per_head: Mapping[str, int] = field(
+        default_factory=dict
+    )
+    phase_auto_trigger: Mapping[str, bool] = field(
+        default_factory=dict
+    )
+
+    def value_for_phase(
+        self, attr: str, phase: str,
+    ) -> Any:
+        """Resolve a phase-aware attribute. When the policy
+        carries a per-phase override the phase's value wins;
+        otherwise the legacy scalar (``required`` /
+        ``auto_trigger`` / ``budget_per_pr`` /
+        ``max_requests_per_head``) is used. ``attr`` MUST be
+        one of: ``required``, ``auto_trigger``,
+        ``budget_per_pr``, ``max_requests_per_head``."""
+        override_map = {
+            "required": self.phase_required,
+            "auto_trigger": self.phase_auto_trigger,
+            "budget_per_pr": self.phase_budget_per_pr,
+            "max_requests_per_head":
+                self.phase_max_requests_per_head,
+        }
+        m = override_map.get(attr) or {}
+        if isinstance(m, Mapping) and phase in m:
+            return m[phase]
+        return getattr(self, attr)
 
 
 @dataclass(frozen=True)
@@ -243,93 +494,83 @@ def _provider_review_record_for_head(
     provider: str,
     head_sha: str,
 ) -> Optional[dict]:
-    """Find the provider's most recent review (formal OR
-    walkthrough-completed comment) and return a small record
-    suitable for freshness comparison.
+    """Find the provider's authoritative review record for
+    the current exact head.
 
-    Returns ``None`` when no provider evidence is present in the
-    snapshot.
+    Round-C23R1 fix: the previous implementation iterated
+    ``snap["formal_reviews"]`` in snapshot order and
+    returned immediately on the first matching provider
+    entry. That ordering is NOT a guarantee — GitHub may
+    return reviews in ``submitted_at`` order, ``id`` order,
+    or arbitrary order depending on pagination. The
+    authoritative algorithm MUST walk ALL formal reviews
+    for the provider and select the best one by priority:
 
-    The strongest available evidence is consulted first:
+    1. ANY formal review with ``commit_id == head_sha``
+       wins (exact-head anchor). Among multiple exact-head
+       matches, the most-recent by ``submitted_at`` wins.
+    2. ANY ``provider_surfaces[provider].heads[head_sha]``
+       binding is ALSO exact-head authoritative evidence.
+       When present alongside a stale formal review, the
+       provider_surface wins because the supervisor
+       persisted the binding at snapshot time and it
+       represents the live evidence. Both #1 and #2 are
+       checked before any stale record is returned.
+    3. Otherwise the most-recent STALE record (commit_id
+       differs from head_sha), selected by ``submitted_at``
+       in descending ISO-8601 order.
+    4. Otherwise the most-recent UNBOUND record (no
+       ``commit_id``; GitHub did not expose a binding
+       anchor — typically a pre-round-27 review). Wall-clock
+       ordering selects the latest.
+    5. Fallback to issue comments (walkthrough-completed
+       markers) — only consulted when the formal-review
+       branch yields nothing. Issue comments do not expose
+       ``commit_id`` so they cannot win priority #1/#2.
 
-    1. ``snap["formal_reviews"]`` filtered to ``provider``:
-       GitHub's ``submitted_at`` plus the ``commit_id`` field
-       (round-27+) bind a review to a specific commit. We
-       compare ``commit_id`` to the current head.
-    2. ``snap["_provider_issue_comments"]`` filtered to the
-       provider: a walkthrough-completed comment. The
-       ``created_at`` field is the strongest time anchor
-       available; ``commit_id`` is not exposed for issue
-       comments, so freshness is bound to the wall-clock
-       relative to the current head's observed ``head_match``.
-       The HEAD timestamp is recorded separately; if the
-       provider explicitly tagged the head (e.g. CodeRabbit's
-       walkthrough has a per-comment ``commit_id``), the
-       snapshot's ``provider_surfaces`` carries it.
-    3. ``snap["provider_surfaces"]``: per-provider exact-head
-       bindings persisted by ``capture_live_snapshot``.
+    Returns ``None`` when none of the above yields a record.
 
-    The checker prefers formal reviews over issue comments when
-    both are available for the same provider.
+    The function never raises. Malformed entries are
+    silently skipped so a single corrupt review record does
+    not break the planner.
     """
     if not isinstance(snap, dict):
         return None
-    # 1. Formal reviews (GitHub's ``/repos/.../pulls/{n}/reviews``).
+    provider_reviews: List[dict] = []
     for r in snap.get("formal_reviews") or []:
         if not isinstance(r, dict):
             continue
         if r.get("provider") != provider:
             continue
+        provider_reviews.append(r)
+    # Priority #1: any exact-head match. Among the matches,
+    # pick the most recent by ``submitted_at`` so the
+    # audit's "freshness must beat ordering" rule wins.
+    exact_head_matches = []
+    for r in provider_reviews:
         cid = r.get("commit_id")
-        # ``commit_id`` is the SHA the review was submitted
-        # against. When GitHub returns ``None`` we treat it as
-        # a pre-binding-anchor review and prefer the
-        # ``head_sha`` field if the review was specifically
-        # tagged. Otherwise the freshness falls back to
-        # wall-clock comparison against the head observation
-        # time.
-        submitted_at = r.get("submitted_at")
-        review_id = r.get("review_id") or r.get("id")
         if cid is None and r.get("head_sha"):
             cid = r["head_sha"]
         if cid == head_sha:
-            return {
-                "commit_id": cid,
-                "submitted_at": submitted_at,
-                "review_id": review_id,
-                "kind": "formal_review",
-            }
-        # The review's commit_id is different from the current
-        # head; record it as the latest stale record so the
-        # caller can decide whether the wall-clock is within
-        # the grace period.
-        if cid:
-            return {
-                "commit_id": cid,
-                "submitted_at": submitted_at,
-                "review_id": review_id,
-                "kind": "formal_review_stale_commit",
-            }
-        # No commit_id at all: treat as worst-case (unknown).
+            exact_head_matches.append(r)
+    if exact_head_matches:
+        freshest = _most_recent_review(exact_head_matches)
+        cid = freshest.get("commit_id")
+        if cid is None and freshest.get("head_sha"):
+            cid = freshest["head_sha"]
         return {
-            "commit_id": None,
-            "submitted_at": submitted_at,
-            "review_id": review_id,
-            "kind": "formal_review_unbound",
+            "commit_id": cid,
+            "submitted_at": freshest.get("submitted_at"),
+            "review_id": (
+                freshest.get("review_id")
+                or freshest.get("id")
+            ),
+            "kind": "formal_review",
         }
-    # 2. Provider issue comments (walkthrough / review-complete
-    #    markers).
-    for c in snap.get("_provider_issue_comments", {}).get(provider, []) or []:
-        if not isinstance(c, dict):
-            continue
-        return {
-            "commit_id": None,  # issue comments don't expose
-            # commit_id; bound by wall-clock only
-            "submitted_at": c.get("created_at"),
-            "review_id": c.get("id"),
-            "kind": "issue_comment",
-        }
-    # 3. Provider surfaces (per-head explicit binding).
+    # Priority #2: provider-surface exact-head binding.
+    # The supervisor persisted this at snapshot time; it is
+    # authoritative for the current head even when a stale
+    # formal review exists alongside.
     surf = (snap.get("provider_surfaces") or {}).get(provider)
     if isinstance(surf, dict):
         for head_key, rec in (surf.get("heads") or {}).items():
@@ -340,7 +581,118 @@ def _provider_review_record_for_head(
                     "review_id": rec.get("review_id"),
                     "kind": "provider_surface",
                 }
+    # Priority #3: most recent STALE record (commit_id
+    # differs from head_sha).
+    stale_records = []
+    for r in provider_reviews:
+        cid = r.get("commit_id")
+        if cid is None and r.get("head_sha"):
+            cid = r["head_sha"]
+        if cid and cid != head_sha:
+            stale_records.append(r)
+    if stale_records:
+        freshest = _most_recent_review(stale_records)
+        cid = freshest.get("commit_id")
+        if cid is None and freshest.get("head_sha"):
+            cid = freshest["head_sha"]
+        return {
+            "commit_id": cid,
+            "submitted_at": freshest.get("submitted_at"),
+            "review_id": (
+                freshest.get("review_id")
+                or freshest.get("id")
+            ),
+            "kind": "formal_review_stale_commit",
+        }
+    # Priority #4: most recent UNBOUND record (no commit_id,
+    # no head_sha binding).
+    unbound_records = []
+    for r in provider_reviews:
+        cid = r.get("commit_id")
+        if cid is None and r.get("head_sha"):
+            cid = r["head_sha"]
+        if cid is None:
+            unbound_records.append(r)
+    if unbound_records:
+        freshest = _most_recent_review(unbound_records)
+        return {
+            "commit_id": None,
+            "submitted_at": freshest.get("submitted_at"),
+            "review_id": (
+                freshest.get("review_id")
+                or freshest.get("id")
+            ),
+            "kind": "formal_review_unbound",
+        }
+    # Priority #5: provider issue comments (walkthrough /
+    # review-complete markers). The audit prefers the
+    # most-recent walkthrough by ``created_at`` since the
+    # issue-comment connection does not expose a
+    # ``commit_id``. Issue comments are weaker evidence
+    # than formal reviews, so they only win when no formal
+    # review exists for the provider on the current head.
+    issue_comments = (
+        snap.get("_provider_issue_comments", {}).get(provider, []) or []
+    )
+    if issue_comments:
+        freshest_comment = _most_recent_comment(issue_comments)
+        if freshest_comment is not None:
+            return {
+                "commit_id": None,  # issue comments don't
+                # expose commit_id; bound by wall-clock only
+                "submitted_at": freshest_comment.get("created_at"),
+                "review_id": freshest_comment.get("id"),
+                "kind": "issue_comment",
+            }
     return None
+
+
+def _most_recent_review(reviews: List[dict]) -> dict:
+    """Return the most recent formal review by ``submitted_at``.
+    The helper accepts a non-empty list and never raises on
+    malformed timestamps: entries without ``submitted_at``
+    sort to the bottom; the first entry is returned when the
+    list is empty (the caller filters)."""
+    if not reviews:
+        # Defensive: the planner only calls this when the
+        # list is non-empty, but a guard prevents the
+        # ``max`` reduction from raising on an empty list.
+        return {}
+    decorated: List[Tuple[float, int, dict]] = []
+    for i, r in enumerate(reviews):
+        if not isinstance(r, dict):
+            continue
+        ts = _parse_iso8601_utc(r.get("submitted_at"))
+        if ts is None:
+            ts = 0.0
+        decorated.append((ts, i, r))
+    if not decorated:
+        return reviews[0]
+    # Sort by timestamp DESC then by index DESC (stable
+    # order for entries with identical timestamps). The
+    # most recent is at index 0.
+    decorated.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return decorated[0][2]
+
+
+def _most_recent_comment(comments: List[dict]) -> Optional[dict]:
+    """Return the most recent issue comment by ``created_at``.
+    Mirrors ``_most_recent_review`` for the
+    ``_provider_issue_comments`` payload."""
+    if not comments:
+        return None
+    decorated: List[Tuple[float, int, dict]] = []
+    for i, c in enumerate(comments):
+        if not isinstance(c, dict):
+            continue
+        ts = _parse_iso8601_utc(c.get("created_at"))
+        if ts is None:
+            ts = 0.0
+        decorated.append((ts, i, c))
+    if not decorated:
+        return comments[0]
+    decorated.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return decorated[0][2]
 
 
 def _read_request_ledger(
@@ -598,34 +950,100 @@ def _count_active_request_records(
     provider: str,
     head_sha: str,
     superseded_records: List[dict],
-) -> int:
-    """Count the number of REQUEST_INTENT / REQUEST_SENT /
-    ACKNOWLEDGED / REVIEW_COMPLETE records for ``provider`` on
-    ``head_sha``, minus the SUPERSEDED set. Used to enforce
-    ``max_requests_per_head`` and ``budget_per_pr``."""
+) -> Tuple[int, int]:
+    """Count the active request records for ``provider`` and
+    split them by ``head_sha`` match.
+
+    Round-C23R1 fix: the previous implementation computed a
+    binary ``max(0, 1 - superseded_for_provider)`` which
+    conflated per-head cap accounting with PR-lifetime
+    budget accounting. The audit requires semantically
+    correct accounting:
+
+    - ``active_on_current_head``: number of
+      REQUEST_INTENT / REQUEST_SENT / ACKNOWLEDGED /
+      REVIEW_COMPLETE records whose ``head_sha`` (stored in
+      the canonical ``{provider}__{head}.json`` filename)
+      equals the current head. Subtracted by the
+      corresponding SUPERSEDED count for the SAME
+      (provider, head_sha) pair (defensive: if the
+      supervisor moved the active record aside on head
+      advance, the per-head count drops to 0; otherwise
+      ``max(0, count - superseded_count_for_pair)``).
+    - ``active_in_pr_lifecycle``: number of active
+      records across ALL heads for ``provider``. This is
+      what ``budget_per_pr`` caps. The supervisor moves a
+      record to ``*.superseded.json`` on head advance, but
+      the canonical ``{provider}__{head}.json`` for the
+      PRIOR head remains on disk (no deletion); the helper
+      counts only the active lifecycle (not superseded).
+
+    Returns ``(active_on_current_head, active_in_pr_lifecycle)``.
+
+    ``superseded_records`` is the canonical list returned
+    by ``list_superseded_records(ledger_path)``. It is used
+    only for the per-head subtraction; the PR-lifetime
+    counter counts canonical ``{provider}__{head}.json``
+    files that have a non-SUPERSEDED lifecycle.
+    """
     if ledger_path is None:
-        return 0
-    active = _read_request_ledger(ledger_path, provider, head_sha)
-    if not isinstance(active, dict):
-        return 0
-    lifecycle = active.get("lifecycle")
-    if lifecycle not in (
+        return (0, 0)
+    # Group superseded records by (provider, head_sha) for
+    # the per-head subtraction.
+    superseded_pairs: Dict[Tuple[str, str], int] = {}
+    for s in superseded_records:
+        if not isinstance(s, dict):
+            continue
+        s_provider = s.get("provider")
+        s_head = (
+            s.get("superseded_head")
+            or s.get("head_sha")
+            or ""
+        )
+        if not isinstance(s_provider, str) or not s_head:
+            continue
+        superseded_pairs[(s_provider, s_head)] = (
+            superseded_pairs.get((s_provider, s_head), 0) + 1
+        )
+    on_current = 0
+    in_pr = 0
+    if not ledger_path.exists():
+        return (on_current, in_pr)
+    _LIFECYCLES = (
         "REQUEST_INTENT",
         "REQUEST_SENT",
         "ACKNOWLEDGED",
         "REVIEW_COMPLETE",
-    ):
-        return 0
-    # Subtract SUPERSEDED records (which the supervisor moves
-    # aside on head advance). The current ledger record
-    # survives the SUPERSEDED promotion because the canonical
-    # file lives at ``provider__head.json`` while superseded
-    # variants live at ``provider__head.superseded.json``.
-    superseded_for_provider = sum(
-        1 for s in superseded_records
-        if s.get("provider") == provider
     )
-    return max(0, 1 - superseded_for_provider)
+    # Active records: canonical ``{provider}__{head}.json``
+    # with a non-SUPERSEDED lifecycle.
+    for p in ledger_path.glob(f"{provider}__*.json"):
+        # Skip superseded variants.
+        if p.name.endswith(".superseded.json"):
+            continue
+        try:
+            payload = json.loads(p.read_text())
+        except (OSError, json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("lifecycle") not in _LIFECYCLES:
+            continue
+        # The head_sha is encoded in the filename.
+        # {provider}__{head_sha}.json -> head_sha is the
+        # third component.
+        stem = p.stem  # {provider}__{head_sha}
+        parts = stem.split("__", 1)
+        if len(parts) != 2:
+            continue
+        h = parts[1]
+        in_pr += 1
+        if h == head_sha:
+            superseded_for_pair = superseded_pairs.get(
+                (provider, h), 0
+            )
+            on_current = max(0, on_current + 1 - superseded_for_pair)
+    return (on_current, in_pr)
 
 
 def plan_reviewer_actions(
@@ -636,30 +1054,73 @@ def plan_reviewer_actions(
     ledger_path: Optional[Path] = None,
     superseded_records: Optional[List[dict]] = None,
     now: Optional[float] = None,
+    phase: str = PHASE_INITIAL_HEAD,
 ) -> Dict[str, ReviewerTriggerPlan]:
     """Compute the per-provider trigger decision for the
     current head.
+
+    Round-C23R1: the planner resolves the phase via the
+    ``phase`` parameter (the caller is responsible for
+    deriving it; production callers pass the value
+    returned by ``resolve_phase``). Per-phase overrides
+    (``policy.phase_required`` / ``phase_auto_trigger`` /
+    ``phase_budget_per_pr`` /
+    ``phase_max_requests_per_head``) win over the legacy
+    scalar fields when populated.
 
     Iterates over ``policies.keys()``; callers can pass any
     subset (typically ``REQUIRED + OPTIONAL`` providers from
     the supervisor's POLICY block).
 
-    Dedup rules:
-      - ``max_requests_per_head`` caps per-head triggers
+    Dedup rules (per-phase):
+
+      - ``phase_max_requests_per_head[phase]`` (or legacy
+        ``max_requests_per_head``) caps per-head triggers
         regardless of budget.
-      - ``budget_per_pr`` caps the lifetime triggers per
-        provider per PR lifecycle. ``None`` = unlimited.
+      - ``phase_budget_per_pr[phase]`` (or legacy
+        ``budget_per_pr``) caps lifetime triggers per
+        provider per PR lifecycle. ``None`` = unlimited;
+        ``0`` = explicitly disabled on this phase (CodeRabbit
+        on repair heads).
       - ``request_cooldown_seconds`` rejects immediate
         retries even when budget allows (defensive).
 
-    ``suprseded_records`` is the list returned by
-    ``list_review_requests(REVIEW_REQUESTS_DIR / *.superseded.json)``
-    so the budget accounting correctly subtracts attempts
-    that were correctly moved aside at head advance.
+    ``superseded_records`` is the list returned by
+    ``list_superseded_records(ledger_path)`` so the budget
+    accounting correctly subtracts attempts that were
+    correctly moved aside at head advance. The new
+    accounting helper ``_count_active_request_records``
+    returns ``(on_current_head, in_pr_lifecycle)``; the
+    per-head subtraction only counts SUPERSEDED entries
+    for the SAME ``(provider, head_sha)`` pair (round-C23R1
+    Defect B fix).
     """
     superseded = list(superseded_records or [])
     plans: Dict[str, ReviewerTriggerPlan] = {}
     for provider, policy in policies.items():
+        # Round-C23R1: phase-aware resolution of the four
+        # dimension fields. When ``policy.phase_required``
+        # (or the analogous field) is empty the legacy
+        # scalar wins; otherwise the phase's value wins.
+        required = bool(
+            policy.value_for_phase("required", phase)
+        )
+        auto_trigger = bool(
+            policy.value_for_phase("auto_trigger", phase)
+        )
+        # ``budget_per_pr`` may be ``None`` (unlimited) or
+        # ``int``. The phase override preserves the same
+        # semantics.
+        budget_per_pr = policy.value_for_phase(
+            "budget_per_pr", phase
+        )
+        if not isinstance(budget_per_pr, int) and (
+            budget_per_pr is not None
+        ):
+            budget_per_pr = None
+        max_per_head = int(
+            policy.value_for_phase("max_requests_per_head", phase)
+        )
         freshness = check_provider_freshness(
             provider=provider,
             policy=policy,
@@ -668,7 +1129,9 @@ def plan_reviewer_actions(
             ledger_path=ledger_path,
             now=now,
         )
-        # 1. Fresh -> NOT_NEEDED.
+        # 1. Fresh -> NOT_NEEDED. The freshness contract is
+        # exact-head-only; an exact-head review (priority
+        # #1 of the new review-selection algorithm) wins.
         if freshness.state == FRESHNESS_FRESH:
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
@@ -709,24 +1172,69 @@ def plan_reviewer_actions(
         request_id = (
             ledger.get("request_id") if isinstance(ledger, dict) else None
         )
-        # Budget accounting: count active non-superseded
-        # records on the current head.
-        active_count = _count_active_request_records(
+        # Round-C23R1: semantically correct request
+        # accounting. Returns
+        # ``(active_on_current_head, active_in_pr_lifecycle)``.
+        on_current_head, in_pr_lifecycle = _count_active_request_records(
             ledger_path=ledger_path,
             provider=provider,
             head_sha=head_sha,
             superseded_records=superseded,
         )
-        # Per-head dedup: ``max_requests_per_head`` (default
-        # 1) caps how many times the same provider may be
-        # triggered for the SAME head.
+        # Per-phase budget = ``0`` means "explicitly disabled
+        # on this phase" (e.g. CodeRabbit on repair heads).
+        # The planner emits NOT_NEEDED without a request —
+        # the readiness gate does NOT block on this
+        # provider. Audit's Defect B fix.
+        if budget_per_pr == 0:
+            if not required:
+                plans[provider] = ReviewerTriggerPlan(
+                    provider=provider,
+                    action="NOT_NEEDED",
+                    reason="phase_disabled_optional_provider",
+                    freshness=freshness,
+                )
+                continue
+            # ``required=True`` with ``budget_per_pr=0`` is
+            # contradictory; the audit requires BLOCK so
+            # the operator is notified.
+            plans[provider] = ReviewerTriggerPlan(
+                provider=provider,
+                action="BLOCK",
+                reason="phase_required_with_zero_budget",
+                freshness=freshness,
+            )
+            continue
+        if max_per_head == 0:
+            # ``max_per_head=0`` means "no requests on this
+            # phase". Optional providers emit NOT_NEEDED;
+            # required providers with no fresh evidence
+            # emit BLOCK (the operator MUST re-authorize).
+            if not required:
+                plans[provider] = ReviewerTriggerPlan(
+                    provider=provider,
+                    action="NOT_NEEDED",
+                    reason="phase_per_head_disabled_optional_provider",
+                    freshness=freshness,
+                )
+                continue
+            plans[provider] = ReviewerTriggerPlan(
+                provider=provider,
+                action="BLOCK",
+                reason="phase_per_head_disabled_required_provider",
+                freshness=freshness,
+            )
+            continue
+        # Per-head dedup: ``max_per_head`` caps how many
+        # times the same provider may be triggered for the
+        # SAME head.
         if (
-            policy.max_requests_per_head is not None
-            and active_count >= policy.max_requests_per_head
+            max_per_head is not None
+            and on_current_head >= max_per_head
         ):
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
-                action="BLOCK" if policy.required else "NOT_NEEDED",
+                action="BLOCK" if required else "NOT_NEEDED",
                 reason="max_requests_per_head_reached",
                 last_request_at=last_request_at,
                 last_lifecycle=last_lifecycle,
@@ -735,13 +1243,14 @@ def plan_reviewer_actions(
             )
             continue
         # Lifetime budget: ``budget_per_pr`` (None = unlimited).
+        # ``0`` is handled above as phase-disabled.
         if (
-            policy.budget_per_pr is not None
-            and active_count >= policy.budget_per_pr
+            budget_per_pr is not None
+            and in_pr_lifecycle >= budget_per_pr
         ):
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
-                action="BLOCK",
+                action="BLOCK" if required else "NOT_NEEDED",
                 reason="budget_per_pr_exhausted",
                 last_request_at=last_request_at,
                 last_lifecycle=last_lifecycle,
@@ -771,11 +1280,11 @@ def plan_reviewer_actions(
             continue
         # 6. The provider may be triggered (auto_trigger)
         #    when its freshness is STALE / PENDING.
-        if not policy.auto_trigger:
+        if not auto_trigger:
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
                 action=(
-                    "BLOCK" if policy.required else "NOT_NEEDED"
+                    "BLOCK" if required else "NOT_NEEDED"
                 ),
                 reason="policy_disallows_auto_trigger",
                 freshness=freshness,
@@ -783,7 +1292,7 @@ def plan_reviewer_actions(
             continue
         # 7. Optional + pending/stale: don't request, but also
         #    don't block readiness.
-        if not policy.required:
+        if not required:
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
                 action="NOT_NEEDED",
