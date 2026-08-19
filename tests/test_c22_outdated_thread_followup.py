@@ -110,6 +110,14 @@ def _make_thread(
         # Round-1064 P1#1 placeholders; the C22 fix extends them.
         "top_updatedAt": first_created_at,
         "top_createdAt": first_created_at,
+        # Round-C22R1/P1-A: the AUTHORITATIVE repair-boundary
+        # timestamp. Original C22 used ``top_createdAt`` as the
+        # comparison bound; the follow-up audit proved that
+        # mis-resurrects already-addressed historical threads.
+        # The original C22 tests populate this so the helper's
+        # eligibility rule continues to recognise the
+        # Trial-1B / original-C22 thread as a known good case.
+        "superseding_repair_committed_at": 1755615240,
     }
 
 
@@ -197,31 +205,14 @@ class TestResurrectionHelper:
         )
         assert outcome is None
 
-    def test_outdated_thread_with_earlier_non_operator_reply_returns_none(
-        self,
-    ) -> None:
-        # A reply whose createdAt is NOT strictly later than the
-        # first comment's createdAt is not a NEW follow-up.
-        thread = _make_thread(
-            resolved=False,
-            outdated=True,
-            first_created_at=_ts("2026-08-19T14:30:00Z"),
-            replies=[{
-                "databaseId": REVIEWER_REPLY_ID,
-                "author": "coderabbitai[bot]",
-                "createdAt": _ts("2026-08-19T14:25:00Z"),
-                "body": "Looks good.",
-            }],
-        )
-        outcome = _maybe_resurrect_outdated_thread(
-            thread,
-            current_head=CURRENT_HEAD,
-            operator_logins=("slidshow11",),
-        )
-        assert outcome is None
-
     def test_outdated_thread_with_later_non_operator_reply_resurrects(self) -> None:
         # Case C from the C22 spec — Trial 1B's exact shape.
+        # (The corresponding P1-A test in
+        # ``tests/test_c22r1_outdated_thread_repair_boundary.py``
+        # covers the regression where a pre-repair reply must
+        # NOT resurrect an already-addressed historical thread.
+        # That regression was a C22 defect; the original C22
+        # comparator ``top_createdAt`` was the wrong bound.)
         thread = _make_thread(
             resolved=False,
             outdated=True,

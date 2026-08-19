@@ -1223,6 +1223,12 @@ def _parse_iso8601_utc(value: object) -> Optional[int]:
     the caller can fall back to the strict "missing evidence" path
     instead of guessing. The returned value is comparable across
     comments in the same thread.
+
+    Round-C22R1/S2 hardening: a bare date (``"2026-08-19"``) is NOT
+    a valid GitHub timestamp; the function rejects it. Only full
+    datetime strings (with a time component) are accepted, so the
+    eligibility rule cannot accidentally treat a date-only string
+    as a coincident-timestamp resurrection.
     """
     if not isinstance(value, str) or not value:
         return None
@@ -1235,6 +1241,25 @@ def _parse_iso8601_utc(value: object) -> Optional[int]:
         dt = _dt.datetime.fromisoformat(raw)
     except (TypeError, ValueError):
         return None
+    # Round-C22R1/S2: ``fromisoformat`` accepts date-only
+    # strings like ``"2026-08-19"`` and returns a ``datetime``
+    # instance with time ``00:00:00``. GitHub does not emit
+    # date-only timestamps; treat them as missing evidence so
+    # the eligibility rule fails closed rather than treating
+    # a truncated string as a coincident-timestamp match.
+    #
+    # The heuristic: ``fromisoformat("YYYY-MM-DD")`` always
+    # produces a ``datetime`` with
+    # ``(hour, minute, second, microsecond) == (0, 0, 0, 0)``.
+    # Real GitHub timestamps never have that exact shape.
+    if (
+        dt.hour == 0
+        and dt.minute == 0
+        and dt.second == 0
+        and dt.microsecond == 0
+        and "T" not in raw
+    ):
+        return None
     if dt.tzinfo is None:
         # Treat naive timestamps as UTC; GitHub always emits Z.
         dt = dt.replace(tzinfo=_dt.timezone.utc)
@@ -1244,24 +1269,35 @@ def _parse_iso8601_utc(value: object) -> Optional[int]:
 def _c22_is_followup_eligible(
     *,
     followup: dict,
-    first_created_ts: Optional[int],
+    repair_boundary_ts: Optional[int],
     operator_logins: Tuple[str, ...],
 ) -> bool:
-    """Return True iff ``followup`` is a non-operator, NEWER, actionable
-    reply that can resurrect an outdated thread.
+    """Return True iff ``followup`` is a non-operator, post-repair,
+    actionable reply that can resurrect an outdated thread.
 
-    The eligibility rule (Autonomy C22):
+    The eligibility rule (Autonomy C22-R1):
 
       R1. followup author must NOT be in ``operator_logins`` (operator
           accounts can explain away a finding without re-elevating it).
       R2. followup must carry a ``createdAt`` strictly later than the
-          first comment's ``createdAt`` (timestamp ordering inside the
-          same thread — the strongest durable evidence GitHub exposes;
-          ``comment.commit`` is NOT re-bound when a thread goes
-          outdated, so commit-oid evidence is unreliable).
-      R3. followup body must pass ``_is_actionable_provider_comment`` so
-          status markers (``Walkthrough``, ``In progress``, etc.) do not
-          resurrect threads.
+          ``repair_boundary_ts`` — the Unix committer timestamp of the
+          head-changing repair commit that made the original review
+          anchor stale. GitHub does not re-bind ``comment.commit``
+          when a thread goes outdated, so commit-oid evidence is
+          unreliable; the supervisor's
+          ``_git_superseding_repair_committed_at`` helper provides
+          the canonical repair boundary by reading
+          ``git log --reverse <anchor>..<head>``. When the boundary
+          is missing / unparseable (e.g. git lookup failed or the
+          supervisor could not derive it), the rule fails closed:
+          ``repair_boundary_ts is None`` → False.
+      R3. followup body must pass ``_is_actionable_provider_comment``
+          so status markers (``Walkthrough``, ``In progress``,
+          etc.) do not resurrect threads.
+
+    The R2 comparison is intentionally STRICT (>) so an
+    equal-timestamp followup (e.g. an off-by-second race) does
+    not silently resurrect an already-addressed historical thread.
 
     Each rule has an inline source-pointer note. The helper is split
     from ``_maybe_resurrect_outdated_thread`` so the eligibility rule is
@@ -1277,13 +1313,14 @@ def _c22_is_followup_eligible(
         or author in operator_logins
     ):
         return False
-    # R2: strictly-later timestamp. Missing / unparseable createdAt on
-    # either side returns False (we cannot claim "newer" without a
-    # timestamp anchor).
+    # R2: strictly-later-than-repair-boundary timestamp.
+    # Missing / unparseable createdAt on either side returns False
+    # (we cannot claim "post-repair" without a timestamp anchor on
+    # both ends).
     followup_ts = _parse_iso8601_utc(followup.get("createdAt"))
-    if followup_ts is None or first_created_ts is None:
+    if followup_ts is None or repair_boundary_ts is None:
         return False
-    if followup_ts <= first_created_ts:
+    if followup_ts <= repair_boundary_ts:
         return False
     # R3: actionable body — not a status marker.
     body = str(followup.get("body") or "")
@@ -1292,64 +1329,137 @@ def _c22_is_followup_eligible(
     return True
 
 
+def _normalize_operator_logins(
+    raw: object,
+    *,
+    fallback: Tuple[str, ...] = _C22_DEFAULT_OPERATOR_LOGINS,
+) -> Tuple[str, ...]:
+    """Round-C22R1/S1: normalize the ``operator_logins`` snapshot
+    field into a canonical tuple of trimmed, non-empty strings.
+
+    Contract:
+
+    - ``None`` → ``fallback`` (backward-compatible fixture / no-
+      operator-override default).
+    - ``list`` / ``tuple`` / ``set`` of strings → trimmed, non-empty
+      entries preserved; falsy / empty entries dropped; the result
+      is a tuple. ``str(...)`` defends against non-string elements.
+    - bare ``str`` (e.g. ``"github-actions"``) → ``fallback``.
+      Treating it as an iterable would otherwise explode it into a
+      tuple of single-character logins, which is the exact bug
+      Sourcery flagged. ``len(raw) > some-large-threshold`` would
+      also miss cases where the operator's name happens to be a
+      short string the user meant as ONE identity; the explicit
+      type check is the right contract.
+    - any other truthy non-iterable (``int``, ``float``, ``bool``,
+      ``None``) → ``fallback``. ``tuple(int)`` raises ``TypeError``,
+      which Sourcery flagged.
+    - ``dict`` → ``fallback``. ``tuple({"a": 1, "b": 2})`` returns
+      ``("a", "b")`` (keys, not values), which would silently
+      introduce bogus operator logins. Reject explicitly.
+
+    The normalizer never raises; every malformed input falls back
+    to the canonical default.
+    """
+    if raw is None:
+        return tuple(fallback)
+    if isinstance(raw, str):
+        # Plain string must not be expanded into characters.
+        return tuple(fallback)
+    if isinstance(raw, dict):
+        # Dicts would expose KEYS, not values, if iterated. Reject.
+        return tuple(fallback)
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        # Truthy non-iterable (int, float, bool, custom object).
+        return tuple(fallback)
+    out: List[str] = []
+    seen: set = set()
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        s = entry.strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    if not out:
+        return tuple(fallback)
+    return tuple(out)
+
+
 def _maybe_resurrect_outdated_thread(
     thread_data: dict,
     *,
     current_head: Optional[str],
     operator_logins: Tuple[str, ...] = _C22_DEFAULT_OPERATOR_LOGINS,
 ) -> Optional[dict]:
-    """C22: reconsider an outdated, unresolved review thread when a NEW
-    non-operator follow-up reply exists.
+    """C22-R1: reconsider an outdated, unresolved review thread when a
+    NEW non-operator follow-up reply exists AFTER the head-changing
+    repair.
 
-    Returns a dict describing the qualifying follow-up, or ``None`` when
-    the thread is not eligible.
+    Returns a dict describing the qualifying follow-up, or ``None``
+    when the thread is not eligible.
 
     The eligibility rule (see ``_c22_is_followup_eligible``):
 
-      - the thread itself must be outdated and unresolved (the caller
-        has already enforced that — this helper trusts the caller);
-      - there must be at least one reply whose ``createdAt`` is strictly
-        later than the first comment's ``createdAt``;
-      - the latest qualifying reply is returned so the caller can use
-        its body / author / id as the actionable follow-up evidence.
+      - the thread itself must be outdated and unresolved (the
+        caller has already enforced that — this helper trusts the
+        caller);
+      - there must be a ``superseding_repair_committed_at`` on
+        ``thread_data`` (the supervisor stamps this from
+        ``_git_superseding_repair_committed_at``); a missing /
+        unparseable boundary fails closed;
+      - at least one reply must have ``createdAt`` strictly later
+        than ``superseding_repair_committed_at`` (NOT just later
+        than the first comment — see Autonomy C22-R1/P1-A);
+      - the latest qualifying reply is returned so the caller can
+        use its body / author / id as the actionable follow-up
+        evidence.
 
-    The captured ``createdAt`` evidence is the strongest durable binding
-    GitHub exposes: ``comment.commit`` is NOT re-bound when a thread
-    goes outdated, so timestamp ordering inside the same thread is the
-    only reliable signal that a follow-up post-dates the work that made
-    the original anchor stale. This is documented here so a future
-    revision does not silently weaken the rule by, e.g., switching to a
-    ``comment.commit`` check that the GraphQL payload does not
-    re-populate.
+    The ``superseding_repair_committed_at`` evidence is
+    authoritative. ``comment.commit`` is NOT re-bound by GitHub
+    when a thread goes outdated, so commit-oid evidence is
+    unreliable; the supervisor computes the repair boundary by
+    walking ``git log --reverse --ancestry-path <anchor>..<head>``
+    and reading the committer timestamp of the FIRST descendant
+    commit. This matches the audit's expectation that the
+    follow-up must post-date the head-changing REPAIR that already
+    addressed the original concern, not just any later commit on
+    the branch (including documentation / report-only commits).
 
     Parameters
     ----------
     thread_data:
         The thread dict as captured by ``capture_live_snapshot``
         (``resolved/outdated/path/line/body/commit_oid/author/
-        comment_count/top_id/replies`` plus optional
-        ``top_createdAt`` / ``replies[*].createdAt``). Both
-        ``top_createdAt`` and the first reply's ``createdAt`` are used
-        by the eligibility rule; missing timestamps fail closed
-        (return None).
+        comment_count/top_id/replies`` plus
+        ``superseding_repair_committed_at`` and
+        ``replies[*].createdAt``). Both the
+        ``superseding_repair_committed_at`` field and each
+        reply's ``createdAt`` are used by the eligibility rule;
+        missing timestamps fail closed (return None).
     current_head:
-        The snapshot's exact PR head. Currently informational; reserved
-        for the future case where head-anchored follow-ups become
-        available on newer GraphQL payloads.
+        The snapshot's exact PR head. Currently informational;
+        reserved for the future case where head-anchored follow-ups
+        become available on newer GraphQL payloads.
     operator_logins:
         Set of account names whose replies are treated as operator
-        explanations and DO NOT resurrect outdated threads. Defaults to
-        ``_C22_DEFAULT_OPERATOR_LOGINS`` (``github-actions`` etc).
-        The supervisor's snapshot may override via the
+        explanations and DO NOT resurrect outdated threads. Defaults
+        to ``_C22_DEFAULT_OPERATOR_LOGINS`` (``github-actions``
+        etc). The supervisor's snapshot may override via the
         ``operator_logins`` field, but this helper does not read it
         directly — callers (``_collect_review_findings``,
         ``collect_findings``) thread the override through their own
-        argument plumbing.
+        argument plumbing after running it through
+        ``_normalize_operator_logins``.
 
     Returns
     -------
     Optional[dict]
-        A ``{"followup": <reply-dict>, "thread_id": <id>}`` pair, or
+        A ``{"followup": <reply-dict>, "thread_id": <id>,
+        "superseding_repair_committed_at": <int|None>}`` triple, or
         ``None``. The reply dict is the raw snapshot entry (NOT a
         shaped Finding) so the caller can preserve the original
         ``createdAt`` / ``author`` / ``databaseId`` provenance.
@@ -1367,9 +1477,21 @@ def _maybe_resurrect_outdated_thread(
     replies = thread_data.get("replies") or []
     if not isinstance(replies, list) or not replies:
         return None
-    first_created_ts = _parse_iso8601_utc(
-        thread_data.get("top_createdAt")
+    # Round-C22R1/P1-A: the AUTHORITATIVE repair-boundary
+    # timestamp is the supervisor's
+    # ``_git_superseding_repair_committed_at`` result. The first
+    # comment's ``createdAt`` is intentionally NOT used as the
+    # comparison bound; the audit's review-c1 case (T1 < T2 < T3)
+    # proved that comparison mis-resurrects already-addressed
+    # historical threads.
+    repair_boundary_ts_raw = thread_data.get(
+        "superseding_repair_committed_at"
     )
+    repair_boundary_ts: Optional[int] = None
+    if isinstance(repair_boundary_ts_raw, int):
+        repair_boundary_ts = repair_boundary_ts_raw
+    elif isinstance(repair_boundary_ts_raw, str) and repair_boundary_ts_raw:
+        repair_boundary_ts = _parse_iso8601_utc(repair_boundary_ts_raw)
     # Walk replies in their stored order; the snapshot already sorts
     # GraphQL comments by id and the supervisor preserves that order,
     # so the last entry is the freshest.
@@ -1379,7 +1501,7 @@ def _maybe_resurrect_outdated_thread(
             continue
         if _c22_is_followup_eligible(
             followup=reply,
-            first_created_ts=first_created_ts,
+            repair_boundary_ts=repair_boundary_ts,
             operator_logins=tuple(operator_logins),
         ):
             qualifying = reply
@@ -1392,6 +1514,7 @@ def _maybe_resurrect_outdated_thread(
             or thread_data.get("thread_id")
             or ""
         ),
+        "superseding_repair_committed_at": repair_boundary_ts,
     }
 
 
@@ -1416,6 +1539,20 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
         raise InvalidSnapshot("snapshot must be a dict")
     findings: List[Finding] = []
     seen_ids: set = set()
+    # Round-C22R1/S3: cross-surface dedup by ``comment_id``. The
+    # collector consumes multiple finding-emitting surfaces
+    # (provider issue comments, ``review_comments``, C22
+    # resurrected thread follow-ups). When the same logical
+    # comment is visible through more than one surface (e.g.
+    # the C22 resurrected follow-up also appears as an
+    # inline-review-comment because GitHub exposes it in both
+    # the thread and the PR's review-comment stream), the
+    # ``seen_ids`` dedup by ``finding_id`` is INSUFFICIENT — the
+    # inline path keys by ``inline:<comment_id>`` and the
+    # thread path keys by ``thread:<thread_id>``, so they would
+    # both pass the ``seen_ids`` gate. ``seen_comment_ids``
+    # catches the duplicate by the underlying GitHub databaseId.
+    seen_comment_ids: set = set()
     # Round-29 review (Codex): filter out issue comments
     # that are bound to a previous head. The
     # ``_provider_issue_comments`` list is the supervisor's
@@ -1527,7 +1664,12 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"{provider}:{cid}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup.
+            if isinstance(cid, int) and cid in seen_comment_ids:
+                continue
             seen_ids.add(finding_id)
+            if isinstance(cid, int):
+                seen_comment_ids.add(cid)
             body = str(c.get("body") or "")
             if not _is_actionable_provider_comment(body):
                 continue
@@ -1566,7 +1708,15 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"inline:{cid}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup. The same
+            # comment may also surface as a C22 resurrected
+            # follow-up in ``review_threads``; dedup by
+            # the underlying GitHub databaseId.
+            if isinstance(cid, int) and cid in seen_comment_ids:
+                continue
             seen_ids.add(finding_id)
+            if isinstance(cid, int):
+                seen_comment_ids.add(cid)
             body = str(c.get("body") or "")
             if not _is_actionable_provider_comment(body):
                 continue
@@ -1600,7 +1750,12 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"coderabbit:{cid}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup by comment id.
+            if isinstance(cid, int) and cid in seen_comment_ids:
+                continue
             seen_ids.add(finding_id)
+            if isinstance(cid, int):
+                seen_comment_ids.add(cid)
             body = str(c.get("body") or "")
             if not _is_actionable_provider_comment(body):
                 continue
@@ -1638,13 +1793,17 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
     current_head = snapshot.get("head_sha")
     # Round-C22/C22: snapshot may carry an ``operator_logins``
     # override; default to the conservative set baked into
-    # ``_C22_DEFAULT_OPERATOR_LOGINS``. The helper uses this set to
-    # distinguish operator explanations from reviewer follow-ups so
-    # an outdated thread is only resurrected when a non-operator
-    # reviewer posts a NEWER reply.
-    operator_logins: Tuple[str, ...] = tuple(
-        snapshot.get("operator_logins")
-        or list(_C22_DEFAULT_OPERATOR_LOGINS)
+    # Round-C22R1/S1: the snapshot's ``operator_logins`` field
+    # is normalized through ``_normalize_operator_logins`` so
+    # that bare strings, truthy non-iterables, dicts, and other
+    # malformed inputs cannot expand into bogus operator
+    # identities (the original bug was ``tuple("github-actions")``
+    # → ``("g","i","t","h","u","b","-","a","c","t","i","o","n","s")``).
+    # The fallback remains the conservative GitHub-Actions default
+    # for backward-compatible fixture-only snapshots that omit
+    # the field.
+    operator_logins: Tuple[str, ...] = _normalize_operator_logins(
+        snapshot.get("operator_logins"),
     )
     if isinstance(threads, dict):
         for thread_id, thread_data in threads.items():
@@ -1721,7 +1880,18 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
                 finding_id = f"thread:{thread_id}"
                 if finding_id in seen_ids:
                     continue
+                # Round-C22R1/S3: cross-surface dedup. The
+                # follow-up's databaseId may have already been
+                # emitted via the inline ``review_comments`` or
+                # provider issue-comment surface above.
+                if (
+                    followup_db_id is not None
+                    and followup_db_id in seen_comment_ids
+                ):
+                    continue
                 seen_ids.add(finding_id)
+                if followup_db_id is not None:
+                    seen_comment_ids.add(followup_db_id)
                 findings.append(Finding(
                     finding_id=finding_id,
                     source="review_thread",
@@ -1764,7 +1934,28 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"thread:{thread_id}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup. The
+            # thread's first-comment id (``top_id``) may have
+            # already been emitted via the inline
+            # ``review_comments`` or provider issue-comment
+            # surface above.
+            _thread_top_id_raw = thread_data.get("top_id")
+            try:
+                _thread_top_id = (
+                    int(_thread_top_id_raw)
+                    if _thread_top_id_raw not in (None, "")
+                    else None
+                )
+            except (TypeError, ValueError):
+                _thread_top_id = None
+            if (
+                _thread_top_id is not None
+                and _thread_top_id in seen_comment_ids
+            ):
+                continue
             seen_ids.add(finding_id)
+            if _thread_top_id is not None:
+                seen_comment_ids.add(_thread_top_id)
             if not _is_actionable_provider_comment(thread_body):
                 # A thread on the current head is by
                 # definition actionable even if its
@@ -2013,9 +2204,12 @@ def collect_findings(
         # outdated threads, apply the same narrow resurrection rule
         # as the unfocused collector; the helper is shared so the
         # two paths cannot drift on eligibility semantics.
-        operator_logins_focused: Tuple[str, ...] = tuple(
-            snapshot.get("operator_logins")
-            or list(_C22_DEFAULT_OPERATOR_LOGINS)
+        # Round-C22R1/S1: same normalizer as the unfocused
+        # collector so a string-typed operator_logins snapshot
+        # value cannot explode into bogus single-character
+        # identities.
+        operator_logins_focused: Tuple[str, ...] = (
+            _normalize_operator_logins(snapshot.get("operator_logins"))
         )
         if isinstance(thread_data, dict):
             if not thread_data.get("resolved"):
@@ -3442,6 +3636,7 @@ __all__ = [
     # names.
     "_c22_is_followup_eligible",
     "_maybe_resurrect_outdated_thread",
+    "_normalize_operator_logins",
     "_parse_iso8601_utc",
     "bump_slice_epoch",
     "build_directive",

@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, List, Optional, Tuple
 
 #: Strict lowercase hex SHA-1/256 pattern. Used to validate
 #: rebind targets and any other 40-or-64-char head SHA.
@@ -2663,6 +2663,73 @@ def _git_show_blob(head, path):
             return None
         return h.stdout.decode("utf-8", errors="replace").strip() or None
     except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
+        return None
+
+
+def _git_superseding_repair_committed_at(
+    original_commit_oid: Optional[str],
+    current_head: Optional[str],
+) -> Optional[int]:
+    """Return the Unix committer timestamp of the FIRST commit on
+    ``current_head`` that is a strict descendant of
+    ``original_commit_oid`` — i.e. the head-changing repair commit
+    that made the original review anchor stale.
+
+    Used by the C22-R1 finding collector to bind follow-up
+    eligibility to the SUPERSEDING REPAIR boundary rather than
+    the first-comment timestamp. A reviewer follow-up that
+    post-dates this timestamp is, by construction, evidence the
+    reviewer posted AFTER the repair that already addressed the
+    original concern.
+
+    Returns ``None`` when:
+
+    - ``original_commit_oid`` is falsy / unparseable
+    - ``current_head`` is falsy / unparseable
+    - the commit graph lookup fails (timeout, non-zero exit, no
+      output, the original commit is not an ancestor of current
+      head, etc.)
+
+    A ``None`` return is the C22-R1 fail-closed signal: when the
+    repair boundary cannot be established, the relay must NOT
+    resurrect the thread (otherwise an already-addressed
+    historical review would be silently re-opened).
+    """
+    if not isinstance(original_commit_oid, str) or not original_commit_oid:
+        return None
+    if not isinstance(current_head, str) or not current_head:
+        return None
+    if not (REPO_DIR and Path(REPO_DIR).exists()):  # type: ignore[name-defined]
+        return None
+    try:
+        import subprocess as _sp
+        # ``--reverse`` plus ``| head -1`` gives the EARLIEST
+        # commit after the anchor. ``%ct`` is the committer
+        # timestamp in Unix seconds. ``--ancestry-path`` keeps
+        # only commits reachable from HEAD that descend from the
+        # anchor (excludes side branches and merges that don't
+        # touch the linear PR-branch history).
+        # If ``original_commit_oid`` is not an ancestor of
+        # ``current_head`` (e.g. the thread anchor was rebased
+        # away), git log returns no commits and we return None.
+        r = _sp.run(
+            [
+                "git", "-C", str(REPO_DIR),  # type: ignore[name-defined]
+                "log",
+                "--reverse",
+                "--ancestry-path",
+                "--pretty=format:%ct",
+                f"{original_commit_oid}..{current_head}",
+            ],
+            capture_output=True, timeout=5.0, text=True,
+        )
+        if r.returncode != 0:
+            return None
+        first_line = (r.stdout or "").splitlines()[0].strip()
+        if not first_line:
+            return None
+        return int(first_line)
+    except (OSError, _sp.SubprocessError, _sp.TimeoutExpired, ValueError):
         return None
 
 
@@ -11201,6 +11268,28 @@ def safe_github_get(path: str, token: str) -> Optional[Any]:
     return github_get(path, token)
 
 
+# Round-C22R1/P2-C: per-thread comment pagination cap. A thread
+# with more than this many comments is treated as too noisy to
+# paginate fully; the snapshot marks ``comment_pagination_failed``
+# so the readiness gate can fail closed.
+_C22R1_THREAD_COMMENT_PAGES_CAP = 12  # 12 pages * 25 = 300 comments
+
+# Round-C22R1/P2-C: per-thread comment pagination query (the
+# thread-level ``comments`` connection requires the ``node(id:)``
+# alias, not ``reviewThread(id:)`` — see the round-54 in-process
+# transport). Used by the post-processing pagination pass to
+# fetch additional pages AFTER the inline first page.
+_C22R1_THREAD_COMMENT_QUERY = (
+    "query($nodeId: ID!, $cursor: String) "
+    "{ node(id: $nodeId) "
+    "{ ... on PullRequestReviewThread "
+    "{ comments(first: 25, after: $cursor) "
+    "{ pageInfo { hasNextPage endCursor } "
+    "nodes { databaseId body author { login } "
+    "createdAt updatedAt path line commit { oid } } } } } }"
+)
+
+
 def capture_live_snapshot(rs: dict, token: str) -> dict:
     snap = {
         "captured_at": now_iso(),
@@ -11221,6 +11310,23 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         # current inline review comments per provider.
         "provider_surfaces": {},
         "review_comments": [],
+        # Round-C22R1/P1-B: production operator-identity set.
+        # The relay's C22 resurrection rule (R1) relies on this
+        # field. Built below from: PR author login + GitHub
+        # ``viewer`` login + every known provider bot_login +
+        # automation actors. The fallback (github-actions
+        # defaults) is intentionally narrow — it only exists for
+        # unit-test fixtures and offline runs.
+        "operator_logins": [],
+        # Round-C22R1/P2-C: per-thread pagination status. The
+        # paginator is invoked below for every thread; the snap
+        # records the aggregate so the relay's readiness gate
+        # can fail closed when ANY thread's pagination did not
+        # exhaust. (An incomplete inventory at this granularity
+        # can otherwise recreate the original false-readiness
+        # defect.)
+        "review_thread_pagination_complete": True,
+        "review_thread_pagination_failed": False,
     }
     pr = safe_github_get(
         f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
@@ -11232,6 +11338,71 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             snap["head_sha"] == AUTHORITATIVE_HEAD  # type: ignore[name-defined]
         )
         snap["mergeable"] = pr.get("mergeable")
+    # Round-C22R1/P1-B: capture PR author login (the most
+    # authoritative operator-identity candidate). The REST
+    # ``/repos/.../pulls/{n}`` payload already exposes
+    # ``user.login``; we record it here so the operator-logins
+    # builder below can include it without an extra query.
+    _pr_user = pr.get("user") if isinstance(pr, dict) else None
+    _pr_author_login = (
+        _pr_user.get("login") if isinstance(_pr_user, dict) else None
+    )
+    # Round-C22R1/P1-B: capture the GitHub authenticated viewer
+    # login (i.e. the account that ran this snapshot capture).
+    # One extra ``viewer { login }`` GraphQL round-trip per
+    # snapshot is acceptable; we cache the value in the snap so
+    # the operator-logins builder below reads it directly.
+    _viewer_login: Optional[str] = None
+    try:
+        _viewer_data = _github_graphql(  # type: ignore[name-defined]
+            "query { viewer { login } }",
+            {},
+        )
+        if isinstance(_viewer_data, dict):
+            _viewer_obj = _viewer_data.get("viewer")
+            if isinstance(_viewer_obj, dict):
+                _viewer_login = _viewer_obj.get("login")
+    except Exception:
+        _viewer_login = None
+    # Round-C22R1/P1-B: build the production operator identity
+    # set. The C22 R1 rule excludes operator accounts from being
+    # treated as reviewer follow-ups; the canonical operator
+    # identity sources for THIS run are:
+    #
+    #   1. the PR author (``pr.user.login`` from REST)
+    #   2. the GitHub authenticated viewer running this snapshot
+    #   3. the canonical repo owner login (``REPO_OWNER``)
+    #
+    # Automation actors (``github-actions`` and friends) are
+    # recorded separately because they are common operator
+    # explanations but should not be conflated with the
+    # human-authorised operator set.
+    #
+    # ``set()`` deduplicates and ``str(...)`` defends against
+    # ``None`` (and other falsy) entries from any of the
+    # sources. The set is sorted into a stable list so the snap
+    # payload is deterministic for downstream snapshot
+    # fingerprinting and equality checks.
+    _automation_logins = ["github-actions", "github-actions[bot]"]
+    _operator_set: set = set()
+    for _src in (
+        _pr_author_login,
+        _viewer_login,
+        REPO_OWNER,  # type: ignore[name-defined]
+        *_automation_logins,
+    ):
+        if isinstance(_src, str) and _src.strip():
+            _operator_set.add(_src.strip())
+    snap["operator_logins"] = sorted(_operator_set)
+    # Round-C22R1/P1-B: stamp the underlying sources so the
+    # relay + audit can verify which identities populated the
+    # set (and detect fallback usage in production).
+    snap["operator_identity_sources"] = {
+        "pr_author_login": _pr_author_login,
+        "viewer_login": _viewer_login,
+        "repo_owner": REPO_OWNER,  # type: ignore[name-defined]
+        "automation_logins": sorted(_automation_logins),
+    }
     revs = safe_github_get(
         # Round-37: per_page=100 (was 20). GitHub caps each page
         # at 100, and PR #5 has accumulated 60+ reviews, so the
@@ -11375,7 +11546,14 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             # timestamp ordering inside the same thread is what
             # distinguishes a follow-up that survived a repair
             # from a follow-up that pre-dates it).
-            "comments(first: 25) { nodes { "
+            # Round-C22R1/P2-C: also expose the inner ``comments``
+            # connection's ``pageInfo`` so the per-thread
+            # pagination pass knows whether more replies exist
+            # beyond the first page. A >25-comment thread with a
+            # qualifying follow-up beyond page 1 must NOT be
+            # silently treated as clean.
+            "comments(first: 25) { pageInfo { hasNextPage endCursor } "
+            "nodes { "
             "body author { login } databaseId createdAt updatedAt "
             "path line commit { oid } } } } } } } }"
         )
@@ -11460,6 +11638,24 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             comments_nodes = (
                 comments_obj.get("nodes", [])
                 if isinstance(comments_obj, dict) else []
+            )
+            # Round-C22R1/P2-C: capture the first-page
+            # ``pageInfo`` so the post-processing pagination
+            # pass knows whether more replies exist beyond the
+            # inline first page. ``_comments_has_next`` /
+            # ``_comments_end_cursor`` are transient fields —
+            # stripped before the snap is serialized.
+            _comments_page_info = (
+                comments_obj.get("pageInfo")
+                if isinstance(comments_obj, dict) else None
+            )
+            _inline_has_next = bool(
+                _comments_page_info.get("hasNextPage")
+                if isinstance(_comments_page_info, dict) else False
+            )
+            _inline_end_cursor = (
+                _comments_page_info.get("endCursor")
+                if isinstance(_comments_page_info, dict) else None
             )
             first_comment: dict = {}
             if comments_nodes and isinstance(comments_nodes[0], dict):
@@ -11554,6 +11750,14 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     # durable thread-proof fingerprint changes
                     # whenever a new reply is observed.
                     "replies": reply_entries,
+                    # Round-C22R1/P2-C: transit-only fields
+                    # carrying the first-page ``pageInfo`` so the
+                    # post-processing pagination pass knows
+                    # whether more replies exist beyond the
+                    # inline first page. The post-pass strips
+                    # these before the snap is serialized.
+                    "_comments_has_next": _inline_has_next,
+                    "_comments_end_cursor": _inline_end_cursor,
                 },
             ))
         page_info_obj = threads.get("pageInfo")
@@ -11575,6 +11779,134 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             pagination_failed = True
             break
         cursor = pinfo.get("endCursor")
+    # Round-C22R1/P2-C: per-thread comment pagination. The inline
+    # loop above captured the first 25 comments of each thread
+    # along with ``pageInfo``; this pass walks any subsequent
+    # pages so a >25-comment thread with a qualifying follow-up
+    # beyond page 1 is not silently truncated. The bounded cap
+    # (``_C22R1_THREAD_COMMENT_PAGES_CAP``) fails closed: when
+    # the cap is exhausted before ``hasNextPage == False``, the
+    # aggregate pagination flag is marked failed and the snap
+    # records the truncated thread ids.
+    truncated_thread_ids: List[str] = []
+    for _ti, (_tid, _resolved, _outdated, _evidence) in enumerate(all_threads):
+        if not _tid:
+            continue
+        # The inline loop stashed the first-page ``hasNextPage``/
+        # ``endCursor`` on ``_evidence`` (see the comment-field
+        # addition below). If the inline capture saw
+        # ``hasNextPage == False``, the first page is complete
+        # and the per-thread paginator can be skipped.
+        _inline_has_next = bool(_evidence.get("_comments_has_next"))
+        _inline_end_cursor = _evidence.get("_comments_end_cursor") or None
+        if not _inline_has_next:
+            # No further pages to walk; only do the repair-
+            # boundary computation for outdated threads.
+            if _outdated:
+                _anchor_oid = _evidence.get("commit_oid")
+                _current_head_sha = snap.get("head_sha")
+                _evidence["superseding_repair_committed_at"] = (
+                    _git_superseding_repair_committed_at(
+                        _anchor_oid,
+                        _current_head_sha,
+                    )
+                )
+            # Strip the inline-only pagination hints before the
+            # snap is serialized (they were transit fields, not
+            # part of the durable schema).
+            _evidence.pop("_comments_has_next", None)
+            _evidence.pop("_comments_end_cursor", None)
+            continue
+        # Walk additional pages until ``hasNextPage == False``
+        # or the safety cap is exhausted.
+        _cursor = _inline_end_cursor
+        _extra_replies: List[dict] = []
+        _pagination_failed = False
+        for _ in range(_C22R1_THREAD_COMMENT_PAGES_CAP):
+            _data = _github_graphql(  # type: ignore[name-defined]
+                _C22R1_THREAD_COMMENT_QUERY,
+                {"nodeId": _tid, "cursor": _cursor},
+            )
+            if not isinstance(_data, dict):
+                _pagination_failed = True
+                break
+            _node = _data.get("node")
+            if not isinstance(_node, dict):
+                _pagination_failed = True
+                break
+            _comments = _node.get("comments")
+            if not isinstance(_comments, dict):
+                _pagination_failed = True
+                break
+            for n in (_comments.get("nodes") or []):
+                if not isinstance(n, dict):
+                    continue
+                _reply_author_obj = n.get("author")
+                _reply_author_login = (
+                    _reply_author_obj.get("login")
+                    if isinstance(_reply_author_obj, dict) else None
+                )
+                _extra_replies.append({
+                    "id": str(n.get("databaseId") or ""),
+                    "updatedAt": (n.get("updatedAt") or ""),
+                    "createdAt": (n.get("createdAt") or ""),
+                    "body": n.get("body") or "",
+                    "author": _reply_author_login,
+                })
+            _page_info = _comments.get("pageInfo")
+            if not isinstance(_page_info, dict):
+                _pagination_failed = True
+                break
+            if not _page_info.get("hasNextPage"):
+                _cursor = None
+                break
+            _cursor = _page_info.get("endCursor")
+            if not _cursor:
+                _pagination_failed = True
+                break
+        else:
+            # The ``for/else`` fires only if the loop ran to
+            # completion (cap exhausted before
+            # ``hasNextPage == False``).
+            _pagination_failed = True
+        if _pagination_failed:
+            snap["review_thread_pagination_complete"] = False
+            snap["review_thread_pagination_failed"] = True
+            truncated_thread_ids.append(_tid)
+            _evidence.pop("_comments_has_next", None)
+            _evidence.pop("_comments_end_cursor", None)
+            continue
+        if _extra_replies:
+            # Concatenate the extra replies to the inline first-
+            # page replies. The inline first-page replies
+            # captured only ``comments_nodes[1:]`` (i.e. excludes
+            # the first comment which is the thread anchor);
+            # ``_extra_replies`` already excludes the first
+            # comment on every page (each page's first node is
+            # the cursor anchor, NOT a new reply).
+            existing = list(_evidence.get("replies") or [])
+            _evidence["replies"] = existing + _extra_replies
+            # ``comment_count`` already counts the first
+            # comment + inline replies; we ADD the extra replies.
+            existing_count = int(_evidence.get("comment_count") or 1)
+            _evidence["comment_count"] = existing_count + len(_extra_replies)
+        # Round-C22R1/P1-A: compute the superseding repair
+        # timestamp for outdated threads so the relay's C22-R1
+        # helper can bind follow-up eligibility to the head-
+        # changing repair boundary rather than the first-
+        # comment timestamp.
+        if _outdated:
+            _anchor_oid = _evidence.get("commit_oid")
+            _current_head_sha = snap.get("head_sha")
+            _evidence["superseding_repair_committed_at"] = (
+                _git_superseding_repair_committed_at(
+                    _anchor_oid,
+                    _current_head_sha,
+                )
+            )
+        _evidence.pop("_comments_has_next", None)
+        _evidence.pop("_comments_end_cursor", None)
+    snap["truncated_thread_ids"] = truncated_thread_ids
     snap["review_threads"] = {
         tid: {
             "resolved": r,
