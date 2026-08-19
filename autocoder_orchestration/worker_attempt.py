@@ -550,6 +550,31 @@ class WorkerResultArtifact:
         # prelaunch id. ``result_contract_match`` MUST be
         # exactly True. Missing/empty fields or any mismatch
         # is fail-closed.
+        #
+        # Pre-envelope launch-failure special case (round-167/P2):
+        # the worker wrapper aborts before launching the worker
+        # process and writes a canonical ``WORKER_EXECUTION_FAILED``
+        # artifact. The artifact carries four independent markers
+        # of "no envelope was observed":
+        #
+        #   * ``result_type == "WORKER_EXECUTION_FAILED"``
+        #   * ``extra.worker_result_envelope_seen == False``
+        #   * ``extra.envelope_status == "missing"``
+        #   * ``extra.launch_failure`` is set to a non-empty string
+        #
+        # In that case there is NO envelope observation to validate
+        # against the supervisor-owned prelaunch contract id, so
+        # requiring a non-empty ``observed_result_contract_id``
+        # would misclassify every pre-envelope launch failure as a
+        # result-contract violation. The artifact remains
+        # semantically classified as ``WORKER_EXECUTION_FAILED``
+        # (the supervisor's poll path maps that result_type to
+        # ``LIFECYCLE_WORKER_EXITED_NO_PUSH`` rather than to
+        # ``LIFECYCLE_WORKER_RESULT_INVALID``). The
+        # ``expected_result_contract_id`` is still cross-checked
+        # against the supervisor-owned prelaunch id so a worker
+        # that mutated the prelaunch contract id cannot bypass
+        # the contract defense.
         prelaunch_rcid = (
             rec.extra.get("result_contract_id")
             if isinstance(rec.extra, dict)
@@ -565,12 +590,28 @@ class WorkerResultArtifact:
             obs_rcid = extra.get("observed_result_contract_id", "")
             exp_rcid = extra.get("expected_result_contract_id", "")
             match = extra.get("result_contract_match", None)
+            envelope_status = extra.get("envelope_status", "") or ""
+            envelope_seen = extra.get("worker_result_envelope_seen", None)
+            launch_failure = extra.get("launch_failure", "") or ""
+            # Pre-envelope launch failure: skip the
+            # observed-contract-id requirement because no envelope
+            # exists to observe. Still cross-check the expected
+            # contract id against the supervisor-owned prelaunch
+            # id (a wrapper cannot mutate the prelaunch contract
+            # id without being detected).
+            is_pre_envelope_launch_failure = (
+                self.result_type == RESULT_TYPE_WORKER_EXECUTION_FAILED
+                and envelope_seen is False
+                and envelope_status == "missing"
+                and bool(launch_failure)
+            )
             if not obs_rcid or not exp_rcid:
-                errors.append(
-                    "artifact missing required contract fields "
-                    "(expected_result_contract_id/observed_result_contract_id); "
-                    "legacy artifact shape is not accepted"
-                )
+                if not is_pre_envelope_launch_failure:
+                    errors.append(
+                        "artifact missing required contract fields "
+                        "(expected_result_contract_id/observed_result_contract_id); "
+                        "legacy artifact shape is not accepted"
+                    )
             else:
                 if exp_rcid != obs_rcid:
                     errors.append(
