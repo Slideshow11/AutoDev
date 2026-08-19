@@ -2733,6 +2733,113 @@ def _git_superseding_repair_committed_at(
         return None
 
 
+def _superseded_repair_transition_for_thread(
+    *,
+    thread_id: str,
+) -> Optional[dict]:
+    """Round-C22R2/P1: look up the durable FindingLedger's
+    ``superseded_repair_transition`` record for ``thread:<tid>``
+    and return it for snapshot stamping.
+
+    Returns ``None`` when:
+
+      - ``thread_id`` is empty / malformed;
+      - the orchestrator state root cannot be resolved
+        (no ``AED_ORCHESTRATION_STATE_ROOT``, no
+        ``RUN_STATE['orchestration_state_root']`` entry);
+      - the durable ledger has no SUPERSEDED row for the
+        prior finding identity (the thread has not been
+        superseded by any worker push yet — a normal
+        first-time-seen state);
+      - any read or parse error occurs.
+
+    The helper NEVER raises; every failure path returns
+    ``None`` so ``capture_live_snapshot`` keeps its canonical
+    "must not raise" contract. The audit's contract is fail-
+    closed: when this helper returns None the C22-R2
+    eligibility helper in the relay rejects any follow-up as
+    ineligible.
+    """
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    # Resolve the orchestrator state root. The supervisor
+    # already exposes ``resolve_orchestration_state_root``;
+    # we defer the import to avoid a circular dependency at
+    # module load time.
+    try:
+        from .orchestration_state_root import (
+            OrchestrationRootError,
+            resolve_orchestration_state_root,
+        )
+        from autocoder_orchestration.store import StateStore
+        from autocoder_orchestration.review_repair_relay import (
+            FindingLedger,
+        )
+    except ImportError:
+        return None
+    try:
+        state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+    except OrchestrationRootError:
+        return None
+    except Exception:
+        return None
+    if not state_root:
+        return None
+    try:
+        store = StateStore(state_root=state_root)
+    except Exception:
+        return None
+    finding_id = f"thread:{thread_id}"
+    # The ledger's ``superseded_repair_transition`` walks the
+    # entire ``finding_ledger.jsonl`` (per-state-root, NOT
+    # per-head) looking for SUPERSEDED rows for this
+    # finding_id. The constructor's ``head_sha`` is only
+    # consulted when writing NEW entries; the helper is
+    # read-only, so we pass a placeholder hex string. Any
+    # 40/64-char lowercase hex value satisfies the
+    # constructor's validation; the canonical PR head is
+    # preferred for diagnostic consistency.
+    try:
+        # ``read_journal`` is invoked via
+        # ``FindingLedger.superseded_repair_transition``; the
+        # ledger constructor validates ``head_sha`` shape and
+        # raises when the value is malformed.
+        from autocoder_orchestration.context import (
+            RunContext as _RC,
+        )
+        try:
+            _ctx = _RC.from_dict(
+                store.read_optional("run_context.json") or {}
+            )
+        except Exception:
+            _ctx = None
+        _ledger_head = (
+            getattr(_ctx, "current_authorized_head", None)
+            if _ctx is not None
+            else None
+        )
+        if not isinstance(_ledger_head, str) or not _HEX_SHA_RE.match(
+            _ledger_head
+        ):
+            _ledger_head = "a" * 40  # placeholder; the
+            # ledger only uses this when WRITING new
+            # entries, which this helper never does.
+        ledger = FindingLedger(
+            store,
+            head_sha=_ledger_head,
+        )
+        # ``FindingLedger.superseded_repair_transition`` is
+        # read-only; it does not raise on a missing finding
+        # (returns ``None``).
+        return ledger.superseded_repair_transition(finding_id)
+    except Exception:
+        return None
+
+
 def _compute_provider_thread_version(provider_thread):
     """Deterministic provider-thread version fingerprint from
     the FULL available thread state. No truncation of body
@@ -6070,6 +6177,12 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 finding_ids=tuple(_d.get("finding_ids") or ()),
                 directive_digest=_d.get("directive_digest", ""),
                 directive_path=_d.get("directive_path", ""),
+                # Round-C22R2/P1: relay directive UUID that drove
+                # this worker push; recorded on the ledger's
+                # SUPERSEDED row so the snapshot's C22-R2
+                # eligibility helper can recover the
+                # authoritative repair transition by finding ID.
+                directive_id=_d.get("directive_id"),
                 prelaunch_head=_d.get("prelaunch_head", ""),
                 expected_branch=_d.get("expected_branch", "feat/review-repair-relay-v1"),
                 pid=int(_pid) if _pid else 0,
@@ -8388,6 +8501,12 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             finding_ids=(),
             directive_digest=directive_digest,
             directive_path=directive_path,
+            # Round-C22R2/P1: record the directive UUID on the
+            # worker attempt so ``mark_head_advanced_public`` can
+            # forward it to ``loop.mark_head_advanced(...)`` and
+            # the SUPERSEDED row in the finding ledger carries
+            # the authoritative repair-transition provenance.
+            directive_id=directive_id,
             prelaunch_head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
             expected_branch=expected_branch,
             pid=proc.pid,
@@ -11811,6 +11930,25 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                         _current_head_sha,
                     )
                 )
+                # Round-C22R2/P1: durable FindingLedger lookup.
+                # This is the AUTHORITATIVE repair-transition
+                # evidence the C22-R2 eligibility helper reads;
+                # the C22-R1 git-ancestry field above is
+                # diagnostic provenance only.
+                _durable = _superseded_repair_transition_for_thread(
+                    thread_id=_tid,
+                )
+                if _durable is not None:
+                    _evidence["superseded_at"] = _durable.get(
+                        "superseded_at"
+                    )
+                    _evidence["superseded_by_head"] = _durable.get(
+                        "superseded_by_head"
+                    )
+                    if _durable.get("directive_id"):
+                        _evidence["superseded_directive_id"] = (
+                            _durable["directive_id"]
+                        )
             # Strip the inline-only pagination hints before the
             # snap is serialized (they were transit fields, not
             # part of the durable schema).
@@ -11890,11 +12028,24 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             # comment + inline replies; we ADD the extra replies.
             existing_count = int(_evidence.get("comment_count") or 1)
             _evidence["comment_count"] = existing_count + len(_extra_replies)
-        # Round-C22R1/P1-A: compute the superseding repair
-        # timestamp for outdated threads so the relay's C22-R1
-        # helper can bind follow-up eligibility to the head-
-        # changing repair boundary rather than the first-
-        # comment timestamp.
+        # Round-C22R2/P1: prefer the durable FindingLedger's
+        # ``superseded_repair_transition`` record over the
+        # C22-R1 git-ancestry-derived boundary. The audit
+        # explicitly rejected git-ancestry as the
+        # authoritative evidence (an unrelated docs commit
+        # between the original anchor and the actual repair
+        # is still a descendant of the anchor). The
+        # supervisor plumbs the per-run orchestration state
+        # root and looks up ``thread:<tid>`` on the durable
+        # ledger. When the ledger has no record (e.g. this
+        # is the first time the thread has been seen) the
+        # rule fails closed via the C22-R2 eligibility
+        # helper; the snapshot records ``None`` and the
+        # helper rejects any follow-up as ineligible.
+        #
+        # The C22-R1 git-ancestry field is still stamped on
+        # the snapshot for diagnostic provenance — its value
+        # is no longer consulted by the eligibility helper.
         if _outdated:
             _anchor_oid = _evidence.get("commit_oid")
             _current_head_sha = snap.get("head_sha")
@@ -11904,6 +12055,33 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     _current_head_sha,
                 )
             )
+            # Durable ledger lookup. Fail-closed: a missing
+            # or malformed ``state_root`` (e.g. when the
+            # supervisor runs against a fixture or before
+            # the orchestrator is initialised) does NOT
+            # propagate as a hard exception; the
+            # ``superseded_at`` field stays None and the
+            # C22-R2 helper rejects any follow-up. This
+            # preserves the canonical
+            # ``capture_live_snapshot`` "must not raise"
+            # contract.
+            _durable = _superseded_repair_transition_for_thread(
+                thread_id=_tid,
+            )
+            if _durable is not None:
+                _evidence["superseded_at"] = _durable.get("superseded_at")
+                _evidence["superseded_by_head"] = _durable.get(
+                    "superseded_by_head"
+                )
+                # Carry the directive_id into the snap as
+                # diagnostic provenance so downstream
+                # consumers can correlate the resurrection
+                # back to the directive that drove the head
+                # advance.
+                if _durable.get("directive_id"):
+                    _evidence["superseded_directive_id"] = (
+                        _durable["directive_id"]
+                    )
         _evidence.pop("_comments_has_next", None)
         _evidence.pop("_comments_end_cursor", None)
     snap["truncated_thread_ids"] = truncated_thread_ids
@@ -12402,6 +12580,47 @@ def evaluate_readiness(
             "reason": "thread_pagination_failed",
             "pagination_complete": snap.get(
                 "review_threads_pagination_complete"
+            ),
+        }
+    # Round-C22R2/P2: inner per-thread comments/replies
+    # pagination failure also blocks readiness. The
+    # singular ``review_thread_pagination_failed`` flag
+    # is set by ``capture_live_snapshot``'s post-processing
+    # pass when ANY thread's per-thread ``comments``
+    # connection could not be walked to completion (cap
+    # exhausted before ``hasNextPage == False``, or
+    # transport error). When this flag fires, a qualifying
+    # reviewer follow-up on a >25-comment thread can be
+    # missing from the snapshot's ``review_threads.replies``
+    # list, and the relay's eligibility rule cannot
+    # evaluate it. The same fail-closed reasoning that
+    # applies to the outer thread-list pagination applies
+    # here: incomplete inventory MUST NOT be classified as
+    # clean. The legacy plural flag above covers the outer
+    # pagination; this branch covers the inner pagination.
+    if snap.get("review_thread_pagination_failed"):
+        return {
+            "ready": False,
+            "reason": "inner_thread_pagination_failed",
+            "pagination_complete": snap.get(
+                "review_thread_pagination_complete"
+            ),
+            "truncated_thread_ids": list(
+                snap.get("truncated_thread_ids") or []
+            ),
+        }
+    # Round-C22R2/P2: a non-empty ``truncated_thread_ids``
+    # list with the failure flag unset (e.g. a partial
+    # transport error that did not increment the boolean)
+    # still signals an incomplete inventory. The readiness
+    # gate fails closed so the relay cannot promote
+    # readiness on a partial reply inventory.
+    if snap.get("truncated_thread_ids"):
+        return {
+            "ready": False,
+            "reason": "inner_thread_pagination_truncated",
+            "truncated_thread_ids": list(
+                snap.get("truncated_thread_ids") or []
             ),
         }
     # Round-117 P1: fail closed when provider surface

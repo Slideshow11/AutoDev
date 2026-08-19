@@ -597,7 +597,13 @@ class FindingLedger:
         except (OSError, AttributeError):
             pass
 
-    def mark_superseded_by_head(self, old_head_sha: str) -> int:
+    def mark_superseded_by_head(
+        self,
+        old_head_sha: str,
+        *,
+        new_head_sha: Optional[str] = None,
+        directive_id: Optional[str] = None,
+    ) -> int:
         """Mark every ACTIVE finding on ``old_head_sha`` as
         SUPERSEDED.
 
@@ -606,6 +612,35 @@ class FindingLedger:
         The ledger rewrites every ACTIVE / DISPATCHED / OBSERVED
         entry for ``old_head_sha`` to SUPERSEDED. SUPERSEDED is
         a terminal state on that head.
+
+        Round-C22R2/P1 (true repair-boundary binding): when
+        ``new_head_sha`` is provided, the SUPERSEDED row also
+        records:
+
+          - ``superseded_by_head``: the authoritative NEW head
+            SHA that replaced the finding's evidence. This is
+            NOT a git-ancestry-derived value; it is the worker
+            push the controller observed at the moment of the
+            transition (the same value ``report_repair_pushed``
+            binds to ``AWAITING_CI``).
+          - ``superseded_at`` (already exists): wall-clock
+            ISO 8601 timestamp at which the transition was
+            recorded.
+          - ``directive_id`` (optional): the relay's directive
+            UUID that drove the head advance. The audit's
+            preference is to record whatever durable
+            authoritative transition evidence is already
+            available, so the snapshot's eligibility helper
+            can later look up ``superseded_at`` / ``superseded_by_head``
+            for a prior finding ID.
+
+        Backward-compat: when ``new_head_sha`` is None, the
+        function preserves the legacy behaviour (no
+        ``superseded_by_head`` field on the row) so any
+        existing call site or test fixture that does not pass
+        the new argument continues to work. Production callers
+        in ``loop.mark_head_advanced`` MUST pass the new
+        head SHA so the durable evidence is recorded.
 
         Returns the number of entries that were promoted.
 
@@ -619,6 +654,27 @@ class FindingLedger:
             raise DirectiveContractError(
                 f"mark_superseded_by_head requires a hex head_sha, "
                 f"got {old_head_sha!r}"
+            )
+        # Round-C22R2/P1: validate new_head_sha so the ledger's
+        # SUPERSEDED row never records a malformed SHA. The
+        # controller's rebind path validates again later (and
+        # raises ControllerError), but we want a malformed
+        # value to fail closed before any ledger writes happen.
+        # When ``new_head_sha`` is None we preserve the legacy
+        # behaviour (no ``superseded_by_head`` field on the
+        # row) so old call sites continue to work.
+        if new_head_sha is not None and (
+            not isinstance(new_head_sha, str)
+            or not _HEX_SHA_RE.match(new_head_sha)
+        ):
+            raise DirectiveContractError(
+                f"mark_superseded_by_head new_head_sha must be hex "
+                f"(40 or 64 lowercase hex chars), got {new_head_sha!r}"
+            )
+        if directive_id is not None and not isinstance(directive_id, str):
+            raise DirectiveContractError(
+                f"mark_superseded_by_head directive_id must be str, "
+                f"got {type(directive_id).__name__}"
             )
         try:
             rows = list(self.store.read_journal(self._rel_path()))
@@ -654,6 +710,15 @@ class FindingLedger:
             superseded = dict(entry)
             superseded["state"] = FINDING_STATE_SUPERSEDED
             superseded["superseded_at"] = _now_iso()
+            # Round-C22R2/P1: durable superseding-head evidence.
+            # When the caller passes ``new_head_sha`` we record
+            # it; without it we leave the legacy row shape
+            # unchanged so old consumers / test fixtures still
+            # parse the JSONL correctly.
+            if new_head_sha is not None:
+                superseded["superseded_by_head"] = new_head_sha
+            if directive_id is not None:
+                superseded["directive_id"] = directive_id
             try:
                 self.store.append_journal(self._rel_path(), superseded)
                 promoted += 1
@@ -662,6 +727,79 @@ class FindingLedger:
                 # controller on a journal write failure.
                 pass
         return promoted
+
+    def superseded_repair_transition(
+        self, finding_id: str,
+    ) -> Optional[Dict[str, str]]:
+        """Round-C22R2/P1: return the authoritative SUPERSEDED
+        transition record for ``finding_id``, or ``None`` when
+        no durable evidence exists.
+
+        Returns a dict with these keys (when evidence is
+        present):
+
+          - ``superseded_by_head``: the new head SHA recorded
+            by ``mark_superseded_by_head(new_head_sha=...)``
+            at the moment the worker pushed the repair.
+          - ``superseded_at``: the ISO 8601 wall-clock at which
+            the transition was recorded.
+          - ``directive_id``: the relay's directive UUID (when
+            recorded by the caller).
+
+        Returns ``None`` when:
+
+          - ``finding_id`` has no SUPERSEDED entry;
+          - the SUPERSEDED entry predates the C22R2 schema and
+            therefore lacks a ``superseded_by_head`` field
+            (the audit's contract: fail closed rather than
+            fall back to a git-ancestry heuristic);
+          - any of the values are malformed (non-string
+            ``superseded_by_head``, etc.).
+
+        The helper is read-only; it never modifies the
+        journal. It walks the JSONL append-only log
+        backwards so the most-recent SUPERSEDED row for the
+        finding_id wins (in case the worker pushed multiple
+        times and the same finding was superseded repeatedly).
+        """
+        if not isinstance(finding_id, str) or not finding_id:
+            return None
+        try:
+            rows = list(self.store.read_journal(self._rel_path()))
+        except (OSError, AttributeError):
+            return None
+        # Walk in reverse so the most-recent SUPERSEDED row
+        # for this finding_id is preferred.
+        for entry in reversed(rows):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("finding_id") != finding_id:
+                continue
+            if entry.get("state") != FINDING_STATE_SUPERSEDED:
+                continue
+            sbh = entry.get("superseded_by_head")
+            sat = entry.get("superseded_at")
+            did = entry.get("directive_id")
+            # Fail closed if any required field is missing or
+            # malformed. The audit forbids falling back to a
+            # git-ancestry heuristic; without the durable
+            # ``superseded_by_head`` we must return None.
+            if not isinstance(sbh, str) or not sbh:
+                return None
+            if not _HEX_SHA_RE.match(sbh):
+                return None
+            if not isinstance(sat, str) or not sat:
+                return None
+            if did is not None and not isinstance(did, str):
+                return None
+            out: Dict[str, str] = {
+                "superseded_by_head": sbh,
+                "superseded_at": sat,
+            }
+            if did is not None:
+                out["directive_id"] = did
+            return out
+        return None
 
     def state_of(self, finding_id: str) -> Optional[Dict[str, Any]]:
         """Return the canonical ledger entry for ``finding_id`` on
@@ -1269,39 +1407,50 @@ def _parse_iso8601_utc(value: object) -> Optional[int]:
 def _c22_is_followup_eligible(
     *,
     followup: dict,
-    repair_boundary_ts: Optional[int],
+    repair_transition_ts: Optional[int],
     operator_logins: Tuple[str, ...],
 ) -> bool:
     """Return True iff ``followup`` is a non-operator, post-repair,
     actionable reply that can resurrect an outdated thread.
 
-    The eligibility rule (Autonomy C22-R1):
+    The eligibility rule (Autonomy C22-R2):
 
       R1. followup author must NOT be in ``operator_logins`` (operator
           accounts can explain away a finding without re-elevating it).
       R2. followup must carry a ``createdAt`` strictly later than the
-          ``repair_boundary_ts`` — the Unix committer timestamp of the
-          head-changing repair commit that made the original review
-          anchor stale. GitHub does not re-bind ``comment.commit``
-          when a thread goes outdated, so commit-oid evidence is
-          unreliable; the supervisor's
-          ``_git_superseding_repair_committed_at`` helper provides
-          the canonical repair boundary by reading
-          ``git log --reverse <anchor>..<head>``. When the boundary
-          is missing / unparseable (e.g. git lookup failed or the
-          supervisor could not derive it), the rule fails closed:
-          ``repair_boundary_ts is None`` → False.
+          ``repair_transition_ts`` — the Unix-seconds wall-clock
+          timestamp at which the durable FindingLedger recorded the
+          authoritative superseding-head transition
+          (``FindingLedger.mark_superseded_by_head(new_head_sha=...)``).
+          The ledger row is the canonical evidence; it is populated
+          by ``loop.mark_head_advanced(old_head_sha, new_head_sha,
+          directive_id=...)`` at the moment the controller observes
+          the worker push and binds ``report_repair_pushed`` to
+          ``AWAITING_CI``.
       R3. followup body must pass ``_is_actionable_provider_comment``
           so status markers (``Walkthrough``, ``In progress``,
           etc.) do not resurrect threads.
+
+    R2 fails closed when:
+
+      - ``repair_transition_ts`` is None (the durable ledger has
+        no SUPERSEDED row for the prior finding, or the row's
+        ``superseded_at`` is missing / unparseable);
+      - ``followup.createdAt`` is None or unparseable.
 
     The R2 comparison is intentionally STRICT (>) so an
     equal-timestamp followup (e.g. an off-by-second race) does
     not silently resurrect an already-addressed historical thread.
 
-    Each rule has an inline source-pointer note. The helper is split
-    from ``_maybe_resurrect_outdated_thread`` so the eligibility rule is
-    unit-testable in isolation.
+    The audit's contract forbids falling back to a
+    git-ancestry-derived boundary when the durable evidence is
+    missing. The C22-R1 helper used ``git log --reverse
+    --ancestry-path <anchor>..<head>`` and was disproven by the
+    Codex review: an unrelated docs commit between the original
+    anchor and the actual repair is still a descendant of the
+    anchor, and the heuristic would treat the docs commit as
+    the boundary. The C22-R2 helper therefore reads the
+    authoritative ledger record exclusively.
     """
     if not isinstance(followup, dict):
         return False
@@ -1313,14 +1462,14 @@ def _c22_is_followup_eligible(
         or author in operator_logins
     ):
         return False
-    # R2: strictly-later-than-repair-boundary timestamp.
+    # R2: strictly-later-than-repair-transition timestamp.
     # Missing / unparseable createdAt on either side returns False
     # (we cannot claim "post-repair" without a timestamp anchor on
     # both ends).
     followup_ts = _parse_iso8601_utc(followup.get("createdAt"))
-    if followup_ts is None or repair_boundary_ts is None:
+    if followup_ts is None or repair_transition_ts is None:
         return False
-    if followup_ts <= repair_boundary_ts:
+    if followup_ts <= repair_transition_ts:
         return False
     # R3: actionable body — not a status marker.
     body = str(followup.get("body") or "")
@@ -1477,21 +1626,26 @@ def _maybe_resurrect_outdated_thread(
     replies = thread_data.get("replies") or []
     if not isinstance(replies, list) or not replies:
         return None
-    # Round-C22R1/P1-A: the AUTHORITATIVE repair-boundary
-    # timestamp is the supervisor's
-    # ``_git_superseding_repair_committed_at`` result. The first
-    # comment's ``createdAt`` is intentionally NOT used as the
-    # comparison bound; the audit's review-c1 case (T1 < T2 < T3)
-    # proved that comparison mis-resurrects already-addressed
-    # historical threads.
-    repair_boundary_ts_raw = thread_data.get(
-        "superseding_repair_committed_at"
-    )
-    repair_boundary_ts: Optional[int] = None
-    if isinstance(repair_boundary_ts_raw, int):
-        repair_boundary_ts = repair_boundary_ts_raw
-    elif isinstance(repair_boundary_ts_raw, str) and repair_boundary_ts_raw:
-        repair_boundary_ts = _parse_iso8601_utc(repair_boundary_ts_raw)
+    # Round-C22R2/P1: the AUTHORITATIVE repair-transition
+    # timestamp is the durable FindingLedger's
+    # ``superseded_at`` record for the prior finding identity
+    # (``thread:<thread_id>``). The snapshot stamps this on the
+    # thread entry from
+    # ``FindingLedger.superseded_repair_transition(...)``.
+    # When the ledger has no record (or the record is missing
+    # ``superseded_at``), the rule MUST fail closed — the
+    # audit explicitly forbids falling back to a
+    # git-ancestry-derived boundary. C22-R1's
+    # ``superseding_repair_committed_at`` field is kept in
+    # the thread dict purely as diagnostic provenance (the
+    # snapshot still computes it) but is NOT consulted as a
+    # fallback by this helper.
+    repair_transition_ts: Optional[int] = None
+    superseded_at_raw = thread_data.get("superseded_at")
+    if isinstance(superseded_at_raw, int):
+        repair_transition_ts = superseded_at_raw
+    elif isinstance(superseded_at_raw, str) and superseded_at_raw:
+        repair_transition_ts = _parse_iso8601_utc(superseded_at_raw)
     # Walk replies in their stored order; the snapshot already sorts
     # GraphQL comments by id and the supervisor preserves that order,
     # so the last entry is the freshest.
@@ -1501,7 +1655,7 @@ def _maybe_resurrect_outdated_thread(
             continue
         if _c22_is_followup_eligible(
             followup=reply,
-            repair_boundary_ts=repair_boundary_ts,
+            repair_transition_ts=repair_transition_ts,
             operator_logins=tuple(operator_logins),
         ):
             qualifying = reply
@@ -1514,7 +1668,15 @@ def _maybe_resurrect_outdated_thread(
             or thread_data.get("thread_id")
             or ""
         ),
-        "superseding_repair_committed_at": repair_boundary_ts,
+        "superseded_at": superseded_at_raw,
+        "superseded_by_head": thread_data.get("superseded_by_head"),
+        # Round-C22R1 legacy field kept for callers that
+        # already read it; ``superseded_at`` /
+        # ``superseded_by_head`` are the canonical C22-R2
+        # evidence.
+        "superseding_repair_committed_at": (
+            thread_data.get("superseding_repair_committed_at")
+        ),
     }
 
 
@@ -3469,7 +3631,13 @@ class RelayLoop:
                 f"fail-closed; supervisor schedules retry"
             )
 
-    def mark_head_advanced(self, old_head_sha: str, new_head_sha: str) -> None:
+    def mark_head_advanced(
+        self,
+        old_head_sha: str,
+        new_head_sha: str,
+        *,
+        directive_id: Optional[str] = None,
+    ) -> None:
         """Bind the worker push to the state machine.
 
         The supervisor calls this when the worker's push
@@ -3498,14 +3666,47 @@ class RelayLoop:
         already advanced via a manual operator action,
         or the CI runner drove the transition). The
         head_observed is the new head SHA.
+
+        Round-C22R2/P1: the ledger's SUPERSEDED rows
+        also record ``superseded_by_head=new_head_sha``
+        and (when supplied) ``directive_id`` so the
+        snapshot's C22-R2 eligibility helper can look up
+        the authoritative repair-boundary evidence by
+        finding ID instead of falling back to a
+        git-ancestry heuristic.
         """
         if new_head_sha == old_head_sha:
             return
+        # Round-C22R2/P1: validate new_head_sha shape so the
+        # ledger's SUPERSEDED row never records a malformed
+        # SHA. The controller's rebind path validates again
+        # later (and raises ControllerError), but we want a
+        # malformed value to fail closed BEFORE any ledger
+        # writes happen. Mirrors the controller's existing
+        # validation so existing tests that catch
+        # ``ControllerError`` continue to pass.
+        # Importing here to avoid a circular import at
+        # module-load time.
+        from autocoder_orchestration.controller import (
+            ControllerError as _CtrlError,
+        )
+        if not isinstance(new_head_sha, str) or not _HEX_SHA_RE.match(new_head_sha):
+            raise _CtrlError(
+                f"mark_head_advanced new_head_sha must be 40 or 64 "
+                f"lowercase hex chars: {new_head_sha!r}"
+            )
         # Round-27: advance the finding ledger so the prior
         # head's findings are not re-emitted on the new head
         # unless fresh evidence explicitly reopens them.
+        # Round-C22R2/P1: pass ``new_head_sha`` and the
+        # optional ``directive_id`` so the SUPERSEDED row
+        # carries the durable superseding-head evidence.
         old_ledger = FindingLedger(self.store, head_sha=old_head_sha)
-        promoted = old_ledger.mark_superseded_by_head(old_head_sha)
+        promoted = old_ledger.mark_superseded_by_head(
+            old_head_sha,
+            new_head_sha=new_head_sha,
+            directive_id=directive_id,
+        )
         log_attr = getattr(self.controller, "log", None)
         if log_attr is not None and promoted:
             log_attr(

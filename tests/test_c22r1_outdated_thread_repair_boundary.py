@@ -88,6 +88,7 @@ def _iso(seconds: float) -> str:
 
 T_T1_ISO = _iso(T_T1)
 T_T2_ISO = _iso(T_T2)
+T_REPAIR_ISO = _iso(T_REPAIR)
 
 
 def _make_thread(
@@ -102,6 +103,8 @@ def _make_thread(
     first_created_at: str = T_T1_ISO,
     first_author: str = "coderabbitai[bot]",
     superseding_repair_committed_at: int | None = int(T_REPAIR),
+    superseded_at: str | int | None = T_REPAIR_ISO,
+    superseded_by_head: str | None = "b89c25fe98fcf06f5ea14e32390a389d9227f2c6",
 ) -> dict:
     reply_entries = []
     for reply in replies or []:
@@ -125,12 +128,15 @@ def _make_thread(
         "replies": reply_entries,
         "top_updatedAt": first_created_at,
         "top_createdAt": first_created_at,
-        # C22-R1: the AUTHORITATIVE repair-boundary timestamp,
-        # derived by the supervisor via
-        # ``git log --reverse --pretty=format:"%ct" <anchor>..<head>``
-        # and stamped on the snapshot. ``None`` is allowed only for
-        # test fixtures that intentionally omit it to exercise the
-        # fail-closed path.
+        # Round-C22R2/P1: durable ledger evidence the C22-R2
+        # helper prefers. Pre-C22R2 fixtures omit it; this
+        # C22-R1 file is updated to mirror the production
+        # snapshot so existing assertions remain valid under
+        # the new contract.
+        "superseded_at": superseded_at,
+        "superseded_by_head": superseded_by_head,
+        # Round-C22R1/P1-A: kept as diagnostic provenance;
+        # the new helper does NOT consult it.
         "superseding_repair_committed_at": superseding_repair_committed_at,
     }
 
@@ -236,7 +242,8 @@ class TestRepairBoundaryBinding:
         thread = _make_thread(
             resolved=False,
             outdated=True,
-            superseding_repair_committed_at=None,  # boundary absent
+            superseding_repair_committed_at=None,  # legacy boundary absent
+            superseded_at=None,  # C22-R2 durable boundary absent
             replies=[{
                 "databaseId": REVIEWER_REPLY_ID,
                 "author": "coderabbitai[bot]",

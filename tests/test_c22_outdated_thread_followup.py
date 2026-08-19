@@ -110,13 +110,16 @@ def _make_thread(
         # Round-1064 P1#1 placeholders; the C22 fix extends them.
         "top_updatedAt": first_created_at,
         "top_createdAt": first_created_at,
-        # Round-C22R1/P1-A: the AUTHORITATIVE repair-boundary
-        # timestamp. Original C22 used ``top_createdAt`` as the
-        # comparison bound; the follow-up audit proved that
-        # mis-resurrects already-addressed historical threads.
-        # The original C22 tests populate this so the helper's
-        # eligibility rule continues to recognise the
-        # Trial-1B / original-C22 thread as a known good case.
+        # Round-C22R2/P1: durable ledger evidence the C22-R2
+        # helper prefers. The original C22 test fixture
+        # mirrors the production snapshot so existing
+        # assertions remain valid under the new contract;
+        # the legacy ``superseding_repair_committed_at``
+        # field is preserved for diagnostic provenance only.
+        "superseded_at": "2026-08-19T14:14:00Z",
+        "superseded_by_head": "b89c25fe98fcf06f5ea14e32390a389d9227f2c6",
+        # Round-C22R1/P1-A: legacy field (no longer the
+        # authoritative boundary).
         "superseding_repair_committed_at": 1755615240,
     }
 

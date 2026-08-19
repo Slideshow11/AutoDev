@@ -283,6 +283,17 @@ class WorkerAttemptRecord:
     github_head_verified: bool
     terminal_reason: Optional[str]
     extra: dict[str, Any] = field(default_factory=dict)
+    # Round-C22R2/P1: optional relay directive UUID that drove
+    # the worker push. The supervisor's
+    # ``mark_head_advanced_public`` reads this and passes it
+    # to ``loop.mark_head_advanced(directive_id=...)`` so the
+    # SUPERSEDED rows of the finding ledger carry the
+    # authoritative repair-transition provenance. Optional
+    # (with default ``None``) so existing serialized attempt
+    # records without this field continue to parse via
+    # ``from_dict``. Placed after every non-default field so
+    # the dataclass field-order contract is preserved.
+    directive_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
