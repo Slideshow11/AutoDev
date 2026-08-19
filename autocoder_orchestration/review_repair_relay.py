@@ -597,7 +597,13 @@ class FindingLedger:
         except (OSError, AttributeError):
             pass
 
-    def mark_superseded_by_head(self, old_head_sha: str) -> int:
+    def mark_superseded_by_head(
+        self,
+        old_head_sha: str,
+        *,
+        new_head_sha: Optional[str] = None,
+        directive_id: Optional[str] = None,
+    ) -> int:
         """Mark every ACTIVE finding on ``old_head_sha`` as
         SUPERSEDED.
 
@@ -606,6 +612,35 @@ class FindingLedger:
         The ledger rewrites every ACTIVE / DISPATCHED / OBSERVED
         entry for ``old_head_sha`` to SUPERSEDED. SUPERSEDED is
         a terminal state on that head.
+
+        Round-C22R2/P1 (true repair-boundary binding): when
+        ``new_head_sha`` is provided, the SUPERSEDED row also
+        records:
+
+          - ``superseded_by_head``: the authoritative NEW head
+            SHA that replaced the finding's evidence. This is
+            NOT a git-ancestry-derived value; it is the worker
+            push the controller observed at the moment of the
+            transition (the same value ``report_repair_pushed``
+            binds to ``AWAITING_CI``).
+          - ``superseded_at`` (already exists): wall-clock
+            ISO 8601 timestamp at which the transition was
+            recorded.
+          - ``directive_id`` (optional): the relay's directive
+            UUID that drove the head advance. The audit's
+            preference is to record whatever durable
+            authoritative transition evidence is already
+            available, so the snapshot's eligibility helper
+            can later look up ``superseded_at`` / ``superseded_by_head``
+            for a prior finding ID.
+
+        Backward-compat: when ``new_head_sha`` is None, the
+        function preserves the legacy behaviour (no
+        ``superseded_by_head`` field on the row) so any
+        existing call site or test fixture that does not pass
+        the new argument continues to work. Production callers
+        in ``loop.mark_head_advanced`` MUST pass the new
+        head SHA so the durable evidence is recorded.
 
         Returns the number of entries that were promoted.
 
@@ -619,6 +654,27 @@ class FindingLedger:
             raise DirectiveContractError(
                 f"mark_superseded_by_head requires a hex head_sha, "
                 f"got {old_head_sha!r}"
+            )
+        # Round-C22R2/P1: validate new_head_sha so the ledger's
+        # SUPERSEDED row never records a malformed SHA. The
+        # controller's rebind path validates again later (and
+        # raises ControllerError), but we want a malformed
+        # value to fail closed before any ledger writes happen.
+        # When ``new_head_sha`` is None we preserve the legacy
+        # behaviour (no ``superseded_by_head`` field on the
+        # row) so old call sites continue to work.
+        if new_head_sha is not None and (
+            not isinstance(new_head_sha, str)
+            or not _HEX_SHA_RE.match(new_head_sha)
+        ):
+            raise DirectiveContractError(
+                f"mark_superseded_by_head new_head_sha must be hex "
+                f"(40 or 64 lowercase hex chars), got {new_head_sha!r}"
+            )
+        if directive_id is not None and not isinstance(directive_id, str):
+            raise DirectiveContractError(
+                f"mark_superseded_by_head directive_id must be str, "
+                f"got {type(directive_id).__name__}"
             )
         try:
             rows = list(self.store.read_journal(self._rel_path()))
@@ -654,6 +710,15 @@ class FindingLedger:
             superseded = dict(entry)
             superseded["state"] = FINDING_STATE_SUPERSEDED
             superseded["superseded_at"] = _now_iso()
+            # Round-C22R2/P1: durable superseding-head evidence.
+            # When the caller passes ``new_head_sha`` we record
+            # it; without it we leave the legacy row shape
+            # unchanged so old consumers / test fixtures still
+            # parse the JSONL correctly.
+            if new_head_sha is not None:
+                superseded["superseded_by_head"] = new_head_sha
+            if directive_id is not None:
+                superseded["directive_id"] = directive_id
             try:
                 self.store.append_journal(self._rel_path(), superseded)
                 promoted += 1
@@ -662,6 +727,79 @@ class FindingLedger:
                 # controller on a journal write failure.
                 pass
         return promoted
+
+    def superseded_repair_transition(
+        self, finding_id: str,
+    ) -> Optional[Dict[str, str]]:
+        """Round-C22R2/P1: return the authoritative SUPERSEDED
+        transition record for ``finding_id``, or ``None`` when
+        no durable evidence exists.
+
+        Returns a dict with these keys (when evidence is
+        present):
+
+          - ``superseded_by_head``: the new head SHA recorded
+            by ``mark_superseded_by_head(new_head_sha=...)``
+            at the moment the worker pushed the repair.
+          - ``superseded_at``: the ISO 8601 wall-clock at which
+            the transition was recorded.
+          - ``directive_id``: the relay's directive UUID (when
+            recorded by the caller).
+
+        Returns ``None`` when:
+
+          - ``finding_id`` has no SUPERSEDED entry;
+          - the SUPERSEDED entry predates the C22R2 schema and
+            therefore lacks a ``superseded_by_head`` field
+            (the audit's contract: fail closed rather than
+            fall back to a git-ancestry heuristic);
+          - any of the values are malformed (non-string
+            ``superseded_by_head``, etc.).
+
+        The helper is read-only; it never modifies the
+        journal. It walks the JSONL append-only log
+        backwards so the most-recent SUPERSEDED row for the
+        finding_id wins (in case the worker pushed multiple
+        times and the same finding was superseded repeatedly).
+        """
+        if not isinstance(finding_id, str) or not finding_id:
+            return None
+        try:
+            rows = list(self.store.read_journal(self._rel_path()))
+        except (OSError, AttributeError):
+            return None
+        # Walk in reverse so the most-recent SUPERSEDED row
+        # for this finding_id is preferred.
+        for entry in reversed(rows):
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("finding_id") != finding_id:
+                continue
+            if entry.get("state") != FINDING_STATE_SUPERSEDED:
+                continue
+            sbh = entry.get("superseded_by_head")
+            sat = entry.get("superseded_at")
+            did = entry.get("directive_id")
+            # Fail closed if any required field is missing or
+            # malformed. The audit forbids falling back to a
+            # git-ancestry heuristic; without the durable
+            # ``superseded_by_head`` we must return None.
+            if not isinstance(sbh, str) or not sbh:
+                return None
+            if not _HEX_SHA_RE.match(sbh):
+                return None
+            if not isinstance(sat, str) or not sat:
+                return None
+            if did is not None and not isinstance(did, str):
+                return None
+            out: Dict[str, str] = {
+                "superseded_by_head": sbh,
+                "superseded_at": sat,
+            }
+            if did is not None:
+                out["directive_id"] = did
+            return out
+        return None
 
     def state_of(self, finding_id: str) -> Optional[Dict[str, Any]]:
         """Return the canonical ledger entry for ``finding_id`` on
@@ -1200,6 +1338,348 @@ def _is_actionable_provider_comment(body: str) -> bool:
     return True
 
 
+#: Default operator-account set used by ``_maybe_resurrect_outdated_thread``
+#: when the snapshot does not carry one. ``coderabbitai[bot]``,
+#: ``chatgpt-codex-connector[bot]``, and any ``[bot]``-suffixed account
+#: are NEVER operator accounts. ``github-actions`` covers CI-bot replies.
+#: The list is intentionally conservative: reviewers (CodeRabbit, Codex)
+#: are NOT operators. The supervisor may override this via the snapshot's
+#: ``operator_logins`` field when richer identity is available.
+_C22_DEFAULT_OPERATOR_LOGINS: Tuple[str, ...] = (
+    "github-actions",
+    "github-actions[bot]",
+)
+
+
+def _parse_iso8601_utc(value: object) -> Optional[int]:
+    """Return a timestamp-seconds value for a GitHub-style ISO 8601
+    timestamp, or ``None`` when the value is missing / malformed.
+
+    GitHub returns ``createdAt`` / ``updatedAt`` as UTC strings like
+    ``"2026-08-19T14:27:14Z"`` or ``"2026-08-19T14:27:14.000Z"``.
+    The function is strict: anything unparseable returns ``None`` so
+    the caller can fall back to the strict "missing evidence" path
+    instead of guessing. The returned value is comparable across
+    comments in the same thread.
+
+    Round-C22R1/S2 hardening: a bare date (``"2026-08-19"``) is NOT
+    a valid GitHub timestamp; the function rejects it. Only full
+    datetime strings (with a time component) are accepted, so the
+    eligibility rule cannot accidentally treat a date-only string
+    as a coincident-timestamp resurrection.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    # ``fromisoformat`` in 3.11 handles ``Z``; older builds need ``+00:00``.
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        import datetime as _dt
+        dt = _dt.datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    # Round-C22R1/S2: ``fromisoformat`` accepts date-only
+    # strings like ``"2026-08-19"`` and returns a ``datetime``
+    # instance with time ``00:00:00``. GitHub does not emit
+    # date-only timestamps; treat them as missing evidence so
+    # the eligibility rule fails closed rather than treating
+    # a truncated string as a coincident-timestamp match.
+    #
+    # The heuristic: ``fromisoformat("YYYY-MM-DD")`` always
+    # produces a ``datetime`` with
+    # ``(hour, minute, second, microsecond) == (0, 0, 0, 0)``.
+    # Real GitHub timestamps never have that exact shape.
+    if (
+        dt.hour == 0
+        and dt.minute == 0
+        and dt.second == 0
+        and dt.microsecond == 0
+        and "T" not in raw
+    ):
+        return None
+    if dt.tzinfo is None:
+        # Treat naive timestamps as UTC; GitHub always emits Z.
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return int(dt.timestamp())
+
+
+def _c22_is_followup_eligible(
+    *,
+    followup: dict,
+    repair_transition_ts: Optional[int],
+    operator_logins: Tuple[str, ...],
+) -> bool:
+    """Return True iff ``followup`` is a non-operator, post-repair,
+    actionable reply that can resurrect an outdated thread.
+
+    The eligibility rule (Autonomy C22-R2):
+
+      R1. followup author must NOT be in ``operator_logins`` (operator
+          accounts can explain away a finding without re-elevating it).
+      R2. followup must carry a ``createdAt`` strictly later than the
+          ``repair_transition_ts`` — the Unix-seconds wall-clock
+          timestamp at which the durable FindingLedger recorded the
+          authoritative superseding-head transition
+          (``FindingLedger.mark_superseded_by_head(new_head_sha=...)``).
+          The ledger row is the canonical evidence; it is populated
+          by ``loop.mark_head_advanced(old_head_sha, new_head_sha,
+          directive_id=...)`` at the moment the controller observes
+          the worker push and binds ``report_repair_pushed`` to
+          ``AWAITING_CI``.
+      R3. followup body must pass ``_is_actionable_provider_comment``
+          so status markers (``Walkthrough``, ``In progress``,
+          etc.) do not resurrect threads.
+
+    R2 fails closed when:
+
+      - ``repair_transition_ts`` is None (the durable ledger has
+        no SUPERSEDED row for the prior finding, or the row's
+        ``superseded_at`` is missing / unparseable);
+      - ``followup.createdAt`` is None or unparseable.
+
+    The R2 comparison is intentionally STRICT (>) so an
+    equal-timestamp followup (e.g. an off-by-second race) does
+    not silently resurrect an already-addressed historical thread.
+
+    The audit's contract forbids falling back to a
+    git-ancestry-derived boundary when the durable evidence is
+    missing. The C22-R1 helper used ``git log --reverse
+    --ancestry-path <anchor>..<head>`` and was disproven by the
+    Codex review: an unrelated docs commit between the original
+    anchor and the actual repair is still a descendant of the
+    anchor, and the heuristic would treat the docs commit as
+    the boundary. The C22-R2 helper therefore reads the
+    authoritative ledger record exclusively.
+    """
+    if not isinstance(followup, dict):
+        return False
+    # R1: non-operator author.
+    author = followup.get("author")
+    if (
+        not isinstance(author, str)
+        or not author
+        or author in operator_logins
+    ):
+        return False
+    # R2: strictly-later-than-repair-transition timestamp.
+    # Missing / unparseable createdAt on either side returns False
+    # (we cannot claim "post-repair" without a timestamp anchor on
+    # both ends).
+    followup_ts = _parse_iso8601_utc(followup.get("createdAt"))
+    if followup_ts is None or repair_transition_ts is None:
+        return False
+    if followup_ts <= repair_transition_ts:
+        return False
+    # R3: actionable body — not a status marker.
+    body = str(followup.get("body") or "")
+    if not _is_actionable_provider_comment(body):
+        return False
+    return True
+
+
+def _normalize_operator_logins(
+    raw: object,
+    *,
+    fallback: Tuple[str, ...] = _C22_DEFAULT_OPERATOR_LOGINS,
+) -> Tuple[str, ...]:
+    """Round-C22R1/S1: normalize the ``operator_logins`` snapshot
+    field into a canonical tuple of trimmed, non-empty strings.
+
+    Contract:
+
+    - ``None`` → ``fallback`` (backward-compatible fixture / no-
+      operator-override default).
+    - ``list`` / ``tuple`` / ``set`` of strings → trimmed, non-empty
+      entries preserved; falsy / empty entries dropped; the result
+      is a tuple. ``str(...)`` defends against non-string elements.
+    - bare ``str`` (e.g. ``"github-actions"``) → ``fallback``.
+      Treating it as an iterable would otherwise explode it into a
+      tuple of single-character logins, which is the exact bug
+      Sourcery flagged. ``len(raw) > some-large-threshold`` would
+      also miss cases where the operator's name happens to be a
+      short string the user meant as ONE identity; the explicit
+      type check is the right contract.
+    - any other truthy non-iterable (``int``, ``float``, ``bool``,
+      ``None``) → ``fallback``. ``tuple(int)`` raises ``TypeError``,
+      which Sourcery flagged.
+    - ``dict`` → ``fallback``. ``tuple({"a": 1, "b": 2})`` returns
+      ``("a", "b")`` (keys, not values), which would silently
+      introduce bogus operator logins. Reject explicitly.
+
+    The normalizer never raises; every malformed input falls back
+    to the canonical default.
+    """
+    if raw is None:
+        return tuple(fallback)
+    if isinstance(raw, str):
+        # Plain string must not be expanded into characters.
+        return tuple(fallback)
+    if isinstance(raw, dict):
+        # Dicts would expose KEYS, not values, if iterated. Reject.
+        return tuple(fallback)
+    if not isinstance(raw, (list, tuple, set, frozenset)):
+        # Truthy non-iterable (int, float, bool, custom object).
+        return tuple(fallback)
+    out: List[str] = []
+    seen: set = set()
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        s = entry.strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    if not out:
+        return tuple(fallback)
+    return tuple(out)
+
+
+def _maybe_resurrect_outdated_thread(
+    thread_data: dict,
+    *,
+    current_head: Optional[str],
+    operator_logins: Tuple[str, ...] = _C22_DEFAULT_OPERATOR_LOGINS,
+) -> Optional[dict]:
+    """C22-R1: reconsider an outdated, unresolved review thread when a
+    NEW non-operator follow-up reply exists AFTER the head-changing
+    repair.
+
+    Returns a dict describing the qualifying follow-up, or ``None``
+    when the thread is not eligible.
+
+    The eligibility rule (see ``_c22_is_followup_eligible``):
+
+      - the thread itself must be outdated and unresolved (the
+        caller has already enforced that — this helper trusts the
+        caller);
+      - there must be a ``superseding_repair_committed_at`` on
+        ``thread_data`` (the supervisor stamps this from
+        ``_git_superseding_repair_committed_at``); a missing /
+        unparseable boundary fails closed;
+      - at least one reply must have ``createdAt`` strictly later
+        than ``superseding_repair_committed_at`` (NOT just later
+        than the first comment — see Autonomy C22-R1/P1-A);
+      - the latest qualifying reply is returned so the caller can
+        use its body / author / id as the actionable follow-up
+        evidence.
+
+    The ``superseding_repair_committed_at`` evidence is
+    authoritative. ``comment.commit`` is NOT re-bound by GitHub
+    when a thread goes outdated, so commit-oid evidence is
+    unreliable; the supervisor computes the repair boundary by
+    walking ``git log --reverse --ancestry-path <anchor>..<head>``
+    and reading the committer timestamp of the FIRST descendant
+    commit. This matches the audit's expectation that the
+    follow-up must post-date the head-changing REPAIR that already
+    addressed the original concern, not just any later commit on
+    the branch (including documentation / report-only commits).
+
+    Parameters
+    ----------
+    thread_data:
+        The thread dict as captured by ``capture_live_snapshot``
+        (``resolved/outdated/path/line/body/commit_oid/author/
+        comment_count/top_id/replies`` plus
+        ``superseding_repair_committed_at`` and
+        ``replies[*].createdAt``). Both the
+        ``superseding_repair_committed_at`` field and each
+        reply's ``createdAt`` are used by the eligibility rule;
+        missing timestamps fail closed (return None).
+    current_head:
+        The snapshot's exact PR head. Currently informational;
+        reserved for the future case where head-anchored follow-ups
+        become available on newer GraphQL payloads.
+    operator_logins:
+        Set of account names whose replies are treated as operator
+        explanations and DO NOT resurrect outdated threads. Defaults
+        to ``_C22_DEFAULT_OPERATOR_LOGINS`` (``github-actions``
+        etc). The supervisor's snapshot may override via the
+        ``operator_logins`` field, but this helper does not read it
+        directly — callers (``_collect_review_findings``,
+        ``collect_findings``) thread the override through their own
+        argument plumbing after running it through
+        ``_normalize_operator_logins``.
+
+    Returns
+    -------
+    Optional[dict]
+        A ``{"followup": <reply-dict>, "thread_id": <id>,
+        "superseding_repair_committed_at": <int|None>}`` triple, or
+        ``None``. The reply dict is the raw snapshot entry (NOT a
+        shaped Finding) so the caller can preserve the original
+        ``createdAt`` / ``author`` / ``databaseId`` provenance.
+    """
+    if not isinstance(thread_data, dict):
+        return None
+    # The eligibility rule treats ``resolved`` and ``outdated`` as
+    # caller-enforced invariants, but we double-check defensively so a
+    # naive caller cannot accidentally resurrect a stale or closed
+    # thread.
+    if thread_data.get("resolved"):
+        return None
+    if not thread_data.get("outdated"):
+        return None
+    replies = thread_data.get("replies") or []
+    if not isinstance(replies, list) or not replies:
+        return None
+    # Round-C22R2/P1: the AUTHORITATIVE repair-transition
+    # timestamp is the durable FindingLedger's
+    # ``superseded_at`` record for the prior finding identity
+    # (``thread:<thread_id>``). The snapshot stamps this on the
+    # thread entry from
+    # ``FindingLedger.superseded_repair_transition(...)``.
+    # When the ledger has no record (or the record is missing
+    # ``superseded_at``), the rule MUST fail closed — the
+    # audit explicitly forbids falling back to a
+    # git-ancestry-derived boundary. C22-R1's
+    # ``superseding_repair_committed_at`` field is kept in
+    # the thread dict purely as diagnostic provenance (the
+    # snapshot still computes it) but is NOT consulted as a
+    # fallback by this helper.
+    repair_transition_ts: Optional[int] = None
+    superseded_at_raw = thread_data.get("superseded_at")
+    if isinstance(superseded_at_raw, int):
+        repair_transition_ts = superseded_at_raw
+    elif isinstance(superseded_at_raw, str) and superseded_at_raw:
+        repair_transition_ts = _parse_iso8601_utc(superseded_at_raw)
+    # Walk replies in their stored order; the snapshot already sorts
+    # GraphQL comments by id and the supervisor preserves that order,
+    # so the last entry is the freshest.
+    qualifying: Optional[dict] = None
+    for reply in replies:
+        if not isinstance(reply, dict):
+            continue
+        if _c22_is_followup_eligible(
+            followup=reply,
+            repair_transition_ts=repair_transition_ts,
+            operator_logins=tuple(operator_logins),
+        ):
+            qualifying = reply
+    if qualifying is None:
+        return None
+    return {
+        "followup": qualifying,
+        "thread_id": (
+            thread_data.get("id")
+            or thread_data.get("thread_id")
+            or ""
+        ),
+        "superseded_at": superseded_at_raw,
+        "superseded_by_head": thread_data.get("superseded_by_head"),
+        # Round-C22R1 legacy field kept for callers that
+        # already read it; ``superseded_at`` /
+        # ``superseded_by_head`` are the canonical C22-R2
+        # evidence.
+        "superseding_repair_committed_at": (
+            thread_data.get("superseding_repair_committed_at")
+        ),
+    }
+
+
 def _collect_review_findings(snapshot: dict) -> List[Finding]:
     """Extract CodeRabbit-style inline-comment findings from a snapshot.
 
@@ -1221,6 +1701,20 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
         raise InvalidSnapshot("snapshot must be a dict")
     findings: List[Finding] = []
     seen_ids: set = set()
+    # Round-C22R1/S3: cross-surface dedup by ``comment_id``. The
+    # collector consumes multiple finding-emitting surfaces
+    # (provider issue comments, ``review_comments``, C22
+    # resurrected thread follow-ups). When the same logical
+    # comment is visible through more than one surface (e.g.
+    # the C22 resurrected follow-up also appears as an
+    # inline-review-comment because GitHub exposes it in both
+    # the thread and the PR's review-comment stream), the
+    # ``seen_ids`` dedup by ``finding_id`` is INSUFFICIENT — the
+    # inline path keys by ``inline:<comment_id>`` and the
+    # thread path keys by ``thread:<thread_id>``, so they would
+    # both pass the ``seen_ids`` gate. ``seen_comment_ids``
+    # catches the duplicate by the underlying GitHub databaseId.
+    seen_comment_ids: set = set()
     # Round-29 review (Codex): filter out issue comments
     # that are bound to a previous head. The
     # ``_provider_issue_comments`` list is the supervisor's
@@ -1332,7 +1826,12 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"{provider}:{cid}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup.
+            if isinstance(cid, int) and cid in seen_comment_ids:
+                continue
             seen_ids.add(finding_id)
+            if isinstance(cid, int):
+                seen_comment_ids.add(cid)
             body = str(c.get("body") or "")
             if not _is_actionable_provider_comment(body):
                 continue
@@ -1371,7 +1870,15 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"inline:{cid}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup. The same
+            # comment may also surface as a C22 resurrected
+            # follow-up in ``review_threads``; dedup by
+            # the underlying GitHub databaseId.
+            if isinstance(cid, int) and cid in seen_comment_ids:
+                continue
             seen_ids.add(finding_id)
+            if isinstance(cid, int):
+                seen_comment_ids.add(cid)
             body = str(c.get("body") or "")
             if not _is_actionable_provider_comment(body):
                 continue
@@ -1405,7 +1912,12 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"coderabbit:{cid}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup by comment id.
+            if isinstance(cid, int) and cid in seen_comment_ids:
+                continue
             seen_ids.add(finding_id)
+            if isinstance(cid, int):
+                seen_comment_ids.add(cid)
             body = str(c.get("body") or "")
             if not _is_actionable_provider_comment(body):
                 continue
@@ -1441,6 +1953,20 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
         or {}
     )
     current_head = snapshot.get("head_sha")
+    # Round-C22/C22: snapshot may carry an ``operator_logins``
+    # override; default to the conservative set baked into
+    # Round-C22R1/S1: the snapshot's ``operator_logins`` field
+    # is normalized through ``_normalize_operator_logins`` so
+    # that bare strings, truthy non-iterables, dicts, and other
+    # malformed inputs cannot expand into bogus operator
+    # identities (the original bug was ``tuple("github-actions")``
+    # → ``("g","i","t","h","u","b","-","a","c","t","i","o","n","s")``).
+    # The fallback remains the conservative GitHub-Actions default
+    # for backward-compatible fixture-only snapshots that omit
+    # the field.
+    operator_logins: Tuple[str, ...] = _normalize_operator_logins(
+        snapshot.get("operator_logins"),
+    )
     if isinstance(threads, dict):
         for thread_id, thread_data in threads.items():
             if not isinstance(thread_data, dict):
@@ -1448,6 +1974,103 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             if thread_data.get("resolved"):
                 continue
             if thread_data.get("outdated"):
+                # Round-C22/C22: do not auto-skip outdated threads.
+                # Trial 1B proved an outdated thread can carry a
+                # NEW non-operator reviewer reply that re-elevates
+                # the finding (its anchor went stale when the head
+                # advanced, but the reviewer re-asserted the concern
+                # on a newer review). Apply the narrow resurrection
+                # helper. If it returns ``None``, the thread has no
+                # qualifying follow-up and is skipped (the historical
+                # behavior is preserved for the A and B cases).
+                resurrected = _maybe_resurrect_outdated_thread(
+                    thread_data,
+                    current_head=current_head,
+                    operator_logins=operator_logins,
+                )
+                if resurrected is None:
+                    continue
+                # The finding is built from the QUALIFYING follow-up,
+                # not the stale first comment. The thread-level
+                # ``path`` / ``line`` are preserved as actionable
+                # anchors because GitHub does not re-anchor replies
+                # when a thread goes outdated.
+                followup = resurrected["followup"]
+                followup_db_id_raw = followup.get("id")
+                try:
+                    followup_db_id = (
+                        int(followup_db_id_raw)
+                        if followup_db_id_raw not in (None, "")
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    followup_db_id = None
+                followup_body = str(followup.get("body") or "").strip()
+                followup_author = str(followup.get("author") or "")
+                followup_created = str(followup.get("createdAt") or "")
+                # Provenance prologue: keep the body prefix purely
+                # structured so the worker can identify the
+                # triggering follow-up without inventing a new
+                # Finding schema. The full follow-up body is
+                # appended after a blank line so the existing
+                # worker heuristics (severity, anchor extraction)
+                # operate on the actionable content.
+                thread_path = thread_data.get("path") or ""
+                thread_line = thread_data.get("line")
+                provenance_prologue = (
+                    "C22-resurrected follow-up evidence\n"
+                    f"thread_id: {thread_id}\n"
+                    f"triggering_comment_id: {followup_db_id_raw or ''}\n"
+                    f"triggering_author: {followup_author}\n"
+                    f"triggering_createdAt: {followup_created}\n"
+                    "outdated: true\n"
+                    f"current_head: {current_head or ''}\n"
+                    f"original_thread_comment_id: {thread_data.get('top_id') or ''}\n"
+                    f"thread_path: {thread_path}\n"
+                    f"thread_line: {thread_line if thread_line is not None else ''}\n"
+                    "\n"
+                )
+                finding_body = (
+                    provenance_prologue + followup_body
+                )
+                severity = _classify_severity(followup_body)
+                title = (
+                    followup_body.splitlines()[0]
+                    if followup_body
+                    else f"(thread {thread_id[-12:]})"
+                )
+                finding_id = f"thread:{thread_id}"
+                if finding_id in seen_ids:
+                    continue
+                # Round-C22R1/S3: cross-surface dedup. The
+                # follow-up's databaseId may have already been
+                # emitted via the inline ``review_comments`` or
+                # provider issue-comment surface above.
+                if (
+                    followup_db_id is not None
+                    and followup_db_id in seen_comment_ids
+                ):
+                    continue
+                seen_ids.add(finding_id)
+                if followup_db_id is not None:
+                    seen_comment_ids.add(followup_db_id)
+                findings.append(Finding(
+                    finding_id=finding_id,
+                    source="review_thread",
+                    severity=severity,
+                    title=title[:120],
+                    body=finding_body,
+                    file_path=thread_path if thread_path else None,
+                    line=(
+                        int(thread_line)
+                        if isinstance(thread_line, int) else None
+                    ),
+                    url=None,
+                    suggested_test=_extract_suggested_test(followup_body),
+                    review_id=None,
+                    comment_id=followup_db_id,
+                    check_name=None,
+                ))
                 continue
             thread_body = str(thread_data.get("body") or "").strip()
             thread_path = thread_data.get("path") or ""
@@ -1473,7 +2096,28 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             finding_id = f"thread:{thread_id}"
             if finding_id in seen_ids:
                 continue
+            # Round-C22R1/S3: cross-surface dedup. The
+            # thread's first-comment id (``top_id``) may have
+            # already been emitted via the inline
+            # ``review_comments`` or provider issue-comment
+            # surface above.
+            _thread_top_id_raw = thread_data.get("top_id")
+            try:
+                _thread_top_id = (
+                    int(_thread_top_id_raw)
+                    if _thread_top_id_raw not in (None, "")
+                    else None
+                )
+            except (TypeError, ValueError):
+                _thread_top_id = None
+            if (
+                _thread_top_id is not None
+                and _thread_top_id in seen_comment_ids
+            ):
+                continue
             seen_ids.add(finding_id)
+            if _thread_top_id is not None:
+                seen_comment_ids.add(_thread_top_id)
             if not _is_actionable_provider_comment(thread_body):
                 # A thread on the current head is by
                 # definition actionable even if its
@@ -1717,44 +2361,131 @@ def collect_findings(
             else None
         )
         current_head = snapshot.get("head_sha")
+        # Round-C22/C22: resolved threads still emit no finding
+        # (a closed thread keeps no actionable evidence). For
+        # outdated threads, apply the same narrow resurrection rule
+        # as the unfocused collector; the helper is shared so the
+        # two paths cannot drift on eligibility semantics.
+        # Round-C22R1/S1: same normalizer as the unfocused
+        # collector so a string-typed operator_logins snapshot
+        # value cannot explode into bogus single-character
+        # identities.
+        operator_logins_focused: Tuple[str, ...] = (
+            _normalize_operator_logins(snapshot.get("operator_logins"))
+        )
         if isinstance(thread_data, dict):
-            if thread_data.get("resolved"):
-                pass
-            elif thread_data.get("outdated"):
-                pass
-            else:
-                thread_body = str(thread_data.get("body") or "").strip()
-                thread_path = thread_data.get("path") or ""
-                thread_line = thread_data.get("line")
-                thread_commit_oid = thread_data.get("commit_oid")
-                if (
-                    not thread_body
-                    and not thread_path
-                    and thread_commit_oid
-                    and current_head
-                    and thread_commit_oid != current_head
-                ):
-                    pass
-                else:
-                    severity = _classify_severity(thread_body)
-                    title = (
-                        thread_body.splitlines()[0]
-                        if thread_body else f"(thread {focused_thread_id[-12:]})"
+            if not thread_data.get("resolved"):
+                # Resurrected branch: outdated + qualifying review
+                # follow-up. Build the finding from the follow-up,
+                # NOT the stale first comment. Same provenance
+                # prologue as the unfocused collector.
+                if thread_data.get("outdated"):
+                    resurrected = _maybe_resurrect_outdated_thread(
+                        thread_data,
+                        current_head=current_head,
+                        operator_logins=operator_logins_focused,
                     )
-                    review_findings.append(Finding(
-                        finding_id=f"thread:{focused_thread_id}",
-                        source="review_thread",
-                        severity=severity,
-                        title=title[:120],
-                        body=thread_body,
-                        file_path=thread_path if thread_path else None,
-                        line=int(thread_line) if isinstance(thread_line, int) else None,
-                        url=None,
-                        suggested_test=None,
-                        review_id=None,
-                        comment_id=None,
-                        check_name=None,
-                    ))
+                    if resurrected is not None:
+                        followup = resurrected["followup"]
+                        followup_db_id_raw = followup.get("id")
+                        try:
+                            followup_db_id = (
+                                int(followup_db_id_raw)
+                                if followup_db_id_raw not in (None, "")
+                                else None
+                            )
+                        except (TypeError, ValueError):
+                            followup_db_id = None
+                        followup_body = str(
+                            followup.get("body") or ""
+                        ).strip()
+                        followup_author = str(
+                            followup.get("author") or ""
+                        )
+                        followup_created = str(
+                            followup.get("createdAt") or ""
+                        )
+                        thread_path = thread_data.get("path") or ""
+                        thread_line = thread_data.get("line")
+                        provenance_prologue = (
+                            "C22-resurrected follow-up evidence\n"
+                            f"thread_id: {focused_thread_id}\n"
+                            f"triggering_comment_id: {followup_db_id_raw or ''}\n"
+                            f"triggering_author: {followup_author}\n"
+                            f"triggering_createdAt: {followup_created}\n"
+                            "outdated: true\n"
+                            f"current_head: {current_head or ''}\n"
+                            f"original_thread_comment_id: {thread_data.get('top_id') or ''}\n"
+                            f"thread_path: {thread_path}\n"
+                            f"thread_line: {thread_line if thread_line is not None else ''}\n"
+                            "\n"
+                        )
+                        finding_body = (
+                            provenance_prologue + followup_body
+                        )
+                        severity = _classify_severity(followup_body)
+                        title = (
+                            followup_body.splitlines()[0]
+                            if followup_body
+                            else f"(thread {focused_thread_id[-12:]})"
+                        )
+                        review_findings.append(Finding(
+                            finding_id=f"thread:{focused_thread_id}",
+                            source="review_thread",
+                            severity=severity,
+                            title=title[:120],
+                            body=finding_body,
+                            file_path=thread_path if thread_path else None,
+                            line=(
+                                int(thread_line)
+                                if isinstance(thread_line, int) else None
+                            ),
+                            url=None,
+                            suggested_test=_extract_suggested_test(
+                                followup_body
+                            ),
+                            review_id=None,
+                            comment_id=followup_db_id,
+                            check_name=None,
+                        ))
+                else:
+                    # Current-head path: unchanged behavior. The
+                    # historical exact-head guard via ``commit_oid``
+                    # is preserved byte-for-byte.
+                    thread_body = str(
+                        thread_data.get("body") or ""
+                    ).strip()
+                    thread_path = thread_data.get("path") or ""
+                    thread_line = thread_data.get("line")
+                    thread_commit_oid = thread_data.get("commit_oid")
+                    if (
+                        not thread_body
+                        and not thread_path
+                        and thread_commit_oid
+                        and current_head
+                        and thread_commit_oid != current_head
+                    ):
+                        pass
+                    else:
+                        severity = _classify_severity(thread_body)
+                        title = (
+                            thread_body.splitlines()[0]
+                            if thread_body else f"(thread {focused_thread_id[-12:]})"
+                        )
+                        review_findings.append(Finding(
+                            finding_id=f"thread:{focused_thread_id}",
+                            source="review_thread",
+                            severity=severity,
+                            title=title[:120],
+                            body=thread_body,
+                            file_path=thread_path if thread_path else None,
+                            line=int(thread_line) if isinstance(thread_line, int) else None,
+                            url=None,
+                            suggested_test=None,
+                            review_id=None,
+                            comment_id=None,
+                            check_name=None,
+                        ))
     else:
         review_findings = list(_collect_review_findings(snapshot))
     findings: List[Finding] = list(review_findings) + list(ci_findings)
@@ -2900,7 +3631,13 @@ class RelayLoop:
                 f"fail-closed; supervisor schedules retry"
             )
 
-    def mark_head_advanced(self, old_head_sha: str, new_head_sha: str) -> None:
+    def mark_head_advanced(
+        self,
+        old_head_sha: str,
+        new_head_sha: str,
+        *,
+        directive_id: Optional[str] = None,
+    ) -> None:
         """Bind the worker push to the state machine.
 
         The supervisor calls this when the worker's push
@@ -2929,14 +3666,47 @@ class RelayLoop:
         already advanced via a manual operator action,
         or the CI runner drove the transition). The
         head_observed is the new head SHA.
+
+        Round-C22R2/P1: the ledger's SUPERSEDED rows
+        also record ``superseded_by_head=new_head_sha``
+        and (when supplied) ``directive_id`` so the
+        snapshot's C22-R2 eligibility helper can look up
+        the authoritative repair-boundary evidence by
+        finding ID instead of falling back to a
+        git-ancestry heuristic.
         """
         if new_head_sha == old_head_sha:
             return
+        # Round-C22R2/P1: validate new_head_sha shape so the
+        # ledger's SUPERSEDED row never records a malformed
+        # SHA. The controller's rebind path validates again
+        # later (and raises ControllerError), but we want a
+        # malformed value to fail closed BEFORE any ledger
+        # writes happen. Mirrors the controller's existing
+        # validation so existing tests that catch
+        # ``ControllerError`` continue to pass.
+        # Importing here to avoid a circular import at
+        # module-load time.
+        from autocoder_orchestration.controller import (
+            ControllerError as _CtrlError,
+        )
+        if not isinstance(new_head_sha, str) or not _HEX_SHA_RE.match(new_head_sha):
+            raise _CtrlError(
+                f"mark_head_advanced new_head_sha must be 40 or 64 "
+                f"lowercase hex chars: {new_head_sha!r}"
+            )
         # Round-27: advance the finding ledger so the prior
         # head's findings are not re-emitted on the new head
         # unless fresh evidence explicitly reopens them.
+        # Round-C22R2/P1: pass ``new_head_sha`` and the
+        # optional ``directive_id`` so the SUPERSEDED row
+        # carries the durable superseding-head evidence.
         old_ledger = FindingLedger(self.store, head_sha=old_head_sha)
-        promoted = old_ledger.mark_superseded_by_head(old_head_sha)
+        promoted = old_ledger.mark_superseded_by_head(
+            old_head_sha,
+            new_head_sha=new_head_sha,
+            directive_id=directive_id,
+        )
         log_attr = getattr(self.controller, "log", None)
         if log_attr is not None and promoted:
             log_attr(
@@ -3062,6 +3832,13 @@ __all__ = [
     "SEVERITY_P1",
     "SEVERITY_P2",
     "WORKER_PROMPT_TEMPLATE",
+    # Round-C22/C22: export so tests + callers can introspect the
+    # narrow resurrection helper without reaching into ``_``-prefixed
+    # names.
+    "_c22_is_followup_eligible",
+    "_maybe_resurrect_outdated_thread",
+    "_normalize_operator_logins",
+    "_parse_iso8601_utc",
     "bump_slice_epoch",
     "build_directive",
     "build_worker_prompt",

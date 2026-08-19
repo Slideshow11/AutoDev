@@ -739,7 +739,17 @@ def mark_head_advanced_public(
     # continue polling; the next round re-attempts the
     # transition from the durable state.
     try:
-        loop.mark_head_advanced(old_head_sha, new_head_sha)
+        loop.mark_head_advanced(
+            old_head_sha,
+            new_head_sha,
+            # Round-C22R2/P1: forward the directive UUID that
+            # drove the worker push so the finding ledger's
+            # SUPERSEDED row records the authoritative
+            # repair-transition provenance. ``directive_id``
+            # was captured into the attempt record at
+            # launch time (``WorkerAttemptRecord.directive_id``).
+            directive_id=getattr(attempt, "directive_id", None),
+        )
     except Exception as exc:  # noqa: BLE001
         try:
             from .supervisor import log
