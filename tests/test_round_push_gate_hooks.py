@@ -607,7 +607,7 @@ def test_case_f_finalizer_failure_blocks_commit_via_driver(tmp_path, monkeypatch
     The driver short-circuits with rc=1 when ``tmp_path`` is not
     a git repo, so seed ``tmp_path/.git`` before invoking it.
     """
-    sys.path.insert(0, str(REPO_ROOT))
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
     from autocoder_supervisor.provenance_maintenance import (
         ProvenanceFinalizeError,
     )
@@ -754,7 +754,7 @@ def test_case_h_no_verify_bypasses_local_hook(monkeypatch, tmp_path):
     # Now exercise the supervisor-side validator. We need to
     # re-use the actual _validate_provenance_consistency shim
     # (which delegates to the canonical push_gate implementation).
-    sys.path.insert(0, str(REPO_ROOT))
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
     from autocoder_supervisor.supervisor import (
         _validate_provenance_consistency,
     )
@@ -785,7 +785,7 @@ def test_wrapper_injects_worker_env_and_hooks_path(tmp_path, monkeypatch):  # no
     receives AED_AUTODEV_WORKER=1 + AED_WORKER_PRELAUNCH_HEAD and
     GIT_CONFIG_COUNT/_KEY_n/_VALUE_n is populated, with NO mutation to
     the operator's persistent config."""
-    sys.path.insert(0, str(REPO_ROOT))
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
     from autocoder_supervisor import aed_worker_wrapper as wmod
 
     # We invoke the wrapper's main() entry point in-process by
@@ -853,7 +853,7 @@ def test_wrapper_injects_worker_env_and_hooks_path(tmp_path, monkeypatch):  # no
 def test_wrapper_rejects_malformed_git_config_count(tmp_path, monkeypatch):
     """Defence in depth: malformed inherited GIT_CONFIG_COUNT fails
     the worker launch closed rather than silently dropping the hook."""
-    sys.path.insert(0, str(REPO_ROOT))
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
     monkeypatch.setenv("GIT_CONFIG_COUNT", "not-a-number")
     import autocoder_supervisor.aed_worker_wrapper as wr
     argv = [
@@ -886,7 +886,7 @@ def test_wrapper_preserves_inherited_git_config(tmp_path, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
     monkeypatch.setenv("GIT_CONFIG_KEY_0", "user.email")
     monkeypatch.setenv("GIT_CONFIG_VALUE_0", "x@example.com")
-    sys.path.insert(0, str(REPO_ROOT))
+    monkeypatch.syspath_prepend(str(REPO_ROOT))
     import autocoder_supervisor.aed_worker_wrapper as wr
     captured = {}
 

@@ -147,7 +147,22 @@ def _write_launch_failure_artifact(
             "worker_envelope_source": "round167_p2_launch_failure",
             "envelope_status": "missing",
             "envelope_match_count": 0,
+            # Round-167/CodeRabbit-P2: emit the full
+            # result-contract field set so the supervisor's
+            # ``WorkerResultArtifact.validate_against_attempt``
+            # does not misclassify a launch failure as a
+            # contract violation. ``expected_result_contract_id``
+            # echoes the supervisor-owned prelaunch id;
+            # ``observed_result_contract_id`` is empty because
+            # no envelope was produced; ``result_contract_match``
+            # is False with an explicit reason.
             "result_contract_id": args.result_contract_id or "",
+            "expected_result_contract_id": args.result_contract_id or "",
+            "observed_result_contract_id": "",
+            "result_contract_match": False,
+            "result_contract_mismatch_reason": (
+                "worker did not launch; no envelope was produced"
+            ),
         },
     }
     try:

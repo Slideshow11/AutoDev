@@ -77,6 +77,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -200,11 +201,16 @@ def validate_provenance_consistency_at_sha(
         # does not regress for synthetic fixtures.
         return (True, [])
 
-    # Synthetic-fixture tolerance for prelaunch_head (tests only).
-    # If prelaunch is unknown to git, the validator still needs the
-    # outgoing manifest; skip the prelaunch diff check but keep the
-    # outgoing-side checks (controlled destinations, manifest index,
-    # diff) intact.
+    # Round-167/CodeRabbit-P2: the ``prelaunch_is_synthetic``
+    # flag is computed for diagnostic clarity but the
+    # validator MUST remain fail-closed for an unresolvable
+    # prelaunch_head. A real worker push never supplies an
+    # unknown prelaunch SHA; the only legitimate callers
+    # with synthetic prelaunch values are unit tests, and
+    # those tests assert against real prelaunch SHA values
+    # (``git rev-parse HEAD~1``). The unconditional
+    # ``git diff`` at step 2 below is the correct
+    # fail-closed behavior.
     prelaunch_is_synthetic = False
     try:
         _prelaunch_check = subprocess.run(
@@ -217,6 +223,9 @@ def validate_provenance_consistency_at_sha(
             f"failed with subprocess error: {e!r}"
         ])
     if _prelaunch_check.returncode != 0:
+        # Surface the synthetic-fixture observation but do
+        # NOT use it to bypass any subsequent check. The
+        # diff at step 2 will fail closed naturally.
         prelaunch_is_synthetic = True
 
     # Importing manifest helpers from provenance_maintenance
@@ -344,6 +353,17 @@ def validate_provenance_consistency_at_sha(
     # Step 2: enumerate the changed paths between prelaunch_head
     # and outgoing_head. Done with `git diff --name-only` so we
     # see exactly the committed bytes Git is about to publish.
+    #
+    # Round-167/CodeRabbit-P2: this ``git diff`` is
+    # unconditional; an unresolvable ``prelaunch_head`` will
+    # fail here (rc != 0) and the validator returns
+    # ``(False, ...)``. This is the correct fail-closed
+    # behavior for the security boundary and matches the
+    # production pre-push-hook contract. The
+    # ``prelaunch_is_synthetic`` flag observed above is
+    # surfaced in the error message so the operator can
+    # distinguish "prelaunch is not a Git object" from a
+    # generic diff failure.
     try:
         proc = subprocess.run(
             ["git", "-C", str(repo_root), "diff", "--name-only",
@@ -355,8 +375,12 @@ def validate_provenance_consistency_at_sha(
             f"git diff failed with subprocess error: {e!r}"
         ])
     if proc.returncode != 0:
+        hint = (
+            " (prelaunch_head is not a resolvable Git object)"
+            if prelaunch_is_synthetic else ""
+        )
         return (False, [
-            f"git diff failed: rc={proc.returncode} "
+            f"git diff failed: rc={proc.returncode}{hint} "
             f"stderr={proc.stderr[:200]!r}"
         ])
 
@@ -545,6 +569,7 @@ def validate_committed_state_scan_at_sha(
     *,
     outgoing_head: str,
     repo_root: Path,
+    allow_synthetic_outgoing: bool = False,
 ) -> tuple:
     """Run the canonical committed-state scanner against the
     committed outgoing tree at ``outgoing_head``.
@@ -562,6 +587,16 @@ def validate_committed_state_scan_at_sha(
       * Capture stdout/stderr for the diagnostic.
 
     Returns ``(ok: bool, errors: list[str])``.
+
+    ``allow_synthetic_outgoing`` defaults to ``False`` so the
+    production pre-push hook fails closed for an unknown
+    outgoing SHA. Round-167/CodeRabbit-P2: the scanner half of
+    the gate previously bypassed this check, while the
+    provenance half already gated on
+    ``allow_synthetic_outgoing``. The asymmetry let a
+    well-formed but unknown 40-hex SHA skip the scanner
+    silently. The CLI passes ``False``; the param is
+    propagated for symmetry with the provenance validator.
     """
     if not _HEX_SHA_RE.match(outgoing_head or ""):
         return (False, [f"invalid outgoing_head: {outgoing_head!r}"])
@@ -578,18 +613,42 @@ def validate_committed_state_scan_at_sha(
             f"{outgoing_head[:12]}...: {e!r}"
         ])
     if cat.returncode != 0:
-        # Synthetic fixture SHA — skip the gate, same policy
-        # as provenance validator.
+        if not allow_synthetic_outgoing:
+            # Round-167/CodeRabbit-P2: fail closed by default
+            # (same policy as the provenance validator). A
+            # well-formed but unknown 40-hex SHA must not skip
+            # the committed-state scan. Production callers
+            # pass ``False``; only opt-in tests / supervisors
+            # pass ``True`` (none today, mirroring the
+            # provenance validator's contract).
+            return (False, [
+                f"outgoing_head {outgoing_head[:12]}... is not a "
+                f"real Git object in {repo_root}; committed-state "
+                "scan cannot run against an unresolvable SHA"
+            ])
+        # Opt-in synthetic tolerance: tests construct synthetic
+        # ``outgoing_head`` values which are not Git objects.
+        # Skip the scanner (no committed tree to scan) and
+        # return the legacy ``(True, [])`` so the supervisor's
+        # classification does not regress for synthetic
+        # fixtures.
         return (True, [])
 
     # Throwaway worktree at the exact committed outgoing tip.
-    # Round-1064 P2: use a per-invocation directory keyed on
-    # the outgoing SHA (truncated) so concurrent invocations on
-    # the same repo do not collide on ``.git/push_gate_wt``.
-    # The cleanup ``finally`` removes only the directory this
-    # invocation created.
+    # Round-167/CodeRabbit-P2: include a per-invocation
+    # discriminator (the current PID + the host's MAC address
+    # node from ``uuid.getnode()``) so the worker pre-push
+    # hook and the supervisor post-push validator do not
+    # collide on ``outgoing_head[:12]`` alone. Both
+    # invocations run against the same outgoing SHA; without
+    # the discriminator the second invocation's
+    # ``worktree remove --force`` deletes the worktree the
+    # first invocation is still scanning. The cleanup
+    # ``finally`` removes only the directory this invocation
+    # created.
     wt_dir = (
-        repo_root / ".git" / f"push_gate_wt_{outgoing_head[:12]}"
+        repo_root / ".git"
+        / f"push_gate_wt_{outgoing_head[:12]}_{os.getpid()}_{uuid.getnode()}"
     )
     # Best-effort cleanup; previous invocations may have left
     # a stale worktree behind.
@@ -683,8 +742,16 @@ def _run_validators(args: argparse.Namespace) -> int:
                 prelaunch_head=pre, outgoing_head=out, repo_root=repo_root,
             )
         else:
+            # Round-167/CodeRabbit-P2: the scanner validator
+            # now takes ``allow_synthetic_outgoing`` for
+            # symmetry with the provenance validator. The
+            # CLI default is fail-closed (False); no current
+            # caller passes True, mirroring the provenance
+            # validator's CLI surface (which also has the
+            # param but no CLI flag).
             ok, errors = validate_committed_state_scan_at_sha(
                 outgoing_head=out, repo_root=repo_root,
+                allow_synthetic_outgoing=False,
             )
         payload["checks"].append({
             "name": check,
