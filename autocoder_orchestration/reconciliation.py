@@ -23,6 +23,29 @@ class FindingDisposition(str, Enum):
     SUPERSEDED = "SUPERSEDED"
     INVALID = "INVALID"
     INCONCLUSIVE = "INCONCLUSIVE"
+    # Round-591: terminal supervisor-side dispositions for
+    # ``no_changes_required_proof`` and worker ``claim.disposition``.
+    # REAL_REPAIR_REQUIRED: worker has authority+evidence to fix
+    # and HAS produced/repaired; the finding is repaired and
+    # the work is on the current head.
+    # ALREADY_SATISFIED: terminal no-change disposition with
+    # proof; the observed evidence confirms the finding is moot
+    # in current state.
+    # SUPERSEDED: terminal disposition requiring ACTUAL
+    # supersession proof (e.g. the subject SHA advanced past
+    # the finding head); ``I think this is a fetch/config gap``
+    # is NOT a supersession proof.
+    # INCOMPLETE_EVIDENCE: NONTERMINAL — re-observe on next
+    # round; never accepted as a NO_CHANGES_REQUIRED
+    # disposition alone.
+    # STILL_ACTIONABLE: NONTERMINAL — the finding is real and
+    # the worker has authority+evidence to repair but chose
+    # not to (e.g. round-39 anti-churn while CI is red);
+    # this MUST leave the work executable for a later attempt.
+    REAL_REPAIR_REQUIRED = "REAL_REPAIR_REQUIRED"
+    ALREADY_SATISFIED = "ALREADY_SATISFIED"
+    INCOMPLETE_EVIDENCE = "INCOMPLETE_EVIDENCE"
+    STILL_ACTIONABLE = "STILL_ACTIONABLE"
 
 
 @dataclass(frozen=True)
@@ -64,6 +87,23 @@ class Finding:
             raise ValueError("head_sha must be 40 or 64 lowercase hex chars")
 
     def is_resolvable(self) -> bool:
+        # Round-1064 P2: both ``is_resolvable`` and the
+        # controller's two-tuples enumerate a subset of the
+        # enum and treat the remainder by default. A new
+        # member that neither list names silently takes the
+        # permissive branch. Enumerate the disposition space
+        # explicitly so the function is exhaustive on the
+        # current enum (any new member requires an explicit
+        # decision here). ``REAL_REPAIR_REQUIRED`` and
+        # ``STILL_ACTIONABLE`` are non-terminal work that
+        # must remain executable for a later attempt; they
+        # are NOT resolvable here. ``ALREADY_SATISFIED`` is
+        # terminal with proof and is settled elsewhere (the
+        # controller validates it through its own
+        # ``terminal_with_required_proof`` set), so the
+        # Finding/ThreadResolution flow treats it as
+        # non-resolvable. ``INCOMPLETE_EVIDENCE`` is
+        # non-terminal and must be re-observed.
         return self.disposition in (
             FindingDisposition.REPAIRED,
             FindingDisposition.SUPERSEDED,

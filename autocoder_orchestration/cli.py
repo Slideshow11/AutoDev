@@ -17,13 +17,12 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 from .context import RunContext, make_run_context, generate_run_id
 from .canonical_paths import canonical_paths as _canonical_artifact_paths
@@ -47,8 +46,10 @@ from .state_machine import (
     STATE_COMPLETE,
     STATE_BLOCKED,
 )
-from .store import StateStore, StateStoreError, ProcessIdentity, current_process_identity
+from .store import StateStore, StateStoreError
 from .controller import Controller, ControllerError
+from .readiness import ReadinessCertificate
+from .artifacts import ArtifactError, read_artifact, write_artifact  # noqa: F401
 from .readiness import ReadinessEngine, ReadinessDecision, ReadinessCertificate
 from .observer import ObservationLog, Observation
 from .artifacts import ArtifactError, write_artifact, read_artifact
@@ -56,17 +57,13 @@ from .candidate import (
     Candidate,
     CandidateBuilder,
     CandidateError,
-    build_candidate_from_observations,
 )
 from .verifier_handoff import (
     VerifierHandoff,
-    VerifierRoleGuard,
     write_handoff,
-    read_handoff,
 )
 from .merge_authorization import (
     MergeAuthorization,
-    MergeExecutor,
     MergeRecord,
     MergeError,
     MergeTransactionInputs,
@@ -78,6 +75,14 @@ from .merge_authorization import (
     execute_guarded_merge_transaction,
     fetch_live_pr_payload,
 )
+from .review_repair_relay import (
+    DEFAULT_MAX_ROUNDS,
+    DirectiveStore,
+    EscalateToHuman,
+    RelayError,
+    RelayLoop,
+    build_worker_prompt,
+)
 
 
 EXIT_OK = 0
@@ -85,6 +90,20 @@ EXIT_INVARG = 2
 EXIT_GUARD = 3
 EXIT_STATE = 4
 EXIT_INTERNAL = 5
+
+# Round-591: the OPERATOR-POLICY set for PR #5. Migration
+# operations MUST target exactly this set; narrowing is
+# forbidden so the operator cannot silently shrink the
+# required-check policy.
+SEVEN_NAME_OPERATOR_POLICY: tuple[str, ...] = (
+    "test (3.10)",
+    "test (3.11)",
+    "test (3.12)",
+    "package-smoke",
+    "provenance",
+    "committed-state-scan",
+    "full-suite",
+)
 
 # Author login used by CodeRabbit on this repository. The CLI filters
 # latestReviews by this identity so a human review cannot satisfy the
@@ -181,31 +200,55 @@ def _fetch_coderabbit_review_state(
         "nodes { author { login } state }"
         "}}}"
     )
-    cursor = "null"
+    # ``cursor`` is None on the first request and the prior
+    # page's endCursor on subsequent requests. ``gh api
+    # graphql -F cursor=...`` sends the raw string; the
+    # GraphQL server expects a JSON null for the first
+    # page. Calling with ``-F cursor="null"`` (the four
+    # character string) makes the server reject the first
+    # request, so the path is conditioned on cursor being
+    # set.
+    #
+    # The path fails CLOSED on every incomplete-inventory
+    # signal (subprocess error, JSON error, missing page,
+    # page-limit, or hasNextPage without endCursor). A
+    # partial inventory that already shows an APPROVED
+    # state from an earlier round must NOT satisfy the
+    # merge guard when a later page cannot be confirmed.
+    cursor: Optional[str] = None
     has_next = True
     page_count = 0
     matched_state: Optional[str] = None
     while has_next:
         page_count += 1
         if page_count > _CODERABBIT_MAX_PAGES:
-            break
+            # Defensive: refuse if more than 10 pages of
+            # reviews exist. An incomplete inventory is a
+            # guard failure.
+            return None
+        cmd = [
+            gh_executable, "api", "graphql",
+            "-f", f"query={query}",
+            "-F", f"owner={owner}",
+            "-F", f"name={name}",
+            "-F", f"pr={pr_number}",
+        ]
+        if cursor is not None:
+            cmd.extend(["-F", f"cursor={cursor}"])
         proc = subprocess.run(
-            [
-                gh_executable, "api", "graphql",
-                "-f", f"query={query}",
-                "-F", f"owner={owner}",
-                "-F", f"name={name}",
-                "-F", f"pr={pr_number}",
-                "-F", f"cursor={cursor}",
-            ],
-            capture_output=True, text=True, timeout=30,
+            cmd, capture_output=True, text=True, timeout=30,
         )
         if proc.returncode != 0:
-            return matched_state
+            return None
         try:
             doc = json.loads(proc.stdout)
         except json.JSONDecodeError:
-            return matched_state
+            return None
+        # Round-29 P1#6: fail closed on partial GraphQL
+        # responses. Top-level ``errors`` means the page is
+        # partial even if ``data`` is present.
+        if isinstance(doc, dict) and isinstance(doc.get("errors"), list) and doc["errors"]:
+            return None
         page = (
             doc.get("data", {})
             .get("repository", {})
@@ -213,14 +256,28 @@ def _fetch_coderabbit_review_state(
             .get("latestReviews", {})
         )
         if not page:
-            return matched_state
+            return None
+        # Round-29 P1#6: ``nodes`` MUST be a list. Missing
+        # ``nodes`` / ``pageInfo`` is a partial response.
+        if not isinstance(page.get("nodes"), list):
+            return None
+        if not isinstance(page.get("pageInfo"), dict):
+            return None
         # Filter for CodeRabbit matches on this page.
         match = _filter_coderabbit_review_state(doc)
         if match is not None and matched_state is None:
             matched_state = match
         page_info = page.get("pageInfo", {})
         has_next = bool(page_info.get("hasNextPage"))
-        cursor = page_info.get("endCursor") or "null"
+        # If hasNextPage is set but endCursor is missing,
+        # the inventory is incomplete: fail closed.
+        if has_next and not page_info.get("endCursor"):
+            return None
+        # ``endCursor`` is None on the final page; the next
+        # iteration's cursor is None so the first-page
+        # logic above runs again (which is correct: the
+        # loop terminates via ``has_next``).
+        cursor = page_info.get("endCursor") or None
     return matched_state
 
 
@@ -345,11 +402,51 @@ def cmd_initialize(args: argparse.Namespace) -> int:
                 json_mode=args.json,
                 exit_code=EXIT_INVARG,
             )
-    required_ci_jobs = (
-        args.required_ci_jobs.split(",") if args.required_ci_jobs else
-        ("test (3.10)", "test (3.11)", "test (3.12)",
-         "package-smoke", "provenance", "committed-state-scan")
-    )
+    # Required CI jobs precedence (round-591):
+    # 1. --required-ci-jobs flag from operator (explicit).
+    # 2. Existing RunContext's required_ci_jobs (persisted
+    #    by a prior initialize call or supervisor config).
+    # 3. Operator-policy SEVEN-NAME default (the exact seven
+    #    GitHub check-run names for PR #5):
+    #       test (3.10), test (3.11), test (3.12),
+    #       package-smoke,
+    #       provenance, committed-state-scan,
+    #       full-suite.
+    # The persisted RunContext MUST take precedence over
+    # the default set when no explicit flag is provided.
+    # A configured gate such as ``security-scan`` MUST
+    # be able to block qualification/merge.
+    required_ci_jobs: list = []
+    if args.required_ci_jobs:
+        required_ci_jobs = args.required_ci_jobs.split(",")
+    else:
+        # Read the persisted RunContext if it exists.
+        # The persisted RunContext MUST take precedence
+        # over the default set when no explicit flag is
+        # provided. A configured gate such as
+        # ``security-scan`` MUST be able to block
+        # qualification/merge.
+        existing_ctx_dict = StateStore(args.state_root).read_optional(
+            "run_context.json",
+        )
+        if (
+            existing_ctx_dict is not None
+            and existing_ctx_dict.get("required_ci_jobs")
+        ):
+            required_ci_jobs = list(
+                existing_ctx_dict["required_ci_jobs"],
+            )
+        else:
+            # round-591: SEVEN-NAME operator policy (default).
+            # The previous six-job default omitted ``full-suite``,
+            # which is the seventh authoritative required check
+            # on PR #5.
+            required_ci_jobs = [
+                "test (3.10)", "test (3.11)", "test (3.12)",
+                "package-smoke", "provenance",
+                "committed-state-scan",
+                "full-suite",
+            ]
     impl_cmd = tuple(args.impl_worker_command.split()) if args.impl_worker_command else (
         "/usr/bin/env", "true", "{prompt}", "{session_id}"
     )
@@ -379,6 +476,184 @@ def cmd_initialize(args: argparse.Namespace) -> int:
         "state_path": ctx.state_path,
     }
     return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
+
+
+def cmd_migrate_required_ci_jobs(args: argparse.Namespace) -> int:
+    """Round-591: audited, narrow migration of the persisted
+    ``required_ci_jobs`` set when a stale run was initialized
+    with non-operator-policy identities (e.g. ``['test', 'lint']``
+    from an early bootstrap before the GitHub workflow added
+    ``full-suite``).
+
+    Engineering bootstrap authorization: this is the ONLY
+    canonical path for changing a persisted
+    ``required_ci_jobs``. The supervisor, the CLI, and the
+    tests cannot silently rewrite the persisted policy.
+
+    Invariants (all enforced; fail-closed):
+
+    - ``--expected-old`` MUST equal the persisted
+      ``required_ci_jobs`` exactly (both length and order).
+      If the persisted value differs, the call is REJECTED
+      so a stale caller cannot accidentally narrow the
+      operator policy.
+    - ``--new-required-ci-jobs`` MUST be a non-empty list.
+    - The migration is atomic via the
+      ``StateStore.compare_and_swap`` path; on success,
+      the persisted ``run_context.json`` revision is
+      incremented and the durable audit trail
+      ``required_ci_jobs_migrations.json`` records the
+      before/after/by/at pair.
+    - Run identity, PR identity, authorized head, and worker /
+      generation history are preserved — only the
+      ``required_ci_jobs`` field changes.
+    - Idempotent: re-running with the already-applied
+      ``--expected-old`` will fail-closed (expected_old
+      does not match the NEW value).
+    """
+    state_store = StateStore(args.state_root)
+    # Read strictly; missing run_context fails closed.
+    if not state_store.exists("run_context.json"):
+        return _emit(
+            {"error": "run_context.json does not exist; nothing to migrate"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    rev_marker = "run_context.json"
+    expected_rev = -1
+    ctx_dict = None
+    try:
+        # First read is informational (revision lookup).
+        ctx_dict = state_store.read_strict(rev_marker)
+        expected_rev = int(ctx_dict.get("_revision", 0))
+    except StateStoreError as exc:
+        return _emit(
+            {"error": f"cannot read run_context.json: {exc}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    # Required set BEFORE the migration.
+    persisted = list(ctx_dict.get("required_ci_jobs") or [])
+    expected_old = [
+        name.strip() for name in (args.expected_old or "").split(",") if name.strip()
+    ]
+    if tuple(persisted) != tuple(expected_old):
+        return _emit(
+            {
+                "error": (
+                    "expected-old mismatch: persisted "
+                    f"{persisted!r} != --expected-old {expected_old!r}; "
+                    "refusing to migrate to avoid silent policy change"
+                ),
+                "persisted_required_ci_jobs": persisted,
+                "expected_old": expected_old,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    new_required_ci_jobs = [
+        name.strip()
+        for name in (args.new_required_ci_jobs or "").split(",")
+        if name.strip()
+    ]
+    if not new_required_ci_jobs:
+        return _emit(
+            {"error": "--new-required-ci-jobs must be non-empty"},
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    # Safety: refuse silent reduction relative to operator
+    # policy intent. Every entry in the new set must already
+    # be the seven-name operator policy, OR the operation
+    # must specify a complete replacement. A narrowing of
+    # the seven-name operator-policy set is REJECTED.
+    if set(new_required_ci_jobs) != set(SEVEN_NAME_OPERATOR_POLICY):
+        return _emit(
+            {
+                "error": (
+                    "--new-required-ci-jobs MUST equal the "
+                    "exact seven-name operator-policy set; "
+                    "narrowing is forbidden by round-591"
+                ),
+                "expected_seven_name": list(SEVEN_NAME_OPERATOR_POLICY),
+                "got": new_required_ci_jobs,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    # Atomically rewrite run_context.json via CAS so concurrent
+    # relaunches can't interleave a stale read.
+    new_ctx = dict(ctx_dict)
+    new_ctx.pop("_revision", None)
+    new_ctx.pop("_written_at", None)
+    new_ctx["required_ci_jobs"] = list(new_required_ci_jobs)
+    try:
+        new_rev = state_store.compare_and_swap(
+            rev_marker, new_ctx, expected_revision=expected_rev
+        )
+    except StateStoreError as exc:
+        return _emit(
+            {"error": f"compare_and_swap failed: {exc}"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    # Persist a durable audit trail.
+    audit_entry = {
+        "migration_id": (
+            f"rcimgr-{new_rev.path.replace('/', '_')}@{new_rev.revision}"
+        ),
+        "from_required_ci_jobs": persisted,
+        "to_required_ci_jobs": list(new_required_ci_jobs),
+        "by": args.by,
+        "reason": args.reason,
+        "at": time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        ),
+        "run_id": ctx_dict.get("run_id"),
+        "pr_number": ctx_dict.get("pr_number"),
+        "rev_before": expected_rev,
+        "rev_after": new_rev.revision,
+    }
+    try:
+        state_store.append_journal("required_ci_jobs_migrations.json", audit_entry)
+    except (StateStoreError, OSError) as exc:
+        # Migration succeeded but audit-trail append failed.
+        # ``append_journal`` calls ``chmod`` / ``open`` / ``write``
+        # directly on the filesystem, so a real out-of-space
+        # or permission failure propagates as ``OSError`` rather
+        # than as ``StateStoreError`` — both must surface the same
+        # non-zero exit code so callers that check exit status
+        # alone do not record the migration as fully audited.
+        # The durable run_context.json change is the canonical
+        # record (do not roll back), BUT the audit trail is the
+        # stated control for this command, so the loss MUST be
+        # visible: signal a non-zero exit code and an explicit
+        # ``error`` key so callers that check exit status alone
+        # do not record the migration as fully audited.
+        return _emit(
+            {
+                "error": (
+                    f"migration committed (rev {new_rev.revision}) "
+                    f"but audit-trail append failed: {exc}"
+                ),
+                "warning": (
+                    f"migration committed (rev {new_rev.revision}) "
+                    f"but audit-trail append failed: {exc}"
+                ),
+                "migration": audit_entry,
+            },
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    return _emit(
+        {
+            "migration": audit_entry,
+            "new_revision": new_rev.revision,
+            "new_required_ci_jobs": list(new_required_ci_jobs),
+        },
+        json_mode=args.json,
+        exit_code=EXIT_OK,
+    )
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -823,6 +1098,7 @@ def cmd_merge_authorize(args: argparse.Namespace) -> int:
         author=args.author,
         next_wave_authorization=None,
         notes=args.notes,
+        required_ci_jobs=tuple(ctx.required_ci_jobs or ()),
     )
     auth_payload = auth.to_dict()
     auth_payload["_sha256"] = auth.compute_sha256()
@@ -929,6 +1205,24 @@ def cmd_merge(args: argparse.Namespace) -> int:
             json_mode=args.json,
             exit_code=EXIT_STATE,
         )
+    # Round-28 P2: the merge authorization MUST carry the run's
+    # configured required CI jobs so the locked mutable-gate
+    # cross-binding guard can compare the human-signed
+    # approval against the persisted run policy. Production
+    # code injects ``ctx.required_ci_jobs`` so the auth always
+    # binds to the same set as the persisted ``RunContext``.
+    # ``MergeAuthorization`` is a frozen dataclass; we use
+    # ``object.__setattr__`` to override the artifact value
+    # with the persisted run policy.
+    target_ci = tuple(ctx.required_ci_jobs or ())
+    if auth.required_ci_jobs != target_ci:
+        try:
+            object.__setattr__(auth, "required_ci_jobs", target_ci)
+        except Exception:
+            # If the frozen dataclass somehow refuses
+            # ``__setattr__``, the merge gate's cross-binding
+            # guard below sees the divergence and fails closed.
+            pass
     authorization_path = paths["authorization"]
     candidate_path = paths["candidate"]
     verifier_path = paths["verifier"]
@@ -953,7 +1247,13 @@ def cmd_merge(args: argparse.Namespace) -> int:
     try:
         all_nodes = []
         has_next = True
-        cursor = "null"
+        # ``cursor`` is None on the first request; the
+        # ``-F cursor=...`` argument is only added when a
+        # cursor exists. ``-F cursor="null"`` (the string)
+        # would make the GraphQL server reject the first
+        # request, so the path is conditioned on cursor
+        # being set.
+        cursor: Optional[str] = None
         page_count = 0
         while has_next:
             page_count += 1
@@ -972,14 +1272,17 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "nodes { isResolved isOutdated }"
                 "}}}"
             )
+            thread_cmd = [
+                "gh", "api", "graphql",
+                "-f", f"query={q}",
+                "-F", f"owner={ctx.repo_owner}",
+                "-F", f"name={ctx.repo_name}",
+                "-F", f"pr={auth.pr_number}",
+            ]
+            if cursor is not None:
+                thread_cmd.extend(["-F", f"cursor={cursor}"])
             thread_proc = subprocess.run(
-                ["gh", "api", "graphql",
-                 "-f", f"query={q}",
-                 "-F", f"owner={ctx.repo_owner}",
-                 "-F", f"name={ctx.repo_name}",
-                 "-F", f"pr={auth.pr_number}",
-                 "-F", f"cursor={cursor}"],
-                capture_output=True, text=True, timeout=30,
+                thread_cmd, capture_output=True, text=True, timeout=30,
             )
             if thread_proc.returncode != 0:
                 raise RuntimeError(
@@ -997,10 +1300,42 @@ def cmd_merge(args: argparse.Namespace) -> int:
                     f"gh graphql reviewThreads page {page_count} "
                     f"returned no data: {thread_proc.stdout[:200]!r}"
                 )
-            all_nodes.extend(page.get("nodes", []))
+            # Round-171 P1: ``nodes`` MUST be a list. Missing
+            # ``nodes`` / ``pageInfo`` is a partial response —
+            # the merge guard MUST NOT accept it as empty.
+            # Top-level GraphQL ``errors`` (with nonempty data)
+            # is also a partial response; refuse it.
+            top_errors = td.get("errors")
+            if isinstance(top_errors, list) and top_errors:
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"returned partial response with errors: "
+                    f"{thread_proc.stdout[:200]!r}"
+                )
+            if not isinstance(page.get("nodes"), list):
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    f"omitted ``nodes`` (partial response): "
+                    f"{thread_proc.stdout[:200]!r}"
+                )
+            all_nodes.extend(page["nodes"])
             page_info = page.get("pageInfo", {})
             has_next = bool(page_info.get("hasNextPage"))
-            cursor = page_info.get("endCursor") or "null"
+            # If hasNextPage is set but endCursor is missing,
+            # the inventory is incomplete: fail closed.
+            # A partial thread response MUST NOT be treated
+            # as empty.
+            if has_next and not page_info.get("endCursor"):
+                raise RuntimeError(
+                    f"gh graphql reviewThreads page {page_count} "
+                    "reported hasNextPage=True but endCursor is "
+                    "missing; inventory is incomplete"
+                )
+            # ``endCursor`` is None on the final page; the
+            # loop terminates via ``has_next``. We do NOT
+            # default to the string "null" — that would
+            # re-send the broken first-page cursor.
+            cursor = page_info.get("endCursor") or None
 
         unresolved_current = sum(
             1 for n in all_nodes
@@ -1111,6 +1446,15 @@ def cmd_merge(args: argparse.Namespace) -> int:
         live_review_state=live_review_state,
         live_thread_inventory=live_thread_inventory,
         working_tree_clean=working_tree_clean,
+        # Round-28 P2: the run's configured required CI jobs are
+        # the policy the locked mutable gate MUST enforce.
+        # ``ctx.required_ci_jobs`` comes from the persisted
+        # ``RunContext`` (set at orch init time) and is the
+        # authoritative policy. Production code MUST pass it
+        # into the guarded transaction; an empty tuple is only
+        # acceptable when the persisted run policy explicitly
+        # says there are zero required jobs.
+        required_ci_names=tuple(ctx.required_ci_jobs or ()),
     )
 
     try:
@@ -1284,6 +1628,208 @@ def cmd_post_merge_verify(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_review_repair_round(args: argparse.Namespace) -> int:
+    """Run one bounded round of the autonomous review/repair relay.
+
+    The command is the operator-facing entry point for the relay.
+    It reads the run context (and the persisted snapshot JSON
+    when ``--snapshot-file`` is supplied), runs one round via
+    ``RelayLoop.run_once``, and prints the ``RoundDecision``.
+
+    The decision tells the caller what to do:
+    - ``action == "launch_worker"``: the relay built a directive
+      and persisted it. The caller (typically the supervisor)
+      should launch the worker with the directive prompt.
+    - ``action == "enter_qualifying_readiness"``: the head is
+      clean. The caller should invoke the existing readiness gate.
+    - ``action == "escalate_to_human"``: the relay found a P0
+      finding or an escalation keyword. The run is now BLOCKED;
+      the operator must inspect and direct.
+
+    Exit codes follow the conventional mapping:
+    - 0: round ran; the action field tells the caller what to do.
+    - 2: invalid arguments.
+    - 4: state error (e.g. controller in wrong state).
+    - 5: internal error (EscalateToHuman, RelayError, ...).
+    """
+    store = StateStore(args.state_root)
+    rc = store.read_optional("run_context.json")
+    if rc is None:
+        return _emit(
+            {"error": "no run context on file"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    ctx = RunContext.from_dict(rc)
+    # Resolve the snapshot: either from --snapshot-file or stdin.
+    snapshot: Optional[dict] = None
+    if getattr(args, "snapshot_file", None):
+        try:
+            snapshot = json.loads(args.snapshot_file.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            return _emit(
+                {"error": f"snapshot file unreadable: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_INVARG,
+            )
+    elif getattr(args, "snapshot_stdin", False):
+        try:
+            snapshot = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as e:
+            return _emit(
+                {"error": f"stdin is not valid JSON: {e!r}"},
+                json_mode=args.json,
+                exit_code=EXIT_INVARG,
+            )
+    if snapshot is None:
+        return _emit(
+            {"error": "must supply --snapshot-file or --snapshot-stdin"},
+            json_mode=args.json,
+            exit_code=EXIT_INVARG,
+        )
+    head_sha = args.head_sha or ctx.current_authorized_head
+    if not head_sha:
+        return _emit(
+            {"error": "no head_sha available; pass --head-sha or set context"},
+            json_mode=args.json,
+            exit_code=EXIT_STATE,
+        )
+    evidence_root = args.evidence_root or str(ctx.evidence_root)
+    directive_store = DirectiveStore(store, evidence_root)
+    controller = Controller(ctx, store)
+    repo = f"{ctx.repo_owner}/{ctx.repo_name}"
+    # Read required_check_names from the supervisor config if
+    # present; otherwise accept the caller-supplied list.
+    # Fall back to ``ctx.required_ci_jobs`` (the persisted
+    # ``RunContext`` policy) when the operator omits
+    # ``--required-check-names`` so a head with no review
+    # findings still drives pending/failing required checks
+    # through the CI-finding collector rather than silently
+    # calling the head clean.
+    #
+    # Distinguish the three cases the operator can express:
+    #   - flag absent (``args.required_check_names is None``):
+    #     fall back to the persisted ``ctx.required_ci_jobs``
+    #     policy so older checks do not silently reappear.
+    #   - flag present with explicit empty value (``""``): the
+    #     operator is overriding the policy with an intentionally
+    #     empty required-check set; do NOT resurrect
+    #     ``ctx.required_ci_jobs`` — keep the override empty.
+    #   - flag present with comma-separated names: use them
+    #     verbatim, splitting on ``,`` and dropping empties.
+    raw_required = getattr(args, "required_check_names", None)
+    if raw_required is None:
+        cli_required_check_names: Tuple[str, ...] = tuple(
+            ctx.required_ci_jobs or ()
+        )
+    else:
+        # Round-1064 P2: trim explicit names before use. The
+        # raw ``--required-check-names "ci-A, ci-B"`` value
+        # arrived with embedded whitespace, so without the
+        # ``strip()`` the second name became ``" ci-B"`` and
+        # the relay treated the actual ``ci-B`` check as
+        # missing — launching unnecessary repair rounds.
+        cli_required_check_names = tuple(
+            name.strip() for name in raw_required.split(",") if name.strip()
+        )
+    required_check_names = cli_required_check_names
+    max_rounds = int(args.max_rounds) if args.max_rounds else DEFAULT_MAX_ROUNDS
+    loop = RelayLoop(
+        context=ctx,
+        store=store,
+        directive_store=directive_store,
+        controller=controller,
+        required_check_names=required_check_names,
+        max_rounds=max_rounds,
+    )
+    try:
+        decision = loop.run_once(
+            snapshot, head_sha=head_sha,
+            repo=repo, pr_number=int(ctx.pr_number or 0),
+            focused_thread_id=getattr(args, "focused_thread_id", None),
+        )
+    except EscalateToHuman as e:
+        # Round-29 review: only ``EscalateToHuman`` carries
+        # the protected-authority escalation signal
+        # (EXIT_OK + structured ``escalate_to_human``
+        # decision). Generic ``RelayError`` is an internal
+        # failure that MUST NOT be misclassified as a
+        # human-authority escalation; the supervisor needs
+        # the non-zero exit to retry / recover.
+        return _emit(
+            {
+                "action": "escalate_to_human",
+                "escalate_reasons": [str(e)],
+                "error": f"{type(e).__name__}: {e}",
+            },
+            json_mode=args.json,
+            exit_code=EXIT_OK,
+        )
+    except RelayError as e:
+        # Generic ``RelayError`` is an internal /
+        # recoverable relay failure. Surface it with
+        # EXIT_INTERNAL semantics so the supervisor's
+        # retry / recover path can pick it up; do NOT
+        # misclassify it as a protected-authority
+        # escalation.
+        return _emit(
+            {
+                "error": f"{type(e).__name__}: {e}",
+                "action": "internal_error",
+            },
+            json_mode=args.json,
+            exit_code=EXIT_INTERNAL,
+        )
+    payload = decision.to_dict()
+    # When the action is "launch_worker", also render the worker
+    # prompt so the caller can pass it to whatever worker
+    # launcher they prefer. The prompt is large (it contains the
+    # full directive JSON) — printing it twice is fine for
+    # operator-facing CLI output.
+    if decision.action == "launch_worker":
+        try:
+            payload["worker_prompt"] = build_worker_prompt(decision)
+        except Exception as e:  # pragma: no cover - defensive
+            payload["worker_prompt_error"] = repr(e)
+    # Round-31: incomplete evidence → EXIT_OK + structured
+    # decision so the supervisor's wiring routes to
+    # ``recoverable_retry`` rather than ``no_action``.
+    if decision.outcome == "incomplete_evidence":
+        return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
+    return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
+
+
+def cmd_review_repair_status(args: argparse.Namespace) -> int:
+    """Print the relay's progress (round index, last decision, journal).
+
+    The evidence root is resolved from the run context when
+    available, falling back to the operator-supplied
+    ``--evidence-root``. The literal ``/var/tmp/...`` is no
+    longer the default; the status command MUST report the
+    same location the relay writes to.
+    """
+    store = StateStore(args.state_root)
+    # Resolve the evidence root through the same helper used
+    # by cmd_review_repair_round so the status command and
+    # the round command agree on the canonical location.
+    evidence_root = _resolve_evidence_root(args, store)
+    ds = DirectiveStore(store, str(evidence_root))
+    last = ds.last_round_index()
+    directive = ds.read_directive()
+    payload = {
+        "run_id": args.run_id,
+        "evidence_root": str(evidence_root),
+        "last_round_index": last,
+        "directive_present": directive is not None,
+        "transcript_count": len(ds.read_transcript()),
+    }
+    if directive is not None:
+        payload["directive_head_sha"] = directive.head_sha
+        payload["directive_summary"] = directive.summary
+        payload["directive_id"] = directive.directive_id
+    return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="autocoder-orchestration")
     parser.add_argument("--json", action="store_true")
@@ -1312,6 +1858,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     init.add_argument("--impl-worker-command", default="")
     init.add_argument("--evidence-root", default="/var/tmp/autodev-evidence")
 
+    # Round-591: audited required-CI-policy migration. THIS IS
+    # the ONLY canonical path for changing the persisted
+    # ``required_ci_jobs`` field. It enforces a fail-closed
+    # ``--expected-old`` precondition before rewriting.
+    migr = sub.add_parser("migrate-required-ci-jobs", parents=[common])
+    migr.add_argument(
+        "--expected-old", required=True,
+        help=(
+            "Comma-separated required_ci_jobs that MUST exactly "
+            "match the persisted value before the migration is "
+            "allowed to proceed. Refuses to commit silently."
+        ),
+    )
+    migr.add_argument(
+        "--new-required-ci-jobs", required=True,
+        help=(
+            "Comma-separated replacement required_ci_jobs. The "
+            "full operator-policy set (seven-name) should be "
+            "passed verbatim to avoid silent narrowing."
+        ),
+    )
+    migr.add_argument(
+        "--by", default="operator",
+        help="Identity recorded in the migration audit trail.",
+    )
+    migr.add_argument(
+        "--reason", default="",
+        help="Free-form reason recorded in the migration audit trail.",
+    )
+
     build = sub.add_parser("build-candidate", parents=[common])
     build.add_argument("--file-paths", default="")
     build.add_argument("--aed-paths", default="")
@@ -1335,6 +1911,36 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     m = sub.add_parser("merge", parents=[common])
     m.add_argument("--evidence-root", default="")
 
+    rr = sub.add_parser("review-repair-round", parents=[common])
+    rr.add_argument("--snapshot-file", type=Path, default=None,
+                    help="Path to a JSON snapshot file (mutually exclusive with --snapshot-stdin)")
+    rr.add_argument("--snapshot-stdin", action="store_true",
+                    help="Read the snapshot JSON from stdin")
+    rr.add_argument("--head-sha", default=None,
+                    help="Override the head SHA from the run context")
+    rr.add_argument("--evidence-root", default=None,
+                    help="Override the evidence root from the run context")
+    rr.add_argument("--required-check-names", default=None,
+                    help=(
+                        "Comma-separated CI check names that must pass "
+                        "for the head to be clean. Default (omitted) "
+                        "falls back to the persisted ctx.required_ci_jobs "
+                        "policy; pass an empty string to override the "
+                        "policy with an intentionally empty set."
+                    ))
+    rr.add_argument("--max-rounds", default=str(DEFAULT_MAX_ROUNDS),
+                    help="Outer bound on relay rounds before BLOCKED")
+    rr.add_argument("--focused-thread-id", default=None,
+                    help="Round-45 C13: scope this round's directive to a SINGLE "
+                         "targeted review thread (PRRT_kw... id). The directive "
+                         "contains exactly one finding for that thread and bypasses "
+                         "the max_findings cap. The supervisor uses this on the "
+                         "durable-thread-drain path so the worker evaluates the "
+                         "specific thread instead of the historical backlog.")
+
+    rs = sub.add_parser("review-repair-status", parents=[common])
+    rs.add_argument("--evidence-root", default=None)
+
     args = parser.parse_args(argv)
     try:
         if args.command == "status":
@@ -1343,6 +1949,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_gates(args)
         if args.command == "initialize":
             return cmd_initialize(args)
+        if args.command == "migrate-required-ci-jobs":
+            return cmd_migrate_required_ci_jobs(args)
         if args.command == "run":
             return cmd_run(args)
         if args.command == "observe":
@@ -1359,6 +1967,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_merge(args)
         if args.command == "post-merge-verify":
             return cmd_post_merge_verify(args)
+        if args.command == "review-repair-round":
+            return cmd_review_repair_round(args)
+        if args.command == "review-repair-status":
+            return cmd_review_repair_status(args)
     except (ControllerError, StateStoreError, CandidateError, MergeError) as e:
         return _emit(
             {"error": f"{type(e).__name__}: {e}"},

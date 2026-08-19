@@ -31,6 +31,7 @@ from .context import (
     ACTOR_VERIFIER,
     ACTOR_OBSERVER,
     ACTOR_CANDIDATE_BUILDER,
+    _now_iso,
 )
 from .state_machine import (
     StateMachine,
@@ -133,9 +134,6 @@ class Controller:
     def save_state_machine(self, sm: StateMachine) -> StateRevision:
         return self.store.write_atomic("state.json", sm.to_dict())
 
-    def save_run_context(self) -> StateRevision:
-        return self.store.write_atomic("run_context.json", self.context.to_dict())
-
     def load_run_context(self) -> Optional[RunContext]:
         payload = self.store.read_optional("run_context.json")
         if payload is None:
@@ -163,10 +161,307 @@ class Controller:
         sm = self._require_state_for_event()
         return self._apply(sm, STATE_QUALIFYING_READINESS, ACTOR_CONTROLLER, head_observed=head_observed)
 
-    def report_repair_pushed(self, *, head_observed: str) -> StateMachine:
-        """REPAIRING_REVIEW_FINDINGS -> AWAITING_CI."""
+    def report_no_changes_required(
+        self, *, head_observed: str, proof: Optional[dict] = None,
+    ) -> StateMachine:
+        """REPAIRING_REVIEW_FINDINGS -> QUALIFYING_READINESS.
+
+        Round-41: a worker that executed the directive and
+        emitted structured ``NO_CHANGES_REQUIRED`` proof
+        advances REPAIRING_REVIEW_FINDINGS directly to
+        QUALIFYING_READINESS, skipping AWAITING_CI. The
+        CI gate is not required for THIS round because no
+        commit was produced. The supervisor's quiet-window /
+        readiness machinery handles the rest of the
+        qualification.
+
+        Round-591: NO_CHANGES_REQUIRED is valid only when
+        every assigned finding has a terminal no-change
+        disposition supported by evidence:
+
+            REAL_REPAIR_REQUIRED, ALREADY_SATISFIED,
+            SUPERSEDED (with proof), REPAIRED, INVALID,
+            INCONCLUSIVE (with proof)
+
+        Findings with a NONTERMINAL disposition
+        (``STILL_ACTIONABLE`` or ``INCOMPLETE_EVIDENCE``)
+        MUST NOT be accepted as NO_CHANGES_REQUIRED — they
+        represent work that must remain executable for a
+        later attempt, and the round-39 anti-churn
+        discipline is not a blanket no-op permission. A
+        supervisor-only ``SUPERSEDED`` without concrete
+        supersession proof (e.g. ``the subject SHA
+        advanced past the finding head``) is also rejected;
+        ``I think this is a fetch/config gap`` is NOT a
+        supersession proof.
+        """
+        if not isinstance(head_observed, str) or (
+            len(head_observed) != 40 and len(head_observed) != 64
+        ) or not all(c in "0123456789abcdef" for c in head_observed):
+            raise ControllerError(
+                f"head_observed must be 40 or 64 lowercase hex chars: "
+                f"{head_observed!r}"
+            )
+        # Round-591: enforce the disposition contract on every
+        # assigned finding in the proof payload. Round-664 P1:
+        # every malformed shape (absent proof, non-object proof,
+        # missing/non-list findings, empty findings, non-object
+        # entries, entries without a ``disposition`` field) MUST
+        # be rejected — the state machine delegates required-
+        # evidence enforcement to the controller, so silently
+        # accepting any of these shapes would advance to
+        # QUALIFYING_READINESS on incomplete proof.
+        if not isinstance(proof, dict):
+            raise ControllerError(
+                "NO_CHANGES_REQUIRED proof must be an object/dict mapping "
+                f"with a 'findings' list; got {type(proof).__name__}"
+            )
+        findings_proof = proof.get("findings")
+        if not isinstance(findings_proof, list):
+            raise ControllerError(
+                "NO_CHANGES_REQUIRED proof is missing a 'findings' list; "
+                "the controller cannot validate the no-op without the "
+                "per-finding disposition contract"
+            )
+        if len(findings_proof) == 0:
+            raise ControllerError(
+                "NO_CHANGES_REQUIRED proof has an empty 'findings' list; "
+                "the controller cannot validate a no-op without any "
+                "assigned-finding disposition"
+            )
+        nonterminal = (
+            FindingDisposition.STILL_ACTIONABLE,
+            FindingDisposition.INCOMPLETE_EVIDENCE,
+            FindingDisposition.REAL_REPAIR_REQUIRED,
+        )
+        # Round-1064 P2: ``ALREADY_SATISFIED`` is a
+        # terminal-with-proof disposition (the worker has
+        # concrete evidence that the defect is moot in
+        # current state). It MUST be in the
+        # terminal-with-required-proof set so a worker
+        # that returns ``ALREADY_SATISFIED`` without an
+        # ``evidence`` field is rejected, exactly like
+        # ``SUPERSEDED`` / ``REPAIRED`` / ``INVALID`` /
+        # ``INCONCLUSIVE``. Without this entry the
+        # classifier silently falls through to the
+        # permissive branch and accepts a proof-less
+        # ``ALREADY_SATISFIED`` as a no-op, which is a
+        # round-591 contract violation.
+        terminal_with_required_proof = (
+            FindingDisposition.SUPERSEDED,
+            FindingDisposition.REPAIRED,
+            FindingDisposition.INVALID,
+            FindingDisposition.INCONCLUSIVE,
+            FindingDisposition.ALREADY_SATISFIED,
+        )
+        for idx, entry in enumerate(findings_proof):
+            if not isinstance(entry, dict):
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED proof findings[{idx}] is not "
+                    f"an object/dict: {entry!r}"
+                )
+            disp_raw = entry.get("disposition")
+            if disp_raw is None or not isinstance(disp_raw, str):
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED proof findings[{idx}] "
+                    f"(finding_id={entry.get('finding_id')!r}) is missing "
+                    f"a 'disposition' string; the controller cannot "
+                    f"validate the no-op without a terminal disposition"
+                )
+            try:
+                disp = FindingDisposition(disp_raw)
+            except ValueError:
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED proof has unknown disposition: "
+                    f"{disp_raw!r}"
+                )
+            if disp in nonterminal:
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED rejected: finding "
+                    f"{entry.get('finding_id')!r} has nonterminal "
+                    f"disposition {disp.value!r}; cannot be "
+                    f"represented as a no-op without leaving "
+                    f"nonterminal work stranded"
+                )
+            if disp in terminal_with_required_proof and not entry.get("evidence"):
+                raise ControllerError(
+                    f"NO_CHANGES_REQUIRED rejected: finding "
+                    f"{entry.get('finding_id')!r} has disposition "
+                    f"{disp.value!r} but no evidence field; "
+                    f"supersession / repair must be concretely proven"
+                )
         sm = self._require_state_for_event()
+        # Round-27 P1#5 atomicity: rebind context FIRST, then
+        # apply the transition.
+        new_context = self.context.with_new_head(head_observed)
+        self.save_run_context_for(new_context)
+        self.context = new_context
+        return self._apply(
+            sm,
+            STATE_QUALIFYING_READINESS,
+            ACTOR_IMPL_WORKER,
+            head_observed=head_observed,
+        )
+
+    def report_new_actionable_review_on_qualified_head(
+        self,
+        *,
+        head_observed: str,
+        actionable_review_inventory: list,
+    ) -> StateMachine:
+        """QUALIFYING_READINESS -> REPAIRING_REVIEW_FINDINGS.
+
+        Round-33: a head that previously qualified (CI clean, reviews
+        clean) can receive NEW actionable reviews on the SAME head.
+        The relay must be able to re-enter REPAIRING_REVIEW_FINDINGS
+        to drive a repair cycle. Without this transition the relay
+        correctly fails closed (RelayError) and the actionable review
+        is stranded indefinitely.
+
+        Contract:
+        1. ``actionable_review_inventory`` is a non-empty list of
+           event-id strings. Empty -> ControllerError (cannot reopen
+           a qualified head with no actionable review evidence).
+        2. Current canonical state MUST be QUALIFYING_READINESS. Any
+           other state -> InvalidTransition. The caller (supervisor)
+           MUST gate this with the same canonical-state guard the
+           relay uses, so an already-running REPAIR cycle is not
+           double-entered.
+        3. The transition INVALIDATES the prior readiness_certificate
+           so the next QUALIFYING_READINESS->READY_FOR_CANDIDATE
+           transition must be re-earned with a fresh certificate.
+        4. The actionable_review_inventory is persisted as a new
+           evidence file ``new_actionable_review_inventory.json``
+           in the run's state root so the durable journal records
+           exactly which events drove the re-open.
+        """
+        if not isinstance(actionable_review_inventory, list) or not actionable_review_inventory:
+            raise ControllerError(
+                "actionable_review_inventory must be a non-empty list of event id strings"
+            )
+        for eid in actionable_review_inventory:
+            if not isinstance(eid, str) or not eid:
+                raise ControllerError(
+                    f"actionable_review_inventory entries must be non-empty strings; got {eid!r}"
+                )
+        # Persist the inventory BEFORE the transition so the durable
+        # journal always has the evidence file even if the transition
+        # write fails. The transition's required_evidence key is
+        # ``new_actionable_review_inventory``; the StateStore does
+        # not validate by file name, but the durable record must
+        # exist for any operator audit.
+        self.store.write_atomic(
+            "new_actionable_review_inventory.json",
+            {
+                "head_observed": head_observed,
+                "inventory": list(actionable_review_inventory),
+                "recorded_at": _now_iso(),
+                "actor": ACTOR_CONTROLLER,
+            },
+        )
+        sm = self._require_state_for_event()
+        if sm.current_state != STATE_QUALIFYING_READINESS:
+            raise InvalidTransition(
+                f"cannot reopen for new actionable review: current state is "
+                f"{sm.current_state!r}; only QUALIFYING_READINESS is reopenable"
+            )
+        return self._apply(
+            sm,
+            STATE_REPAIRING_REVIEW_FINDINGS,
+            ACTOR_CONTROLLER,
+            head_observed=head_observed,
+        )
+
+    def report_repair_pushed(self, *, head_observed: str) -> StateMachine:
+        """REPAIRING_REVIEW_FINDINGS -> AWAITING_CI.
+
+        Round-27 P1#5 atomicity: the rebind sequence is
+
+          1. Validate the head shape and current state.
+          2. Construct the rebound ``RunContext`` (frozen).
+          3. Persist the rebound context to disk FIRST. If the
+             write fails, ``self.context`` is NOT mutated and
+             the run stays bound to the old head. The
+             controller and disk remain consistent.
+          4. Assign ``self.context`` to the rebound context
+             AFTER successful persistence so the in-memory
+             state matches disk.
+          5. Apply the transition using ``self.context`` (which
+             is now the rebound context) so the
+             state-machine's head guard sees the new
+             authorized head.
+
+        A failed persistence leaves the run in
+        ``REPAIRING_REVIEW_FINDINGS`` with the original
+        authorized head on disk AND in memory. A failed
+        transition leaves the rebind in place; the relay's
+        next round will observe the new head and re-issue
+        the push.
+
+        The ``save_run_context`` write failure path is
+        verified by ``TestRebindAtomicityFailureLeavesDiskAndMemoryOnOldHead``
+        which injects a ``save_run_context`` mock that raises
+        ``OSError`` and asserts that ``self.context`` is
+        unchanged.
+        """
+        if not isinstance(head_observed, str) or (
+            len(head_observed) != 40 and len(head_observed) != 64
+        ) or not all(c in "0123456789abcdef" for c in head_observed):
+            raise ControllerError(
+                f"head_observed must be 40 or 64 lowercase hex chars: {head_observed!r}"
+            )
+        sm = self._require_state_for_event()
+        # Step 2: construct the rebound context (frozen; not
+        # yet assigned to ``self.context``).
+        new_context = self.context.with_new_head(head_observed)
+        # Step 3: persist FIRST. If this raises, ``self.context``
+        # is unchanged and the run stays bound to the old head
+        # on disk AND in memory.
+        #
+        # Round-27 P1#5 atomicity: route through ``save_run_context``
+        # (the bound instance method) so tests can patch the
+        # persistence hook directly. The atomicity contract is
+        # that ANY exception raised here propagates WITHOUT
+        # mutating ``self.context``.
+        self.save_run_context_for(new_context)
+        # Step 4: only after a successful persistence, assign
+        # ``self.context`` so the in-memory state matches disk.
+        self.context = new_context
+        # Step 5: apply the transition. ``_apply`` uses
+        # ``self.context.current_authorized_head`` (now the
+        # rebound head) as the required head, so the
+        # transition succeeds for the new head and the
+        # persisted context is already consistent.
         return self._apply(sm, STATE_AWAITING_CI, ACTOR_IMPL_WORKER, head_observed=head_observed)
+
+    def save_run_context_for(self, context: "RunContext") -> StateRevision:
+        """Persist ``context`` (not necessarily ``self.context``)
+        to ``run_context.json``. Round-27 P1#5: this is the
+        atomicity hook for ``report_repair_pushed`` — the
+        rebound context is constructed, then this method is
+        called, then ``self.context`` is assigned. If this
+        raises, the caller MUST leave ``self.context``
+        untouched so disk and memory stay consistent.
+
+        Production callers go through ``save_run_context`` which
+        delegates here with ``self.context``. Tests inject a
+        mock for this method to exercise the failure path.
+        """
+        return self.store.write_atomic("run_context.json", context.to_dict())
+
+    def save_run_context(self) -> StateRevision:
+        """Persist ``self.context`` (the rebound head) to
+        ``run_context.json``. Round-27 P1#5: this is the
+        atomicity hook for ``report_repair_pushed`` — called
+        BEFORE ``self.context`` is mutated to the rebound
+        head. If this raises, the caller leaves ``self.context``
+        unchanged so disk and memory stay consistent.
+
+        Tests that want to simulate a persistence failure
+        patch this method (NOT ``save_run_context_for``) so the
+        rebind sequence exercises the failure-injection path.
+        """
+        return self.save_run_context_for(self.context)
 
     def record_readiness_certificate(self, cert: ReadinessCertificate, *, head_observed: str) -> StateMachine:
         """QUALIFYING_READINESS -> READY_FOR_CANDIDATE.

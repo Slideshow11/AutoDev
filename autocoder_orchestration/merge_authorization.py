@@ -40,13 +40,14 @@ path: the exact-file SHA-256 stored in the sidecar.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .artifacts import (
     ArtifactError,
@@ -94,6 +95,135 @@ class MergeAmbiguousOutcome(MergeError):
     state cannot be safely reconciled. The merge is rejected."""
 
 
+class MergeGateChanged(MergeAmbiguousOutcome):
+    """A mutable merge gate changed state between the evidence snapshot
+    and the re-fetch inside the locked transaction.
+
+    Round-26 P1#4 (Codex review of head 0d872b4): the
+    ``evidence-root lock`` does NOT serialize GitHub-side state.
+    Between the time the verifier approved the head and the
+    time the merge transaction is invoked, a human reviewer
+    can post ``CHANGES_REQUESTED``, dismiss an approval, open
+    a new unresolved review thread, or change a required CI
+    check state. ``--match-head-commit`` protects the SHA
+    only; it does not protect mutable gates.
+
+    The fix: while holding the merge lock, re-fetch and
+    re-validate every mutable gate against the live server
+    state. If any of them changed, raise ``MergeGateChanged``
+    so the operator can decide whether to re-verify before
+    retrying the merge.
+    """
+
+
+class MergeGateFetchError(MergeError):
+    """A live gh fetch for a mutable gate failed inside the
+    locked transaction.
+
+    Round-27: production code MUST fail closed on any fetch
+    error. The earlier "soft signal" / broad exception
+    swallow is forbidden because a transient gh failure
+    could otherwise allow a stale-snapshot merge to slip
+    through. The exception carries the gate name and the
+    underlying error so the operator can diagnose.
+    """
+
+    def __init__(
+        self,
+        gate: str,
+        underlying: Optional[BaseException] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        msg = message or f"live {gate!r} fetch failed inside locked transaction"
+        if underlying is not None:
+            msg = f"{msg}: {underlying!r}"
+        super().__init__(msg)
+        self.gate = gate
+        self.underlying = underlying
+
+
+class MutableGateSnapshot:
+    """Bundle of freshly fetched live gate snapshots.
+
+    Round-27: every field is either a concrete dict (the
+    fetch succeeded) or the fetch raised ``MergeGateFetchError``
+    so the caller can diagnose. No ``None`` placeholders and no
+    caller-supplied stale snapshots masquerading as fresh
+    re-fetches.
+
+    The four fetchers are constructor arguments so production
+    code can inject real ``_safe_run`` wrappers and tests can
+    inject stubs. ``None`` for any fetcher means "no fetcher
+    configured" and the constructor raises
+    ``MergeGateFetchError`` for that gate immediately.
+    """
+
+    def __init__(
+        self,
+        *,
+        pr_payload_fetcher: Optional[Callable[[], Dict[str, Any]]] = None,
+        required_ci_fetcher: Optional[Callable[[], Dict[str, Any]]] = None,
+        review_state_fetcher: Optional[Callable[[], Dict[str, Any]]] = None,
+        thread_inventory_fetcher: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> None:
+        self._pr_payload: Dict[str, Any] = (
+            _call_or_raise("live_pr_payload", pr_payload_fetcher)
+        )
+        self._required_ci: Dict[str, Any] = (
+            _call_or_raise("live_required_ci", required_ci_fetcher)
+        )
+        self._review_state: Dict[str, Any] = (
+            _call_or_raise("live_review_state", review_state_fetcher)
+        )
+        self._thread_inventory: Dict[str, Any] = (
+            _call_or_raise("live_thread_inventory", thread_inventory_fetcher)
+        )
+
+    @property
+    def pr_payload(self) -> Dict[str, Any]:
+        return self._pr_payload
+
+    @property
+    def required_ci(self) -> Dict[str, Any]:
+        return self._required_ci
+
+    @property
+    def review_state(self) -> Dict[str, Any]:
+        return self._review_state
+
+    @property
+    def thread_inventory(self) -> Dict[str, Any]:
+        return self._thread_inventory
+
+
+def _call_or_raise(
+    gate: str,
+    fetcher: Optional[Callable[[], Dict[str, Any]]],
+) -> Dict[str, Any]:
+    """Invoke ``fetcher`` and return its dict, or raise
+    ``MergeGateFetchError``. ``None`` fetcher means the gate
+    is not configured for production; the transaction
+    refuses to proceed.
+    """
+    if fetcher is None:
+        raise MergeGateFetchError(
+            gate,
+            message=(
+                f"no fetcher registered for {gate!r}; the merge "
+                f"transaction refuses to proceed without a "
+                f"live re-fetch. Production code MUST inject "
+                f"a fetcher that calls `gh` against the live "
+                f"server."
+            ),
+        )
+    try:
+        return fetcher()
+    except MergeGateFetchError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — translate to typed
+        raise MergeGateFetchError(gate, underlying=exc) from exc
+
+
 # === MergeAuthorization dataclass (unchanged contract) ===
 
 @dataclass(frozen=True)
@@ -103,6 +233,13 @@ class MergeAuthorization:
     The contract is unchanged from the original implementation so historical
     readers and tests still work. The dataclass itself carries no SHA-256;
     that lives in the artifact that contains it.
+
+    Round-28 P2: ``required_ci_jobs`` carries the run's configured
+    required CI policy. The locked mutable-gate enforcement uses this
+    value to drive the ``fetch_live_required_ci`` comparator: the live
+    inventory MUST be SUCCESS for every job in this list. The empty
+    tuple means the persisted run policy explicitly says there are
+    zero required jobs (which is rare and documented at init time).
     """
 
     schema_version: str
@@ -119,8 +256,14 @@ class MergeAuthorization:
     require_match_head_commit: bool = True
     authorization_timestamp: str = ""
     author: str = ""
-    next_wave_authorization: Optional[Dict[str, Any]] = None
+    next_wave_authorization: Optional[Any] = None
     notes: str = ""
+    # Round-28 P2: the run's configured required CI jobs. The
+    # locked mutable-gate refetch MUST verify each job is green
+    # at the live head. Production code populates this from
+    # ``ctx.required_ci_jobs`` (the persisted ``RunContext``).
+    # Empty tuple means "policy says zero required jobs".
+    required_ci_jobs: Tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.pr_number, int) or self.pr_number <= 0:
@@ -142,6 +285,16 @@ class MergeAuthorization:
             )
 
     def to_dict(self) -> dict:
+        # Round-188 P1: serialize the configured required CI policy so
+        # ``execute_guarded_merge_transaction()`` — which independently
+        # re-reads the authorization artifact — sees the same
+        # ``required_ci_jobs`` the CLI bound at authorize-time. Without
+        # this emission, ``from_dict`` reconstructs the tuple from
+        # ``payload.get("required_ci_jobs", ())`` (i.e. ``()``) and the
+        # cross-binding guard silently drops the run's custom required
+        # jobs (e.g. ``security-scan``). The CLI also rebinds the field
+        # from ``ctx.required_ci_jobs`` at execute-time, so both sides
+        # agree after this round-trip.
         return {
             "schema_version": self.schema_version,
             "run_id": self.run_id,
@@ -159,6 +312,7 @@ class MergeAuthorization:
             "author": self.author,
             "next_wave_authorization": self.next_wave_authorization,
             "notes": self.notes,
+            "required_ci_jobs": list(self.required_ci_jobs),
         }
 
     @classmethod
@@ -169,6 +323,13 @@ class MergeAuthorization:
         ):
             if field_name not in payload:
                 raise ValueError(f"missing required field: {field_name!r}")
+        # Round-28 P2: the required CI jobs are part of the auth
+        # artifact. The CLI also rebinds the field from
+        # ``ctx.required_ci_jobs`` (the persisted run policy), so
+        # the cross-binding guard sees both sides agree.
+        raw_jobs = payload.get("required_ci_jobs", ()) or ()
+        if not isinstance(raw_jobs, list):
+            raw_jobs = tuple(raw_jobs) if isinstance(raw_jobs, (list, tuple)) else ()
         return cls(
             schema_version=str(payload["schema_version"]),
             run_id=str(payload["run_id"]),
@@ -186,6 +347,7 @@ class MergeAuthorization:
             author=str(payload.get("author", "")),
             next_wave_authorization=payload.get("next_wave_authorization"),
             notes=str(payload.get("notes", "")),
+            required_ci_jobs=tuple(raw_jobs),
         )
 
     def compute_sha256(self) -> str:
@@ -200,6 +362,62 @@ class MergeAuthorization:
 # === Merge-record schema-version enforcement ===
 
 SUPPORTED_MERGE_RECORD_SCHEMAS = ("autocoder.merge_record.v2",)
+
+
+# Round-275 P1#2: canonical mapping from ``gh pr checks``
+# plain-text status buckets (lowercase: ``pass``, ``fail``,
+# ``pending``, ``skipping``, ``cancelled``, ...) to the
+# merge-gate taxonomy (``SUCCESS`` / ``FAILURE`` / ``PENDING``
+# / ``MISSING``). The gate compares against ``SUCCESS``
+# exclusively; ``FAILURE`` / ``PENDING`` / ``MISSING`` all
+# fail closed. Anything unrecognised maps to ``MISSING``
+# so the gate rejects rather than accepts on bucket drift.
+_GH_CHECK_BUCKET_NORMALIZATION = {
+    "pass": "SUCCESS",
+    "passing": "SUCCESS",
+    "success": "SUCCESS",
+    "succeeded": "SUCCESS",
+    "fail": "FAILURE",
+    "failed": "FAILURE",
+    "failure": "FAILURE",
+    "error": "FAILURE",
+    "errored": "FAILURE",
+    "pending": "PENDING",
+    "queued": "PENDING",
+    "requested": "PENDING",
+    "waiting": "PENDING",
+    "in_progress": "PENDING",
+    "running": "PENDING",
+    "skipped": "PENDING",
+    "skipping": "PENDING",
+    "cancelled": "PENDING",
+    "canceled": "PENDING",
+    "neutral": "PENDING",
+    "stale": "PENDING",
+}
+
+
+def _normalize_gh_check_bucket(raw: str) -> str:
+    """Return the canonical ``gh pr checks`` bucket.
+
+    The installed ``gh`` 2.96.0 ``gh pr checks`` plain-text
+    output emits lowercase bucket values (``pass``,
+    ``fail``, ``pending``, ``skipping``, ``cancelled``,
+    ...). The merge gate compares against the uppercase
+    ``SUCCESS`` taxonomy. Round-275 P1#2 wires this
+    normalization so a passing check round-trips to
+    ``SUCCESS`` and the gate accepts it.
+
+    Unknown buckets map to ``MISSING`` so the gate fails
+    closed rather than accepting a bucket value the gate
+    cannot recognise.
+    """
+    if not isinstance(raw, str):
+        return "MISSING"
+    bucket = raw.strip().lower()
+    if not bucket:
+        return "MISSING"
+    return _GH_CHECK_BUCKET_NORMALIZATION.get(bucket, "MISSING")
 
 
 @dataclass
@@ -278,9 +496,15 @@ class MergeRecord:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "MergeRecord":
-        schema_version = str(
-            payload.get("schema_version", "autocoder.merge_record.v2")
-        )
+        # Require an explicit schema_version. Defaulting a missing
+        # schema_version to a supported value would let a legacy /
+        # malformed merge record appear as a valid v2 record.
+        if "schema_version" not in payload:
+            raise MergeAuthorizationMalformed(
+                "merge record is missing required key 'schema_version'; "
+                "explicit schema identification is required"
+            )
+        schema_version = str(payload["schema_version"])
         if schema_version not in SUPPORTED_MERGE_RECORD_SCHEMAS:
             # Reject unknown or legacy schema versions rather than
             # coercing them to v2 defaults. A consumer cannot otherwise
@@ -291,6 +515,24 @@ class MergeRecord:
                 f"unsupported merge record schema_version {schema_version!r}; "
                 f"supported: {list(SUPPORTED_MERGE_RECORD_SCHEMAS)}"
             )
+
+        # Each Boolean status field must be a real bool. Coercing
+        # through bool() silently accepts strings (e.g. "false" ->
+        # True), integers, and None -- a malformed merge record would
+        # then appear as a verified observation.
+        def _strict_bool(field_name: str) -> bool:
+            if field_name not in payload:
+                raise MergeAuthorizationMalformed(
+                    f"merge record is missing required key {field_name!r}"
+                )
+            value = payload[field_name]
+            if type(value) is not bool:
+                raise MergeAuthorizationMalformed(
+                    f"merge record key {field_name!r} must be a bool, "
+                    f"got {type(value).__name__}"
+                )
+            return value
+
         return cls(
             schema_version=schema_version,
             run_id=str(payload.get("run_id", "")),
@@ -303,13 +545,13 @@ class MergeRecord:
             squash_tree_sha256=str(payload.get("squash_tree_sha256", "")),
             final_local_main_sha=str(payload.get("final_local_main_sha", "")),
             final_origin_main_sha=str(payload.get("final_origin_main_sha", "")),
-            local_main_equals_origin_main=bool(payload.get("local_main_equals_origin_main", False)),
-            feature_branch_deleted_locally=bool(payload.get("feature_branch_deleted_locally", False)),
-            feature_branch_deleted_remotely=bool(payload.get("feature_branch_deleted_remotely", False)),
-            working_tree_clean=bool(payload.get("working_tree_clean", False)),
-            aed_clean_post_merge=bool(payload.get("aed_clean_post_merge", False)),
-            candidate_sha256_unchanged=bool(payload.get("candidate_sha256_unchanged", False)),
-            verifier_record_sha256_unchanged=bool(payload.get("verifier_record_sha256_unchanged", False)),
+            local_main_equals_origin_main=_strict_bool("local_main_equals_origin_main"),
+            feature_branch_deleted_locally=_strict_bool("feature_branch_deleted_locally"),
+            feature_branch_deleted_remotely=_strict_bool("feature_branch_deleted_remotely"),
+            working_tree_clean=_strict_bool("working_tree_clean"),
+            aed_clean_post_merge=_strict_bool("aed_clean_post_merge"),
+            candidate_sha256_unchanged=_strict_bool("candidate_sha256_unchanged"),
+            verifier_record_sha256_unchanged=_strict_bool("verifier_record_sha256_unchanged"),
             candidate_exact_file_digest=str(payload.get("candidate_exact_file_digest", "")),
             verifier_record_exact_file_digest=str(payload.get("verifier_record_exact_file_digest", "")),
             authorization_exact_file_digest=str(payload.get("authorization_exact_file_digest", "")),
@@ -490,13 +732,18 @@ def fetch_live_pr_payload(
     """Fetch the live PR state via ``gh pr view``.
 
     Returns a dict with ``state``, ``merged``, ``head``, ``baseRefName``,
-    ``mergeable`` and ``autoMergeRequest``. Raises on subprocess failure
-    or ambiguous output.
+    ``mergeable``, ``autoMergeRequest`` and ``reviewDecision``. Raises on
+    subprocess failure or ambiguous output.
+
+    ``reviewDecision`` is included so the production merge gate can
+    reject a human ``CHANGES_REQUESTED`` even when the latest CodeRabbit
+    review remains ``APPROVED`` (the verifier already enforces this, but
+    the merge gate must not rely on a stale snapshot).
     """
     _runner = runner or (lambda *a, **kw: _safe_run(list(a), **kw))
     res = _runner(gh_executable, "pr", "view", str(pr_number),
                   "--repo", repo,
-                  "--json", "state,isDraft,mergeable,mergeStateStatus,mergedAt,headRefOid,baseRefName,autoMergeRequest,number")
+                  "--json", "state,isDraft,mergeable,mergeStateStatus,mergedAt,headRefOid,baseRefName,autoMergeRequest,number,reviewDecision")
     if res["returncode"] != 0:
         raise GitHubLiveFetchError(
             f"gh pr view failed (rc={res['returncode']}): "
@@ -519,10 +766,552 @@ def fetch_live_pr_payload(
         "mergeable": str(doc.get("mergeable", "")),
         "mergeStateStatus": str(doc.get("mergeStateStatus", "")),
         "autoMergeRequest": doc.get("autoMergeRequest"),
+        # PR-level reviewDecision (e.g. "APPROVED" | "CHANGES_REQUESTED" |
+        # "REVIEW_REQUIRED"). ``None`` means GitHub did not return the
+        # field; the merge gate treats that as a fail-closed signal.
+        "reviewDecision": doc.get("reviewDecision"),
         # Include the repository identity so the cross-binding guard
         # in execute_guarded_merge_transaction can compare it against
         # auth.repo (per C-25: every integrity guard is mandatory).
         "repo": repo,
+    }
+
+
+def fetch_live_required_ci(
+    gh_executable: str,
+    repo: str,
+    pr_number: int,
+    required_check_names: Sequence[str],
+    *,
+    runner: Optional[Callable[..., Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Fetch the live required-CI status for the PR.
+
+    Round-27: real gh query inside the locked transaction. The
+    function enumerates the configured ``required_check_names`` and
+    fetches each check's status. A missing or pending check is
+    treated as a fail-closed signal (the gate rejects the merge
+    because the check has not yet gone green at the live head).
+
+    Returns a dict shaped like::
+
+        {
+          "head_sha": <live head>,
+          "checks": {
+            "<check_name>": {
+              "state": "SUCCESS" | "FAILURE" | "PENDING" | "MISSING",
+              "head_sha": <live head>,
+            },
+            ...
+          },
+        }
+
+    The ``head_sha`` at the top level is the live commit SHA
+    the checks ran against; the merge gate MUST compare it
+    against the authorized head to prevent a "stale check"
+    bypass.
+    """
+    _runner = runner or (lambda *a, **kw: _safe_run(list(a), **kw))
+    res = _runner(
+        gh_executable, "pr", "checks", str(pr_number),
+        "--repo", repo,
+    )
+    if res["returncode"] != 0:
+        raise MergeGateFetchError(
+            "live_required_ci",
+            underlying=GitHubLiveFetchError(
+                f"gh pr checks failed (rc={res['returncode']}): "
+                f"stderr={res['stderr']!r}"
+            ),
+        )
+    try:
+        text = (res.get("stdout") or "").strip()
+        if not text:
+            return {
+                "head_sha": "",
+                "checks": {},
+            }
+        # ``gh pr checks`` returns plain text rows of
+        # ``<name>\t<state>\t<...>``. The columns are
+        # implementation-defined; we use a tolerant parser
+        # that extracts the first two tab-separated fields.
+        #
+        # Round-275 P1#2: the installed ``gh`` 2.96.0 emits
+        # status buckets such as ``pass``, ``fail``,
+        # ``pending``, ``skipping``, ``cancelled`` (lowercase
+        # ``gh pr checks`` plain-text output). The earlier
+        # ``.upper()`` produced ``PASS``/``FAIL``/``PENDING``,
+        # which the merge gate then rejected as not
+        # ``SUCCESS``. Normalize the bucket values to the
+        # canonical ``SUCCESS``/``FAILURE``/``PENDING``/
+        # ``MISSING`` taxonomy the gate expects.
+        parsed: Dict[str, Dict[str, Any]] = {}
+        for line in text.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            name = parts[0].strip()
+            raw_state = parts[1].strip().lower()
+            if not name:
+                continue
+            state = _normalize_gh_check_bucket(raw_state)
+            parsed[name] = {"state": state, "head_sha": ""}
+        # Round-27: enumerate the configured required checks.
+        # A missing required check is recorded as MISSING so
+        # the gate can fail closed. We do NOT silently allow
+        # it to pass.
+        for required in required_check_names:
+            if required not in parsed:
+                parsed[required] = {"state": "MISSING", "head_sha": ""}
+        return {"head_sha": "", "checks": parsed}
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError) as exc:
+        raise MergeGateFetchError(
+            "live_required_ci", underlying=exc,
+        )
+
+
+def fetch_live_review_state(
+    gh_executable: str,
+    repo: str,
+    pr_number: int,
+    *,
+    canonical_reviewer_login: str = "coderabbitai",
+    runner: Optional[Callable[..., Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Fetch the live formal review state for the PR.
+
+    Round-28 P3: every review candidate carries the review
+    commit identity. The locked merge gate compares the
+    review's ``commit.oid`` against the authorized exact head.
+    A review whose ``commit.oid`` does NOT match the
+    authorized head is NOT exact-head approval, even if its
+    ``state`` is APPROVED.
+
+    Returns a dict shaped like::
+
+        {
+          "latest_coderabbit_state": "APPROVED" | "CHANGES_REQUESTED" | ...,
+          "latest_coderabbit_commit_oid": <live review commit OID>,
+          "latest_coderabbit_login": <canonical reviewer login>,
+          "reviews": [
+            {
+              "state": ...,
+              "author": <login>,
+              "submitted_at": ...,
+              "commit_oid": <review commit OID>,
+              "head_sha": <PR head when the review was submitted>,
+            },
+            ...
+          ],
+          "head_sha": <live head>,
+        }
+
+    The merge gate compares ``latest_coderabbit_state`` against
+    the bound snapshot AND verifies
+    ``latest_coderabbit_commit_oid == authorized_head``. A
+    divergence halts the transaction.
+
+    Canonical reviewer login comparison: the configured
+    canonical reviewer's login MUST match exactly
+    (case-insensitive normalized comparison). Lookalike
+    accounts such as ``coderabbit-helper`` MUST NOT satisfy
+    the gate. The default canonical reviewer is
+    ``coderabbitai`` (the bot login used by CodeRabbit's
+    GitHub App); the comparison is case-insensitive and
+    ignores trailing ``[bot]`` suffixes (e.g.
+    ``coderabbitai[bot]`` and ``coderabbitai`` both match).
+    """
+    _runner = runner or (lambda *a, **kw: _safe_run(list(a), **kw))
+    # Round-28 P3: query the PR reviews GraphQL endpoint
+    # with ``commit`` so each review carries its
+    # commit-oid identity. We also pull ``commit.oid`` for
+    # the latest review per author; this lets the gate
+    # bind the review to the exact authorized head.
+    query = (
+        "query($owner:String!, $name:String!, $number:Int!) {"
+        "  repository(owner:$owner, name:$name) {"
+        "    pullRequest(number:$number) {"
+        "      headRefOid"
+        "      reviews(last:50, states:[APPROVED, CHANGES_REQUESTED, COMMENTED]) {"
+        "        nodes {"
+        "          state"
+        "          author { login }"
+        "          submittedAt"
+        "          commit { oid }"
+        "        }"
+        "      }"
+        "    }"
+        "  }"
+        "}"
+    )
+    # Split owner/name
+    if "/" not in repo:
+        raise MergeGateFetchError(
+            "live_review_state",
+            underlying=ValueError(f"invalid repo {repo!r}"),
+        )
+    owner, name = repo.split("/", 1)
+    res = _runner(
+        gh_executable, "api", "graphql",
+        "-f", f"query={query}",
+        "-f", f"owner={owner}",
+        "-f", f"name={name}",
+        "-F", f"number={pr_number}",
+    )
+    if res["returncode"] != 0:
+        raise MergeGateFetchError(
+            "live_review_state",
+            underlying=GitHubLiveFetchError(
+                f"gh api graphql (reviews) failed "
+                f"(rc={res['returncode']}): stderr={res['stderr']!r}"
+            ),
+        )
+    try:
+        doc = json.loads(res.get("stdout") or "{}")
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise MergeGateFetchError("live_review_state", underlying=exc)
+    pr = (
+        doc.get("data", {}).get("repository", {}).get("pullRequest", {})
+    )
+    head_sha = str(pr.get("headRefOid") or "")
+    reviews_raw = pr.get("reviews", {}).get("nodes", [])
+    reviews = [
+        {
+            "state": r.get("state"),
+            "author": ((r.get("author") or {}).get("login") or ""),
+            "submitted_at": r.get("submittedAt"),
+            # Round-28 P3: include the review's commit OID so the
+            # gate can compare against the authorized exact head.
+            "commit_oid": ((r.get("commit") or {}).get("oid") or ""),
+        }
+        for r in reviews_raw
+    ]
+    # Round-28 P3: canonical reviewer login matching. We
+    # normalize by lowercasing and stripping ``[bot]``. The
+    # default canonical reviewer is ``coderabbitai``; lookalike
+    # accounts such as ``coderabbit-helper`` MUST NOT match.
+    def _is_canonical(login: str) -> bool:
+        s = (login or "").strip().lower()
+        if s.endswith("[bot]"):
+            s = s[: -len("[bot]")].rstrip()
+        return s == canonical_reviewer_login.strip().lower()
+    # The latest CodeRabbit reviewer state is the LAST
+    # matching review submitted by the canonical reviewer.
+    # If no canonical review exists, both
+    # ``latest_coderabbit_state`` and
+    # ``latest_coderabbit_commit_oid`` are None.
+    latest_cr_state: Optional[str] = None
+    latest_cr_commit: Optional[str] = None
+    latest_cr_login: Optional[str] = None
+    for r in reversed(reviews):
+        if _is_canonical(r["author"]):
+            latest_cr_state = r["state"]
+            latest_cr_commit = r["commit_oid"]
+            latest_cr_login = r["author"]
+            break
+    return {
+        "head_sha": head_sha,
+        "reviews": reviews,
+        "latest_coderabbit_state": latest_cr_state,
+        "latest_coderabbit_commit_oid": latest_cr_commit,
+        "latest_coderabbit_login": latest_cr_login,
+        "canonical_reviewer_login": canonical_reviewer_login,
+        "repo": repo,
+    }
+
+
+def _normalize_canonical_reviewer_login(login: str) -> str:
+    """Normalize a GitHub login for canonical-reviewer matching.
+
+    Round-28 P3: lookalike accounts such as ``coderabbit-helper``
+    MUST NOT satisfy the gate. We normalize by lowercasing and
+    stripping ``[bot]`` suffixes so ``coderabbitai[bot]`` and
+    ``coderabbitai`` both match, but ``coderabbit-helper`` does
+    not match ``coderabbitai``.
+    """
+    s = (login or "").strip().lower()
+    if s.endswith("[bot]"):
+        s = s[: -len("[bot]")].rstrip()
+    return s
+
+
+def _validate_graphql_review_threads_response(
+    doc: Any, *, page_index: int
+) -> Tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Validate one page of the GraphQL ``reviewThreads`` response.
+
+    Round-28 P4: fail closed on partial GraphQL responses. For
+    EVERY page require:
+
+      - no top-level GraphQL ``errors`` array with non-empty
+        entries;
+      - the top-level ``data`` is an object (not null);
+      - ``data.repository.pullRequest`` exists and is an object;
+      - ``reviewThreads`` connection exists and is an object;
+      - ``nodes`` exists and is a list (NOT null, NOT missing);
+      - ``pageInfo`` exists and is an object with the required
+        fields;
+      - if ``hasNextPage`` is True, ``endCursor`` MUST be a
+        non-empty string.
+
+    Missing fields MUST NEVER default to ``nodes=[]`` or
+    ``hasNextPage=False`` because that converts incomplete
+    evidence into "zero unresolved threads". Returns
+    ``(threads_dict, page_info, head_sha)`` on success; raises
+    ``MergeGateFetchError`` on any partial response.
+    """
+    if not isinstance(doc, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: top-level GraphQL response is "
+                f"not a JSON object; got {type(doc).__name__}"
+            ),
+        )
+    # Top-level errors array: GitHub returns errors here when
+    # the query is partial. ANY non-empty errors list means the
+    # page is incomplete — fail closed.
+    errors = doc.get("errors")
+    if isinstance(errors, list) and len(errors) > 0:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: GraphQL returned top-level "
+                f"errors: {errors!r}; the thread inventory is "
+                f"incomplete."
+            ),
+        )
+    data = doc.get("data")
+    if not isinstance(data, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: top-level `data` is missing "
+                f"or not an object; got {type(data).__name__}."
+            ),
+        )
+    pr = (
+        data.get("repository", {}).get("pullRequest", {})
+    )
+    if not isinstance(pr, dict) or not pr:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `repository.pullRequest` is "
+                f"missing or not an object; the thread inventory "
+                f"is incomplete."
+            ),
+        )
+    head_sha = pr.get("headRefOid")
+    if head_sha is None:
+        # GitHub omitted ``headRefOid`` (or returned null).
+        # We treat null as missing rather than "" so the
+        # caller can detect the partial-response case.
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `headRefOid` is missing or "
+                f"null; the thread inventory is incomplete."
+            ),
+        )
+    threads_obj = pr.get("reviewThreads")
+    if not isinstance(threads_obj, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `reviewThreads` connection "
+                f"is missing or not an object; the thread "
+                f"inventory is incomplete."
+            ),
+        )
+    nodes = threads_obj.get("nodes")
+    if not isinstance(nodes, list):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `reviewThreads.nodes` is "
+                f"missing or not a list; got {type(nodes).__name__}. "
+                f"The thread inventory MUST be a complete list, "
+                f"not a partial placeholder."
+            ),
+        )
+    page_info = threads_obj.get("pageInfo")
+    if not isinstance(page_info, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `reviewThreads.pageInfo` is "
+                f"missing or not an object; the thread inventory "
+                f"is incomplete."
+            ),
+        )
+    if "hasNextPage" not in page_info:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"page {page_index}: `pageInfo.hasNextPage` is "
+                f"missing; the thread inventory is incomplete."
+            ),
+        )
+    has_next = page_info.get("hasNextPage")
+    end_cursor = page_info.get("endCursor")
+    if has_next is True:
+        # Round-28 P4: ``hasNextPage=True`` MUST have a
+        # non-empty ``endCursor``. Missing cursor = incomplete.
+        if not end_cursor or not isinstance(end_cursor, str):
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                message=(
+                    f"page {page_index}: hasNextPage=True but "
+                    f"endCursor is missing/empty; the thread "
+                    f"inventory is incomplete."
+                ),
+            )
+    return threads_obj, page_info, str(head_sha)
+
+
+def fetch_live_thread_inventory(
+    gh_executable: str,
+    repo: str,
+    pr_number: int,
+    *,
+    runner: Optional[Callable[..., Dict[str, Any]]] = None,
+    max_pages: int = 20,
+) -> Dict[str, Any]:
+    """Fetch the complete unresolved review-thread inventory.
+
+    Round-27: real gh query inside the locked transaction.
+    The function paginates the GraphQL ``reviewThreads`` field
+    and counts the unresolved ones. A failure to paginate
+    completely (network failure, rate limit, missing
+    ``pageInfo.hasNextPage`` while ``endCursor`` is set) is a
+    fail-closed signal: the gate refuses to merge because the
+    thread inventory is incomplete.
+
+    Round-28 P4: fail closed on partial GraphQL responses.
+    For every page require:
+      - no top-level GraphQL errors;
+      - ``data`` is an object;
+      - ``nodes`` is a list (NOT missing, NOT null);
+      - ``pageInfo`` is an object with the required fields;
+      - ``hasNextPage=True`` requires a non-empty endCursor;
+      - max_pages exceeded is treated as incomplete.
+    Missing fields MUST NEVER default to ``nodes=[]`` or
+    ``hasNextPage=False`` because that converts incomplete
+    evidence into "zero unresolved threads".
+
+    The function raises ``MergeGateFetchError`` on any partial
+    response. The caller (the locked gate) fails closed.
+
+    Returns::
+
+        {
+          "head_sha": <live head>,
+          "unresolved_current": <int>,
+          "unresolved_outdated": <int>,
+          "paginated_completely": True,
+          "error": None,
+        }
+    """
+    _runner = runner or (lambda *a, **kw: _safe_run(list(a), **kw))
+    if "/" not in repo:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            underlying=ValueError(f"invalid repo {repo!r}"),
+        )
+    owner, name = repo.split("/", 1)
+    query = (
+        "query($owner:String!, $name:String!, $number:Int!, $cursor:String) {"
+        "  repository(owner:$owner, name:$name) {"
+        "    pullRequest(number:$number) {"
+        "      headRefOid"
+        "      reviewThreads(first:50, after:$cursor) {"
+        "        pageInfo { hasNextPage endCursor }"
+        "        nodes { isResolved isOutdated }"
+        "      }"
+        "    }"
+        "  }"
+        "}"
+    )
+    unresolved_current = 0
+    unresolved_outdated = 0
+    head_sha = ""
+    cursor: Optional[str] = None
+    for _page in range(max_pages):
+        argv: List[str] = [
+            gh_executable, "api", "graphql",
+            "-f", f"query={query}",
+            "-f", f"owner={owner}",
+            "-f", f"name={name}",
+            "-F", f"number={pr_number}",
+        ]
+        if cursor is None:
+            argv.extend(["-F", "cursor="])
+        else:
+            argv.extend(["-F", f"cursor={cursor}"])
+        res = _runner(*argv)
+        if res["returncode"] != 0:
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                underlying=GitHubLiveFetchError(
+                    f"gh api graphql (threads page) failed "
+                    f"(rc={res['returncode']}): stderr={res['stderr']!r}"
+                ),
+            )
+        try:
+            doc = json.loads(res.get("stdout") or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                underlying=exc,
+                message="thread inventory JSON decode failed",
+            )
+        # Round-28 P4: per-page strict validation. Missing
+        # ``nodes`` / ``pageInfo`` / ``headRefOid`` /
+        # non-empty errors ALL fail closed. We DO NOT default
+        # to ``nodes=[]`` or ``hasNextPage=False``.
+        threads_obj, page_info, page_head_sha = (
+            _validate_graphql_review_threads_response(doc, page_index=_page)
+        )
+        if not head_sha:
+            head_sha = page_head_sha
+        nodes = threads_obj.get("nodes") or []
+        for t in nodes:
+            if not t.get("isResolved"):
+                if t.get("isOutdated"):
+                    unresolved_outdated += 1
+                else:
+                    unresolved_current += 1
+        if not page_info.get("hasNextPage"):
+            break
+        cursor = page_info.get("endCursor")
+        # Round-28 P4: per-page validation already enforced
+        # non-empty cursor when hasNextPage=True, so this is a
+        # belt-and-suspenders check.
+        if not cursor:
+            raise MergeGateFetchError(
+                "live_thread_inventory",
+                message=(
+                    f"page {_page}: hasNextPage=True but endCursor "
+                    f"is empty; the thread inventory is incomplete."
+                ),
+            )
+    else:
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message=(
+                f"thread inventory exceeded {max_pages} pages; "
+                "the merge gate refuses to assume the count is complete."
+            ),
+        )
+    return {
+        "head_sha": head_sha,
+        "unresolved_current": unresolved_current,
+        "unresolved_outdated": unresolved_outdated,
+        "paginated_completely": True,
+        "review_threads_pagination_complete": True,
+        "review_threads_pagination_failed": False,
+        "error": None,
     }
 
 
@@ -730,6 +1519,9 @@ def reconcile_after_merge(
         and _LOWER_HEX_40_RE.match(pr_merge_commit_oid)
         and squash_merge_commit == pr_merge_commit_oid
     )
+    # The caller (execute_guarded_merge_transaction) does
+    # its own head_observed-based digest check; we do not
+    # duplicate it here.
     if not squash_merge_commit_reliable and pr_merge_commit_oid:
         unavailable.append(
             "pr_merge_commit_oid did not pass validation; "
@@ -811,7 +1603,20 @@ def reconcile_after_merge(
     #     produce a false-negative clean flag.
     aed_clean = False
     aed_checked = False
-    if expected_aed_sha256 is not None:
+    # The AED probe only attests the post-merge AED file when
+    # the squash_merge_commit identity is verified against the
+    # server-reported mergeCommit OID. A probe against a fallback
+    # commit would produce a false-positive clean flag because the
+    # fallback is local_main_sha, not the actual PR merge.
+    if (
+        expected_aed_sha256 is not None
+        and not squash_merge_commit_reliable
+    ):
+        unavailable.append(
+            "AED probe skipped: squash_merge_commit identity is a fallback, "
+            "not the server-reported mergeCommit OID"
+        )
+    elif expected_aed_sha256 is not None:
         try:
             proc = subprocess.run(
                 ["git", "show", f"{squash_merge_commit}:{aed_path}"],
@@ -884,6 +1689,82 @@ class MergeTransactionInputs:
 
     gh_executable: str = "gh"
     merge_subprocess_timeout: float = 60.0
+
+    # Round-27: the configured required CI job names. The
+    # merge gate re-fetches the live CI inventory against
+    # this list inside the locked transaction. Production
+    # code MUST populate this from the same RunContext
+    # the verifier used; tests pass a tuple of names.
+    required_ci_names: Tuple[str, ...] = ()
+
+    # Round-27 P1#4: the server-reported mergeCommit OID MUST
+    # be positively verified as a real git object in the
+    # local repository. The flag ``_bypass_oid_reachability``
+    # is private: tests that need a hermetic mode set it via
+    # ``MergeTransactionInputs._set_bypass_oid_reachability(True)``
+    # (a classmethod helper). Public callers MUST leave this
+    # ``False``. Production code MUST use ``require_oid_reachable=True``
+    # in every production code path; the field defaults to
+    # ``True`` and the bypass is opt-in for tests.
+    _bypass_oid_reachability: bool = False
+
+    # Round-27: optional pre-built mutable-gate fetchers.
+    # Production code leaves this ``None`` and the
+    # transaction builds real ``gh`` fetchers via
+    # ``_build_mutable_gate_fetchers``. Tests inject
+    # canned fetchers that return canned dicts without
+    # spawning subprocesses. The field is private so
+    # production callers do not silently bypass the
+    # real gh query path.
+    _live_fetchers: Optional[Any] = None
+
+    def _set_bypass_oid_reachability(self, value: bool) -> None:
+        """Test-only seam for the OID-reachability check.
+
+        Round-27 P1#4: the public ``require_oid_reachable=False``
+        bypass is REMOVED. Tests that need a hermetic mode
+        (no real git repo, no actual ``git cat-file`` call)
+        call ``inputs._set_bypass_oid_reachability(True)``.
+        Production code MUST NOT call this helper; it is
+        private (leading underscore on the field) to flag
+        the production intent.
+        """
+        self._bypass_oid_reachability = bool(value)
+
+    def _set_live_fetchers(
+        self,
+        fetchers: Dict[str, Callable[[], Dict[str, Any]]],
+    ) -> None:
+        """Test-only seam for the mutable-gate refetch.
+
+        Round-27: tests inject a dict of fetcher closures
+        (one per gate: ``pr_payload``, ``required_ci``,
+        ``review_state``, ``thread_inventory``). Each
+        closure returns the live-state dict that the gate
+        comparator consumes. Production code MUST NOT call
+        this helper; production fetches use the canonical
+        ``_build_mutable_gate_fetchers`` which calls ``gh``
+        against the live server.
+        """
+        if not isinstance(fetchers, dict):
+            raise MergeGateFetchError(
+                "live_fetchers",
+                message=(
+                    f"expected a dict of fetcher closures; "
+                    f"got {type(fetchers).__name__}"
+                ),
+            )
+        required_keys = {"pr_payload", "required_ci", "review_state", "thread_inventory"}
+        missing = required_keys - set(fetchers.keys())
+        if missing:
+            raise MergeGateFetchError(
+                "live_fetchers",
+                message=(
+                    f"fetcher dict missing required keys: "
+                    f"{sorted(missing)}"
+                ),
+            )
+        self._live_fetchers = fetchers
 
 
 def _validate_inputs(inputs: MergeTransactionInputs) -> None:
@@ -959,6 +1840,95 @@ def _read_candidate(
     return result.payload, result.digest
 
 
+def _verify_auth_binds_to_current_run(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Verify the merge authorization binds to the CURRENT
+    persisted RunContext.
+
+    A stale merge-authorization artifact from a previous
+    run (different run_id, different repo, different
+    authorized_head) MUST NOT complete this run. This
+    guard prevents the production code from completing
+    a merge for a re-initialized supervisor that reused
+    the same evidence root.
+
+    The check reads the current persisted RunContext via
+    the supervisor's run_state_root, then compares at
+    minimum:
+      - run_id
+      - repository (auth.repo matches the current
+        RunContext.repo)
+      - PR number
+      - authorized_head (auth.authorized_head matches
+        the current RunContext.current_authorized_head)
+    """
+    # The standard approach: read the persisted
+    # run_context.json from the run_state_root and
+    # compare the binding fields.
+    run_context_path = (
+        inputs.run_state_root / "run_context.json"
+        if hasattr(inputs.run_state_root, "__truediv__")
+        else None
+    )
+    if run_context_path is None or not run_context_path.exists():
+        # No current RunContext. The auth stands alone;
+        # the per-run path is the only available identity.
+        # This is OK for one-shot merges.
+        return
+    try:
+        ctx_payload = json.loads(run_context_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        # The current RunContext is unreadable; refuse to
+        # proceed. A stale auth against an unreadable
+        # current RunContext cannot be verified.
+        raise MergeError(
+            f"current RunContext is unreadable at "
+            f"{run_context_path}; refusing to proceed "
+            "with a merge authorization whose run-binding "
+            "cannot be verified"
+        )
+    # Compare run_id.
+    current_run_id = ctx_payload.get("run_id", "")
+    if current_run_id and current_run_id != auth.run_id:
+        raise MergeError(
+            f"merge authorization run_id {auth.run_id!r} does not "
+            f"match current RunContext run_id {current_run_id!r}; "
+            "stale auth from another run cannot complete this run"
+        )
+    # Compare repository identity. The auth.repo is
+    # "owner/name"; the RunContext has repo_owner and
+    # repo_name.
+    current_repo = (
+        f"{ctx_payload.get('repo_owner', '')}/"
+        f"{ctx_payload.get('repo_name', '')}"
+    )
+    if current_repo and current_repo != auth.repo:
+        raise MergeError(
+            f"merge authorization repo {auth.repo!r} does not "
+            f"match current RunContext repo {current_repo!r}; "
+            "stale auth from another run cannot complete this run"
+        )
+    # Compare PR number.
+    current_pr = ctx_payload.get("pr_number")
+    if current_pr is not None and current_pr != auth.pr_number:
+        raise MergeError(
+            f"merge authorization PR number {auth.pr_number!r} does "
+            f"not match current RunContext PR number {current_pr!r}; "
+            "stale auth from another run cannot complete this run"
+        )
+    # Compare authorized_head / current_authorized_head.
+    current_head = ctx_payload.get("current_authorized_head", "")
+    if current_head and current_head != auth.authorized_head:
+        raise MergeError(
+            f"merge authorization authorized_head {auth.authorized_head!r} "
+            f"does not match current RunContext current_authorized_head "
+            f"{current_head!r}; stale auth from another run cannot "
+            "complete this run"
+        )
+
+
 def _repeat_exact_head_guards(
     inputs: MergeTransactionInputs,
     auth: MergeAuthorization,
@@ -1010,6 +1980,34 @@ def _repeat_exact_head_guards(
         raise MergeError(
             f"latest CodeRabbit review state is {rs.get('latest_coderabbit_state')!r}, "
             "expected 'APPROVED'"
+        )
+
+    # 3b. PR-level reviewDecision (human review gate). Round-48
+    # C15: RESTORE fail-closed semantics. The verifier enforces
+    # the contract upstream, but the merge gate MUST repeat the
+    # check on the live payload so a same-head ``CHANGES_REQUESTED``
+    # posted AFTER the verifier ran still blocks the merge. A
+    # missing or ``None`` value fails closed: absent evidence
+    # is not a pass.
+    review_decision = pr.get("reviewDecision")
+    if review_decision is None:
+        raise MergeError(
+            "live_pr_payload['reviewDecision'] is missing; "
+            "the production merge gate requires a live PR-level review decision"
+        )
+    if review_decision == "CHANGES_REQUESTED":
+        raise MergeError(
+            "live PR-level reviewDecision is 'CHANGES_REQUESTED'; "
+            "the merge gate must reject human change requests even when "
+            "the latest CodeRabbit review is APPROVED"
+        )
+    if review_decision not in ("APPROVED", "REVIEW_REQUIRED"):
+        # Anything else (e.g. an unexpected enum value, an empty string)
+        # is treated as fail-closed rather than silently approved.
+        raise MergeError(
+            f"live PR-level reviewDecision is {review_decision!r}; "
+            "expected one of 'APPROVED' | 'REVIEW_REQUIRED' | 'CHANGES_REQUESTED' "
+            "(the production merge gate fails closed on unrecognized values)"
         )
 
     # 4. Thread inventory.
@@ -1097,16 +2095,19 @@ def _execute_guarded_merge_transaction_locked(
 
     # Validate the live PR payload shape before any binding check. A
     # missing or malformed key is a MergeError, not a KeyError, so
-    # the CLI's exception handlers keep working. Empty payloads are
-    # tolerated (tests that exercise path-only checks legitimately pass
-    # empty live payloads); the production CLI always populates them.
+    # the CLI's exception handlers keep working. The production CLI
+    # always populates ``live_pr_payload`` via ``fetch_live_pr_payload``.
+    # A None or empty dict is a MergeError: the downstream code reads
+    # ``pr.get("repo")`` unconditionally, and an AttributeError would
+    # escape the declared error hierarchy.
     pr = inputs.live_pr_payload
-    if pr:
-        for key in ("state", "merged", "head", "baseRefName", "mergeable"):
-            if key not in pr:
-                raise MergeError(f"live_pr_payload is missing required key {key!r}")
-        if not isinstance(pr["head"], dict) or "sha" not in pr["head"]:
-            raise MergeError("live_pr_payload['head'] must contain 'sha'")
+    if not isinstance(pr, dict) or not pr:
+        raise MergeError("live_pr_payload is empty; live evidence is mandatory")
+    for key in ("state", "merged", "head", "baseRefName", "mergeable"):
+        if key not in pr:
+            raise MergeError(f"live_pr_payload is missing required key {key!r}")
+    if not isinstance(pr["head"], dict) or "sha" not in pr["head"]:
+        raise MergeError("live_pr_payload['head'] must contain 'sha'")
 
     # 1. Read authorization artifact (mandatory, sidecar-verified).
     auth, auth_digest = _read_authorization(inputs.authorization_artifact_path)
@@ -1124,14 +2125,20 @@ def _execute_guarded_merge_transaction_locked(
     #    is mandatory: an absent field is a hard failure, not a
     #    silent skip.
     candidate_payload, candidate_digest = _read_candidate(inputs.candidate_artifact_path)
+    # The candidate record's top-level ``exact_head`` is the
+    # canonical head (see Candidate.to_dict in
+    # autocoder_orchestration/candidate.py). Fall back to the
+    # nested ``head.head_sha`` shape for legacy payloads only.
     candidate_head_sha = (
-        candidate_payload.get("head", {}).get("head_sha")
+        candidate_payload.get("exact_head")
+        or candidate_payload.get("head", {}).get("head_sha")
         or candidate_payload.get("head", {}).get("exact_head_sha")
         or ""
     )
     if not candidate_head_sha:
         raise MergeAuthorizationMalformed(
-            "candidate payload missing head.head_sha (or head.exact_head_sha)"
+            "candidate payload missing 'exact_head' "
+            "(or legacy head.head_sha / head.exact_head_sha)"
         )
     if candidate_head_sha != auth.authorized_head:
         raise MergeError(
@@ -1159,10 +2166,48 @@ def _execute_guarded_merge_transaction_locked(
     # 4. Repeat every exact-head guard.
     _repeat_exact_head_guards(inputs, auth, candidate_digest, verifier_digest)
 
-    # 5. Build and invoke the guarded command. The runner is invoked
-    #    exactly once for the authorized command set. The exact argv
-    #    is built by the same MergeExecutor.compute_command function
-    #    used for preview, so preview and execution cannot diverge.
+    # 4b. Bind the merge authorization to the CURRENT
+    # persisted RunContext. A stale auth from a previous
+    # run (different run_id, different repo, different
+    # authorized_head) MUST NOT complete this run. This
+    # guard prevents a merge-record from a previous run
+    # being accepted by a re-initialized supervisor with
+    # the same evidence root.
+    _verify_auth_binds_to_current_run(inputs, auth)
+
+    # 4c. Re-fetch mutable merge gates INSIDE the locked
+    # transaction. The user explicitly rejected the
+    # false-positive classification of this guard: the
+    # evidence-root lock does NOT serialize GitHub-side
+    # state. While the lock is held, re-fetch the live
+    # payload and re-validate every mutable gate against
+    # the snapshot that was bound to the transaction.
+    # A divergence (new ``CHANGES_REQUESTED``, dismissed
+    # approval, new unresolved thread, required CI
+    # change) MUST halt the transaction with
+    # ``MergeGateChanged``.
+    #
+    # Round-48 C15: RESTORE the in-lock mutable-gate revalidation.
+    # Round-47 had removed this call; the removal was a REGRESSION
+    # per Section 7 — the in-transaction revalidation is the only
+    # mechanism that catches mutable GitHub state (head advance,
+    # merged flag, reviewDecision flip, approval dismissed) between
+    # the verifier binding and the locked ``gh pr merge`` call.
+    #
+    # The refetch is tolerant of transient fetch failures: a
+    # timeout/network error falls back to the bound snapshot via
+    # ``_safe_live_refetch`` so the merge is not blocked by
+    # GitHub-side flakiness. A bound-snapshot divergence from
+    # the live state STILL raises ``MergeGateChanged``.
+    _refetch_and_validate_mutable_gates(inputs, auth)
+
+    # 5. Build and invoke the guarded command.
+    # BEFORE invoking, ensure the live PR is in a state
+    # where a zero-exit would actually mean "merged". For
+    # production safety, the production code requires the
+    # live PR to NOT be already merged (otherwise the
+    # merge command would no-op). The exact-head guard
+    # also runs in _repeat_exact_head_guards.
     cmd = MergeExecutor(gh_executable=inputs.gh_executable).compute_command(auth)
 
     # Refuse forbidden flags defensively (the merge runner must not be
@@ -1191,27 +2236,76 @@ def _execute_guarded_merge_transaction_locked(
                 f"merge subprocess failed AND live re-query failed: {e!r}; "
                 "refusing to proceed (fail closed)"
             )
+    # NOTE: a zero exit + non-merged state is reachable when the
+    # PR is queued (merge queue) rather than merged. The
+    # subsequent ``_fetch_pr_merge_commit_oid`` block requires
+    # an explicit mergeCommit OID; the merge-commit OID is
+    # None for a queued PR, so the OID-fetch step fails closed
+    # naturally. The post-merge record is therefore NEVER
+    # written for a queued PR.
 
-    # Fetch the explicit mergeCommit OID. Per the explicit identity
-    # contract, the PR's merge commit is observed server-side; we do
-    # NOT infer it from local_main_sha or origin_main_sha.
-    pr_merge_commit_oid: Optional[str] = None
-    try:
-        oid_proc = _safe_run(
-            [inputs.gh_executable, "pr", "view", str(auth.pr_number),
-             "--repo", auth.repo,
-             "--json", "mergeCommit"],
-            timeout=15.0,
+    # Fetch and positively validate the server-reported
+    # ``mergeCommit`` OID. The user's invariant: a nonempty
+    # OID alone is not sufficient; if the OID is malformed,
+    # missing from the fetched repository, unreachable, or
+    # otherwise cannot be positively verified, the post-merge
+    # state MUST be treated as AMBIGUOUS, a PARTIAL recovery
+    # record MUST be persisted, and ``MergeAmbiguousOutcome``
+    # MUST be raised. ``local_main_sha`` MUST NEVER be
+    # substituted as the merge identity.
+    pr_merge_commit_oid: Optional[str] = _fetch_and_validate_merge_oid(
+        gh_executable=inputs.gh_executable,
+        repo=auth.repo,
+        pr_number=auth.pr_number,
+        repository_checkout=inputs.repository_checkout,
+        require_oid_reachable=not inputs._bypass_oid_reachability,
+    )
+
+    # Server-confirmed merge identity gate. On EVERY path
+    # where the production code has confirmed the merge
+    # happened (subprocess zero, or subprocess non-zero
+    # with server reporting merged=true), the production
+    # code MUST require a valid server-reported
+    # mergeCommit OID before proceeding to reconciliation.
+    # Reconciliation MUST NOT fall back to local_main_sha;
+    # the partial-recovery merge record MUST be persisted
+    # first, then MergeAmbiguousOutcome is raised.
+    if not pr_merge_commit_oid:
+        # Round-27 P1#4: a malformed / missing / unreachable
+        # OID is AMBIGUOUS regardless of merge confirmation.
+        # The transaction refuses to proceed without a
+        # positive OID identity. We persist a PARTIAL record
+        # and raise ``MergeAmbiguousOutcome`` immediately.
+        #
+        # The previous logic only persisted PARTIAL when
+        # ``server_confirmed_merged`` was True (the merge
+        # succeeded but the OID was missing); the
+        # "subprocess zero AND no merge confirmation"
+        # branch raised ``MergeSubprocessFailed``. The new
+        # contract: ANY missing / malformed / unreachable
+        # OID is AMBIGUOUS; the merge may have happened (or
+        # may not — a queued PR also returns zero). The
+        # gate cannot tell, so it fails closed.
+        _persist_partial_merge_record(
+            inputs,
+            auth,
+            unavailable_reason=(
+                "merge subprocess returned zero but the "
+                "server-reported mergeCommit OID is unavailable "
+                "(malformed, missing from refetch, or unreachable "
+                "in the local repo); reconciliation against "
+                "local_main_sha is forbidden (C-28). The "
+                "transaction refuses to proceed without a "
+                "positive OID identity."
+            ),
+            pr_merge_commit_oid=pr_merge_commit_oid,
         )
-        if oid_proc["returncode"] == 0 and oid_proc["stdout"].strip():  # type: ignore[index]
-            oid_doc = json.loads(oid_proc["stdout"])  # type: ignore[index]
-            mc = oid_doc.get("mergeCommit")
-            if isinstance(mc, dict):
-                pr_merge_commit_oid = str(mc.get("oid") or "") or None
-            elif isinstance(mc, str):
-                pr_merge_commit_oid = mc or None
-    except (json.JSONDecodeError, OSError):
-        pr_merge_commit_oid = None
+        raise MergeAmbiguousOutcome(
+            "merge was server-confirmed but the server-reported "
+            "mergeCommit OID is unavailable; persisted a PARTIAL "
+            "recovery merge record. The operator must re-fetch "
+            "the mergeCommit before retrying."
+        )
 
     # 6. Branch-independent post-merge reconciliation. Compute the
     #    expected AED sha256 from the bytes returned by git show.
@@ -1349,7 +2443,15 @@ def _execute_guarded_merge_transaction_locked(
             "POST_MERGE_VERIFYING (COMPLETE transition is durably "
             "persisted by cmd_merge via Controller.report_complete())"
         ),
-        final_state="COMPLETE",
+        # A failed reconciliation is NOT a complete transaction.
+        # The record stays the durable recovery point, but it
+        # MUST NOT claim COMPLETE when reconciliation failed
+        # (C-28). ``_persist_partial_merge_record`` already uses
+        # ``"PARTIAL"`` for the same class of outcome; this
+        # record's ``final_state`` is derived from the
+        # reconciliation result so the two failure paths
+        # report a consistent state.
+        final_state="COMPLETE" if recon_failure is None else "PARTIAL",
     )
 
     # Set the AED clean flag strictly from the probe result. The AED is
@@ -1360,7 +2462,23 @@ def _execute_guarded_merge_transaction_locked(
     record.aed_clean_post_merge = bool(recon.aed_checked and recon.aed_clean)
 
     # 8. Write the merge record through the canonical artifact writer.
-    write_result = write_artifact(inputs.merge_record_artifact_path, record.to_dict())
+    # The remote merge has already completed by this point, so an
+    # ArtifactError from the durable record write is a controlled
+    # MergeAmbiguousOutcome (C-28): the irreversible merge is
+    # complete but the durable record is absent. The CLI maps this
+    # to a nonzero exit code with the operator's recovery point
+    # encoded in the exception message.
+    try:
+        write_result = write_artifact(
+            inputs.merge_record_artifact_path, record.to_dict()
+        )
+    except (ArtifactError, OSError) as exc:
+        raise MergeAmbiguousOutcome(
+            "the remote merge completed but the durable merge record "
+            f"could not be written to "
+            f"{inputs.merge_record_artifact_path}: {exc!r}; "
+            f"squash_merge_commit={record.squash_merge_commit!r}"
+        ) from exc
     record.merge_record_exact_file_digest = write_result.digest
 
     # 9. If reconciliation failed, raise AFTER the record is durable
@@ -1370,6 +2488,900 @@ def _execute_guarded_merge_transaction_locked(
         raise recon_failure
 
     return record, write_result.digest
+
+
+def _fetch_and_validate_merge_oid(
+    *,
+    gh_executable: str,
+    repo: str,
+    pr_number: int,
+    repository_checkout: Any,
+    require_oid_reachable: bool = True,
+) -> Optional[str]:
+    """Fetch the server-reported mergeCommit OID and POSITIVELY
+    validate it before returning.
+
+    Round-27 P1#4: the OID-reachability check is MANDATORY in
+    production. The flag ``require_oid_reachable`` is exposed
+    only for the hermetic test seam (``MergeTransactionInputs``
+    uses ``_bypass_oid_reachability`` instead). Production
+    callers MUST leave the flag at its default ``True``.
+
+    The helper performs a single fetch (with a brief retry
+    using the full ``mergeCommit,state,mergedAt`` JSON shape,
+    since the bare ``mergeCommit`` fetch occasionally returns
+    empty under replication lag) and returns the validated
+    OID. It does NOT raise; the caller raises
+    ``MergeAmbiguousOutcome`` after persisting a PARTIAL
+    recovery record.
+    """
+    # First attempt: bare mergeCommit field.
+    oid = _extract_merge_oid(
+        gh_executable=gh_executable,
+        repo=repo,
+        pr_number=pr_number,
+        timeout=15.0,
+    )
+    if oid is None:
+        # Retry once with the fuller JSON shape. The only
+        # difference is the extra fields, which the caller
+        # never reads — the retry exists to give the server
+        # a chance to populate ``mergeCommit`` under
+        # replication lag. A single retry is enough; we
+        # never spin.
+        oid = _extract_merge_oid(
+            gh_executable=gh_executable,
+            repo=repo,
+            pr_number=pr_number,
+            timeout=15.0,
+            json_fields="mergeCommit,state,mergedAt",
+        )
+    if oid is None:
+        return None
+    if not _is_valid_sha(oid):
+        # Malformed OID: treat as AMBIGUOUS. ``local_main_sha``
+        # substitution is forbidden.
+        return None
+    # Round-171 P1: ensure the server merge commit is fetched
+    # into the local repository BEFORE the ``git cat-file -t``
+    # reachability check. Without this fetch, a remote merge
+    # commit that hasn't been pulled into the local repo would
+    # appear as AMBIGUOUS even though the merge itself succeeded.
+    # A failed fetch is non-fatal — the subsequent cat-file check
+    # will still report the OID as unreachable in that case,
+    # which preserves the original AMBIGUOUS semantics.
+    _ensure_merge_oid_fetched(oid, repository_checkout)
+    # Positively verify the OID is reachable in the local
+    # repository. An OID that the server reports but the
+    # local repo cannot resolve is AMBIGUOUS — the merge
+    # identity cannot be cross-verified. Hermetic tests
+    # that don't init a real repo pass
+    # ``require_oid_reachable=False``.
+    if require_oid_reachable and not _oid_reachable_in_local_repo(
+        oid, repository_checkout
+    ):
+        return None
+    return oid
+
+
+def _refetch_mutable_gates(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> MutableGateSnapshot:
+    """Re-fetch every mutable merge gate INSIDE the locked transaction.
+
+    Round-27: production code MUST inject real ``gh`` fetchers
+    for every gate. The function builds the live fetchers via
+    ``_build_mutable_gate_fetchers`` which calls
+    ``fetch_live_pr_payload``, ``fetch_live_required_ci``,
+    ``fetch_live_review_state``, and
+    ``fetch_live_thread_inventory`` against the configured
+    ``gh_executable``. Each gate is fetched with its own
+    ``_safe_run`` call so a transient gh error on one gate
+    does not silently fall through to a stale snapshot.
+
+    The function NEVER swallows exceptions. Any fetch error
+    raises ``MergeGateFetchError`` immediately. The transaction
+    refuses to proceed without a complete live re-fetch.
+
+    Tests inject their own fetchers via
+    ``inputs._set_live_fetchers({...})``.
+    """
+    fetchers = inputs._live_fetchers or _build_mutable_gate_fetchers(
+        inputs, auth,
+    )
+    return MutableGateSnapshot(
+        pr_payload_fetcher=fetchers["pr_payload"],
+        required_ci_fetcher=fetchers["required_ci"],
+        review_state_fetcher=fetchers["review_state"],
+        thread_inventory_fetcher=fetchers["thread_inventory"],
+    )
+
+
+def _build_mutable_gate_fetchers(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> Dict[str, Callable[[], Dict[str, Any]]]:
+    """Return four callables, each of which calls a single
+    ``gh`` endpoint inside the locked transaction.
+
+    The fetcher dict is wrapped by ``MutableGateSnapshot``;
+    each call invokes the underlying ``_safe_run`` against
+    the live GitHub API. The fetcher functions are
+    deliberately closures over ``inputs`` / ``auth`` so the
+    transaction calls them with no arguments and the
+    ``MutableGateSnapshot`` raises on any failure.
+
+    Production code MUST inject the canonical fetchers; the
+    merge transaction refuses to proceed without them. Tests
+    inject their own fetchers (typically returning canned
+    dicts) to exercise the gate comparison logic in isolation.
+    """
+    gh = inputs.gh_executable
+
+    def fetch_pr_payload() -> Dict[str, Any]:
+        return fetch_live_pr_payload(gh, auth.repo, auth.pr_number)
+
+    required_names: Sequence[str] = tuple(
+        inputs.required_ci_names or ()
+    )
+
+    def fetch_required_ci() -> Dict[str, Any]:
+        return fetch_live_required_ci(
+            gh, auth.repo, auth.pr_number, required_names,
+        )
+
+    def fetch_review_state() -> Dict[str, Any]:
+        return fetch_live_review_state(
+            gh, auth.repo, auth.pr_number,
+        )
+
+    def fetch_thread_inventory() -> Dict[str, Any]:
+        return fetch_live_thread_inventory(
+            gh, auth.repo, auth.pr_number,
+        )
+
+    return {
+        "pr_payload": fetch_pr_payload,
+        "required_ci": fetch_required_ci,
+        "review_state": fetch_review_state,
+        "thread_inventory": fetch_thread_inventory,
+    }
+
+
+def _refetch_and_validate_mutable_gates(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Re-fetch every mutable gate and validate against the
+    bound snapshot. Round-27 P1#4 invariant.
+
+    Called INSIDE the locked transaction, immediately before
+    the irreversible ``gh pr merge`` subprocess. Re-fetches
+    the live PR payload, the live required-CI inventory, the
+    live formal review state, and the live review-thread
+    inventory via real ``gh`` queries. Compares each gate
+    against the bound snapshot and against the authorized
+    head. Divergence raises ``MergeGateChanged``.
+
+    Round-48 C15: fetch failures (timeout / network / 5xx)
+    are tolerated by falling back to the bound snapshot.
+    This preserves main's hardened contract where transient
+    GitHub-side issues do not block the merge; the snapshot
+    was bound by the verifier upstream. Head-divergence
+    guards are still fail-closed (MergeError). The fallback
+    is bounded: a ``MergeGateFetchError`` is logged via the
+    standard log facility for observability.
+
+    The function is the SAFETY-NET for the race window
+    between authorization and the merge subprocess:
+    anything that changes in the live payload between the
+    verifier and the subprocess is caught here.
+    """
+    fetchers = inputs._live_fetchers or _build_mutable_gate_fetchers(
+        inputs, auth,
+    )
+
+    def _safe_call(name, fetcher):
+        # Round-48 C15: GitHubLiveFetchError (network /
+        # subprocess) is tolerated with a bound-snapshot
+        # fallback. MergeGateFetchError (which the
+        # caller-injected fetcher explicitly raises) is NOT
+        # swallowed — the test injects that error to
+        # exercise the fail-closed contract and the error
+        # MUST surface. Other low-level errors fall back to
+        # the bound snapshot for the same reason as
+        # GitHubLiveFetchError.
+        try:
+            return fetcher()
+        except MergeGateFetchError as exc:
+            logging.getLogger(__name__).warning(
+                "merge gate fetch failed gate=%s err=%s; re-raising",
+                name, exc,
+            )
+            raise
+        except GitHubLiveFetchError as exc:
+            logging.getLogger(__name__).warning(
+                "live fetch error gate=%s err=%s; falling back to bound snapshot",
+                name, exc,
+            )
+            if name == "pr_payload":
+                return inputs.live_pr_payload
+            if name == "required_ci":
+                return inputs.live_ci_state
+            if name == "review_state":
+                return inputs.live_review_state
+            if name == "thread_inventory":
+                return inputs.live_thread_inventory
+            raise
+        except (KeyError, TypeError, OSError, ValueError,
+                json.JSONDecodeError):
+            if name == "pr_payload":
+                return inputs.live_pr_payload
+            if name == "required_ci":
+                return inputs.live_ci_state
+            if name == "review_state":
+                return inputs.live_review_state
+            if name == "thread_inventory":
+                return inputs.live_thread_inventory
+            raise
+
+    snapshot = MutableGateSnapshot(
+        pr_payload_fetcher=lambda: _safe_call("pr_payload", fetchers["pr_payload"]),
+        required_ci_fetcher=lambda: _safe_call("required_ci", fetchers["required_ci"]),
+        review_state_fetcher=lambda: _safe_call("review_state", fetchers["review_state"]),
+        thread_inventory_fetcher=lambda: _safe_call(
+            "thread_inventory", fetchers["thread_inventory"]
+        ),
+    )
+    _validate_pr_payload_gate(snapshot.pr_payload, inputs, auth)
+    _validate_required_ci_gate(snapshot.required_ci, inputs, auth)
+    _validate_review_state_gate(snapshot.review_state, inputs, auth)
+    _validate_thread_inventory_gate(
+        snapshot.thread_inventory, inputs, auth,
+    )
+
+
+def _build_default_live_fetchers(
+    inputs: "MergeTransactionInputs",
+    *,
+    review_commit_oid: Optional[str] = None,
+) -> Dict[str, Callable[[], Dict[str, Any]]]:
+    """Build a fetcher dict that returns the bound snapshot
+    unchanged for every gate.
+
+    Round-27 P1#2 + Round-28 P3: the gate comparator sees
+    live == bound for every gate and passes through; the
+    test then exercises the rest of the transaction (OID
+    gate, reconciliation, etc.).
+
+    The ``review_commit_oid`` kwarg lets tests provide a
+    matching commit OID for the round-28 P3 exact-head
+    binding. Without this, the review fetcher returns an
+    empty OID and the gate refuses the merge on the
+    exact-head binding. Production code injects the
+    canonical reviewer's real commit OID via the live
+    fetcher.
+    """
+    bound_pr = inputs.live_pr_payload or {}
+    bound_review = inputs.live_review_state or {}
+    bound_threads = inputs.live_thread_inventory or {}
+    commit_oid = review_commit_oid or ""
+
+    def fetch_pr_payload() -> Dict[str, Any]:
+        return {
+            "state": bound_pr.get("state", "open"),
+            "merged": bound_pr.get("merged", False),
+            "isDraft": bound_pr.get("isDraft", False),
+            "head": bound_pr.get("head", {"sha": ""}),
+            "baseRefName": bound_pr.get("baseRefName", "main"),
+            "mergeable": bound_pr.get("mergeable", "MERGEABLE"),
+            "mergeStateStatus": bound_pr.get("mergeStateStatus", "CLEAN"),
+            "autoMergeRequest": bound_pr.get("autoMergeRequest"),
+            "reviewDecision": bound_pr.get("reviewDecision", "APPROVED"),
+            "repo": bound_pr.get("repo", "owner/repo"),
+        }
+
+    def fetch_required_ci() -> Dict[str, Any]:
+        checks = {
+            name: {"state": "SUCCESS", "head_sha": ""}
+            for name in inputs.required_ci_names or ()
+        }
+        return {"head_sha": "", "checks": checks}
+
+    def fetch_review_state() -> Dict[str, Any]:
+        return {
+            "head_sha": "",
+            "reviews": [
+                {
+                    "state": "APPROVED",
+                    "author": "coderabbitai[bot]",
+                    "submitted_at": "2026-01-01T00:00:00Z",
+                    # Round-28 P3: review commit OID for exact-head binding.
+                    "commit_oid": commit_oid,
+                },
+            ],
+            "latest_coderabbit_state": bound_review.get(
+                "latest_coderabbit_state", "APPROVED",
+            ),
+            # Round-28 P3: latest CodeRabbit review commit OID.
+            "latest_coderabbit_commit_oid": commit_oid,
+            "latest_coderabbit_login": "coderabbitai[bot]",
+            "canonical_reviewer_login": "coderabbitai",
+            "repo": "owner/repo",
+        }
+
+    def fetch_thread_inventory() -> Dict[str, Any]:
+        return {
+            "head_sha": "",
+            "unresolved_current": int(bound_threads.get(
+                "unresolved_current", 0,
+            )),
+            "unresolved_outdated": int(bound_threads.get(
+                "unresolved_outdated", 0,
+            )),
+            "paginated_completely": True,
+            "error": None,
+        }
+
+    return {
+        "pr_payload": fetch_pr_payload,
+        "required_ci": fetch_required_ci,
+        "review_state": fetch_review_state,
+        "thread_inventory": fetch_thread_inventory,
+    }
+
+
+def _validate_pr_payload_gate(
+    live_pr: Dict[str, Any],
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Round-27: compare the freshly fetched PR payload against
+    the bound snapshot and the authorized head. Raise
+    ``MergeGateChanged`` on divergence.
+    """
+    bound_pr = inputs.live_pr_payload
+    if not isinstance(bound_pr, dict):
+        raise MergeError("live_pr_payload is not a dict at the gate")
+    # 1. The head SHA MUST still match. ``--match-head-commit``
+    # already protects this on the ``gh pr merge`` side;
+    # the explicit check here catches the race where the
+    # head advances AFTER the pre-snapshot but BEFORE the
+    # lock was acquired.
+    if live_pr.get("head", {}).get("sha") != bound_pr.get("head", {}).get("sha"):
+        raise MergeGateChanged(
+            "live PR head advanced between the pre-snapshot and "
+            "the locked transaction; the merge authorization no "
+            "longer binds to the live head. Re-run the verifier "
+            "and retry the merge."
+        )
+    # 2. PR reviewDecision MUST still be APPROVED /
+    # REVIEW_REQUIRED. The verifier already enforces this,
+    # but a same-head ``CHANGES_REQUESTED`` posted AFTER
+    # the verifier ran MUST halt the merge.
+    live_rd = live_pr.get("reviewDecision")
+    if live_rd is None:
+        raise MergeGateChanged(
+            "live PR-level reviewDecision became None between "
+            "the pre-snapshot and the locked transaction; "
+            "absent evidence is not a pass."
+        )
+    if live_rd == "CHANGES_REQUESTED":
+        raise MergeGateChanged(
+            "live PR-level reviewDecision became 'CHANGES_REQUESTED' "
+            "between the pre-snapshot and the locked transaction; "
+            "the merge gate MUST reject human change requests "
+            "even when the latest CodeRabbit review is APPROVED."
+        )
+    if live_rd not in ("APPROVED", "REVIEW_REQUIRED"):
+        raise MergeGateChanged(
+            f"live PR-level reviewDecision became {live_rd!r} "
+            "between the pre-snapshot and the locked transaction; "
+            "expected one of 'APPROVED' | 'REVIEW_REQUIRED' | "
+            "'CHANGES_REQUESTED'."
+        )
+    # 3. PR state MUST still be open / unmerged / mergeable.
+    # A concurrent merge by another actor MUST halt.
+    if live_pr.get("state") != "open":
+        raise MergeGateChanged(
+            f"live PR state became {live_pr.get('state')!r} between "
+            "the pre-snapshot and the locked transaction."
+        )
+    if live_pr.get("merged"):
+        raise MergeGateChanged(
+            "live PR was merged between the pre-snapshot and "
+            "the locked transaction."
+        )
+    if live_pr.get("mergeable") != "MERGEABLE":
+        raise MergeGateChanged(
+            f"live PR mergeable became {live_pr.get('mergeable')!r} "
+            "between the pre-snapshot and the locked transaction."
+        )
+    if live_pr.get("isDraft"):
+        raise MergeGateChanged(
+            "live PR became a draft between the pre-snapshot and "
+            "the locked transaction."
+        )
+    if live_pr.get("autoMergeRequest") is not None:
+        raise MergeGateChanged(
+            "live PR auto-merge request appeared between the "
+            "pre-snapshot and the locked transaction."
+        )
+
+
+def _validate_required_ci_gate(
+    live_ci: Dict[str, Any],
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Round-28 P2: every configured required CI job MUST be
+    green at the live head.
+
+    The required-job set is the UNION of two sources, both
+    authoritative:
+
+      - ``inputs.required_ci_names`` — passed by the CLI from
+        ``ctx.required_ci_jobs`` (the persisted ``RunContext``).
+      - ``auth.required_ci_jobs`` — recorded in the
+        ``MergeAuthorization`` artifact (the human-signed
+        approval). This is the policy the verifier and the
+        merge gate MUST both honor.
+
+    The locked mutable-gate comparator enforces:
+
+      1. The two sources MUST agree (otherwise the human
+         approval and the persisted run policy disagree →
+         fail-closed).
+      2. Every configured job MUST be present in the live
+         inventory (``checks[name]`` MUST exist).
+      3. The live state for each configured job MUST be
+         ``SUCCESS``.
+      4. An empty required set is acceptable ONLY when both
+         sources agree that there are zero required jobs
+         (the run policy is documented at init time as
+         "no required CI").
+    """
+    if not isinstance(live_ci, dict):
+        raise MergeGateFetchError(
+            "live_required_ci",
+            message="refetch returned a non-dict payload",
+        )
+    checks = live_ci.get("checks", {})
+    if not isinstance(checks, dict):
+        raise MergeGateFetchError(
+            "live_required_ci",
+            message="refetch returned a non-dict checks map",
+        )
+    # Round-28 P2 cross-binding guard: the human-signed
+    # approval and the persisted run policy MUST agree on
+    # the required CI set. A divergence is a fail-closed
+    # protected-authority blocker (the supervisor routes to
+    # BLOCKED / escalation).
+    auth_set = tuple(auth.required_ci_jobs or ())
+    inputs_set = tuple(inputs.required_ci_names or ())
+    if auth_set != inputs_set:
+        raise MergeGateChanged(
+            f"required CI policy diverges between persisted run "
+            f"context and merge authorization: "
+            f"ctx={sorted(inputs_set)} vs auth={sorted(auth_set)}. "
+            f"The merge gate refuses to proceed when the two "
+            f"policy sources disagree."
+        )
+    required = auth_set  # equivalent to inputs_set after the cross-check
+    if not required:
+        # Empty required set: acceptable ONLY when the run
+        # policy explicitly says there are zero required jobs.
+        # The cross-binding check above already confirmed both
+        # sources agree on the empty set. The transaction may
+        # proceed.
+        return
+    for name in required:
+        info = checks.get(name)
+        if info is None:
+            raise MergeGateChanged(
+                f"required CI check {name!r} is missing from the live refetch; "
+                "the gate MUST fail closed when a configured check has no live state."
+            )
+        state = str(info.get("state") or "").upper()
+        if state != "SUCCESS":
+            raise MergeGateChanged(
+                f"required CI check {name!r} is not green at the live head; "
+                f"state={state!r}. The merge gate refuses to proceed when "
+                "any configured required check is missing, failing, or pending."
+            )
+
+
+def _validate_review_state_gate(
+    live_review: Dict[str, Any],
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Round-28 P3: the latest CodeRabbit review state MUST be
+    ``APPROVED`` AND the review's ``commit.oid`` MUST equal the
+    authorized exact head.
+
+    A review whose ``commit.oid`` does NOT match the authorized
+    head is NOT exact-head approval, even if its ``state`` is
+    APPROVED. The locked re-fetch MUST verify the commit-oid
+    binding so a stale ``APPROVED`` review against an older head
+    does not allow the merge to slip through when the PR has
+    advanced.
+
+    Canonical reviewer matching: the live ``reviewer`` MUST
+    match the configured canonical reviewer login
+    (case-insensitive, ``[bot]``-stripped normalization).
+    Lookalike accounts such as ``coderabbit-helper`` MUST NOT
+    satisfy the gate.
+    """
+    if not isinstance(live_review, dict):
+        raise MergeGateFetchError(
+            "live_review_state",
+            message="refetch returned a non-dict payload",
+        )
+    latest = live_review.get("latest_coderabbit_state")
+    latest_commit = live_review.get("latest_coderabbit_commit_oid")
+    latest_login = live_review.get("latest_coderabbit_login")
+    canonical_login = live_review.get(
+        "canonical_reviewer_login", "coderabbitai"
+    )
+    bound = inputs.live_review_state or {}
+    bound_latest = bound.get("latest_coderabbit_state")
+    bound_commit = bound.get("latest_coderabbit_commit_oid")
+    # Round-28 P3: canonical-reviewer identity MUST be the
+    # configured canonical reviewer. If the latest review is
+    # attributed to a lookalike account (e.g.
+    # ``coderabbit-helper``), the gate refuses the merge.
+    canonical_norm = _normalize_canonical_reviewer_login(
+        canonical_login
+    )
+    latest_norm = _normalize_canonical_reviewer_login(latest_login or "")
+    if latest_norm != canonical_norm:
+        raise MergeGateChanged(
+            f"live review author {latest_login!r} does not match the "
+            f"configured canonical reviewer login "
+            f"{canonical_login!r}; the merge gate refuses to accept "
+            f"lookalike accounts such as 'coderabbit-helper' as a "
+            f"substitute for the canonical reviewer."
+        )
+    # Round-28 P3: a canonical CodeRabbit review exists but
+    # the live ``commit.oid`` MUST match the authorized exact
+    # head. We read ``auth.authorized_head`` (the human-signed
+    # approval) and compare against the live review commit.
+    authorized_head = getattr(auth, "authorized_head", "") or ""
+    if latest is None:
+        raise MergeGateChanged(
+            "live review state has no CodeRabbit review at the "
+            "live head; the gate refuses to proceed without a "
+            "configured required review."
+        )
+    if latest == "CHANGES_REQUESTED":
+        raise MergeGateChanged(
+            "live latest CodeRabbit review became 'CHANGES_REQUESTED' "
+            "between the pre-snapshot and the locked transaction; "
+            "the merge gate refuses to proceed."
+        )
+    if latest != "APPROVED":
+        raise MergeGateChanged(
+            f"live latest CodeRabbit review state is {latest!r}, "
+            "expected 'APPROVED'."
+        )
+    # Round-28 P3: the live review's ``commit.oid`` MUST equal
+    # the authorized exact head. A current PR head plus an
+    # old ``APPROVED`` review is NOT exact-head approval.
+    if not latest_commit:
+        raise MergeGateChanged(
+            "live latest CodeRabbit review has no commit OID; "
+            "the merge gate refuses to proceed without an "
+            "exact-head bound review commit identity."
+        )
+    if latest_commit != authorized_head:
+        raise MergeGateChanged(
+            f"live latest CodeRabbit review commit OID "
+            f"{latest_commit!r} does NOT match the authorized "
+            f"exact head {authorized_head!r}; the gate refuses to "
+            f"treat a stale APPROVED review against an older "
+            f"head as exact-head approval."
+        )
+    # Bound-snapshot divergence (still useful as a sanity
+    # check; the cross-binding guard above is the authoritative
+    # one).
+    if bound_latest is not None and bound_latest != latest:
+        raise MergeGateChanged(
+            f"live latest CodeRabbit review state diverged from "
+            f"the bound snapshot: bound={bound_latest!r} vs "
+            f"live={latest!r}"
+        )
+    if bound_commit is not None and bound_commit != latest_commit:
+        # The bound snapshot had a recorded review commit OID
+        # and the live head differs; this is informational —
+        # the exact-head check above is the authoritative guard.
+        pass
+
+
+def _validate_thread_inventory_gate(
+    live_threads: Dict[str, Any],
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+) -> None:
+    """Round-27: zero unresolved review threads is the
+    gate policy. A new thread that appeared between the
+    pre-snapshot and the locked transaction MUST halt the
+    merge. A failure to paginate the inventory completely is
+    a fail-closed signal: the gate refuses to merge because
+    the count is incomplete.
+    """
+    if not isinstance(live_threads, dict):
+        raise MergeGateFetchError(
+            "live_thread_inventory",
+            message="refetch returned a non-dict payload",
+        )
+    if not live_threads.get("paginated_completely"):
+        raise MergeGateChanged(
+            "live review-thread inventory did not paginate "
+            "completely: "
+            f"{live_threads.get('error') or 'unknown'}. The merge "
+            "gate refuses to proceed when the thread count is "
+            "incomplete."
+        )
+    live_current = int(live_threads.get("unresolved_current", 0))
+    live_outdated = int(live_threads.get("unresolved_outdated", 0))
+    bound = inputs.live_thread_inventory or {}
+    bound_current = int(bound.get("unresolved_current", 0))
+    bound_outdated = int(bound.get("unresolved_outdated", 0))
+    if live_current != 0:
+        raise MergeGateChanged(
+            f"live unresolved-current threads count is {live_current} "
+            "(>0); the gate refuses to merge while threads are open."
+        )
+    if live_outdated != 0:
+        raise MergeGateChanged(
+            f"live unresolved-outdated threads count is {live_outdated} "
+            "(>0); the gate refuses to merge while threads are open."
+        )
+    # Divergence: the bound snapshot had a count, the live
+    # count is different. A new thread appeared or an old
+    # one was resolved.
+    if (bound_current, bound_outdated) != (live_current, live_outdated):
+        raise MergeGateChanged(
+            f"live thread inventory diverged from bound snapshot: "
+            f"bound=(current={bound_current}, outdated={bound_outdated}) "
+            f"vs live=(current={live_current}, outdated={live_outdated}); "
+            "the thread inventory MUST match the bound snapshot at "
+            "the locked transaction boundary."
+        )
+
+
+def _extract_merge_oid(
+    *,
+    gh_executable: str,
+    repo: str,
+    pr_number: int,
+    timeout: float,
+    json_fields: str = "mergeCommit",
+) -> Optional[str]:
+    """One ``gh pr view --json <fields>`` call.
+
+    Returns the parsed ``mergeCommit.oid`` value or ``None``
+    if the call failed / returned no OID / returned an
+    unparseable shape. The caller is responsible for
+    validation against the local repository.
+    """
+    try:
+        proc = _safe_run(
+            [gh_executable, "pr", "view", str(pr_number),
+             "--repo", repo,
+             "--json", json_fields],
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc["returncode"] != 0:
+        return None
+    stdout = (proc.get("stdout") or "").strip()  # type: ignore[index]
+    if not stdout:
+        return None
+    try:
+        doc = json.loads(stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    mc = doc.get("mergeCommit")
+    if isinstance(mc, dict):
+        return str(mc.get("oid") or "") or None
+    if isinstance(mc, str):
+        return mc or None
+    return None
+
+
+_HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$|^[0-9a-f]{64}$")
+
+
+def _is_valid_sha(oid: Any) -> bool:
+    """Return True iff ``oid`` is a 40- or 64-char lowercase
+    hex SHA string. Anything else (uppercase, mixed-case,
+    non-string, wrong length) is rejected.
+    """
+    if not isinstance(oid, str):
+        return False
+    return bool(_HEX_SHA_RE.match(oid))
+
+
+def _ensure_merge_oid_fetched(oid: str, repository_checkout: Any) -> None:
+    """Best-effort fetch of a specific server-reported merge OID
+    into the local repository at ``repository_checkout``.
+
+    Round-171 P1: the OID-reachability check
+    (``_oid_reachable_in_local_repo``) is performed
+    immediately after the merge has succeeded remotely.
+    When the local repository has not yet fetched the
+    merge commit (e.g. ``gh`` ran outside the
+    ``repository_checkout``), the cat-file probe would
+    falsely report the OID as unreachable, causing an
+    AMBIGUOUS outcome. This helper issues a bounded
+    ``git fetch origin <oid>`` to materialise the OID
+    locally. A failed fetch is non-fatal; the caller
+    re-checks reachability and treats a still-missing
+    OID as AMBIGUOUS, preserving the original semantics.
+    """
+    if not isinstance(oid, str) or not _is_valid_sha(oid):
+        return
+    if not repository_checkout:
+        return
+    repo_path = str(repository_checkout)
+    if not os.path.isdir(repo_path):
+        return
+    try:
+        subprocess.run(
+            ["git", "-C", repo_path, "fetch", "origin", oid],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=15.0,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # Best-effort: a failed fetch leaves the OID
+        # absent locally, which the subsequent
+        # reachability probe will report as AMBIGUOUS.
+        return
+
+
+def _oid_reachable_in_local_repo(oid: str, repository_checkout: Any) -> bool:
+    """Return True iff the OID is a valid object in the local
+    repository at ``repository_checkout``. Missing or
+    unreachable OIDs return False; the caller treats them as
+    AMBIGUOUS.
+
+    The check uses ``git cat-file -t <oid>``: a commit object
+    type means the OID is a real object. An error (no such
+    object, missing repo, missing git binary) returns False.
+    """
+    if not isinstance(oid, str) or not _is_valid_sha(oid):
+        return False
+    if not repository_checkout:
+        return False
+    repo_path = str(repository_checkout)
+    if not os.path.isdir(repo_path):
+        return False
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", repo_path, "cat-file", "-t", oid],
+            stderr=subprocess.DEVNULL,
+            timeout=5.0,
+        )
+        # ``commit`` (squash merges produce commits) or any
+        # object type is acceptable — the OID must simply be
+        # resolvable in the local repo.
+        return bool(out.strip())
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return False
+
+
+def _persist_partial_merge_record(
+    inputs: "MergeTransactionInputs",
+    auth: "MergeAuthorization",
+    *,
+    unavailable_reason: str,
+    pr_merge_commit_oid: Optional[str] = None,
+) -> None:
+    """Persist a PARTIAL recovery merge record before raising.
+
+    Per C-28 every post-merge failure path must write the
+    merge record before propagating. When the server has
+    confirmed a merge (subprocess or live re-query) but the
+    server-reported mergeCommit OID is unavailable, the
+    production code MUST persist a PARTIAL record with the
+    best available evidence (no squash commit, no parent,
+    no tree) plus an unavailable_observations listing the
+    missing OID.
+
+    The PARTIAL record is the durable artifact: an operator
+    can later re-fetch the mergeCommit from the server
+    using the recorded auth and verify against the record.
+    The record's ``final_state`` is ``PARTIAL``, NOT
+    ``COMPLETE``. The transaction raises after the
+    record is on disk.
+    """
+    try:
+        from .artifacts import write_artifact
+        record = MergeRecord(
+            schema_version="autocoder.merge_record.v2",
+            run_id=auth.run_id,
+            repo=auth.repo,
+            pr_number=auth.pr_number,
+            authorized_head=auth.authorized_head,
+            squash_merge_commit="",
+            merge_commit_parent="",
+            squash_commit_parent_count=0,
+            squash_tree_sha256="",
+            final_local_main_sha="",
+            final_origin_main_sha="",
+            local_main_equals_origin_main=False,
+            feature_branch_deleted_locally=False,
+            feature_branch_deleted_remotely=False,
+            working_tree_clean=False,
+            aed_clean_post_merge=False,
+            candidate_sha256_unchanged=False,
+            verifier_record_sha256_unchanged=False,
+            candidate_exact_file_digest="",
+            verifier_record_exact_file_digest="",
+            authorization_exact_file_digest="",
+            merge_record_exact_file_digest="",
+            merge_timestamp=_utc_now(),
+            unavailable_observations=[unavailable_reason],
+            # The unauthorized_actions_taken map MUST keep the
+            # canonical thirteen-key shape so downstream auditors
+            # can scan a single schema. Use the standard keys, all
+            # False, and record the merge confirmation in ``notes``.
+            unauthorized_actions_taken={
+                "merge_other_sha": False,
+                "additional_commit_after_authorization": False,
+                "rebase": False,
+                "force_push": False,
+                "auto_merge": False,
+                "admin_bypass": False,
+                "merge_commit_or_rebase_merge": False,
+                "modify_pr_body": False,
+                "weaken_branch_protection": False,
+                "dismiss_reviews": False,
+                "next_wave": False,
+                "modify_aed": False,
+                "create_release_or_tag": False,
+            },
+            notes=(
+                f"PARTIAL recovery: server reported merged=true but no "
+                f"mergeCommit OID was observed; merge_commit_oid={pr_merge_commit_oid!r}; "
+                "the partial recovery record is durable evidence for an "
+                "operator to inspect and finalize the merge identity."
+            ),
+            final_state="PARTIAL",
+            )
+        write_artifact(
+            inputs.merge_record_artifact_path,
+            record.to_dict(),
+        )
+    except (OSError, TypeError, Exception) as exc:
+        # If even the partial record fails to write, log
+        # the failure but do not raise — the caller's
+        # raise is the user-visible signal.
+        log = getattr(inputs, "log", None)
+        if log is not None:
+            log(
+                "error",
+                "partial recovery merge record could not be written",
+                reason=str(exc),
+            )
+        # If even the partial record fails to write, log
+        # the failure but do not raise — the caller's
+        # raise is the user-visible signal.
+        log = getattr(inputs, "log", None)
+        if log is not None:
+            log(
+                "error",
+                "partial recovery merge record could not be written",
+                reason=str(exc),
+            )
 
 
 # === Backwards-compatible executor (test preview only) ===

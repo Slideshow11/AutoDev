@@ -122,7 +122,21 @@ def _good_cert(expected_head: str = HEAD) -> ReadinessCertificate:
     )
 
 
-def _builder_kwargs() -> dict:
+def _builder_kwargs(*, aed_repo_root: str | None = None, aed_source_commit: str | None = None) -> dict:
+    # Pre-canary round-281 §4: the AED-side candidate build no
+    # longer requires the historical /home/max/Automated-Edge-Discovery
+    # checkout. Callers MUST pass an ``aed_repo_root`` (and optional
+    # ``aed_source_commit``) pointing at a hermetic
+    # tmp_path-style AED-like source tree. CI no longer skips
+    # negative/fail-closed coverage because the AED path is
+    # hermetic.
+    if aed_repo_root is None:
+        # Back-compat default for callers that don't pass one.
+        aed_repo_root = os.environ.get(
+            "AUTODEV_AED_REPO_PATH"
+        ) or str(Path("/home") / "max" / "Automated-Edge-Discovery")
+    if aed_source_commit is None:
+        aed_source_commit = AED_HEAD
     return dict(
         run_id="r1",
         repo="o/r",
@@ -145,8 +159,38 @@ def _builder_kwargs() -> dict:
             "autocoder_lifecycle/__init__.py",
         ],
         aed_source_paths=["aed_lifecycle/__init__.py"],
-        aed_source_commit=AED_HEAD,
-        aed_repo_root=str("/home" + "/" + "max" + "/" + "Automated-Edge-Discovery"),
+        aed_source_commit=aed_source_commit,
+        aed_repo_root=aed_repo_root,
+    )
+
+
+def _tmp_aed_repo(tmp_path: Path) -> tuple[str, str]:
+    """Create a hermetic AED-like source tree under ``tmp_path``.
+
+    Returns ``(aed_repo_root, aed_source_commit)``. The repo has
+    one initial commit with a single tracked file
+    (``aed_lifecycle/__init__.py``) so source-attachment code can
+    ``git show`` it without needing the historical
+    ``Automated-Edge-Discovery`` checkout.
+    """
+    aed_root = tmp_path / "aed_repo"
+    aed_root.mkdir()
+    _git(aed_root, "init", "-q")
+    _git(aed_root, "config", "user.email", "test@example.com")
+    _git(aed_root, "config", "user.name", "Test")
+    pkg = aed_root / "aed_lifecycle"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("# hermetic AED-side fixture\n")
+    _git(aed_root, "add", "-A")
+    _git(aed_root, "commit", "-q", "-m", "aed-initial")
+    head = _git(aed_root, "rev-parse", "HEAD", check=False).stdout.strip()
+    return str(aed_root), head
+
+
+def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True, text=True, check=check,
     )
 
 
@@ -220,8 +264,15 @@ class TestCandidateBuilder:
 
 # === Refusal ===
 class TestCandidateRefusal:
-    def test_refuses_without_readiness(self) -> None:
-        # Bad readiness: missing a CI job
+    # Pre-canary round-281 §4: negative/fail-closed coverage is
+    # required in CI. The hermetic tmp_path AED fixture removes
+    # the historical-checkout dependency. No skip.
+
+    def test_refuses_without_readiness(self, tmp_path: Path) -> None:
+        # Pre-canary round-281 §4: avoid the hardcoded
+        # /home/max/AutoDev path; build a hermetic candidate
+        # against a tmp_path AED root.
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         bad_kwargs = _good_kwargs()
         runs = _check_runs()
         runs[0]["conclusion"] = "failure"
@@ -237,22 +288,34 @@ class TestCandidateRefusal:
             certificate_id="cert-bad",
             issuer="observer",
         )
-        b = CandidateBuilder(**_builder_kwargs())
+        b = CandidateBuilder(
+            **_builder_kwargs(
+                aed_repo_root=aed_root,
+                aed_source_commit=aed_commit,
+            )
+        )
         with pytest.raises(CandidateNotReady):
-            b.build(cert, str("/home" + "/" + "max" + "/" + "AutoDev"))
+            b.build(cert, aed_root)
 
-    def test_refuses_head_mismatch(self, tmp_git_repo) -> None:
-        # Cert expects HEAD, builder expects different head
+    def test_refuses_head_mismatch(self, tmp_git_repo, tmp_path: Path) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = "z" * 40
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateHeadMismatch):
             b.build(cert, tmp_git_repo.root)
 
-    def test_refuses_run_id_mismatch(self, tmp_git_repo) -> None:
+    def test_refuses_run_id_mismatch(self, tmp_git_repo, tmp_path: Path) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["run_id"] = "different-run"
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateNotReady):
@@ -296,9 +359,17 @@ def tmp_git_repo(tmp_path):
 
 
 class TestCandidateBuild:
-    def test_build_from_exact_head(self, tmp_git_repo) -> None:
+    # Pre-canary round-281 §4: the candidate build is exercised
+    # against a hermetic AED-like source tree under tmp_path.
+    # CI no longer skips these tests.
+
+    def test_build_from_exact_head(self, tmp_git_repo, tmp_path: Path) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["sample.py"]
         b = CandidateBuilder(**kwargs)
@@ -309,33 +380,44 @@ class TestCandidateBuild:
         assert len(sf["sha256"]) == 64
         assert sf["size_bytes"] > 0
 
-    def test_build_refuses_unsafe_path(self, tmp_git_repo) -> None:
+    def test_build_refuses_unsafe_path(self, tmp_git_repo, tmp_path: Path) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["../escape.py"]
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
             b.build(cert, tmp_git_repo.root)
 
-    def test_build_refuses_unsafe_head(self, tmp_git_repo) -> None:
+    def test_build_refuses_unsafe_head(self, tmp_git_repo, tmp_path: Path) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = "not_sha"
         kwargs["file_paths_to_attach"] = ["sample.py"]
         b = CandidateBuilder(**kwargs)
         with pytest.raises(CandidateError):
             b.build(cert, tmp_git_repo.root)
 
-    def test_build_writes_files(self, tmp_git_repo) -> None:
+    def test_build_writes_files(self, tmp_git_repo, tmp_path: Path) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         import hashlib
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["sample.py"]
         b = CandidateBuilder(**kwargs)
         cand = b.build(cert, tmp_git_repo.root)
-        # Verify the file contents match
         out = subprocess.check_output(
             ["git", "show", f"{tmp_git_repo.head_full()}:sample.py"],
             cwd=tmp_git_repo.root,
@@ -345,9 +427,17 @@ class TestCandidateBuild:
 
 # === Input hash checks ===
 class TestCandidateInputHashes:
-    def test_input_hash_mismatch_rejected(self, tmp_git_repo) -> None:
+    # Pre-canary round-281 §4: hermetic AED fixture; no skip.
+
+    def test_input_hash_mismatch_rejected(
+        self, tmp_git_repo, tmp_path: Path,
+    ) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["sample.py"]
         kwargs["expected_input_hashes"] = {"file:sample.py": "z" * 64}
@@ -355,7 +445,10 @@ class TestCandidateInputHashes:
         with pytest.raises(CandidateError):
             b.build(cert, tmp_git_repo.root)
 
-    def test_input_hash_match_accepted(self, tmp_git_repo) -> None:
+    def test_input_hash_match_accepted(
+        self, tmp_git_repo, tmp_path: Path,
+    ) -> None:
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         import hashlib
         cert = _good_cert(tmp_git_repo.head_full())
         out = subprocess.check_output(
@@ -363,7 +456,10 @@ class TestCandidateInputHashes:
             cwd=tmp_git_repo.root,
         )
         actual = hashlib.sha256(out).hexdigest()
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["sample.py"]
         kwargs["expected_input_hashes"] = {"file:sample.py": actual}
@@ -374,17 +470,24 @@ class TestCandidateInputHashes:
 
 # === Repository isolation ===
 class TestRepoIsolation:
-    """The candidate binds the exact head from a specific repository.
-    Mixing repositories must fail.
-    """
+    # Pre-canary round-281 §4: hermetic AED fixture; no skip.
 
-    def test_repo_owner_used_in_candidate(self, tmp_git_repo) -> None:
+    """The candidate binds the exact head from a specific repository.
+    Mixing repositories must fail."""
+
+    def test_repo_owner_used_in_candidate(
+        self, tmp_git_repo, tmp_path: Path,
+    ) -> None:
         """When self.repo is "DifferentOwner/DifferentRepo" but the checkout
         is for "o/r", the build must fail with CandidateError.
         """
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         from autocoder_orchestration.candidate import CandidateError
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["sample.py"]
         kwargs["repo"] = "DifferentOwner/DifferentRepo"
@@ -392,10 +495,16 @@ class TestRepoIsolation:
         with pytest.raises(CandidateError):
             b.build(cert, tmp_git_repo.root)
 
-    def test_repo_owner_matched_in_candidate(self, tmp_git_repo) -> None:
+    def test_repo_owner_matched_in_candidate(
+        self, tmp_git_repo, tmp_path: Path,
+    ) -> None:
         """When self.repo matches the checkout origin, the build succeeds."""
+        aed_root, aed_commit = _tmp_aed_repo(tmp_path)
         cert = _good_cert(tmp_git_repo.head_full())
-        kwargs = _builder_kwargs()
+        kwargs = _builder_kwargs(
+            aed_repo_root=aed_root,
+            aed_source_commit=aed_commit,
+        )
         kwargs["expected_head"] = tmp_git_repo.head_full()
         kwargs["file_paths_to_attach"] = ["sample.py"]
         kwargs["repo"] = "o/r"

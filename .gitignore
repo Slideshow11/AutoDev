@@ -28,3 +28,35 @@ autocoder_supervisor/supervisor.log
 # scanner would erroneously flag as forbidden tokens. The
 # cache is git-local and must never be committed.
 .ruff_cache/
+
+
+# Round-53 / C21: ignore runtime forensic artifacts and operator reports.
+# These are produced by the supervisor/operator during work and must
+# never be staged or committed. They contain secrets, audit-only data,
+# and round-* control-plane reports.
+# Runtime forensic artifacts (snapshot captures, openclaw backups, etc.)
+LIVE_STALL_FORENSICS_*.json
+round51_openclaw_db_pre_clear_*.sqlite3
+round51_openclaw_pre_recovery_*/
+round52_openclaw_pre_recovery_*/
+# Operator control-plane reports and deployed manifests
+round*_worker_attempt_result.json
+round*_final_report.json
+round*_deployed_manifest.json
+round*_canary_metrics.json
+round*_canary*_pre_state.json
+round*_canary*_post_state.json
+round*_migration_snapshot.json
+round*_signatures_index.txt
+round*_pre_canary_audit_snapshot.json
+round*_pre_canary_unresolved.json
+round*_continuation_return_report.json
+round*_return_report.json
+round*_section2_violation_record.json
+round*_canary1_signatures_index.txt
+round*_canary2_signatures_index.txt
+# Forward-only commits for control-plane infrastructure must not
+# accidentally stage these.
+
+# pytest tmp dirs
+tmp[a-z0-9_]*/

@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Round-697 source-controlled pre-commit assist for AED worker
+# sessions ONLY.
+#
+# Installed ONLY into worker child environments (see
+# autocoder_supervisor.aed_worker_wrapper). Never runs for an
+# interactive human git invocation.
+#
+# When a worker has touched a manifest-controlled destination
+# we deterministically run the canonical provenance finalizer
+# so the worker's commit becomes push-ready. If the
+# finalization raises the commit is rejected deterministically
+# (fail-closed) so the worker sees a clear error before any
+# network push attempts.
+#
+# The pre-push hook (sibling script) is the AUTHORITATIVE
+# network-push boundary; this hook is only an assist. If a
+# worker somehow disables this hook, the pre-push hook still
+# reads the canonical validator against the outgoing commit
+# and the supervisor's round-697 post-push validator remains
+# as defense in depth.
+#
+# Environment contract:
+#   AED_AUTODEV_WORKER         REQUIRED == "1" — otherwise
+#                              this script refuses to run, so
+#                              an operator who copies the repo
+#                              onto their workstation never sees
+#                              this hook fire.
+#   AED_WORKER_PRELAUNCH_HEAD  REQUIRED — 40-char hex SHA.
+#   AED_WORKER_ATTEMPT_ID      OPTIONAL — for log correlation.
+#
+# Exit codes:
+#   0  assist completed (or no controlled change); commit may
+#      proceed.
+#   1  hard error (missing env / wrong context / finalizer
+#      raised). The commit attempt should abort.
+#
+# The hook always aborts the commit (exit 1) on any
+# deterministically detectable problem.
+
+set -euo pipefail
+
+if [[ "${AED_AUTODEV_WORKER:-}" != "1" ]]; then
+    # The hook is installed as the worker's core.hooksPath,
+    # but the environment is what actually gates whether it
+    # fires. If we somehow get here without the env marker,
+    # refuse to participate. This is the belt-and-braces
+    # guard against an operator accidentally inheriting the
+    # hook by copying the source-controlled hooks dir.
+    echo "aed-pre-commit: refusing to run; AED_AUTODEV_WORKER!=1" >&2
+    exit 1
+fi
+
+if [[ -z "${AED_WORKER_PRELAUNCH_HEAD:-}" ]]; then
+    echo "aed-pre-commit: AED_WORKER_PRELAUNCH_HEAD is empty; aborting commit" >&2
+    exit 1
+fi
+
+# The hook runs from a normal Git checkout at the worker CWD;
+# resolve the repo root and prefer that as --cwd.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "${repo_root}" ]]; then
+    echo "aed-pre-commit: not inside a git working tree" >&2
+    exit 1
+fi
+
+# Use the source-controlled worker-hook driver. It must
+# live inside the source-controlled hooks directory so it
+# is always available alongside this hook.
+driver_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+driver="${driver_dir}/lib/precommit_finalize.py"
+if [[ ! -f "${driver}" ]]; then
+    echo "aed-pre-commit: missing driver ${driver}; aborting commit" >&2
+    exit 1
+fi
+
+# Do NOT enable the hook to operate on a NO-OP worker. The
+# driver inspects staged + working-tree content and only
+# invokes run_provenance_finalize_if_needed when at least
+# one manifest-controlled destination changed.
+attempt_label="${AED_WORKER_ATTEMPT_ID:-worker-precommit}"
+if ! python3 "${driver}" \
+        --repo-root "${repo_root}" \
+        --prelaunch-head "${AED_WORKER_PRELAUNCH_HEAD}" \
+        --attempt-label "${attempt_label}"; then
+    echo "aed-pre-commit: finalize driver failed; aborting commit" >&2
+    echo "  -> reproduce interactively:" >&2
+    echo "     PYTHONPATH=. python3 ${driver} --repo-root ${repo_root} --prelaunch-head ${AED_WORKER_PRELAUNCH_HEAD}" >&2
+    echo "  -> see test_round_push_gate_hooks.py case PRE_COMMIT_FINALIZER_FAILURE" >&2
+    exit 1
+fi
+
+exit 0

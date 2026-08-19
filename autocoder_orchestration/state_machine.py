@@ -160,6 +160,26 @@ _FORWARD_TRANSITIONS: Tuple[Transition, ...] = (
         durable_event="control_plane.repair_pushed",
         invalidates=frozenset({"ci_inventory", "review_inventory"}),
     ),
+    # Round-41: a worker that executed the directive and
+    # emitted structured ``NO_CHANGES_REQUIRED`` proof can
+    # advance REPAIRING_REVIEW_FINDINGS directly to
+    # QUALIFYING_READINESS, skipping AWAITING_CI because
+    # no commit was produced (so no CI gate is required for
+    # THIS round's commit). The supervisor's CI policy /
+    # quiet-window machinery handles the rest of the
+    # qualification. The required evidence is the
+    # ``no_changes_required_proof`` blob carrying
+    # per-finding disposition and verification summary.
+    Transition(
+        source=STATE_REPAIRING_REVIEW_FINDINGS,
+        target=STATE_QUALIFYING_READINESS,
+        authorized_actors=frozenset({"implementation_worker", "controller"}),
+        required_evidence=frozenset({"no_changes_required_proof"}),
+        head_stability="exact_head",
+        idempotency="first_wins",
+        durable_event="control_plane.no_changes_required",
+        invalidates=frozenset({"ci_inventory", "review_inventory"}),
+    ),
     Transition(
         source=STATE_QUALIFYING_READINESS,
         target=STATE_READY_FOR_CANDIDATE,
@@ -169,6 +189,25 @@ _FORWARD_TRANSITIONS: Tuple[Transition, ...] = (
         idempotency="first_wins",
         durable_event="control_plane.ready_for_candidate",
         invalidates=frozenset(),
+    ),
+    # Round-33: a head that previously qualified (CI clean, reviews clean)
+    # can receive NEW actionable reviews on the SAME head. The relay must
+    # be able to re-enter REPAIRING_REVIEW_FINDINGS without an
+    # intermediate QUALIFYING_READINESS -> READY_FOR_CANDIDATE -> ...
+    # back-walk. The required evidence is the actionable-review
+    # inventory that was not present at the prior qualifying decision;
+    # ``invalidates`` clears the prior readiness certificate so the
+    # next QUALIFYING_READINESS->READY_FOR_CANDIDATE transition must
+    # be re-earned with a fresh certificate.
+    Transition(
+        source=STATE_QUALIFYING_READINESS,
+        target=STATE_REPAIRING_REVIEW_FINDINGS,
+        authorized_actors=frozenset({"controller"}),
+        required_evidence=frozenset({"new_actionable_review_inventory"}),
+        head_stability="live",
+        idempotency="first_wins",
+        durable_event="control_plane.reopened_for_new_actionable_review",
+        invalidates=frozenset({"readiness_certificate"}),
     ),
     Transition(
         source=STATE_READY_FOR_CANDIDATE,

@@ -289,10 +289,17 @@ def _build_d0_fixture(verifier_payload_override=None):
             "mergeStateStatus": "CLEAN",
             "autoMergeRequest": None,
             "isDraft": False,
+            "reviewDecision": "APPROVED",
+            "repo": f"{ctx.repo_owner}/{ctx.repo_name}",
         },
         "live_ci_state": {"all_required_passing": True,
                             "coderabbit_passing": True},
-        "live_review_state": {"latest_coderabbit_state": "APPROVED"},
+        "live_review_state": {
+            "latest_coderabbit_state": "APPROVED",
+            "latest_coderabbit_login": "coderabbitai",
+            "canonical_reviewer_login": "coderabbitai",
+            "latest_coderabbit_commit_oid": ctx.current_authorized_head,
+        },
         "live_thread_inventory": {"unresolved_current": 0,
                                   "unresolved_outdated": 0},
         "working_tree_clean": True,
@@ -404,6 +411,22 @@ class FailedVerifierZeroGhInvocationsFullFixtureTests(unittest.TestCase):
             inputs = self._build_inputs(ctx, paths, fixtures)
             safe_run = self._safe_run_successful()
             post_merge_exception = None
+            # Round-48 C15: inject live fetchers so the
+            # in-lock refetch sees the bound snapshot. The
+            # _safe_run mock only intercepts the merge
+            # command; refetch reads from the bound
+            # snapshot.
+            from autocoder_orchestration.merge_authorization import (
+                _build_default_live_fetchers,
+            )
+            try:
+                _AH_d0 = inputs.live_pr_payload["head"]["sha"]
+            except Exception:
+                _AH_d0 = ctx.current_authorized_head
+            inputs._set_bypass_oid_reachability(True)
+            inputs._set_live_fetchers(
+                _build_default_live_fetchers(inputs, review_commit_oid=_AH_d0)
+            )
             with mock.patch(
                 "autocoder_orchestration.merge_authorization._safe_run",
                 safe_run,

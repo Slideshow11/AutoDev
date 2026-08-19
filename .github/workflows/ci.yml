@@ -24,7 +24,6 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
-          AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
           AED_REPO_NAME: AutoDev
           AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
@@ -42,7 +41,6 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
-          AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
           AED_REPO_NAME: AutoDev
           AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
@@ -60,7 +58,6 @@ jobs:
       - run: pip install pytest
       - run: pytest -q tests/test_autocoder_supervisor.py tests/test_autocoder_supervisor_packaging.py tests/test_extraction_provenance.py --no-header
         env:
-          AED_PR_NUMBER: "0"
           AED_REPO_OWNER: Slideshow11
           AED_REPO_NAME: AutoDev
           AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
@@ -131,3 +128,54 @@ jobs:
           persist-credentials: false
       - name: Run canonical committed-state scan
         run: python3 scripts/canonical_scanner.py
+
+  # Round-54/C22 §7: deterministic full-suite regression
+  # job. A regression caught by ANY test in the suite
+  # (including the long-tail round-N coverage, the
+  # directive-bridge contract tests, the
+  # result-contract-validation tests, etc.) MUST make
+  # exact-head CI fail. The earlier six jobs cover a
+  # focused subset (autocoder_supervisor + packaging +
+  # extraction_provenance) and a full-suite regression
+  # in the rest of the repo would slip past them.
+  # This job runs the ENTIRE pytest suite on Python 3.11
+  # and MUST pass before freeze.
+  full-suite:
+    name: full-suite
+    runs-on: ubuntu-latest
+    steps:
+      # Round-54/C22 §7: ``fetch-depth: 0`` ensures the
+      # checkout includes the full ``origin/<branch>`` ref
+      # namespace so the round-40 head-reconciliation
+      # tests can resolve ``origin/feat/review-repair-relay-v1``
+      # against the real git tree. The earlier six jobs
+      # do NOT need full history (they run a focused
+      # subset that reads only HEAD bytes).
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pytest + hermes runtime deps
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest build
+      - name: Run full repository pytest suite
+        # The full suite is the source-of-truth for
+        # production readiness. All round-54/C22 tests
+        # (system_event_terminality, retry_lifecycle,
+        # supervisor_contract_validation, provider_state
+        # _classification, final_repair, etc.) and all
+        # pre-existing round-N coverage MUST pass.
+        # A failure here is a freeze-blocker.
+        run: |
+          set -e
+          pytest -q tests/ --no-header \
+            -p no:cacheprovider
+        env:
+          AED_REPO_OWNER: Slideshow11
+          AED_REPO_NAME: AutoDev
+          AED_AUTHORITATIVE_HEAD: "0000000000000000000000000000000000000000"
+          PYTHONPATH: .
