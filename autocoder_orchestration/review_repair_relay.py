@@ -1200,6 +1200,201 @@ def _is_actionable_provider_comment(body: str) -> bool:
     return True
 
 
+#: Default operator-account set used by ``_maybe_resurrect_outdated_thread``
+#: when the snapshot does not carry one. ``coderabbitai[bot]``,
+#: ``chatgpt-codex-connector[bot]``, and any ``[bot]``-suffixed account
+#: are NEVER operator accounts. ``github-actions`` covers CI-bot replies.
+#: The list is intentionally conservative: reviewers (CodeRabbit, Codex)
+#: are NOT operators. The supervisor may override this via the snapshot's
+#: ``operator_logins`` field when richer identity is available.
+_C22_DEFAULT_OPERATOR_LOGINS: Tuple[str, ...] = (
+    "github-actions",
+    "github-actions[bot]",
+)
+
+
+def _parse_iso8601_utc(value: object) -> Optional[int]:
+    """Return a timestamp-seconds value for a GitHub-style ISO 8601
+    timestamp, or ``None`` when the value is missing / malformed.
+
+    GitHub returns ``createdAt`` / ``updatedAt`` as UTC strings like
+    ``"2026-08-19T14:27:14Z"`` or ``"2026-08-19T14:27:14.000Z"``.
+    The function is strict: anything unparseable returns ``None`` so
+    the caller can fall back to the strict "missing evidence" path
+    instead of guessing. The returned value is comparable across
+    comments in the same thread.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    # ``fromisoformat`` in 3.11 handles ``Z``; older builds need ``+00:00``.
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        import datetime as _dt
+        dt = _dt.datetime.fromisoformat(raw)
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        # Treat naive timestamps as UTC; GitHub always emits Z.
+        dt = dt.replace(tzinfo=_dt.timezone.utc)
+    return int(dt.timestamp())
+
+
+def _c22_is_followup_eligible(
+    *,
+    followup: dict,
+    first_created_ts: Optional[int],
+    operator_logins: Tuple[str, ...],
+) -> bool:
+    """Return True iff ``followup`` is a non-operator, NEWER, actionable
+    reply that can resurrect an outdated thread.
+
+    The eligibility rule (Autonomy C22):
+
+      R1. followup author must NOT be in ``operator_logins`` (operator
+          accounts can explain away a finding without re-elevating it).
+      R2. followup must carry a ``createdAt`` strictly later than the
+          first comment's ``createdAt`` (timestamp ordering inside the
+          same thread — the strongest durable evidence GitHub exposes;
+          ``comment.commit`` is NOT re-bound when a thread goes
+          outdated, so commit-oid evidence is unreliable).
+      R3. followup body must pass ``_is_actionable_provider_comment`` so
+          status markers (``Walkthrough``, ``In progress``, etc.) do not
+          resurrect threads.
+
+    Each rule has an inline source-pointer note. The helper is split
+    from ``_maybe_resurrect_outdated_thread`` so the eligibility rule is
+    unit-testable in isolation.
+    """
+    if not isinstance(followup, dict):
+        return False
+    # R1: non-operator author.
+    author = followup.get("author")
+    if (
+        not isinstance(author, str)
+        or not author
+        or author in operator_logins
+    ):
+        return False
+    # R2: strictly-later timestamp. Missing / unparseable createdAt on
+    # either side returns False (we cannot claim "newer" without a
+    # timestamp anchor).
+    followup_ts = _parse_iso8601_utc(followup.get("createdAt"))
+    if followup_ts is None or first_created_ts is None:
+        return False
+    if followup_ts <= first_created_ts:
+        return False
+    # R3: actionable body — not a status marker.
+    body = str(followup.get("body") or "")
+    if not _is_actionable_provider_comment(body):
+        return False
+    return True
+
+
+def _maybe_resurrect_outdated_thread(
+    thread_data: dict,
+    *,
+    current_head: Optional[str],
+    operator_logins: Tuple[str, ...] = _C22_DEFAULT_OPERATOR_LOGINS,
+) -> Optional[dict]:
+    """C22: reconsider an outdated, unresolved review thread when a NEW
+    non-operator follow-up reply exists.
+
+    Returns a dict describing the qualifying follow-up, or ``None`` when
+    the thread is not eligible.
+
+    The eligibility rule (see ``_c22_is_followup_eligible``):
+
+      - the thread itself must be outdated and unresolved (the caller
+        has already enforced that — this helper trusts the caller);
+      - there must be at least one reply whose ``createdAt`` is strictly
+        later than the first comment's ``createdAt``;
+      - the latest qualifying reply is returned so the caller can use
+        its body / author / id as the actionable follow-up evidence.
+
+    The captured ``createdAt`` evidence is the strongest durable binding
+    GitHub exposes: ``comment.commit`` is NOT re-bound when a thread
+    goes outdated, so timestamp ordering inside the same thread is the
+    only reliable signal that a follow-up post-dates the work that made
+    the original anchor stale. This is documented here so a future
+    revision does not silently weaken the rule by, e.g., switching to a
+    ``comment.commit`` check that the GraphQL payload does not
+    re-populate.
+
+    Parameters
+    ----------
+    thread_data:
+        The thread dict as captured by ``capture_live_snapshot``
+        (``resolved/outdated/path/line/body/commit_oid/author/
+        comment_count/top_id/replies`` plus optional
+        ``top_createdAt`` / ``replies[*].createdAt``). Both
+        ``top_createdAt`` and the first reply's ``createdAt`` are used
+        by the eligibility rule; missing timestamps fail closed
+        (return None).
+    current_head:
+        The snapshot's exact PR head. Currently informational; reserved
+        for the future case where head-anchored follow-ups become
+        available on newer GraphQL payloads.
+    operator_logins:
+        Set of account names whose replies are treated as operator
+        explanations and DO NOT resurrect outdated threads. Defaults to
+        ``_C22_DEFAULT_OPERATOR_LOGINS`` (``github-actions`` etc).
+        The supervisor's snapshot may override via the
+        ``operator_logins`` field, but this helper does not read it
+        directly — callers (``_collect_review_findings``,
+        ``collect_findings``) thread the override through their own
+        argument plumbing.
+
+    Returns
+    -------
+    Optional[dict]
+        A ``{"followup": <reply-dict>, "thread_id": <id>}`` pair, or
+        ``None``. The reply dict is the raw snapshot entry (NOT a
+        shaped Finding) so the caller can preserve the original
+        ``createdAt`` / ``author`` / ``databaseId`` provenance.
+    """
+    if not isinstance(thread_data, dict):
+        return None
+    # The eligibility rule treats ``resolved`` and ``outdated`` as
+    # caller-enforced invariants, but we double-check defensively so a
+    # naive caller cannot accidentally resurrect a stale or closed
+    # thread.
+    if thread_data.get("resolved"):
+        return None
+    if not thread_data.get("outdated"):
+        return None
+    replies = thread_data.get("replies") or []
+    if not isinstance(replies, list) or not replies:
+        return None
+    first_created_ts = _parse_iso8601_utc(
+        thread_data.get("top_createdAt")
+    )
+    # Walk replies in their stored order; the snapshot already sorts
+    # GraphQL comments by id and the supervisor preserves that order,
+    # so the last entry is the freshest.
+    qualifying: Optional[dict] = None
+    for reply in replies:
+        if not isinstance(reply, dict):
+            continue
+        if _c22_is_followup_eligible(
+            followup=reply,
+            first_created_ts=first_created_ts,
+            operator_logins=tuple(operator_logins),
+        ):
+            qualifying = reply
+    if qualifying is None:
+        return None
+    return {
+        "followup": qualifying,
+        "thread_id": (
+            thread_data.get("id")
+            or thread_data.get("thread_id")
+            or ""
+        ),
+    }
+
+
 def _collect_review_findings(snapshot: dict) -> List[Finding]:
     """Extract CodeRabbit-style inline-comment findings from a snapshot.
 
@@ -1441,6 +1636,16 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
         or {}
     )
     current_head = snapshot.get("head_sha")
+    # Round-C22/C22: snapshot may carry an ``operator_logins``
+    # override; default to the conservative set baked into
+    # ``_C22_DEFAULT_OPERATOR_LOGINS``. The helper uses this set to
+    # distinguish operator explanations from reviewer follow-ups so
+    # an outdated thread is only resurrected when a non-operator
+    # reviewer posts a NEWER reply.
+    operator_logins: Tuple[str, ...] = tuple(
+        snapshot.get("operator_logins")
+        or list(_C22_DEFAULT_OPERATOR_LOGINS)
+    )
     if isinstance(threads, dict):
         for thread_id, thread_data in threads.items():
             if not isinstance(thread_data, dict):
@@ -1448,6 +1653,92 @@ def _collect_review_findings(snapshot: dict) -> List[Finding]:
             if thread_data.get("resolved"):
                 continue
             if thread_data.get("outdated"):
+                # Round-C22/C22: do not auto-skip outdated threads.
+                # Trial 1B proved an outdated thread can carry a
+                # NEW non-operator reviewer reply that re-elevates
+                # the finding (its anchor went stale when the head
+                # advanced, but the reviewer re-asserted the concern
+                # on a newer review). Apply the narrow resurrection
+                # helper. If it returns ``None``, the thread has no
+                # qualifying follow-up and is skipped (the historical
+                # behavior is preserved for the A and B cases).
+                resurrected = _maybe_resurrect_outdated_thread(
+                    thread_data,
+                    current_head=current_head,
+                    operator_logins=operator_logins,
+                )
+                if resurrected is None:
+                    continue
+                # The finding is built from the QUALIFYING follow-up,
+                # not the stale first comment. The thread-level
+                # ``path`` / ``line`` are preserved as actionable
+                # anchors because GitHub does not re-anchor replies
+                # when a thread goes outdated.
+                followup = resurrected["followup"]
+                followup_db_id_raw = followup.get("id")
+                try:
+                    followup_db_id = (
+                        int(followup_db_id_raw)
+                        if followup_db_id_raw not in (None, "")
+                        else None
+                    )
+                except (TypeError, ValueError):
+                    followup_db_id = None
+                followup_body = str(followup.get("body") or "").strip()
+                followup_author = str(followup.get("author") or "")
+                followup_created = str(followup.get("createdAt") or "")
+                # Provenance prologue: keep the body prefix purely
+                # structured so the worker can identify the
+                # triggering follow-up without inventing a new
+                # Finding schema. The full follow-up body is
+                # appended after a blank line so the existing
+                # worker heuristics (severity, anchor extraction)
+                # operate on the actionable content.
+                thread_path = thread_data.get("path") or ""
+                thread_line = thread_data.get("line")
+                provenance_prologue = (
+                    "C22-resurrected follow-up evidence\n"
+                    f"thread_id: {thread_id}\n"
+                    f"triggering_comment_id: {followup_db_id_raw or ''}\n"
+                    f"triggering_author: {followup_author}\n"
+                    f"triggering_createdAt: {followup_created}\n"
+                    "outdated: true\n"
+                    f"current_head: {current_head or ''}\n"
+                    f"original_thread_comment_id: {thread_data.get('top_id') or ''}\n"
+                    f"thread_path: {thread_path}\n"
+                    f"thread_line: {thread_line if thread_line is not None else ''}\n"
+                    "\n"
+                )
+                finding_body = (
+                    provenance_prologue + followup_body
+                )
+                severity = _classify_severity(followup_body)
+                title = (
+                    followup_body.splitlines()[0]
+                    if followup_body
+                    else f"(thread {thread_id[-12:]})"
+                )
+                finding_id = f"thread:{thread_id}"
+                if finding_id in seen_ids:
+                    continue
+                seen_ids.add(finding_id)
+                findings.append(Finding(
+                    finding_id=finding_id,
+                    source="review_thread",
+                    severity=severity,
+                    title=title[:120],
+                    body=finding_body,
+                    file_path=thread_path if thread_path else None,
+                    line=(
+                        int(thread_line)
+                        if isinstance(thread_line, int) else None
+                    ),
+                    url=None,
+                    suggested_test=_extract_suggested_test(followup_body),
+                    review_id=None,
+                    comment_id=followup_db_id,
+                    check_name=None,
+                ))
                 continue
             thread_body = str(thread_data.get("body") or "").strip()
             thread_path = thread_data.get("path") or ""
@@ -1717,44 +2008,128 @@ def collect_findings(
             else None
         )
         current_head = snapshot.get("head_sha")
+        # Round-C22/C22: resolved threads still emit no finding
+        # (a closed thread keeps no actionable evidence). For
+        # outdated threads, apply the same narrow resurrection rule
+        # as the unfocused collector; the helper is shared so the
+        # two paths cannot drift on eligibility semantics.
+        operator_logins_focused: Tuple[str, ...] = tuple(
+            snapshot.get("operator_logins")
+            or list(_C22_DEFAULT_OPERATOR_LOGINS)
+        )
         if isinstance(thread_data, dict):
-            if thread_data.get("resolved"):
-                pass
-            elif thread_data.get("outdated"):
-                pass
-            else:
-                thread_body = str(thread_data.get("body") or "").strip()
-                thread_path = thread_data.get("path") or ""
-                thread_line = thread_data.get("line")
-                thread_commit_oid = thread_data.get("commit_oid")
-                if (
-                    not thread_body
-                    and not thread_path
-                    and thread_commit_oid
-                    and current_head
-                    and thread_commit_oid != current_head
-                ):
-                    pass
-                else:
-                    severity = _classify_severity(thread_body)
-                    title = (
-                        thread_body.splitlines()[0]
-                        if thread_body else f"(thread {focused_thread_id[-12:]})"
+            if not thread_data.get("resolved"):
+                # Resurrected branch: outdated + qualifying review
+                # follow-up. Build the finding from the follow-up,
+                # NOT the stale first comment. Same provenance
+                # prologue as the unfocused collector.
+                if thread_data.get("outdated"):
+                    resurrected = _maybe_resurrect_outdated_thread(
+                        thread_data,
+                        current_head=current_head,
+                        operator_logins=operator_logins_focused,
                     )
-                    review_findings.append(Finding(
-                        finding_id=f"thread:{focused_thread_id}",
-                        source="review_thread",
-                        severity=severity,
-                        title=title[:120],
-                        body=thread_body,
-                        file_path=thread_path if thread_path else None,
-                        line=int(thread_line) if isinstance(thread_line, int) else None,
-                        url=None,
-                        suggested_test=None,
-                        review_id=None,
-                        comment_id=None,
-                        check_name=None,
-                    ))
+                    if resurrected is not None:
+                        followup = resurrected["followup"]
+                        followup_db_id_raw = followup.get("id")
+                        try:
+                            followup_db_id = (
+                                int(followup_db_id_raw)
+                                if followup_db_id_raw not in (None, "")
+                                else None
+                            )
+                        except (TypeError, ValueError):
+                            followup_db_id = None
+                        followup_body = str(
+                            followup.get("body") or ""
+                        ).strip()
+                        followup_author = str(
+                            followup.get("author") or ""
+                        )
+                        followup_created = str(
+                            followup.get("createdAt") or ""
+                        )
+                        thread_path = thread_data.get("path") or ""
+                        thread_line = thread_data.get("line")
+                        provenance_prologue = (
+                            "C22-resurrected follow-up evidence\n"
+                            f"thread_id: {focused_thread_id}\n"
+                            f"triggering_comment_id: {followup_db_id_raw or ''}\n"
+                            f"triggering_author: {followup_author}\n"
+                            f"triggering_createdAt: {followup_created}\n"
+                            "outdated: true\n"
+                            f"current_head: {current_head or ''}\n"
+                            f"original_thread_comment_id: {thread_data.get('top_id') or ''}\n"
+                            f"thread_path: {thread_path}\n"
+                            f"thread_line: {thread_line if thread_line is not None else ''}\n"
+                            "\n"
+                        )
+                        finding_body = (
+                            provenance_prologue + followup_body
+                        )
+                        severity = _classify_severity(followup_body)
+                        title = (
+                            followup_body.splitlines()[0]
+                            if followup_body
+                            else f"(thread {focused_thread_id[-12:]})"
+                        )
+                        review_findings.append(Finding(
+                            finding_id=f"thread:{focused_thread_id}",
+                            source="review_thread",
+                            severity=severity,
+                            title=title[:120],
+                            body=finding_body,
+                            file_path=thread_path if thread_path else None,
+                            line=(
+                                int(thread_line)
+                                if isinstance(thread_line, int) else None
+                            ),
+                            url=None,
+                            suggested_test=_extract_suggested_test(
+                                followup_body
+                            ),
+                            review_id=None,
+                            comment_id=followup_db_id,
+                            check_name=None,
+                        ))
+                else:
+                    # Current-head path: unchanged behavior. The
+                    # historical exact-head guard via ``commit_oid``
+                    # is preserved byte-for-byte.
+                    thread_body = str(
+                        thread_data.get("body") or ""
+                    ).strip()
+                    thread_path = thread_data.get("path") or ""
+                    thread_line = thread_data.get("line")
+                    thread_commit_oid = thread_data.get("commit_oid")
+                    if (
+                        not thread_body
+                        and not thread_path
+                        and thread_commit_oid
+                        and current_head
+                        and thread_commit_oid != current_head
+                    ):
+                        pass
+                    else:
+                        severity = _classify_severity(thread_body)
+                        title = (
+                            thread_body.splitlines()[0]
+                            if thread_body else f"(thread {focused_thread_id[-12:]})"
+                        )
+                        review_findings.append(Finding(
+                            finding_id=f"thread:{focused_thread_id}",
+                            source="review_thread",
+                            severity=severity,
+                            title=title[:120],
+                            body=thread_body,
+                            file_path=thread_path if thread_path else None,
+                            line=int(thread_line) if isinstance(thread_line, int) else None,
+                            url=None,
+                            suggested_test=None,
+                            review_id=None,
+                            comment_id=None,
+                            check_name=None,
+                        ))
     else:
         review_findings = list(_collect_review_findings(snapshot))
     findings: List[Finding] = list(review_findings) + list(ci_findings)
@@ -3062,6 +3437,12 @@ __all__ = [
     "SEVERITY_P1",
     "SEVERITY_P2",
     "WORKER_PROMPT_TEMPLATE",
+    # Round-C22/C22: export so tests + callers can introspect the
+    # narrow resurrection helper without reaching into ``_``-prefixed
+    # names.
+    "_c22_is_followup_eligible",
+    "_maybe_resurrect_outdated_thread",
+    "_parse_iso8601_utc",
     "bump_slice_epoch",
     "build_directive",
     "build_worker_prompt",

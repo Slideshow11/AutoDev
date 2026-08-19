@@ -11366,8 +11366,17 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             "{ reviewThreads(first: 100, after: $cursor) "
             "{ pageInfo { hasNextPage endCursor } "
             "nodes { id isResolved isOutdated path "
+            # Round-C22/C22: capture ``comments.first``'s timestamps
+            # and per-comment author so the relay's finding
+            # collector can identify NEWER non-operator follow-up
+            # replies in outdated threads. ``createdAt`` is the
+            # strongest durable binding evidence (GitHub does NOT
+            # re-bind ``commit`` when a thread goes outdated, so
+            # timestamp ordering inside the same thread is what
+            # distinguishes a follow-up that survived a repair
+            # from a follow-up that pre-dates it).
             "comments(first: 25) { nodes { "
-            "body author { login } databaseId "
+            "body author { login } databaseId createdAt updatedAt "
             "path line commit { oid } } } } } } } }"
         )
         payload = json.dumps({
@@ -11483,17 +11492,30 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             # carried forward on stale provider evidence. Capture
             # each non-first comment as a reply entry with its
             # ``databaseId`` (stable GraphQL id) and full body.
-            # ``updatedAt`` is not selected by this query, so the
-            # reply falls back to ``""`` — both sides of the
-            # fingerprint therefore hash it consistently.
+            # Round-C22/C22: the C22 resurrection helper also needs
+            # ``createdAt`` + ``author`` per reply so it can apply
+            # the strict R1 (non-operator author) and R2
+            # (strictly-later ``createdAt`` than the first comment)
+            # eligibility rules.
             reply_entries: list[dict] = []
             for reply_node in comments_nodes[1:]:
                 if not isinstance(reply_node, dict):
                     continue
+                _reply_author_obj = reply_node.get("author")
+                _reply_author_login = (
+                    _reply_author_obj.get("login")
+                    if isinstance(_reply_author_obj, dict) else None
+                )
                 reply_entries.append({
                     "id": str(reply_node.get("databaseId") or ""),
-                    "updatedAt": "",
+                    "updatedAt": (
+                        reply_node.get("updatedAt") or ""
+                    ),
+                    "createdAt": (
+                        reply_node.get("createdAt") or ""
+                    ),
                     "body": reply_node.get("body") or "",
+                    "author": _reply_author_login,
                 })
             all_threads.append((
                 node_id,
@@ -11512,6 +11534,20 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     # fingerprint is sensitive to the first
                     # comment's identity.
                     "top_id": str(first_comment.get("databaseId") or ""),
+                    # Round-C22/C22: capture the first comment's
+                    # ``createdAt`` and ``updatedAt`` so the relay's
+                    # C22 resurrection helper can compute the
+                    # strictly-later-timestamp eligibility rule. The
+                    # snapshot previously dropped these timestamps;
+                    # restoring them here is the minimal evidence
+                    # needed to identify a NEW reviewer follow-up in
+                    # an outdated thread.
+                    "top_createdAt": (
+                        first_comment.get("createdAt") or ""
+                    ),
+                    "top_updatedAt": (
+                        first_comment.get("updatedAt") or ""
+                    ),
                     # Round-1064 P1#1: per-thread replies captured
                     # here are re-emitted by
                     # ``_snapshot_provider_thread`` so the
