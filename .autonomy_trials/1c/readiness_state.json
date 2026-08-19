@@ -1,6 +1,0 @@
-{
-  "head_sha_at_revoke": "9b9205d1ad168503c9baa6e3bea4ed6a0361177d",
-  "reason": "new_actionable_event",
-  "revoked_at": "2026-08-19T23:39:20Z",
-  "state": "ACTIVE_REPAIR"
-}
