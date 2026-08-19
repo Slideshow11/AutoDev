@@ -1799,6 +1799,41 @@ def cmd_review_repair_round(args: argparse.Namespace) -> int:
     return _emit(payload, json_mode=args.json, exit_code=EXIT_OK)
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Bounded, read-only installation health check.
+
+    Delegates to :func:`autocoder_orchestration.doctor.doctor_main`,
+    which is the single source of truth for the doctor behavior.
+    The CLI wrapper is intentionally thin: it only adapts CLI
+    args and forwards to ``doctor_main``.
+
+    The doctor's exit-code vocabulary (0=PASS/WARN, 1=FAIL,
+    2=internal doctor error) is mapped onto the CLI's canonical
+    exit-code table so callers reading ``autocoder-orchestration``
+    exit codes can distinguish an internal doctor error (5) from
+    an invalid-argument error (2). Otherwise both would surface
+    as exit 2.
+    """
+    from .doctor import doctor_main
+    from .doctor import EXIT_INTERNAL as DOCTOR_EXIT_INTERNAL
+    # ``args.json`` is the repo-canonical top-level --json flag;
+    # ``args.doctor_json`` is the doctor-subcommand ergonomic
+    # variant (``autocoder-orchestration doctor --json``). Both
+    # are honored; either one enables JSON mode.
+    json_mode = bool(getattr(args, "doctor_json", False)) or bool(args.json)
+    rc = doctor_main(
+        json_mode=json_mode,
+        state_root_parent=args.state_root_parent,
+        repo_root=args.repo_root,
+    )
+    if rc == DOCTOR_EXIT_INTERNAL:
+        # Map doctor's EXIT_INTERNAL (2) onto the CLI's EXIT_INTERNAL (5)
+        # so the caller can distinguish internal-doctor-error from
+        # CLI invalid-argument-error.
+        return EXIT_INTERNAL
+    return rc
+
+
 def cmd_review_repair_status(args: argparse.Namespace) -> int:
     """Print the relay's progress (round index, last decision, journal).
 
@@ -1941,6 +1976,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rs = sub.add_parser("review-repair-status", parents=[common])
     rs.add_argument("--evidence-root", default=None)
 
+    # Doctor: bounded, read-only installation health check.
+    # Does NOT require --state-root / --run-id because it is a
+    # stateless installation probe, not a run-state command.
+    doc = sub.add_parser("doctor")
+    doc.add_argument(
+        "--state-root-parent",
+        default="/var/tmp/autodev-evidence/state",
+        help="Parent directory for the intended AutoDev state root. "
+             "Doctor probes that the parent is creatable/writable/readable "
+             "with a temporary file (no persistent artifact).",
+    )
+    doc.add_argument(
+        "--repo-root",
+        default=None,
+        help="Optional explicit repository root. Defaults to the current "
+             "directory's git toplevel.",
+    )
+    # The repo's canonical pattern is ``--json`` at the top level
+    # (autocoder-orchestration --json doctor). The doctor also
+    # accepts ``--json`` AFTER the subcommand for ergonomics; the
+    # audit explicitly tests the post-subcommand form.
+    doc.add_argument(
+        "--json",
+        dest="doctor_json",
+        action="store_true",
+        default=False,
+        help="Emit JSON instead of human-readable output.",
+    )
+
     args = parser.parse_args(argv)
     try:
         if args.command == "status":
@@ -1971,6 +2035,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return cmd_review_repair_round(args)
         if args.command == "review-repair-status":
             return cmd_review_repair_status(args)
+        if args.command == "doctor":
+            return cmd_doctor(args)
     except (ControllerError, StateStoreError, CandidateError, MergeError) as e:
         return _emit(
             {"error": f"{type(e).__name__}: {e}"},

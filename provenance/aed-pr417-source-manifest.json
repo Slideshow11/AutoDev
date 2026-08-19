@@ -375,12 +375,12 @@
     },
     {
       "destination_path": "autocoder_orchestration/cli.py",
-      "destination_sha256": "f46e61e0ffdc470bc892a4362a65a4255f439eee285c1824feca1a84041674f4",
-      "destination_size_bytes": 81331,
+      "destination_sha256": "b7fb215f9be204baaec8e0c7f366c87c1f3f61139eb756554660ca4019aac3fd",
+      "destination_size_bytes": 84071,
       "source_path": null,
       "source_sha256": null,
       "transformation_classification": "standalone_source_addition",
-      "transformation_explanation": "cli.py cmd_merge and cmd_post_merge_verify recovery payloads include merge_record_path, merge_record_sha256, recovery_required, and recovery_action. Round-5 hardening directive."
+      "transformation_explanation": "cli.py wires the doctor subcommand (autocoder_orchestration.cli doctor) in addition to the original Round-5 hardening directive (cmd_merge / cmd_post_merge_verify recovery payloads). The doctor subcommand is a bounded, read-only installation health check; its exit code (0/1/2) is mapped onto the CLI's canonical exit-code table (0/1/5)."
     },
     {
       "destination_path": "tests/test_pr4_round5_hardening.py",
