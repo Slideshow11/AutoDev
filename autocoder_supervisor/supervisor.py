@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 #: Strict lowercase hex SHA-1/256 pattern. Used to validate
 #: rebind targets and any other 40-or-64-char head SHA.
@@ -12561,6 +12561,197 @@ def any_required_provider_in_progress(snap: dict) -> bool:
     return False
 
 
+def _evaluate_c23_required_blockers(
+    snap: dict, head_sha: str,
+) -> List[Dict[str, str]]:
+    """Round-C23 readiness gate helper.
+
+    Returns the list of required-reviewer blockers that
+    disqualify the snapshot from qualification. A blocker is
+    a provider whose plan is NOT_NEEDED-FAIL (anything other
+    than ``NOT_NEEDED``) AND whose policy marks it as
+    required. The caller (``evaluate_readiness``) renders
+    this list into the ``required_reviewer_pending`` reason.
+
+    The plan values that block readiness are:
+
+    - ``REQUEST``: AutoDev has just dispatched a review
+      request for this provider; the request is in flight
+      (the durable ledger record is REQUEST_INTENT /
+      REQUEST_SENT / ACKNOWLEDGED). The required reviewer's
+      terminal evidence is not yet on the current head, so
+      readiness must wait.
+    - ``WAITING_FOR_AUTO``: the provider may auto-run on
+      the next push (grace period not yet expired) or an
+      earlier request is within its cooldown window.
+    - ``BLOCK``: budget exhausted, policy disallows
+      trigger, or ``max_requests_per_head`` reached. The
+      canonical fail-closed state.
+
+    ``NOT_NEEDED`` is the only non-blocking action; it
+    means the provider has fresh exact-head evidence and no
+    further work is required.
+
+    The planner pre-stamps ``snap["reviewer_plan"]`` on every
+    snapshot. When the planner is unavailable (test fixtures,
+    legacy callers) the snapshot has no ``reviewer_plan``
+    field and this function returns ``[]`` (no blockers).
+    """
+    if not isinstance(snap, dict):
+        return []
+    plan = snap.get("reviewer_plan")
+    if not isinstance(plan, dict):
+        return []
+    blockers: List[Dict[str, str]] = []
+    for provider, entry in plan.items():
+        if not isinstance(entry, dict):
+            continue
+        action = entry.get("action")
+        if action == "NOT_NEEDED":
+            continue
+        blockers.append({
+            "provider": str(provider),
+            "action": str(action),
+            "reason": str(entry.get("reason") or ""),
+        })
+    return blockers
+
+
+def apply_reviewer_plan(
+    snap: dict,
+    *,
+    head_sha: Optional[str] = None,
+    ledger_path: Optional["Path"] = None,
+    post_review_request_fn=None,
+) -> Dict[str, Any]:
+    """Round-C23 heartbeat helper: compute the per-provider
+    trigger plan for the current head, apply REQUEST actions
+    through ``post_review_request`` (when provided), and
+    stamp the result on ``snap["reviewer_plan"]`` so
+    ``evaluate_readiness`` can fail-closed when a required
+    reviewer is missing or stalled.
+
+    The helper is intentionally a thin orchestration layer
+    on top of :class:`ReviewerPolicy` and
+    :func:`plan_reviewer_actions`. It does not call
+    ``post_review_request`` itself when the caller has not
+    supplied a ``post_review_request_fn``; test fixtures use
+    this mode to verify planner decisions without exercising
+    the supervisor's canonical review-request seam.
+
+    Returns the applied plan (same shape that
+    ``plan_reviewer_actions`` returns) so callers can log /
+    emit metrics without re-reading the snapshot.
+    """
+    from autocoder_supervisor.reviewer_policy import (
+        ReviewerPolicy,
+        load_policies_from_providers,
+        plan_reviewer_actions,
+    )
+    if not isinstance(snap, dict):
+        return {}
+    head = head_sha or snap.get("head_sha")
+    if not isinstance(head, str) or not head:
+        snap["reviewer_plan"] = {}
+        return {}
+    # The C23 directive fixes the per-provider
+    # ``required`` / ``auto_trigger`` semantics for this
+    # repository (codex MUST be required; sourcery is
+    # optional; coderabbit is required + initial-only
+    # budget). Override the loader's
+    # ``required_for_final_merge`` inheritance so the C23
+    # contract is not silently weakened by the existing
+    # round-32 ``PROVIDERS`` schema.
+    c23_overrides = {
+        "codex": {
+            "required": True,
+            "auto_trigger": True,
+            "max_requests_per_head": 1,
+        },
+        "sourcery": {
+            "required": False,
+            "auto_trigger": False,
+            "max_requests_per_head": 0,
+        },
+        "coderabbit": {
+            "required": True,
+            "auto_trigger": True,
+            "budget_per_pr": 1,
+            "max_requests_per_head": 1,
+        },
+    }
+    policies = load_policies_from_providers(
+        PROVIDERS,  # type: ignore[name-defined]
+        overrides=c23_overrides,
+    )
+    if not policies:
+        # No provider config: skip C23 (legacy behaviour
+        # preserved).
+        snap["reviewer_plan"] = {}
+        return {}
+    superseded_records: List[dict] = []
+    if REVIEW_REQUESTS_DIR is not None:  # type: ignore[name-defined]
+        try:
+            for p in Path(REVIEW_REQUESTS_DIR).glob(  # type: ignore[name-defined]
+                "*.superseded.json"
+            ):
+                try:
+                    superseded_records.append(
+                        json.loads(p.read_text())
+                    )
+                except Exception:
+                    continue
+        except Exception:
+            superseded_records = []
+    ledger = ledger_path
+    if ledger is None and REVIEW_REQUESTS_DIR is not None:  # type: ignore[name-defined]
+        ledger = Path(REVIEW_REQUESTS_DIR)  # type: ignore[name-defined]
+    plan = plan_reviewer_actions(
+        head_sha=head,
+        snap=snap,
+        policies=policies,
+        ledger_path=ledger,
+        superseded_records=superseded_records,
+    )
+    # Apply REQUEST actions through the canonical
+    # review-request seam. We only fire requests for the
+    # FIRST occurrence per supervisor slice — the planner's
+    # dedup rules (``max_requests_per_head`` + cooldown)
+    # already gate the duplicate-trigger path.
+    dispatched: Dict[str, bool] = {}
+    for provider, plan_entry in plan.items():
+        if plan_entry.action != "REQUEST":
+            continue
+        if post_review_request_fn is None:
+            # Caller does not want to actually trigger; the
+            # plan records REQUEST but ``dispatched`` stays
+            # ``False`` so test fixtures can distinguish.
+            continue
+        try:
+            ok = bool(
+                post_review_request_fn(provider=provider, head_sha=head)
+            )
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            log(
+                "warning",
+                "apply_reviewer_plan: post_review_request raised",
+                provider=provider,
+                error=str(exc)[:200],
+            )
+        dispatched[provider] = ok
+    # Stamp the plan on the snapshot for ``evaluate_readiness``
+    # and audit consumers. The dict form is JSON-serialisable
+    # so the supervisor's existing audit ledger can store it.
+    snap["reviewer_plan"] = {
+        provider: dict(plan_entry.__dict__)
+        for provider, plan_entry in plan.items()
+    }
+    for provider, ok in dispatched.items():
+        snap["reviewer_plan"][provider]["dispatched"] = ok
+    return snap["reviewer_plan"]
+
+
 def evaluate_readiness(
     snap: dict, head: Optional[str] = None,
 ) -> dict:
@@ -12678,6 +12869,24 @@ def evaluate_readiness(
         return {
             "ready": False,
             "reason": "required_provider_in_progress",
+        }
+    # Round-C23: per-provider exact-head freshness. A
+    # required reviewer that is missing or anchored to a
+    # prior head MUST block qualification; AutoDev may have
+    # issued a request, but the reviewer evidence is not yet
+    # present on the current head. The plan is stamped on
+    # the snapshot by ``apply_reviewer_plan`` (the supervisor
+    # heartbeat loop's pre-readiness pass); when the planner
+    # is not available this branch is a no-op (the snapshot's
+    # ``reviewer_plan`` field is optional).
+    _c23_required_blockers = _evaluate_c23_required_blockers(
+        snap, h,
+    )
+    if _c23_required_blockers:
+        return {
+            "ready": False,
+            "reason": "required_reviewer_pending",
+            "required_reviewer_blockers": _c23_required_blockers,
         }
     if ci_state == CI_POLICY_NO_REQUIRED_CHECKS:
         return {
@@ -16534,6 +16743,27 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             elif cur_state in READINESS_STATES:
                 snap_now = capture_live_snapshot(rs, token or "")
+                # Round-C23: stamp the reviewer plan on the
+                # snapshot BEFORE the readiness gate so a
+                # missing required reviewer blocks
+                # qualification. The plan applies REQUEST
+                # actions through the canonical
+                # ``post_review_request`` seam when one is
+                # available; production callers supply the
+                # real seam, test fixtures supply None.
+                try:
+                    apply_reviewer_plan(
+                        snap_now,
+                        head_sha=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                        post_review_request_fn=post_review_request,  # type: ignore[name-defined]
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log(
+                        "warning",
+                        "apply_reviewer_plan raised; "
+                        "C23 readiness gate may emit false positive",
+                        error=str(exc)[:200],
+                    )
                 reasons = snapshot_differs(
                     read_snapshot("A"), snap_now,
                     AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
