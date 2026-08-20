@@ -603,6 +603,7 @@ class FindingLedger:
         *,
         new_head_sha: Optional[str] = None,
         directive_id: Optional[str] = None,
+        superseded_at: Optional[str] = None,
     ) -> int:
         """Mark every ACTIVE finding on ``old_head_sha`` as
         SUPERSEDED.
@@ -623,9 +624,18 @@ class FindingLedger:
             push the controller observed at the moment of the
             transition (the same value ``report_repair_pushed``
             binds to ``AWAITING_CI``).
-          - ``superseded_at`` (already exists): wall-clock
-            ISO 8601 timestamp at which the transition was
-            recorded.
+          - ``superseded_at`` (already exists): ISO 8601
+            timestamp of the authoritative verified repair /
+            push event. When ``superseded_at`` is supplied
+            (Round-C24 / Defect 3) the relay persists that
+            value verbatim so a reviewer follow-up posted
+            AFTER the actual verified push but BEFORE the
+            supervisor observes the push still compares
+            correctly against the real transition time. When
+            ``superseded_at`` is None, the relay falls back
+            to ``_now_iso()`` (the legacy behaviour) — a
+            strictly later wall-clock observation time that
+            the audit flagged as defect-prone.
           - ``directive_id`` (optional): the relay's directive
             UUID that drove the head advance. The audit's
             preference is to record whatever durable
@@ -709,7 +719,24 @@ class FindingLedger:
                 continue
             superseded = dict(entry)
             superseded["state"] = FINDING_STATE_SUPERSEDED
-            superseded["superseded_at"] = _now_iso()
+            # Round-C24 / Defect 3: prefer the authoritative
+            # verified repair / push event time when the caller
+            # supplies ``superseded_at``. Falling back to
+            # ``_now_iso()`` (the legacy behaviour) is the audit's
+            # documented defect because the supervisor's
+            # observation wall clock is strictly later than the
+            # verified push it observes.
+            # Missing trustworthy worker/push timing fails closed for
+            # outdated-thread resurrection. The later ledger observation
+            # wall clock must never masquerade as the repair boundary.
+            if (
+                isinstance(superseded_at, str)
+                and superseded_at
+                and _parse_iso8601_utc(superseded_at) is not None
+            ):
+                superseded["superseded_at"] = superseded_at
+            else:
+                superseded.pop("superseded_at", None)
             # Round-C22R2/P1: durable superseding-head evidence.
             # When the caller passes ``new_head_sha`` we record
             # it; without it we leave the legacy row shape
@@ -3637,6 +3664,7 @@ class RelayLoop:
         new_head_sha: str,
         *,
         directive_id: Optional[str] = None,
+        superseded_at: Optional[str] = None,
     ) -> None:
         """Bind the worker push to the state machine.
 
@@ -3702,10 +3730,23 @@ class RelayLoop:
         # optional ``directive_id`` so the SUPERSEDED row
         # carries the durable superseding-head evidence.
         old_ledger = FindingLedger(self.store, head_sha=old_head_sha)
+        # Round-C24 / Defect 3: forward the authoritative
+        # verified repair / push event timestamp so the
+        # SUPERSEDED rows compare correctly against a
+        # reviewer follow-up that was posted after the actual
+        # push but before the supervisor observed the push.
+        # The caller (``mark_head_advanced_public`` in
+        # ``relay_wiring.py``) reads ``attempt.finished_at``
+        # which is the canonical wall-clock the worker
+        # recorded after verifying its own push to the live
+        # PR. That timestamp is strictly EARLIER than the
+        # supervisor's heartbeat observation time, which is
+        # the value ``_now_iso()`` would otherwise produce.
         promoted = old_ledger.mark_superseded_by_head(
             old_head_sha,
             new_head_sha=new_head_sha,
             directive_id=directive_id,
+            superseded_at=superseded_at,
         )
         log_attr = getattr(self.controller, "log", None)
         if log_attr is not None and promoted:

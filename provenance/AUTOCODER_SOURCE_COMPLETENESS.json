@@ -7467,9 +7467,9 @@
         "destination_path": "autocoder_supervisor/supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
-        "destination_sha256": "ef04bd00b4179e0897ab1deae794466cf4d09ba23726173fd9be20b70ecb9cac",
+        "destination_sha256": "e943e355d9980b7b56cc09f2f310eb99e276e6f66cc7afb972424d5b7267ca12",
         "source_size_bytes": 86428,
-        "destination_size_bytes": 704768,
+        "destination_size_bytes": 722977,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
       },
       {
@@ -7487,9 +7487,9 @@
         "destination_path": "tests/test_autocoder_supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "d51b2e21a4a2bb39619acc70de848a9adbdc4ee28a74ccac25914ca7e7781260",
-        "destination_sha256": "6156b9a5f7cc8cbfa34567aa2116332ecc1f1f5048001e0d9b57501dc29e9b11",
+        "destination_sha256": "389ad7e4f9032d315b8b5ba0facf8ae2d5bf7522d2272b5655fe3bb7ffe51381",
         "source_size_bytes": 39831,
-        "destination_size_bytes": 320615,
+        "destination_size_bytes": 320684,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. Round-146 P1 added test_round146_p1_per_pr_authoritative_head_rebind. The test file is no longer byte-identical to the AED source."
       },
       {

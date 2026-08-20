@@ -524,6 +524,7 @@ def _apply_config(cfg: SupervisorConfig) -> dict[str, Any]:
         "AUTHORITATIVE_HEAD": os.environ.get(
             "AED_AUTHORITATIVE_HEAD", ""
         ),
+        "REQUIRED_CHECK_NAMES": list(cfg.required_check_names),
         # Cadence / cooldowns
         "HEARTBEAT_SECS": cfg.heartbeat_seconds,
         "RESUME_COOLDOWN_SECS": cfg.cooldown_seconds,
@@ -754,9 +755,18 @@ def _reconcile_orchestration_state_root_at_boot() -> str:
     """
     from .orchestration_state_root import (
         OrchestrationRootError,
+        OrchestrationRootMissing,
+        OrchestrationRootUnverified,
         persist_orchestration_state_root,
         resolve_orchestration_state_root,
     )
+    env_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    expected_run_id = None
+    if not env_root:
+        try:
+            expected_run_id = read_run_state().get("last_bound_run_id")
+        except OrchestrationRootError:
+            expected_run_id = None
     # (b) already persisted? Then the resolver returns it
     # without touching the disk and the supervisor stays
     # in steady-state. We do NOT need to call persist
@@ -765,57 +775,125 @@ def _reconcile_orchestration_state_root_at_boot() -> str:
         existing = resolve_orchestration_state_root(
             run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
             expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_run_id=expected_run_id,
             expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
         )
         if existing:
+            if env_root:
+                context_payload = json.loads(
+                    (Path(existing) / "run_context.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                persist_orchestration_state_root(
+                    state_root=existing,
+                    run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+                    repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
+                    repo_name=str(REPO_NAME),  # type: ignore[name-defined]
+                    run_id=str(context_payload.get("run_id") or ""),
+                    pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+                )
             return existing
-    except OrchestrationRootError:
-        # (c) no recorded root AND the env var is unset.
-        # Nothing to persist yet — defer until the operator
-        # sets ``AED_ORCHESTRATION_STATE_ROOT`` explicitly.
+    except OrchestrationRootUnverified:
+        # The resolver positively identified an
+        # orchestration_state_root field in RUN_STATE but
+        # could NOT verify the underlying root (corrupt /
+        # missing run_context.json / mismatched repo /
+        # mismatched PR / mismatched run_id). Round-C24 /
+        # Defect 1 fail-closed: refuse to silently
+        # overwrite. The supervisor routes to BLOCKED /
+        # escalation.
+        log(
+            "error",
+            "round-C24: existing orchestration_state_root did "
+            "NOT verify; refusing to bootstrap a different "
+            "root. Operator intervention required.",
+        )
+        return ""
+    except OrchestrationRootMissing:
+        # (c) no recorded root AND no env var is set —
+        # nothing to persist yet. Fall through to the
+        # round-C24 bootstrap branch below.
         pass
     # (c) env var is set but the supervisor hasn't
     # recorded it yet. Persist the env-var value into
     # RUN_STATE so subsequent boots and the relay
     # subprocess see the same canonical binding.
-    env_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
-    if not env_root:
+    # An explicit root was already positively verified and persisted
+    # above. Reaching this branch with it still set means verification
+    # failed, so fail closed instead of attempting another binding.
+    if env_root:
         return ""
+    # (d) Round-C24 / Defect 1: bootstrap a fresh orchestration
+    # state root when no env var is set AND no persisted
+    # RUN_STATE["orchestration_state_root"] exists AND no
+    # positively-verified root is reachable on disk. The
+    # bootstrap step preserves the round-28 invariant: it does
+    # NOT silently substitute STATE_DIR for the orch root;
+    # instead it allocates a deliberate
+    # ``<STATE_DIR.parent>/orchestration_runs/<run_id>/``
+    # directory, creates the canonical run_context.json +
+    # state.json + relay state files, persists the concrete
+    # path into RUN_STATE, and positively verifies the new
+    # root via the canonical resolver. The caller (the
+    # supervisor's main boot path) MUST hold the singleton
+    # lock before invoking this branch; concurrent bootstrap
+    # is impossible by construction.
     try:
-        persist_orchestration_state_root(
-            state_root=str(env_root),
-            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+        from .orchestration_bootstrap import (
+            bootstrap_orchestration_state_root,
+        )
+        bootstrap_parent = Path(STATE_DIR).parent / "orchestration_runs"  # type: ignore[name-defined]
+        bootstrap_root = bootstrap_orchestration_state_root(
+            state_dir=Path(STATE_DIR),  # type: ignore[name-defined]
+            state_root_parent=bootstrap_parent,
             repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
             repo_name=str(REPO_NAME),  # type: ignore[name-defined]
-            run_id=str(
-                globals().get("RUN_ID")  # type: ignore[name-defined]
-                or f"PR-{PR_NUMBER}"  # type: ignore[name-defined]
-            ),
             pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+            branch=str(
+                globals().get("FEATURE_BRANCH")
+                or os.environ.get("AED_BRANCH")
+                or ""
+            ),
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            current_authorized_head=str(
+                globals().get("AUTHORITATIVE_HEAD")
+                or ""
+            ),
+            authorized_base_sha=str(
+                globals().get("AUTHORIZED_BASE_SHA")
+                or ""
+            ),
+            local_checkout=Path(REPO_DIR),  # type: ignore[name-defined]
+            base_branch=os.environ.get("AED_BASE_BRANCH", "main"),
+            required_ci_jobs=tuple(
+                globals().get("REQUIRED_CHECK_NAMES") or ()
+            ),
+            implementation_worker_command=tuple(
+                globals().get("WORKER_COMMAND_TEMPLATE") or ("true",)
+            ),
         )
         log(
             "info",
-            "round-275 wired orchestration_state_root into RUN_STATE "
-            "from AED_ORCHESTRATION_STATE_ROOT",
-            state_root=env_root,
+            "round-C24 bootstrap allocated orchestration state root",
+            state_root=bootstrap_root,
         )
-        return str(env_root)
+        return bootstrap_root
     except OrchestrationRootError as exc:
         log(
             "warning",
-            "round-275 persist_orchestration_state_root failed; "
-            "supervisor continues with in-memory state_root",
-            state_root=env_root,
-            error=str(exc),
+            "round-C24 bootstrap refused to allocate orchestration "
+            "state root; supervisor continues without orch root "
+            "(same fail-closed behaviour as round-275)",
+            error=str(exc)[:300],
         )
         return ""
     except Exception as exc:  # noqa: BLE001
         log(
             "warning",
-            "round-275 persist_orchestration_state_root raised "
-            "unexpected exception",
-            state_root=env_root,
-            error=str(exc)[:200],
+            "round-C24 bootstrap raised unexpected exception; "
+            "supervisor continues without orch root",
+            error=str(exc)[:300],
         )
         return ""
 
@@ -8861,7 +8939,285 @@ def mark_review_request_superseded(
         )
 
 
-def post_review_request(provider: str, head_sha: str) -> bool:
+def _parse_review_request_marker(body: str):
+    """Parse an AutoDev review-request marker from a
+    comment body. Returns the canonical
+    ``(provider, head_sha, request_id)`` tuple or ``None``
+    when the body does not carry a well-formed marker.
+
+    Marker shape (Round-C24 / Defect 7):
+
+      <!-- autodev-review-request:v1:<provider>:<full_head_sha>:<request_id> -->
+
+    The FULL head SHA is required (40 or 64 lowercase hex
+    chars); a 12-char prefix is rejected because it cannot
+    uniquely identify the head. The audit's P1 finding
+    identified the 12-char-prefix marker as the root cause
+    of the four-request duplicate observed live.
+    """
+    import re as _re
+    if not isinstance(body, str):
+        return None
+    match = _re.search(
+        r"<!--\s*autodev-review-request:v1:"
+        r"(?P<provider>[A-Za-z0-9_\-]+):"
+        r"(?P<head>[0-9a-f]{40}|[0-9a-f]{64}):"
+        r"(?P<rid>req-[A-Za-z0-9._-]+)"
+        r"\s*-->",
+        body,
+    )
+    if match is None:
+        return None
+    return (
+        match.group("provider"),
+        match.group("head"),
+        match.group("rid"),
+    )
+
+
+def _pr_already_has_pending_request(*, provider: str, head_sha: str) -> bool:
+    """Round-C24 / Defect 7: cross-run idempotency authority.
+
+    Query GitHub for the live PR's issue comments and check
+    whether ANY comment carries a valid AutoDev marker that
+    pairs ``provider`` + ``head_sha``. When such a marker
+    exists the supervisor must NOT post another comment for
+    the same provider/head pair.
+
+    Returns True when a marker for ``provider`` / ``head_sha``
+    is found in the live PR's issue comments, False
+    otherwise. The function never raises; transport
+    failures return False so the caller falls through to
+    the fresh-post path and the supervisor continues to
+    operate.
+    """
+    if not provider or not head_sha:
+        return False
+    try:
+        import json as _json
+        import subprocess as _subprocess
+        proc = _subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments",  # type: ignore[name-defined]
+                "--paginate",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        comments = _json.loads(proc.stdout or "[]")
+    except _json.JSONDecodeError:
+        return False
+    if not isinstance(comments, list):
+        return False
+    for c in comments:
+        body = c.get("body") if isinstance(c, dict) else None
+        parsed = _parse_review_request_marker(body or "")
+        if parsed is None:
+            continue
+        marker_provider, marker_head, _marker_rid = parsed
+        if (
+            marker_provider == provider
+            and marker_head == head_sha
+        ):
+            return True
+    return False
+
+
+def _adopt_existing_marker(
+    *,
+    provider: str,
+    head_sha: str,
+    writer,
+) -> Optional[str]:
+    """Round-C24 / Defect 7: locate the existing AutoDev
+    marker on the live PR for ``provider`` + ``head_sha``
+    and persist the discovered ``request_id`` into the
+    local supervisor ledger so the per-head cap / cooldown
+    machinery sees a coherent local record.
+
+    The function chooses the most-recent marker (by
+    ``created_at``) when multiple historical duplicates
+    already exist. Multiple historical duplicates MUST NOT
+    produce another post; this is exactly the live-1C
+    defect the audit flagged.
+    """
+    import datetime as _dt
+    import json as _json
+    import subprocess as _subprocess
+    if not provider or not head_sha:
+        return None
+    try:
+        proc = _subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments",  # type: ignore[name-defined]
+                "--paginate",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        comments = _json.loads(proc.stdout or "[]")
+    except _json.JSONDecodeError:
+        return None
+    if not isinstance(comments, list):
+        return None
+    matches = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        body = c.get("body") or ""
+        parsed = _parse_review_request_marker(body)
+        if parsed is None:
+            continue
+        marker_provider, marker_head, marker_rid = parsed
+        if (
+            marker_provider == provider
+            and marker_head == head_sha
+        ):
+            created_at = c.get("created_at") or ""
+            remote_comment_id = str(c.get("id") or "")
+            remote_comment_url = (
+                c.get("html_url") or c.get("url") or ""
+            )
+            matches.append(
+                (
+                    created_at,
+                    marker_rid,
+                    remote_comment_id,
+                    remote_comment_url,
+                )
+            )
+    if not matches:
+        return None
+    # Most-recent first; deterministic tiebreaker on rid.
+    matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    chosen_created_at, chosen_rid, chosen_id, chosen_url = matches[0]
+    # Persist the discovered record locally so the per-head
+    # cap / cooldown machinery treats this request as
+    # in-flight. We promote it to REQUEST_SENT because the
+    # comment is already on the live PR.
+    try:
+        writer(
+            provider,
+            head_sha,
+            {
+                "actor": "round_c24_marker_adoption",
+                "lifecycle": "REQUEST_SENT",
+                "request_head": head_sha,
+                "request_id": chosen_rid,
+                "requested_at": chosen_created_at or now_iso(),
+                "sent_at": chosen_created_at or now_iso(),
+                "marker": (
+                    f"<!-- autodev-review-request:v1:"
+                    f"{provider}:{head_sha}:{chosen_rid} -->"
+                ),
+                "remote_comment_id": chosen_id,
+                "remote_comment_url": chosen_url,
+                "adopted_from": "live_pr_marker_reconciliation",
+            },
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return chosen_rid
+
+
+def _fetch_and_adopt_global_request_marker(
+    *, provider: str, head_sha: str,
+) -> str:
+    """Return ``found``, ``missing``, or ``error`` for GitHub marker state.
+
+    A found marker is adopted into the local ledger. GitHub transport or
+    pagination failure is an error and fails closed; it must never authorize
+    a speculative duplicate post.
+    """
+    token = get_github_token() or ""
+    if not token:
+        return "error"
+    matches: List[dict] = []
+    for page in range(1, 11):
+        comments = github_get(
+            f"/repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments"  # type: ignore[name-defined]
+            f"?per_page=100&page={page}",
+            token,
+        )
+        if comments is None or not isinstance(comments, list):
+            return "error"
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            parsed = _parse_review_request_marker(comment.get("body") or "")
+            if parsed and parsed[0] == provider and parsed[1] == head_sha:
+                matches.append({
+                    "request_id": parsed[2],
+                    "id": str(comment.get("id") or ""),
+                    "url": comment.get("html_url") or comment.get("url") or "",
+                    "created_at": comment.get("created_at") or "",
+                })
+        if len(comments) < 100:
+            break
+    else:
+        return "error"
+    if not matches:
+        return "missing"
+    matches.sort(key=lambda item: (item["created_at"], item["id"], item["request_id"]))
+    chosen = matches[0]
+    write_review_request(
+        provider=provider,
+        head_sha=head_sha,
+        record={
+            "actor": "round_c24_marker_adoption",
+            "lifecycle": "REQUEST_SENT",
+            "request_head": head_sha,
+            "request_id": chosen["request_id"],
+            "requested_at": chosen["created_at"] or now_iso(),
+            "sent_at": chosen["created_at"] or now_iso(),
+            "marker": (
+                f"<!-- autodev-review-request:v1:{provider}:"
+                f"{head_sha}:{chosen['request_id']} -->"
+            ),
+            "remote_comment_id": chosen["id"],
+            "remote_comment_url": chosen["url"],
+            "adopted_from": "live_pr_marker_reconciliation",
+            "historical_duplicate_count": max(0, len(matches) - 1),
+            "historical_duplicate_request_ids": [
+                item["request_id"] for item in matches[1:]
+            ],
+        },
+    )
+    return "found"
+
+
+def _global_review_request_lock(provider: str, head_sha: str) -> int:
+    """Acquire the host-global provider/head mutation lock."""
+    import hashlib as _hashlib
+    import tempfile as _tempfile
+    lock_root = Path(_tempfile.gettempdir()) / "autodev-review-request-locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    identity = (
+        f"{REPO_OWNER}/{REPO_NAME}#{PR_NUMBER}:{provider}:{head_sha}"  # type: ignore[name-defined]
+    )
+    digest = _hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    fd = os.open(str(lock_root / f"{digest}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _post_review_request_locked(provider: str, head_sha: str) -> bool:
     """Round-44 C12 + Round-54/C22 §4: send the provider review
     request ONLY after re-verifying the live PR head matches
     the requested exact head.
@@ -8912,6 +9268,11 @@ def post_review_request(provider: str, head_sha: str) -> bool:
             provider=provider,
         )
         return False
+    existing_local = read_review_request(provider, head_sha)
+    if existing_local and existing_local.get("lifecycle") in (
+        "REQUEST_SENT", "ACKNOWLEDGED", "REVIEW_COMPLETE",
+    ):
+        return False
     handle = cfg["trigger_handle"]
     live_head = fetch_live_pr_head_now()
     if not live_head:
@@ -8947,10 +9308,57 @@ def post_review_request(provider: str, head_sha: str) -> bool:
     # by a stable identifier that survives process death.
     import uuid as _uuid
     _request_id = f"req-{_uuid.uuid4().hex[:16]}"
+    # Round-C24 / Defect 7: the marker MUST carry the FULL
+    # head SHA (not a 12-char prefix) so a different
+    # supervisor lifetime with a different state directory
+    # can still match this request when it scans the live PR
+    # for cross-run idempotency. The audit explicitly
+    # identified this as the trigger for the four-request
+    # duplicate defect observed live on PR #9 in Trial 1C.
     _marker = (
         f"<!-- autodev-review-request:v1:"
-        f"{provider}:{live_head[:12]}:{_request_id} -->"
+        f"{provider}:{live_head}:{_request_id} -->"
     )
+    # Round-C24 / Defect 7: BEFORE persisting REQUEST_INTENT
+    # and BEFORE any remote mutation, scan the live PR's
+    # issue comments for an existing AutoDev marker that
+    # already pairs ``provider`` + ``live_head``. If one is
+    # found, adopt the discovered ``request_id`` into the
+    # local ledger (so the per-head cap / cooldown remain
+    # consistent across supervisor lifetimes) and DO NOT
+    # post a duplicate comment. This makes the per-head
+    # request idempotency a property of the PR itself,
+    # not of the supervisor's local state directory.
+    marker_state = _fetch_and_adopt_global_request_marker(
+        provider=provider, head_sha=live_head
+    )
+    if marker_state == "found":
+        log(
+            "info",
+            "post_review_request: adopted existing AutoDev marker; "
+            "no duplicate posted",
+            provider=provider,
+            head=live_head[:12],
+        )
+        return False
+    if marker_state == "error":
+        log(
+            "warning",
+            "post_review_request: GitHub marker inventory unavailable; "
+            "failing closed to avoid a cross-run duplicate",
+            provider=provider,
+            head=live_head[:12],
+        )
+        return False
+    previous = read_review_request(provider, live_head)
+    if previous and previous.get("lifecycle") == "REQUEST_INTENT":
+        prior_id = str(previous.get("request_id") or "unknown")
+        history = REVIEW_REQUESTS_DIR / (  # type: ignore[name-defined]
+            f"{provider}__{live_head}__{prior_id}.intent.json"
+        )
+        archived = dict(previous)
+        archived["retry_archived_at"] = now_iso()
+        write_json(history, archived)
     # Step 2: persist REQUEST_INTENT bound to the EXACT live head.
     try:
         write_review_request(  # type: ignore[name-defined]
@@ -9063,6 +9471,15 @@ def post_review_request(provider: str, head_sha: str) -> bool:
         remote_comment_id=_remote_comment_id,
     )
     return True
+
+
+def post_review_request(provider: str, head_sha: str) -> bool:
+    """Serialize and reconcile the canonical ``trigger_handle`` mutation."""
+    fd = _global_review_request_lock(provider, head_sha)
+    try:
+        return _post_review_request_locked(provider, head_sha)
+    finally:
+        os.close(fd)
 
 
 def reconcile_provider_request_request_sent(
@@ -9386,12 +9803,11 @@ def schedule_codex_request_on_stable_head(
     cfg = PROVIDERS.get("codex")
     if not cfg:
         return False
-    # Idempotency: any existing REQUEST_INTENT / REQUEST_SENT
-    # for codex on this head short-circuits to keep
-    # policy honest.
+    # Successful external requests short-circuit. REQUEST_INTENT is
+    # retryable after the quota/cooldown gates below because it proves
+    # only that a pre-mutation write occurred.
     existing = read_review_request("codex", live_head)  # type: ignore[name-defined]
     if existing and existing.get("lifecycle") in (
-        "REQUEST_INTENT",
         "REQUEST_SENT",
         "ACKNOWLEDGED",
         "REVIEW_COMPLETE",
@@ -12678,10 +13094,51 @@ def apply_reviewer_plan(
             state_root_path = None
     except Exception:
         state_root_path = None
+    # Round-C24 / Defect 6: load superseded records BEFORE
+    # resolving phase so the documented fallback path
+    # (``has_any_superseded_request``) is available. The
+    # audit's P1 finding showed the prior ordering loaded
+    # the records only AFTER phase resolution, so a repair
+    # head whose ``state.json`` was unreadable / legacy
+    # resolved ``INITIAL_HEAD`` and CodeRabbit was
+    # incorrectly re-required.
+    superseded_records: List[dict] = []
+    if REVIEW_REQUESTS_DIR is not None:  # type: ignore[name-defined]
+        try:
+            for p in Path(REVIEW_REQUESTS_DIR).glob(  # type: ignore[name-defined]
+                "*.superseded.json"
+            ):
+                try:
+                    candidate = json.loads(p.read_text())
+                    if not isinstance(candidate, dict):
+                        continue
+                    stale_head = candidate.get("stale_head")
+                    next_head = candidate.get("superseded_by_head")
+                    if (
+                        candidate.get("lifecycle") != "SUPERSEDED"
+                        or not isinstance(candidate.get("provider"), str)
+                        or not isinstance(stale_head, str)
+                        or not _HEX_SHA_RE.match(stale_head)
+                        or not isinstance(next_head, str)
+                        or not _HEX_SHA_RE.match(next_head)
+                    ):
+                        continue
+                    superseded_records.append(candidate)
+                except Exception:
+                    continue
+        except Exception:
+            superseded_records = []
     phase = _resolve_phase(
         state_root=(
             Path(state_root_path) if state_root_path else None
         ),
+        # The audit requires this fallback to fire when the
+        # journal is unreadable or legacy. A malformed
+        # superseded record (parse error / schema drift)
+        # must NOT itself force the phase to REPAIR_HEAD;
+        # we only count records that passed the canonical schema and
+        # full-SHA binding checks above.
+        has_any_superseded_request=bool(superseded_records),
     )
     # The C23 directive fixes the per-provider
     # ``required`` / ``auto_trigger`` semantics for this
@@ -12718,20 +13175,10 @@ def apply_reviewer_plan(
         # preserved).
         snap["reviewer_plan"] = {}
         return {}
-    superseded_records: List[dict] = []
-    if REVIEW_REQUESTS_DIR is not None:  # type: ignore[name-defined]
-        try:
-            for p in Path(REVIEW_REQUESTS_DIR).glob(  # type: ignore[name-defined]
-                "*.superseded.json"
-            ):
-                try:
-                    superseded_records.append(
-                        json.loads(p.read_text())
-                    )
-                except Exception:
-                    continue
-        except Exception:
-            superseded_records = []
+    # ``superseded_records`` was already loaded BEFORE phase
+    # resolution (Round-C24 / Defect 6). Reuse the same list
+    # here for ``plan_reviewer_actions``'s per-head cap
+    # accounting so the two reads are consistent.
     ledger = ledger_path
     if ledger is None and REVIEW_REQUESTS_DIR is not None:  # type: ignore[name-defined]
         ledger = Path(REVIEW_REQUESTS_DIR)  # type: ignore[name-defined]
@@ -12773,8 +13220,17 @@ def apply_reviewer_plan(
     # Stamp the plan on the snapshot for ``evaluate_readiness``
     # and audit consumers. The dict form is JSON-serialisable
     # so the supervisor's existing audit ledger can store it.
+    #
+    # Round-C24 / Defect 5: ``dict(plan_entry.__dict__)`` is a
+    # shallow conversion. ``FreshnessResult`` is a frozen
+    # dataclass; ``json.dumps`` rejects it with
+    # ``TypeError: Object of type FreshnessResult is not JSON
+    # serializable``. ``dataclasses.asdict`` recursively
+    # converts every nested dataclass to a plain dict so the
+    # snapshot is JSON-native end-to-end.
+    import dataclasses as _dataclasses
     snap["reviewer_plan"] = {
-        provider: dict(plan_entry.__dict__)
+        provider: _dataclasses.asdict(plan_entry)
         for provider, plan_entry in plan.items()
     }
     for provider, ok in dispatched.items():

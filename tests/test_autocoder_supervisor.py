@@ -3292,7 +3292,9 @@ class _Round44FakeGithub:
     def __init__(self, live_head: str) -> None:
         self.live_head = live_head
 
-    def __call__(self, path: str, token: str) -> dict:
+    def __call__(self, path: str, token: str):
+        if "/issues/" in path and "/comments" in path:
+            return []
         return {
             "head": {"sha": self.live_head},
             "mergeable": True,

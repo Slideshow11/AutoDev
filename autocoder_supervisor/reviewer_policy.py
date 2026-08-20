@@ -960,11 +960,12 @@ def _count_active_request_records(
     budget accounting. The audit requires semantically
     correct accounting:
 
-    - ``active_on_current_head``: number of
-      REQUEST_INTENT / REQUEST_SENT / ACKNOWLEDGED /
-      REVIEW_COMPLETE records whose ``head_sha`` (stored in
-      the canonical ``{provider}__{head}.json`` filename)
-      equals the current head. Subtracted by the
+    - ``active_on_current_head``: number of REQUEST_SENT /
+      ACKNOWLEDGED / REVIEW_COMPLETE records whose ``head_sha``
+      (stored in the canonical ``{provider}__{head}.json``
+      filename) equals the current head. REQUEST_INTENT is
+      deliberately excluded because it proves only local intent,
+      not a successful external request. Subtracted by the
       corresponding SUPERSEDED count for the SAME
       (provider, head_sha) pair (defensive: if the
       supervisor moved the active record aside on head
@@ -1009,12 +1010,32 @@ def _count_active_request_records(
     in_pr = 0
     if not ledger_path.exists():
         return (on_current, in_pr)
-    _LIFECYCLES = (
-        "REQUEST_INTENT",
+    # Round-C24 / Defect 2: split lifecycles precisely.
+    #
+    # ``REQUEST_INTENT`` means the supervisor persisted the
+    # intent BEFORE the GitHub mutation succeeded. It does
+    # NOT represent a successful external request. Counting
+    # it against the per-head cap permanently blocks retry
+    # after a transient CLI/network failure (the audit's
+    # exact reproduction).
+    #
+    # Only states representing a successful external request
+    # consume the one-request-per-head trigger allowance:
+    #
+    #   REQUEST_SENT      gh pr comment succeeded
+    #   ACKNOWLEDGED      provider started processing
+    #   REVIEW_COMPLETE   terminal review evidence observed
+    #
+    # ``REQUEST_INTENT`` is intentionally NOT in either successful-
+    # request count. Retry spam is bounded by the request cooldown;
+    # a failed remote mutation must not consume the PR-lifetime budget.
+    _LIFECYCLES_CAP_CONSUMING = (
         "REQUEST_SENT",
         "ACKNOWLEDGED",
         "REVIEW_COMPLETE",
     )
+    _LIFECYCLES_INTENT_ONLY = ("REQUEST_INTENT",)
+    _LIFECYCLES_ALL = _LIFECYCLES_CAP_CONSUMING + _LIFECYCLES_INTENT_ONLY
     # Active records: canonical ``{provider}__{head}.json``
     # with a non-SUPERSEDED lifecycle.
     for p in ledger_path.glob(f"{provider}__*.json"):
@@ -1027,7 +1048,8 @@ def _count_active_request_records(
             continue
         if not isinstance(payload, dict):
             continue
-        if payload.get("lifecycle") not in _LIFECYCLES:
+        lifecycle = payload.get("lifecycle")
+        if lifecycle not in _LIFECYCLES_ALL:
             continue
         # The head_sha is encoded in the filename.
         # {provider}__{head_sha}.json -> head_sha is the
@@ -1037,8 +1059,12 @@ def _count_active_request_records(
         if len(parts) != 2:
             continue
         h = parts[1]
-        in_pr += 1
-        if h == head_sha:
+        if lifecycle in _LIFECYCLES_CAP_CONSUMING:
+            in_pr += 1
+        # Per-head cap counter counts ONLY successful
+        # external requests. ``REQUEST_INTENT`` records are
+        # retryable and therefore cap-exempt.
+        if h == head_sha and lifecycle in _LIFECYCLES_CAP_CONSUMING:
             superseded_for_pair = superseded_pairs.get(
                 (provider, h), 0
             )
@@ -1140,8 +1166,27 @@ def plan_reviewer_actions(
                 freshness=freshness,
             )
             continue
-        # 2. BLOCKED_BUDGET -> BLOCK (fail closed).
+        # 2. BLOCKED_BUDGET → honor phase-resolved ``required`` +
+        #    ``unavailable_behavior``. The audit's P2 finding
+        #    showed the unconditional BLOCK branch blocked
+        #    readiness when an OPTIONAL provider (Sourcery)
+        #    reports ``paused``. Round-C24 / Defect 4 honours
+        #    ``unavailable_behavior``:
+        #      required=True  → BLOCK (fail-closed on a required
+        #                       reviewer that is paused)
+        #      required=False → NOT_NEEDED (the optional
+        #                       provider's outage is
+        #                       informational; readiness
+        #                       proceeds without it)
         if freshness.state == FRESHNESS_BLOCKED_BUDGET:
+            if not required:
+                plans[provider] = ReviewerTriggerPlan(
+                    provider=provider,
+                    action="NOT_NEEDED",
+                    reason="optional_provider_paused_acceptable",
+                    freshness=freshness,
+                )
+                continue
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
                 action="BLOCK",

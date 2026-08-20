@@ -511,6 +511,7 @@ def mark_head_advanced_public(
     from autocoder_orchestration.worker_attempt import (
         LIFECYCLE_PUSH_VERIFIED,
         LIFECYCLE_TERMINAL_REPAIRED,
+        WorkerResultArtifact,
     )
     from .orchestration_state_root import (
         resolve_orchestration_state_root,
@@ -652,6 +653,23 @@ def mark_head_advanced_public(
             pass
         return False
 
+    repair_transition_at = None
+    artifact_path = getattr(attempt, "result_artifact_path", None)
+    if artifact_path:
+        artifact = WorkerResultArtifact.read(Path(artifact_path))
+        if (
+            artifact is not None
+            and artifact.attempt_id == attempt.attempt_id
+            and new_head_sha in artifact.pushed_commit_shas
+            and not artifact.validate_against_attempt(attempt)
+        ):
+            try:
+                from datetime import datetime as _dt
+                _dt.fromisoformat(artifact.completed_at.replace("Z", "+00:00"))
+                repair_transition_at = artifact.completed_at
+            except (AttributeError, TypeError, ValueError):
+                repair_transition_at = None
+
     # Provenance verified. Now drive the controller transition.
     try:
         state_root = resolve_orchestration_state_root(
@@ -749,6 +767,17 @@ def mark_head_advanced_public(
             # was captured into the attempt record at
             # launch time (``WorkerAttemptRecord.directive_id``).
             directive_id=getattr(attempt, "directive_id", None),
+            # Round-C24 / Defect 3: forward the worker's
+            # authoritative verified-repair timestamp
+            # (the validated WorkerResultArtifact ``completed_at``)
+            # so the SUPERSEDED row
+            # compares correctly against a reviewer follow-up
+            # that arrives AFTER the verified push but BEFORE
+            # the supervisor observes the push. Without this
+            # the SUPERSEDED row's ``superseded_at`` falls
+            # back to ``_now_iso()`` which is strictly later
+            # than any genuine post-repair follow-up.
+            superseded_at=repair_transition_at,
         )
     except Exception as exc:  # noqa: BLE001
         try:
