@@ -62,6 +62,7 @@ def _stub_github_api(monkeypatch, tmp_path):
     _modules = [
         ("supervisor.py", "autocoder_supervisor.supervisor"),
         ("_directive_prompt.py", "autocoder_supervisor._directive_prompt"),
+        ("worker_auth_preflight.py", "autocoder_supervisor.worker_auth_preflight"),
         ("worker_session.py", "autocoder_supervisor.worker_session"),
         ("aed_worker_wrapper.py", "autocoder_supervisor.aed_worker_wrapper"),
         ("directive_bridge.py", "autocoder_supervisor.directive_bridge"),
@@ -408,7 +409,7 @@ class TestAcceptanceRuntimeComparison:
         from autocoder_supervisor.hermes_fingerprint import (
             ACCEPTANCE_RUNTIME_INVENTORY,
         )
-        assert len(ACCEPTANCE_RUNTIME_INVENTORY) == 19
+        assert len(ACCEPTANCE_RUNTIME_INVENTORY) == 20
 
     def test_runtime_records_have_required_fields(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (
@@ -446,7 +447,7 @@ class TestAcceptanceRuntimeComparison:
             pr_number=5,
             branch="feat/review-repair-relay-v1",
         )
-        assert ev["acceptance_runtime_compared_count"] == 19
+        assert ev["acceptance_runtime_compared_count"] == 20
 
     def test_runtime_files_missing_empty(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (

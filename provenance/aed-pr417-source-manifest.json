@@ -136,8 +136,8 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "5233cbcb9c667e594588622fa4cd255b87a8027ff4be7d4dfbfe67bfa65a9e67",
-      "destination_size_bytes": 727066,
+      "destination_sha256": "31d5bea2bb2413225019a72cd0972f53e432bbb6ce299dcc6b573e25f57028de",
+      "destination_size_bytes": 728589,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,

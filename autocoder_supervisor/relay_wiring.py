@@ -901,50 +901,20 @@ def _fetch_pr_head_pushed_at(
     pr_number: int,
     head_sha: str,
 ) -> Optional[str]:
-    """Round-C24-R1 / P1-A: authoritative push-success timestamp.
+    """Round-C24-R2 / P1-A: REMOVED. Returns ``""``.
 
-    Calls GitHub's ``GET /repos/{owner}/{repo}/pulls/{number}``
-    via the supervisor's canonical ``github_get`` helper and
-    returns ``head.repo.pushed_at`` for the requested head SHA.
-
-    This is the actual git-push event time recorded by
-    GitHub when the worker (or any actor) pushed the commit
-    that landed on the PR's head branch. The supervisor's
-    only canonical authority for the push boundary.
-
-    Returns the empty string on transport / parse /
-    head-sha-mismatch failure. The caller MUST treat
-    ``""`` as fail-closed (i.e. ``repair_transition_at =
-    None``); the C22 resurrection helper will then omit
-    ``superseded_at`` from the SUPERSEDED row.
+    The previous C24-R1 implementation read an
+    authoritatively-broken repo-level timestamp. The
+    audit invalidates that binding. Returning ``""``
+    here means the resurrection rule will rely on the
+    per-follow-up exact-head binding (commit_id) rather
+    than any wall-clock timestamp. The C24-R2 contract
+    is fail-closed: when no trustworthy exact-head binding
+    is available, the SUPERSEDED row is written without
+    ``superseded_at`` and outdated-thread resurrection
+    fails closed.
     """
-    from .supervisor import get_github_token, github_get
-    token = get_github_token() or ""
-    if not token:
-        return ""
-    try:
-        payload = github_get(
-            f"/repos/{repo_owner}/{repo_name}/pulls/{int(pr_number)}",
-            token,
-        )
-    except Exception:  # noqa: BLE001
-        return ""
-    if not isinstance(payload, dict):
-        return ""
-    head = payload.get("head") or {}
-    if not isinstance(head, dict):
-        return ""
-    # Head SHA must match the worker's reported push SHA.
-    # Mismatches (e.g. a rebase during the verify window)
-    # are not authoritative push events.
-    head_sha_seen = str(head.get("sha") or "").strip()
-    if head_sha_seen and head_sha_seen != head_sha:
-        return ""
-    repo = head.get("repo") or {}
-    if not isinstance(repo, dict):
-        return ""
-    pushed_at = str(repo.get("pushed_at") or "").strip()
-    return pushed_at
+    return ""
 
 
 __all__ = [

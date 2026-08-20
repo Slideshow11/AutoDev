@@ -75,6 +75,7 @@ ACCEPTANCE_RUNTIME_INVENTORY: tuple = (
     # imports for the orchestration/result-contract/repair
     # pipeline.
     "worker_attempt.py",
+    "worker_auth_preflight.py",
     "review_repair_relay.py",
     "controller.py",
     "context.py",

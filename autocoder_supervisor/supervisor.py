@@ -122,6 +122,7 @@ _ACCEPTANCE_RUNTIME_BINDINGS = [
     ("supervisor.py", "autocoder_supervisor.supervisor"),
     ("_directive_prompt.py", "autocoder_supervisor._directive_prompt"),
     ("worker_session.py", "autocoder_supervisor.worker_session"),
+    ("worker_auth_preflight.py", "autocoder_supervisor.worker_auth_preflight"),
     ("aed_worker_wrapper.py", "autocoder_supervisor.aed_worker_wrapper"),
     ("directive_bridge.py", "autocoder_supervisor.directive_bridge"),
     ("provenance_maintenance.py", "autocoder_supervisor.provenance_maintenance"),
@@ -8450,6 +8451,40 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             attempt_id=attempt_id_prefix,
         )
         return None
+    # Round-C24-R2 / P1 worker auth preflight: verify the
+    # worker's environment has authenticated repo write
+    # capability BEFORE spawning the subprocess. The
+    # previous behaviour launched a worker that returned
+    # ``WORKER_EXECUTION_FAILED`` halfway through because
+    # the worker shell had no auth. The preflight is
+    # non-mutating and emits only boolean diagnostics.
+    # ``AED_SKIP_IDENTITY_GUARD`` is the existing test
+    # affordance; the production supervisor never sets it.
+    if (
+        os.environ.get("AED_SKIP_WORKER_AUTH_PREFLIGHT") != "1"
+        and os.environ.get("AED_SKIP_IDENTITY_GUARD") != "1"
+    ):
+        try:
+            from .worker_auth_preflight import (
+                preflight_or_raise,
+                WorkerRepoAuthUnavailable,
+            )
+            preflight_or_raise(repo_dir=Path(REPO_DIR))  # type: ignore[name-defined]
+        except WorkerRepoAuthUnavailable as exc:
+            log(
+                "warning",
+                "WORKER_REPO_AUTH_UNAVAILABLE: preflight failed; "
+                "refusing to launch a worker that would fail "
+                "halfway through. Set AED_SKIP_WORKER_AUTH_PREFLIGHT=1 "
+                "ONLY in non-production tests.",
+                error=str(exc)[:400],
+            )
+            try:
+                stdout_fh.close()
+                stderr_fh.close()
+            except Exception:
+                pass
+            return None
     try:
         proc = subprocess.Popen(
             cmd,

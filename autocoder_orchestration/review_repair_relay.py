@@ -1436,6 +1436,7 @@ def _c22_is_followup_eligible(
     followup: dict,
     repair_transition_ts: Optional[int],
     operator_logins: Tuple[str, ...],
+    superseding_head: Optional[str] = None,
 ) -> bool:
     """Return True iff ``followup`` is a non-operator, post-repair,
     actionable reply that can resurrect an outdated thread.
@@ -1496,6 +1497,32 @@ def _c22_is_followup_eligible(
     followup_ts = _parse_iso8601_utc(followup.get("createdAt"))
     if followup_ts is None or repair_transition_ts is None:
         return False
+    # Round-C24-R2 / P1-A: exact-head follow-up binding.
+    # When the follow-up evidence is bound to the new
+    # superseding head (``commit_id`` or
+    # ``original_commit_id`` equals ``superseding_head``),
+    # the follow-up is provably post-repair regardless of
+    # the wall-clock timestamp. The audit's preferred
+    # exact-head identity contract replaces the wall-clock
+    # inference that the audit invalidated in §1
+    # (repo.pushed_at is the repo-level, not the PR-branch,
+    # push time).
+    if superseding_head:
+        cmt = (
+            followup.get("commit_id")
+            or followup.get("original_commit_id")
+        )
+        if isinstance(cmt, str) and cmt:
+            # The follow-up has an explicit commit_id
+            # binding. If the binding matches the new
+            # superseding head, the follow-up qualifies
+            # regardless of timestamp. If the binding is
+            # to a DIFFERENT head, the follow-up is provably
+            # NOT on the new head — it cannot resurrect.
+            if cmt == superseding_head:
+                return True
+            else:
+                return False
     if followup_ts <= repair_transition_ts:
         return False
     # R3: actionable body — not a status marker.
@@ -1684,6 +1711,10 @@ def _maybe_resurrect_outdated_thread(
             followup=reply,
             repair_transition_ts=repair_transition_ts,
             operator_logins=tuple(operator_logins),
+            superseding_head=(
+                str(thread_data.get("superseded_by_head") or "")
+                or None
+            ),
         ):
             qualifying = reply
     if qualifying is None:
