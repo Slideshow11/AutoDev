@@ -1132,6 +1132,7 @@ def test_dirt_allowlist_excludes_unknown_untracked_source(tmp_path: Path):
         [
             sys.executable, "-m", "pytest",
             "-q", "-x",
+            f"--basetemp={tmp_path / 'nested-pytest'}",
             "tests/test_round281_strict_dirty_tree_guard.py::TestRound590PytestOfRecurrence",
         ],
         cwd=str(PRODUCTION_ROOT),

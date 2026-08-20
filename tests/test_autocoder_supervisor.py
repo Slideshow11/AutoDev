@@ -159,7 +159,8 @@ def isolated_state(monkeypatch, tmp_path: Path):
     (orch_state_root / "run_context.json").write_text(json.dumps({
         "schema_version": "autocoder.run_context.v1",
         "run_id": "isolated",
-        "repo_owner": "owner/repo",
+        "repo_owner": "owner",
+        "repo_name": "repo",
         "pr_number": 4,
         "current_authorized_head": supervisor.AUTHORITATIVE_HEAD,
     }))
