@@ -111,7 +111,7 @@ from .orchestration_state_root import OrchestrationRootError, OrchestrationRootM
 
 
 # Closure IX §6: the production supervisor MUST
-# resolve the canonical binding for ALL 17 acceptance
+# resolve the canonical binding for every acceptance-critical
 # modules INSIDE its own process. For each, the binding
 # is either:
 #   A. LOADED_MODULE: the module object is already loaded
@@ -127,6 +127,7 @@ _ACCEPTANCE_RUNTIME_BINDINGS = [
     ("provenance_maintenance.py", "autocoder_supervisor.provenance_maintenance"),
     ("hermes_fingerprint.py", "autocoder_supervisor.hermes_fingerprint"),
     ("orchestration_state_root.py", "autocoder_supervisor.orchestration_state_root"),
+    ("orchestration_bootstrap.py", "autocoder_supervisor.orchestration_bootstrap"),
     ("relay_wiring.py", "autocoder_supervisor.relay_wiring"),
     ("config.py", "autocoder_supervisor.config"),
     ("contracts.py", "autocoder_supervisor.contracts"),

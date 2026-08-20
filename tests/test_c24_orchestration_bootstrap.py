@@ -16,6 +16,7 @@ from autocoder_supervisor.orchestration_state_root import (
     OrchestrationRootUnverified,
     resolve_orchestration_state_root,
 )
+from autocoder_supervisor import hermes_fingerprint, supervisor
 
 
 HEAD = "fc3661fbc79618c8d734561cbbf2dae87938bf7b"
@@ -75,6 +76,13 @@ def test_created_root_contains_valid_controller_state(tmp_path: Path) -> None:
     root = _bootstrap(tmp_path)
     state = StateMachine.from_dict(json.loads((root / "state.json").read_text()))
     assert state.current_state == "PLANNED"
+
+
+def test_bootstrap_is_in_supervisor_runtime_identity_bindings() -> None:
+    inventory = set(hermes_fingerprint.ACCEPTANCE_RUNTIME_INVENTORY)
+    bindings = {name for name, _ in supervisor._ACCEPTANCE_RUNTIME_BINDINGS}
+    assert "orchestration_bootstrap.py" in bindings
+    assert bindings == inventory
 
 
 def test_concrete_root_persisted_to_run_state(tmp_path: Path) -> None:
