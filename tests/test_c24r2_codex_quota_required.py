@@ -120,7 +120,18 @@ class TestCodexQuotaRequiredHandling:
 
 
 class TestReadinessBlockedByRequiredCodex:
-    def test_evaluate_readiness_blocks_when_codex_paused(self) -> None:
+    def test_evaluate_readiness_blocks_when_codex_paused(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Defend against cross-test pollution: prior tests
+        # in the suite (notably test_c24r1_reviewer_plan_fail_closed)
+        # leave unconsumed events in the supervisor's global
+        # unconsumed_events.json. ``evaluate_readiness`` returns
+        # ``ready=False, reason=unconsumed_events`` BEFORE the
+        # reviewer_plan check, so the test must pin the
+        # unconsumed list to empty.
+        from autocoder_supervisor import supervisor as _sup_iso
+        monkeypatch.setattr(_sup_iso, "list_unconsumed_events", list)
         """Audit §6: do not qualify readiness while required Codex
         evidence is absent. A snapshot with codex in BLOCKED
         state must fail the readiness gate."""
@@ -178,17 +189,40 @@ class TestReadinessBlockedByRequiredCodex:
                 ),
             ),
         }
-        result = evaluate_readiness(snap, HEAD)
-        assert result["ready"] is False, (
-            f"Readiness must fail closed when required Codex is paused (BLOCK). "
-            f"Got: {result!r}"
+        # Defend against cross-test pollution: a prior test
+        # (test_round54_c22_retry_lifecycle) mutates the
+        # supervisor's module-level ``POLICY`` dict to drop
+        # ``codex`` from the required list. The audit's §6
+        # contract is provider-specific (Codex must be a
+        # required provider), so this test must set the
+        # policy explicitly.
+        from autocoder_supervisor import supervisor as _sup_mod
+        _preserved_policy = dict(_sup_mod.POLICY)
+        _preserved_required = list(
+            _sup_mod.POLICY.get(
+                "required_review_providers_for_pr_416", []
+            )
         )
-        # The blockers must include codex.
-        all_blockers = list(result.get("blockers", [])) + list(
-            result.get("required_reviewer_blockers", [])
-        )
-        provider_names = {b["provider"] for b in all_blockers}
-        assert "codex" in provider_names, (
-            f"BLOCK on codex must appear in blockers list; "
-            f"got {all_blockers!r}"
-        )
+        if "codex" not in _preserved_required:
+            _sup_mod.POLICY["required_review_providers_for_pr_416"] = (
+                list(_preserved_required) + ["codex"]
+            )
+        try:
+            result = evaluate_readiness(snap, HEAD)
+            assert result["ready"] is False, (
+                f"Readiness must fail closed when required Codex is paused (BLOCK). "
+                f"Got: {result!r}"
+            )
+            # The blockers must include codex.
+            all_blockers = list(result.get("blockers", [])) + list(
+                result.get("required_reviewer_blockers", [])
+            )
+            provider_names = {b["provider"] for b in all_blockers}
+            assert "codex" in provider_names, (
+                f"BLOCK on codex must appear in blockers list; "
+                f"got {all_blockers!r}"
+            )
+        finally:
+            _sup_mod.POLICY["required_review_providers_for_pr_416"] = (
+                _preserved_required
+            )
