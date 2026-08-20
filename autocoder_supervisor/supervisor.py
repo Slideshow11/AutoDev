@@ -844,7 +844,21 @@ def _reconcile_orchestration_state_root_at_boot() -> str:
         from .orchestration_bootstrap import (
             bootstrap_orchestration_state_root,
         )
-        bootstrap_parent = Path(STATE_DIR).parent / "orchestration_runs"  # type: ignore[name-defined]
+        # Round-C24-R1 / P1-B: the orchestrator-root parent
+        # MUST live at a HOST-GLOBAL location keyed on the
+        # canonical (repo, PR) — not derived from the
+        # supervisor's STATE_DIR. Two supervisors with
+        # different STATE_DIRs must converge on the same
+        # allocation root. The default
+        # ``$TMPDIR/autodev-orchestration-runs/<repo>/<repo>/pr-<n>/``
+        # is host-global so the convergence is automatic;
+        # operators may override via
+        # ``AED_ORCHESTRATION_ROOT_PARENT``.
+        import tempfile as _tempfile_root
+        bootstrap_parent = (
+            Path(_tempfile_root.gettempdir())
+            / "autodev-orchestration-runs"
+        )
         bootstrap_root = bootstrap_orchestration_state_root(
             state_dir=Path(STATE_DIR),  # type: ignore[name-defined]
             state_root_parent=bootstrap_parent,
@@ -13369,6 +13383,18 @@ def evaluate_readiness(
     _c23_required_blockers = _evaluate_c23_required_blockers(
         snap, h,
     )
+    # Round-C24-R1 / P1-C: fail-closed when the planner raised
+    # or did not stamp the snapshot. ``reviewer_plan_failed``
+    # is set by the readiness callers when ``apply_reviewer_plan``
+    # raised (or the snapshot has no ``reviewer_plan`` field
+    # at all). Production readiness MUST NOT promote without
+    # a successful plan.
+    if snap.get("reviewer_plan_failed"):
+        return {
+            "ready": False,
+            "reason": "reviewer_plan_failed_or_missing",
+            "blockers": _c23_required_blockers,
+        }
     if _c23_required_blockers:
         return {
             "ready": False,
@@ -14097,6 +14123,51 @@ def active_repair_quiet_window(
             head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
         )
         return "escalation"
+    # Round-C24-R1 / P1-C: the C23 reviewer plan MUST be
+    # applied to the snapshot BEFORE ``evaluate_readiness``
+    # runs. Without this, a head can enter PROVISIONAL_READY
+    # while:
+    #   - a required Codex review is missing;
+    #   - a Codex request is still in flight;
+    #   - the planner raised an exception.
+    # The audit's P1-C finding identified this false-readiness
+    # window. The plan stamps ``snap_b["reviewer_plan"]`` and
+    # dispatches REQUEST actions. ``evaluate_readiness`` then
+    # inspects the stamped plan and fails closed when any
+    # required provider is missing / pending / REQUEST.
+    try:
+        apply_reviewer_plan(
+            snap_b,
+            head_sha=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+            post_review_request_fn=post_review_request,  # type: ignore[name-defined]
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Fail-closed: if the planner raises, the readiness
+        # gate MUST NOT promote. The caller (the heartbeat
+        # loop) treats the qualifying interval as
+        # interrupted and the next round re-attempts. We log
+        # and explicitly do NOT call ``enter_readiness``.
+        log(
+            "error",
+            "active_repair_quiet_window: apply_reviewer_plan raised; "
+            "refusing to evaluate readiness",
+            error=str(exc)[:200],
+            head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+        )
+        return None
+    # Also fail-closed when the planner produced no plan at
+    # all (defensive: catch the case where
+    # ``apply_reviewer_plan`` returned normally but the
+    # snapshot has no ``reviewer_plan`` field — a missing
+    # plan MUST block readiness, not silently allow it).
+    if not snap_b.get("reviewer_plan"):
+        log(
+            "warning",
+            "active_repair_quiet_window: reviewer plan missing after "
+            "apply_reviewer_plan; refusing to evaluate readiness",
+            head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+        )
+        return None
     result = evaluate_readiness(
         snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
     )
@@ -17245,12 +17316,26 @@ def main(argv: Optional[list[str]] = None) -> int:
                         post_review_request_fn=post_review_request,  # type: ignore[name-defined]
                     )
                 except Exception as exc:  # noqa: BLE001
+                    # Round-C24-R1 / P1-C: fail-closed. If the
+                    # planner raises, the readiness gate MUST
+                    # NOT promote. The audit's P1-C finding
+                    # identified this fail-open window.
+                    log(
+                        "error",
+                        "READINESS_STATES branch: apply_reviewer_plan raised; "
+                        "refusing to evaluate readiness",
+                        error=str(exc)[:200],
+                        head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                    )
+                    snap_now["reviewer_plan_failed"] = True
+                if not snap_now.get("reviewer_plan"):
                     log(
                         "warning",
-                        "apply_reviewer_plan raised; "
-                        "C23 readiness gate may emit false positive",
-                        error=str(exc)[:200],
+                        "READINESS_STATES branch: reviewer plan missing; "
+                        "refusing to evaluate readiness",
+                        head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
                     )
+                    snap_now["reviewer_plan_failed"] = True
                 reasons = snapshot_differs(
                     read_snapshot("A"), snap_now,
                     AUTHORITATIVE_HEAD,  # type: ignore[name-defined]

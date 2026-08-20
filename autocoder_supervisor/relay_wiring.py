@@ -653,6 +653,20 @@ def mark_head_advanced_public(
             pass
         return False
 
+    # Round-C24-R1 / P1-A: the authoritative repair-transition
+    # timestamp is NOT the worker result envelope's
+    # ``completed_at`` (Codex P1 finding
+    # PRRT_kwDOTtyQLc6aqKAg). It is ``head.repo.pushed_at`` from
+    # GitHub's PR payload, captured by the supervisor's
+    # canonical ``fetch_live_pr_head_now_with_push_time`` helper
+    # at the moment it positively verifies
+    # ``pushed_commit_sha == live_head``. The worker result
+    # envelope's ``completed_at`` is NOT the push time and must
+    # never be used as a substitute. If the supervisor cannot
+    # fetch the authoritative pushed_at (network error, missing
+    # token), ``repair_transition_at`` remains ``None`` and the
+    # SUPERSEDED row is written without ``superseded_at`` so
+    # the C22 resurrection helper fails closed.
     repair_transition_at = None
     artifact_path = getattr(attempt, "result_artifact_path", None)
     if artifact_path:
@@ -663,10 +677,48 @@ def mark_head_advanced_public(
             and new_head_sha in artifact.pushed_commit_shas
             and not artifact.validate_against_attempt(attempt)
         ):
+            # ``artifact.completed_at`` is documented but
+            # NOT trustworthy as the push boundary. We
+            # capture the authoritative ``pushed_at`` from
+            # GitHub's PR payload and write it back to the
+            # attempt record so the relay's downstream
+            # ``mark_head_advanced`` can forward it as the
+            # ``superseded_at`` value. The artifact's
+            # ``completed_at`` is ignored here by design.
             try:
-                from datetime import datetime as _dt
-                _dt.fromisoformat(artifact.completed_at.replace("Z", "+00:00"))
-                repair_transition_at = artifact.completed_at
+                push_ts = _fetch_pr_head_pushed_at(
+                    repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
+                    repo_name=str(REPO_NAME),  # type: ignore[name-defined]
+                    pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+                    head_sha=new_head_sha,
+                )
+                if push_ts:
+                    repair_transition_at = push_ts
+                    try:
+                        from datetime import datetime as _dt
+                        _dt.fromisoformat(push_ts.replace("Z", "+00:00"))
+                        attempt.push_succeeded_at = push_ts
+                    except (AttributeError, TypeError, ValueError):
+                        attempt.push_succeeded_at = None
+                        repair_transition_at = None
+                else:
+                    # Fail closed: no trustworthy push time.
+                    try:
+                        from .supervisor import log
+                        log(
+                            "warning",
+                            "mark_head_advanced_public: could not "
+                            "fetch authoritative pushed_at from "
+                            "GitHub PR payload; setting "
+                            "superseded_at=None so resurrection "
+                            "fails closed",
+                            attempt_id=attempt_id,
+                            head=new_head_sha[:12],
+                        )
+                    except ImportError:
+                        pass
+                    attempt.push_succeeded_at = None
+                    repair_transition_at = None
             except (AttributeError, TypeError, ValueError):
                 repair_transition_at = None
 
@@ -840,6 +892,59 @@ def delete_directive_if_present(evidence_root: str) -> None:
             directive.unlink()
         except OSError:
             pass
+
+
+def _fetch_pr_head_pushed_at(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    head_sha: str,
+) -> Optional[str]:
+    """Round-C24-R1 / P1-A: authoritative push-success timestamp.
+
+    Calls GitHub's ``GET /repos/{owner}/{repo}/pulls/{number}``
+    via the supervisor's canonical ``github_get`` helper and
+    returns ``head.repo.pushed_at`` for the requested head SHA.
+
+    This is the actual git-push event time recorded by
+    GitHub when the worker (or any actor) pushed the commit
+    that landed on the PR's head branch. The supervisor's
+    only canonical authority for the push boundary.
+
+    Returns the empty string on transport / parse /
+    head-sha-mismatch failure. The caller MUST treat
+    ``""`` as fail-closed (i.e. ``repair_transition_at =
+    None``); the C22 resurrection helper will then omit
+    ``superseded_at`` from the SUPERSEDED row.
+    """
+    from .supervisor import get_github_token, github_get
+    token = get_github_token() or ""
+    if not token:
+        return ""
+    try:
+        payload = github_get(
+            f"/repos/{repo_owner}/{repo_name}/pulls/{int(pr_number)}",
+            token,
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    head = payload.get("head") or {}
+    if not isinstance(head, dict):
+        return ""
+    # Head SHA must match the worker's reported push SHA.
+    # Mismatches (e.g. a rebase during the verify window)
+    # are not authoritative push events.
+    head_sha_seen = str(head.get("sha") or "").strip()
+    if head_sha_seen and head_sha_seen != head_sha:
+        return ""
+    repo = head.get("repo") or {}
+    if not isinstance(repo, dict):
+        return ""
+    pushed_at = str(repo.get("pushed_at") or "").strip()
+    return pushed_at
 
 
 __all__ = [

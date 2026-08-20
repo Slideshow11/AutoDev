@@ -75,7 +75,10 @@ def test_created_root_contains_valid_run_context(tmp_path: Path) -> None:
 def test_created_root_contains_valid_controller_state(tmp_path: Path) -> None:
     root = _bootstrap(tmp_path)
     state = StateMachine.from_dict(json.loads((root / "state.json").read_text()))
-    assert state.current_state == "PLANNED"
+    # Round-C24-R1 / Trial 1D root cause fix: the initial
+    # state is QUALIFYING_READINESS (not PLANNED) so the
+    # supervisor's heartbeat loop can drive the round forward.
+    assert state.current_state == "QUALIFYING_READINESS"
 
 
 def test_bootstrap_is_in_supervisor_runtime_identity_bindings() -> None:

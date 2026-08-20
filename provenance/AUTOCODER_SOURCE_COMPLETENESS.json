@@ -7470,7 +7470,7 @@
         "destination_sha256": "7e6d7e5906f1bb86ec08372bc1655ba3dd0185d58315c8bfd0b2ce43c07f3e2c",
         "source_size_bytes": 86428,
         "destination_size_bytes": 723069,
-        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null)."
+        "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null). | Round-C24-R1: bootstrap initial state to QUALIFYING_READINESS, host-global bootstrap lock, P1-A push_succeeded_at capture, P1-C reviewer-plan fail-closed."
       },
       {
         "source_path": "scripts/local/autocoder_supervisor/validate.py",
@@ -7487,9 +7487,9 @@
         "destination_path": "tests/test_autocoder_supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "d51b2e21a4a2bb39619acc70de848a9adbdc4ee28a74ccac25914ca7e7781260",
-        "destination_sha256": "33df1d1dd7e5d6f87db3347e54fd69849215c79b1159b361fcb785bf140a09d3",
+        "destination_sha256": "5ef0168bb2946a7129d36c8d1c2042f139e31c7c47fede4e4c4f7a973210b7a5",
         "source_size_bytes": 39831,
-        "destination_size_bytes": 320708,
+        "destination_size_bytes": 321387,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) added three launch_worker regression tests covering invalid resume-prompt templates, invalid worker-command placeholders, and unmatched braces in worker-command templates. Round-146 P1 added test_round146_p1_per_pr_authoritative_head_rebind. The test file is no longer byte-identical to the AED source."
       },
       {

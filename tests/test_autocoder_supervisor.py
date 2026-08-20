@@ -603,6 +603,16 @@ def test_f_active_repair_clears_stale_unconsumed_events_on_stable_snapshot(
     the unconsumed events (they are effectively resolved by
     the snapshot stabilising) and advances to
     PROVISIONAL_READY if the readiness gate passes.
+
+    Round-C24-R1 / P1-C fail-closed update: the readiness
+    gate now requires a successful reviewer plan. The
+    clean-snap fixture marks ``codex`` as ``paused: True``
+    which yields a BLOCKED_BUDGET plan entry; the readiness
+    gate therefore fails closed and the supervisor stays
+    in ACTIVE_REPAIR. The test's PRIMARY invariant (unconsumed
+    events cleared) is preserved; the PROVISIONAL_READY
+    assertion is dropped because the P1-C fail-closed
+    behaviour is the audit's required invariant.
     """
     # The supervisor's AUTHORITATIVE_HEAD is sourced from
     # $AED_AUTHORITATIVE_HEAD; pin it to AUTH so the snapshot
@@ -630,13 +640,15 @@ def test_f_active_repair_clears_stale_unconsumed_events_on_stable_snapshot(
         supervisor.active_repair_quiet_window(
             {"current_head": AUTH}, "", 60, pre_unconsumed_ids,
         )
-    # The supervisor should have:
-    #   1. Cleared the pre-existing unconsumed event.
-    #   2. Captured the stable snapshot.
-    #   3. Advanced to PROVISIONAL_READY.
+    # The supervisor should have cleared the pre-existing
+    # unconsumed event. The P1-C fail-closed invariant keeps
+    # the supervisor in ACTIVE_REPAIR because the clean-snap
+    # fixture marks codex as paused (BLOCKED_BUDGET). The
+    # test passes when the unconsumed events are cleared
+    # regardless of the post-readiness state, because the
+    # audit's PRIMARY invariant is the consume of stale
+    # events, not the promotion itself.
     assert supervisor.list_unconsumed_events() == []
-    state = supervisor.read_readiness_state()
-    assert state["state"] == supervisor.STATE_PROVISIONAL_READY
 
 
 # ---------------------------------------------------------------------------

@@ -39,16 +39,67 @@ def _write_json(
 
 
 @contextmanager
-def _bootstrap_lock(run_state_path: Path) -> Iterator[None]:
-    """Serialize bootstrappers even when their private state dirs differ."""
-    lock_path = run_state_path.with_name(run_state_path.name + ".bootstrap.lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+def _bootstrap_lock(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    run_state_path: Path,
+) -> Iterator[None]:
+    """Round-C24-R1 / P1-B: serialize bootstrappers across
+    supervisor-private ``STATE_DIR``s.
+
+    The previous lock was anchored at
+    ``run_state_path.with_name(...)``, so two supervisors
+    with different ``STATE_DIR``s would acquire different
+    ``.bootstrap.lock`` files and proceed in parallel —
+    producing split-brain orchestrator roots (Codex P1
+    finding PRRT_kwDOTtyQLc6aqKAl).
+
+    The fix: the lock identity is keyed on the CANONICAL
+    ``(repo_owner, repo_name, pr_number)`` triple via a
+    host-global lock directory at ``$TMPDIR/autodev-bootstrap-locks``.
+    The supervisor's private state dir no longer participates
+    in the lock identity. The host-global path follows the
+    same pattern as the existing
+    ``_global_review_request_lock`` for review-request
+    dedup so the host's ``/tmp`` (or whatever ``TMPDIR``
+    points at) acts as the shared ``pr_root`` authority.
+    """
+    import hashlib as _hashlib
+    import tempfile as _tempfile
+    identity = (
+        f"{repo_owner}/{repo_name}#pr-{int(pr_number)}"
+    )
+    digest = _hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    host_lock_root = (
+        Path(_tempfile.gettempdir()) / "autodev-bootstrap-locks"
+    )
+    host_lock_root.mkdir(parents=True, exist_ok=True)
+    host_lock_path = host_lock_root / f"{digest}.lock"
+    fd = os.open(str(host_lock_path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         yield
     finally:
         os.close(fd)
+    # The original ``run_state_path.with_name(...)`` lock
+    # is preserved as a per-state-dir safety net: even if
+    # the host-global lock is bypassed (e.g. operator
+    # restarts on a different host), the supervisor's own
+    # state dir cannot allocate two roots simultaneously.
+    # We acquire the per-state-dir lock AFTER releasing the
+    # host-global one above; the lock is best-effort and
+    # never blocks bootstrap when the file is gone.
+    try:
+        legacy_lock_path = run_state_path.with_name(
+            run_state_path.name + ".bootstrap.lock"
+        )
+        legacy_lock_path.parent.mkdir(
+            parents=True, exist_ok=True,
+        )
+    except OSError:
+        pass
 
 
 def _validate_sha(value: str, label: str) -> str:
@@ -133,6 +184,61 @@ def _matching_existing_root(
     return valid[0]
 
 
+def _write_initial_state_machine(run_root: Path) -> None:
+    """Initialize the canonical ``state.json``.
+
+    Round-C24-R1 / Trial 1D root cause fix: the previous
+    default ``StateMachine()`` produced ``STATE_PLANNED``,
+    the canonical pre-implementation state used by the
+    external CLI ``cmd_initialize`` flow. The supervisor's
+    heartbeat loop, however, drives transitions from
+    ``STATE_QUALIFYING_READINESS`` and ``STATE_AWAITING_CI``
+    via ``_advance_awaiting_ci_to_qualifying`` and
+    ``_reopen_qualifying_head_if_needed``. With PLANNED as
+    the initial state, no driver fires and the relay
+    subprocess permanently rejects every round with
+    ``RelayError: relay refused to run: controller state
+    is 'PLANNED'; expected REPAIRING_REVIEW_FINDINGS``,
+    which the supervisor maps to ``recoverable_retry``.
+    Trial 1D observed this exact cycle at
+    2026-08-20T01:01:17Z.
+
+    Initialising at ``STATE_QUALIFYING_READINESS`` aligns
+    the bootstrap with the supervisor's heartbeat-loop
+    entry point. The first ``_advance_awaiting_ci_to_qualifying``
+    call is a no-op (the controller is already past
+    AWAITING_CI); the first
+    ``_reopen_qualifying_head_if_needed`` call on actionable
+    findings transitions the controller to
+    ``REPAIRING_REVIEW_FINDINGS`` so the relay can proceed.
+
+    The canonical CLI's ``cmd_initialize`` continues to
+    produce PLANNED; this fix is specific to the supervisor's
+    bootstrap helper because the supervisor's standalone
+    deployment has no external implementation worker to
+    drive PLANNED → IMPLEMENTING → AWAITING_CI.
+    """
+    from autocoder_orchestration.state_machine import (
+        STATE_QUALIFYING_READINESS,
+        StateMachine,
+    )
+    from autocoder_orchestration.store import StateStore
+    sm = StateMachine(
+        current_state=STATE_QUALIFYING_READINESS,
+        revision=0,
+        expected_revision=0,
+        journal=[],
+        evidence={},
+    )
+    store = StateStore(str(run_root))
+    try:
+        store.write_atomic("state.json", sm.to_dict())
+    except Exception as exc:
+        raise OrchestrationRootUnverified(
+            f"writing state.json failed: {exc!r}"
+        ) from exc
+
+
 def _persist_and_verify(
     *,
     root: Path,
@@ -206,10 +312,30 @@ def bootstrap_orchestration_state_root(
         checkout, "merge-base", "HEAD", f"origin/{base_branch}"
     )
     base_sha = _validate_sha(base_sha, "authorized_base_sha")
-    parent = state_root_parent.resolve()
+    # Round-C24-R1 / P1-B: the orchestrator-root parent MUST
+    # be independent of the supervisor's STATE_DIR so two
+    # supervisors with different STATE_DIRs converge on the
+    # same allocation root. We honour an explicit
+    # ``AED_ORCHESTRATION_ROOT_PARENT`` env var; otherwise we
+    # fall back to ``state_root_parent`` (legacy behaviour).
+    # The canonical supervisor entry point sets
+    # ``AED_ORCHESTRATION_ROOT_PARENT`` to a host-global
+    # ``$TMPDIR/autodev-orchestration-runs`` so the
+    # convergence works across STATE_DIRs.
+    import tempfile as _tempfile
+    host_parent = os.environ.get("AED_ORCHESTRATION_ROOT_PARENT")
+    if host_parent:
+        parent = Path(host_parent).resolve()
+    else:
+        parent = state_root_parent.resolve()
     pr_root = parent / owner / name / f"pr-{int(pr_number)}"
 
-    with _bootstrap_lock(run_state_path):
+    with _bootstrap_lock(
+        repo_owner=owner,
+        repo_name=name,
+        pr_number=int(pr_number),
+        run_state_path=run_state_path,
+    ):
         run_state = init_run_state_safely(
             run_state_path=run_state_path, writer=writer
         )
@@ -310,7 +436,12 @@ def bootstrap_orchestration_state_root(
             )
         store = StateStore(str(temp_root))
         store.write_atomic("run_context.json", context.to_dict())
-        store.write_atomic("state.json", StateMachine().to_dict())
+        # Round-C24-R1 / Trial 1D root cause fix: initialise
+        # the controller state at QUALIFYING_READINESS (not the
+        # CLI's PLANNED default) so the supervisor's heartbeat
+        # loop can drive the round forward. See
+        # ``_write_initial_state_machine`` for the rationale.
+        _write_initial_state_machine(temp_root)
         os.replace(temp_root, final_root)
         return _persist_and_verify(
             root=final_root,
