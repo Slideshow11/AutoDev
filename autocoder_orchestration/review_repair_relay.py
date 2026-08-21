@@ -762,14 +762,23 @@ class FindingLedger:
         transition record for ``finding_id``, or ``None`` when
         no durable evidence exists.
 
-        Returns a dict with these keys (when evidence is
-        present):
+        Returns a dict with these keys:
 
           - ``superseded_by_head``: the new head SHA recorded
             by ``mark_superseded_by_head(new_head_sha=...)``
             at the moment the worker pushed the repair.
-          - ``superseded_at``: the ISO 8601 wall-clock at which
-            the transition was recorded.
+            REQUIRED: this is the exact-head identity evidence
+            and the row fails closed without it.
+          - ``superseded_at``: ISO 8601 wall-clock of the
+            verified repair/push event. OPTIONAL supplemental
+            evidence (Round-C24-R2): production intentionally
+            writes SUPERSEDED rows without it whenever no
+            trustworthy push timestamp exists
+            (``_fetch_pr_head_pushed_at`` fails closed to
+            ``""``). The key is present only when the row
+            carries a non-empty string value; a missing or
+            malformed timestamp NEVER invalidates the
+            exact-head identity.
           - ``directive_id``: the relay's directive UUID (when
             recorded by the caller).
 
@@ -780,8 +789,8 @@ class FindingLedger:
             therefore lacks a ``superseded_by_head`` field
             (the audit's contract: fail closed rather than
             fall back to a git-ancestry heuristic);
-          - any of the values are malformed (non-string
-            ``superseded_by_head``, etc.).
+          - ``superseded_by_head`` is malformed (non-string or
+            not a hex SHA).
 
         The helper is read-only; it never modifies the
         journal. It walks the JSONL append-only log
@@ -807,23 +816,30 @@ class FindingLedger:
             sbh = entry.get("superseded_by_head")
             sat = entry.get("superseded_at")
             did = entry.get("directive_id")
-            # Fail closed if any required field is missing or
-            # malformed. The audit forbids falling back to a
-            # git-ancestry heuristic; without the durable
-            # ``superseded_by_head`` we must return None.
+            # Round-C24-R2: ``superseded_by_head`` is the exact-head
+            # IDENTITY evidence and is the only REQUIRED field. A
+            # missing or malformed value fails closed (no
+            # git-ancestry fallback).
             if not isinstance(sbh, str) or not sbh:
                 return None
             if not _HEX_SHA_RE.match(sbh):
                 return None
-            if not isinstance(sat, str) or not sat:
-                return None
-            if did is not None and not isinstance(did, str):
-                return None
+            # Round-C24-R2: ``superseded_at`` is OPTIONAL
+            # supplemental TIME evidence. Production intentionally
+            # writes SUPERSEDED rows without it (the push-time
+            # proxy was invalidated by the audit). A missing or
+            # malformed timestamp must NOT invalidate the exact-head
+            # identity; the key is simply omitted from the returned
+            # record and the legacy time path in the eligibility
+            # helper fails closed on its own.
             out: Dict[str, str] = {
                 "superseded_by_head": sbh,
-                "superseded_at": sat,
             }
+            if isinstance(sat, str) and sat:
+                out["superseded_at"] = sat
             if did is not None:
+                if not isinstance(did, str):
+                    return None
                 out["directive_id"] = did
             return out
         return None
@@ -1441,32 +1457,38 @@ def _c22_is_followup_eligible(
     """Return True iff ``followup`` is a non-operator, post-repair,
     actionable reply that can resurrect an outdated thread.
 
-    The eligibility rule (Autonomy C22-R2):
+    The eligibility rule (Autonomy C22-R2 as amended by
+    Round-C24-R2):
 
       R1. followup author must NOT be in ``operator_logins`` (operator
           accounts can explain away a finding without re-elevating it).
-      R2. followup must carry a ``createdAt`` strictly later than the
-          ``repair_transition_ts`` — the Unix-seconds wall-clock
-          timestamp at which the durable FindingLedger recorded the
-          authoritative superseding-head transition
-          (``FindingLedger.mark_superseded_by_head(new_head_sha=...)``).
-          The ledger row is the canonical evidence; it is populated
-          by ``loop.mark_head_advanced(old_head_sha, new_head_sha,
-          directive_id=...)`` at the moment the controller observes
-          the worker push and binds ``report_repair_pushed`` to
-          ``AWAITING_CI``.
       R3. followup body must pass ``_is_actionable_provider_comment``
           so status markers (``Walkthrough``, ``In progress``,
-          etc.) do not resurrect threads.
+          etc.) do not resurrect threads. Evaluated BEFORE any
+          acceptance branch (CodeRabbit CR-002).
+      R4. IDENTITY PATH (preferred): when ``superseding_head``
+          is available AND the follow-up carries an explicit
+          provider commit binding (``commit_id``), the
+          comparison is pure identity:
 
-    R2 fails closed when:
+            - ``commit_id == superseding_head`` → eligible;
+            - ``commit_id != superseding_head`` → ineligible.
 
-      - ``repair_transition_ts`` is None (the durable ledger has
-        no SUPERSEDED row for the prior finding, or the row's
-        ``superseded_at`` is missing / unparseable);
-      - ``followup.createdAt`` is None or unparseable.
+          This branch NEVER consults ``repair_transition_ts``:
+          production intentionally writes SUPERSEDED rows
+          without ``superseded_at`` (the repo-level push-time
+          proxy was invalidated by the audit), so requiring a
+          timestamp here would make the exact-head contract
+          unreachable (the dead path this round repairs).
+      R5. LEGACY TIME PATH: only when exact-head binding is
+          UNAVAILABLE (no ``superseding_head``, or the
+          follow-up carries no explicit commit binding) does
+          the wall-clock comparison run: ``createdAt`` must be
+          present/parseable AND strictly later than
+          ``repair_transition_ts``. A missing timestamp on
+          either side fails closed.
 
-    The R2 comparison is intentionally STRICT (>) so an
+    The R5 comparison is intentionally STRICT (>) so an
     equal-timestamp followup (e.g. an off-by-second race) does
     not silently resurrect an already-addressed historical thread.
 
@@ -1490,60 +1512,47 @@ def _c22_is_followup_eligible(
         or author in operator_logins
     ):
         return False
-    # R2: strictly-later-than-repair-transition timestamp.
-    # Missing / unparseable createdAt on either side returns False
-    # (we cannot claim "post-repair" without a timestamp anchor on
-    # both ends).
-    followup_ts = _parse_iso8601_utc(followup.get("createdAt"))
-    if followup_ts is None or repair_transition_ts is None:
-        return False
-    # Round-C24-R2 / P1-A: exact-head follow-up binding.
-    # When the follow-up evidence is bound to the new
-    # superseding head (``commit_id`` or
-    # ``original_commit_id`` equals ``superseding_head``),
-    # the follow-up is provably post-repair regardless of
-    # the wall-clock timestamp. The audit's preferred
-    # exact-head identity contract replaces the wall-clock
-    # inference that the audit invalidated in §1
-    # (repo.pushed_at is the repo-level, not the PR-branch,
-    # push time).
-    # Round-C24-R2 / CodeRabbit CR-002: R3 is evaluated BEFORE the
-    # exact-head binding branch. A status marker bound to the new
-    # head (e.g. a "Walkthrough" reply whose ``commit_id`` equals
-    # ``superseding_head``) must NOT resurrect an outdated thread;
-    # the previous ordering returned True from the exact-head branch
-    # before the actionable-body check ran (false-positive
-    # resurrection path).
-    # R3: actionable body — not a status marker.
+    # R3: actionable body — not a status marker. Evaluated BEFORE
+    # either acceptance branch so a status marker bound to the new
+    # head cannot resurrect an outdated thread (CR-002).
     body = str(followup.get("body") or "")
     if not _is_actionable_provider_comment(body):
         return False
-    # Round-C24-R2 / P1-A: exact-head follow-up binding.
-    # When the follow-up evidence is bound to the new
-    # superseding head (``commit_id`` or
-    # ``original_commit_id`` equals ``superseding_head``),
-    # the follow-up is provably post-repair regardless of
-    # the wall-clock timestamp. The audit's preferred
-    # exact-head identity contract replaces the wall-clock
-    # inference that the audit invalidated in §1
-    # (repo.pushed_at is the repo-level, not the PR-branch,
-    # push time).
+    # R4 / Round-C24-R2: IDENTITY PATH — exact-head follow-up
+    # binding. The follow-up's ``commit_id`` is GitHub's live
+    # diff-position anchor for the reply (GraphQL
+    # ``PullRequestReviewComment.commit { oid }``); GitHub keeps it
+    # re-bound to the newest commit on which the hunk still applies,
+    # which makes equality with the ledger's ``superseded_by_head``
+    # positive proof the reviewer replied ON the repair head. When
+    # this identity evidence exists it REPLACES the wall-clock
+    # comparison entirely — no ``repair_transition_ts`` is required,
+    # because production SUPERSEDED rows legitimately carry no
+    # ``superseded_at``.
+    #
+    # ``original_commit_id`` is deliberately NOT accepted here: it
+    # is the creation-time anchor (the commit the ORIGINAL review
+    # comment's hunk was placed on) and is never re-bound by
+    # GitHub. Treating it as current-commit evidence would let a
+    # stale anchor resurrect a finding by coincidental SHA match.
     if superseding_head:
-        cmt = (
-            followup.get("commit_id")
-            or followup.get("original_commit_id")
-        )
+        cmt = followup.get("commit_id")
         if isinstance(cmt, str) and cmt:
-            # The follow-up has an explicit commit_id
-            # binding. If the binding matches the new
-            # superseding head, the follow-up qualifies
-            # regardless of timestamp. If the binding is
-            # to a DIFFERENT head, the follow-up is provably
-            # NOT on the new head — it cannot resurrect.
+            # Explicit commit binding present: decide purely on
+            # identity. Matching the superseding head proves the
+            # follow-up was authored against the repair head;
+            # ANY other binding proves it was not.
             if cmt == superseding_head:
                 return True
-            else:
-                return False
+            return False
+    # R5 / LEGACY TIME PATH: reached only when exact-head binding
+    # is unavailable (no ``superseding_head`` from the ledger, or
+    # the follow-up has no explicit commit binding). Strictly-
+    # later-than-repair-transition timestamp comparison; missing /
+    # unparseable createdAt on either side fails closed.
+    followup_ts = _parse_iso8601_utc(followup.get("createdAt"))
+    if followup_ts is None or repair_transition_ts is None:
+        return False
     if followup_ts <= repair_transition_ts:
         return False
     return True

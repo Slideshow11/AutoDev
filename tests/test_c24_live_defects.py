@@ -202,7 +202,19 @@ def test_true_repair_time_t1_followup_t2_observed_t3_qualifies(
     ) is not None
 
 
-def test_missing_trustworthy_repair_time_fails_closed(tmp_path: Path) -> None:
+def test_missing_trustworthy_repair_time_identity_survives(
+    tmp_path: Path,
+) -> None:
+    """Round-C24-R2: ``mark_superseded_by_head`` called WITHOUT
+    ``superseded_at`` (the production shape — the repo-level
+    push-time proxy was invalidated by the audit) must still
+    record the exact-head IDENTITY evidence. The durable lookup
+    returns ``superseded_by_head`` with NO ``superseded_at``
+    instead of ``None``, so the eligibility helper's identity
+    branch stays reachable. The legacy TIME path continues to
+    fail closed: a follow-up with no explicit commit binding and
+    no usable timestamps cannot resurrect.
+    """
     store = StateStore(str(tmp_path / "orchestration"))
     ledger = FindingLedger(store, head_sha=HEAD)
     finding = Finding.from_dict({
@@ -211,4 +223,28 @@ def test_missing_trustworthy_repair_time_fails_closed(tmp_path: Path) -> None:
     })
     ledger.mark_active(finding)
     ledger.mark_superseded_by_head(HEAD, new_head_sha=NEXT_HEAD)
-    assert ledger.superseded_repair_transition("thread:one") is None
+    transition = ledger.superseded_repair_transition("thread:one")
+    assert transition is not None, (
+        "exact-head identity evidence must survive a SUPERSEDED "
+        "row written without superseded_at"
+    )
+    assert transition["superseded_by_head"] == NEXT_HEAD
+    assert "superseded_at" not in transition, (
+        "no timestamp may be invented when the caller supplies none"
+    )
+    # Legacy TIME path fail-closed: no commit binding on the
+    # reply and no superseded_at anywhere → no resurrection.
+    thread = {
+        "id": "one",
+        "resolved": False,
+        "outdated": True,
+        "superseded_by_head": NEXT_HEAD,
+        "replies": [{
+            "author": "chatgpt-codex-connector",
+            "createdAt": "",
+            "body": "Actionable finding remains after the repair push.",
+        }],
+    }
+    assert _maybe_resurrect_outdated_thread(
+        thread, current_head=NEXT_HEAD,
+    ) is None

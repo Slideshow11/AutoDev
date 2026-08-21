@@ -2,26 +2,39 @@
 
 The audit (§3 §5) prefers a non-time-based identity contract
 for resurrection. The canonical exact-head binding is the
-follow-up comment's ``commit_id`` field (GitHub's
-``inline_review_comments`` and ``issue_comments`` REST API).
+follow-up comment's ``commit_id`` field — GitHub's live
+diff-position anchor for the comment (GraphQL
+``PullRequestReviewComment.commit { oid }``, REST
+``commit_id``). GitHub keeps this field re-bound to the newest
+commit on which the hunk still applies, so equality with the
+ledger's ``superseded_by_head`` is positive proof the reviewer
+replied ON the repair head.
 
 A follow-up qualifies for resurrection when:
 
   1. The thread is unresolved AND outdated.
   2. The FindingLedger has a ``SUPERSEDED`` row for the
      prior finding identity with ``superseded_by_head``
-     equal to the new repair head.
-  3. The follow-up's ``commit_id`` (or ``original_commit_id``)
-     equals ``superseded_by_head`` (the new head).
+     equal to the new repair head. This IDENTITY evidence is
+     usable on its own: ``superseded_at`` is OPTIONAL
+     supplemental time evidence and production rows
+     legitimately omit it (the repo-level push-time proxy was
+     invalidated by the audit).
+  3. The follow-up's ``commit_id`` equals ``superseded_by_head``
+     (the new head). ``original_commit_id`` is NOT accepted:
+     it is the creation-time anchor of the ORIGINAL review
+     comment's hunk and is never re-bound by GitHub, so it can
+     only match a head by coincidence (audit §6).
   4. The follow-up is non-operator, actionable.
 
-When the binding is established, the strict timestamp
-comparison in ``_c22_is_followup_eligible`` is RELAXED:
-the follow-up qualifies regardless of the
-``superseded_at``/``createdAt`` comparison.
+When the exact-head binding is established, the strict timestamp
+comparison in ``_c22_is_followup_eligible`` is REPLACED: the
+follow-up qualifies regardless of any ``superseded_at``/
+``createdAt`` comparison, and no timestamp is required at all.
 
 When the binding is NOT present, the legacy timestamp
-comparison remains in force.
+comparison remains in force and fails closed without
+timestamps.
 
 This test pins the contract.
 """
@@ -105,29 +118,33 @@ class TestExactHeadBindingContract:
         )
         assert result["followup"]["commit_id"] == HEAD_NEW
 
-    def test_binding_original_commit_id_matches_new_head_qualifies(self) -> None:
-        """Follow-up with original_commit_id == HEAD_NEW qualifies:
-        GitHub emits the original commit (when the thread's
-        diff hunk was first placed) and the current commit
-        (latest push). Either is sufficient."""
+    def test_original_commit_id_stale_anchor_does_not_qualify(self) -> None:
+        """Audit §6: ``original_commit_id`` is the creation-time
+        anchor of the ORIGINAL review comment's hunk and is never
+        re-bound by GitHub. It MUST NOT be accepted as
+        current-commit evidence for the follow-up — a stale
+        anchor that happens to equal some head by coincidence
+        cannot resurrect a finding. Live PR #9 evidence: every
+        old-thread comment shares originalCommit 9b9205d1ad…
+        while commit.oid tracks forward per head."""
         thread = _build_thread(
             outdated=True,
             resolved=False,
             followup_commit_id=None,
             followup_original_commit_id=HEAD_NEW,
+            # No timestamp evidence at all: isolates the §6
+            # question. With a valid superseded_at the legacy time
+            # path would qualify for unrelated reasons.
+            superseded_at=None,
         )
         result = _maybe_resurrect_outdated_thread(
             thread,
             current_head=HEAD_NEW,
             operator_logins=NON_OPERATOR_LOGINS,
         )
-        # The exact-head binding via original_commit_id MAY
-        # qualify. If the current helper does not yet check
-        # original_commit_id, the test is a regression witness
-        # for the C24-R2 fix to add it.
-        assert result is not None, (
-            "Original-commit-id binding must also qualify as "
-            "exact-head evidence for resurrection."
+        assert result is None, (
+            "original_commit_id is a stale creation-time anchor; "
+            "it must NOT qualify as exact-head evidence."
         )
 
     def test_no_binding_within_timestamp_window_qualifies_legacy(self) -> None:

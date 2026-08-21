@@ -12287,6 +12287,20 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     _reply_author_obj.get("login")
                     if isinstance(_reply_author_obj, dict) else None
                 )
+                # Round-C24-R2 / §5: capture the reply's own
+                # ``commit { oid }`` — GitHub's live diff-position
+                # anchor for this comment. This is the exact-head
+                # identity evidence the relay's resurrection helper
+                # compares against the ledger's
+                # ``superseded_by_head``. The field was already
+                # selected by the GraphQL query but previously
+                # dropped here, which made the exact-head contract
+                # unreachable in production.
+                _reply_commit_obj = reply_node.get("commit")
+                _reply_commit_oid = (
+                    _reply_commit_obj.get("oid")
+                    if isinstance(_reply_commit_obj, dict) else None
+                )
                 reply_entries.append({
                     "id": str(reply_node.get("databaseId") or ""),
                     "updatedAt": (
@@ -12297,6 +12311,7 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     ),
                     "body": reply_node.get("body") or "",
                     "author": _reply_author_login,
+                    "commit_id": _reply_commit_oid,
                 })
             all_threads.append((
                 node_id,
@@ -12401,15 +12416,22 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                 # evidence the C22-R2 eligibility helper reads;
                 # the C22-R1 git-ancestry field above is
                 # diagnostic provenance only.
+                # Round-C24-R2: ``superseded_by_head`` is exact-head
+                # IDENTITY evidence and is stamped whenever present;
+                # ``superseded_at`` is OPTIONAL supplemental TIME
+                # evidence (production rows legitimately omit it).
+                # Stamping ``superseded_by_head=None`` here would
+                # strand the identity branch of the eligibility
+                # helper, so it is always forwarded.
                 _durable = _superseded_repair_transition_for_thread(
                     thread_id=_tid,
                 )
                 if _durable is not None:
-                    _evidence["superseded_at"] = _durable.get(
-                        "superseded_at"
-                    )
                     _evidence["superseded_by_head"] = _durable.get(
                         "superseded_by_head"
+                    )
+                    _evidence["superseded_at"] = _durable.get(
+                        "superseded_at"
                     )
                     if _durable.get("directive_id"):
                         _evidence["superseded_directive_id"] = (
@@ -12450,12 +12472,24 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     _reply_author_obj.get("login")
                     if isinstance(_reply_author_obj, dict) else None
                 )
+                # Round-C24-R2 / §5: preserve the reply's own
+                # ``commit { oid }`` through pagination too. The
+                # exact-head identity evidence must survive the
+                # >25-comment pagination pass identically to the
+                # first page, otherwise a qualifying follow-up
+                # beyond page 1 would lose its binding.
+                _n_commit_obj = n.get("commit")
+                _n_commit_oid = (
+                    _n_commit_obj.get("oid")
+                    if isinstance(_n_commit_obj, dict) else None
+                )
                 _extra_replies.append({
                     "id": str(n.get("databaseId") or ""),
                     "updatedAt": (n.get("updatedAt") or ""),
                     "createdAt": (n.get("createdAt") or ""),
                     "body": n.get("body") or "",
                     "author": _reply_author_login,
+                    "commit_id": _n_commit_oid,
                 })
             _page_info = _comments.get("pageInfo")
             if not isinstance(_page_info, dict):
@@ -12531,13 +12565,19 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             # preserves the canonical
             # ``capture_live_snapshot`` "must not raise"
             # contract.
+            # Round-C24-R2: ``superseded_by_head`` is exact-head
+            # IDENTITY evidence and is stamped whenever present;
+            # ``superseded_at`` is OPTIONAL supplemental TIME
+            # evidence (production rows legitimately omit it).
             _durable = _superseded_repair_transition_for_thread(
                 thread_id=_tid,
             )
             if _durable is not None:
-                _evidence["superseded_at"] = _durable.get("superseded_at")
                 _evidence["superseded_by_head"] = _durable.get(
                     "superseded_by_head"
+                )
+                _evidence["superseded_at"] = _durable.get(
+                    "superseded_at"
                 )
                 # Carry the directive_id into the snap as
                 # diagnostic provenance so downstream
