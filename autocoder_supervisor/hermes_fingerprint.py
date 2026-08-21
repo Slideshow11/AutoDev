@@ -59,6 +59,7 @@ ACCEPTANCE_RUNTIME_INVENTORY: tuple = (
     "provenance_maintenance.py",
     "hermes_fingerprint.py",
     "orchestration_state_root.py",
+    "orchestration_bootstrap.py",
     "relay_wiring.py",
     "config.py",
     "contracts.py",
@@ -74,6 +75,7 @@ ACCEPTANCE_RUNTIME_INVENTORY: tuple = (
     # imports for the orchestration/result-contract/repair
     # pipeline.
     "worker_attempt.py",
+    "worker_auth_preflight.py",
     "review_repair_relay.py",
     "controller.py",
     "context.py",
@@ -3724,6 +3726,5 @@ def generate_pre_canary_evidence(
     if mirror_parent.exists():
         _atomic_write(mirror_path, evidence)
     return evidence
-
 
 

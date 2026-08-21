@@ -511,11 +511,27 @@ def mark_head_advanced_public(
     from autocoder_orchestration.worker_attempt import (
         LIFECYCLE_PUSH_VERIFIED,
         LIFECYCLE_TERMINAL_REPAIRED,
+        WorkerResultArtifact,
     )
     from .orchestration_state_root import (
         resolve_orchestration_state_root,
     )
-    from .supervisor import RUN_STATE  # type: ignore[name-defined]
+    from .supervisor import (  # type: ignore[name-defined]
+        PR_NUMBER,
+        REPO_NAME,
+        REPO_OWNER,
+        RUN_STATE,
+    )
+
+    # Round-C24-R2 / CodeRabbit CR-001 fix: this module previously
+    # referenced ``REPO_OWNER`` / ``REPO_NAME`` / ``PR_NUMBER`` without
+    # defining or importing them. The resulting NameError escaped the
+    # narrow ``(AttributeError, TypeError, ValueError)`` handler below,
+    # so every verified repair push failed to record
+    # ``report_repair_pushed`` and the controller never advanced
+    # REPAIRING_REVIEW_FINDINGS -> AWAITING_CI. Import the canonical
+    # supervisor globals explicitly so the authoritative pushed_at
+    # fetch can execute on the normal path.
 
     # Round-36: validate positive worker-attempt provenance BEFORE
     # touching the controller state machine. Without this check a
@@ -652,6 +668,75 @@ def mark_head_advanced_public(
             pass
         return False
 
+    # Round-C24-R1 / P1-A: the authoritative repair-transition
+    # timestamp is NOT the worker result envelope's
+    # ``completed_at`` (Codex P1 finding
+    # PRRT_kwDOTtyQLc6aqKAg). It is ``head.repo.pushed_at`` from
+    # GitHub's PR payload, captured by the supervisor's
+    # canonical ``fetch_live_pr_head_now_with_push_time`` helper
+    # at the moment it positively verifies
+    # ``pushed_commit_sha == live_head``. The worker result
+    # envelope's ``completed_at`` is NOT the push time and must
+    # never be used as a substitute. If the supervisor cannot
+    # fetch the authoritative pushed_at (network error, missing
+    # token), ``repair_transition_at`` remains ``None`` and the
+    # SUPERSEDED row is written without ``superseded_at`` so
+    # the C22 resurrection helper fails closed.
+    repair_transition_at = None
+    artifact_path = getattr(attempt, "result_artifact_path", None)
+    if artifact_path:
+        artifact = WorkerResultArtifact.read(Path(artifact_path))
+        if (
+            artifact is not None
+            and artifact.attempt_id == attempt.attempt_id
+            and new_head_sha in artifact.pushed_commit_shas
+            and not artifact.validate_against_attempt(attempt)
+        ):
+            # ``artifact.completed_at`` is documented but
+            # NOT trustworthy as the push boundary. We
+            # capture the authoritative ``pushed_at`` from
+            # GitHub's PR payload and write it back to the
+            # attempt record so the relay's downstream
+            # ``mark_head_advanced`` can forward it as the
+            # ``superseded_at`` value. The artifact's
+            # ``completed_at`` is ignored here by design.
+            try:
+                push_ts = _fetch_pr_head_pushed_at(
+                    repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
+                    repo_name=str(REPO_NAME),  # type: ignore[name-defined]
+                    pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+                    head_sha=new_head_sha,
+                )
+                if push_ts:
+                    repair_transition_at = push_ts
+                    try:
+                        from datetime import datetime as _dt
+                        _dt.fromisoformat(push_ts.replace("Z", "+00:00"))
+                        attempt.push_succeeded_at = push_ts
+                    except (AttributeError, TypeError, ValueError):
+                        attempt.push_succeeded_at = None
+                        repair_transition_at = None
+                else:
+                    # Fail closed: no trustworthy push time.
+                    try:
+                        from .supervisor import log
+                        log(
+                            "warning",
+                            "mark_head_advanced_public: could not "
+                            "fetch authoritative pushed_at from "
+                            "GitHub PR payload; setting "
+                            "superseded_at=None so resurrection "
+                            "fails closed",
+                            attempt_id=attempt_id,
+                            head=new_head_sha[:12],
+                        )
+                    except ImportError:
+                        pass
+                    attempt.push_succeeded_at = None
+                    repair_transition_at = None
+            except (AttributeError, TypeError, ValueError):
+                repair_transition_at = None
+
     # Provenance verified. Now drive the controller transition.
     try:
         state_root = resolve_orchestration_state_root(
@@ -739,7 +824,28 @@ def mark_head_advanced_public(
     # continue polling; the next round re-attempts the
     # transition from the durable state.
     try:
-        loop.mark_head_advanced(old_head_sha, new_head_sha)
+        loop.mark_head_advanced(
+            old_head_sha,
+            new_head_sha,
+            # Round-C22R2/P1: forward the directive UUID that
+            # drove the worker push so the finding ledger's
+            # SUPERSEDED row records the authoritative
+            # repair-transition provenance. ``directive_id``
+            # was captured into the attempt record at
+            # launch time (``WorkerAttemptRecord.directive_id``).
+            directive_id=getattr(attempt, "directive_id", None),
+            # Round-C24 / Defect 3: forward the worker's
+            # authoritative verified-repair timestamp
+            # (the validated WorkerResultArtifact ``completed_at``)
+            # so the SUPERSEDED row
+            # compares correctly against a reviewer follow-up
+            # that arrives AFTER the verified push but BEFORE
+            # the supervisor observes the push. Without this
+            # the SUPERSEDED row's ``superseded_at`` falls
+            # back to ``_now_iso()`` which is strictly later
+            # than any genuine post-repair follow-up.
+            superseded_at=repair_transition_at,
+        )
     except Exception as exc:  # noqa: BLE001
         try:
             from .supervisor import log
@@ -801,6 +907,29 @@ def delete_directive_if_present(evidence_root: str) -> None:
             directive.unlink()
         except OSError:
             pass
+
+
+def _fetch_pr_head_pushed_at(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    pr_number: int,
+    head_sha: str,
+) -> Optional[str]:
+    """Round-C24-R2 / P1-A: REMOVED. Returns ``""``.
+
+    The previous C24-R1 implementation read an
+    authoritatively-broken repo-level timestamp. The
+    audit invalidates that binding. Returning ``""``
+    here means the resurrection rule will rely on the
+    per-follow-up exact-head binding (commit_id) rather
+    than any wall-clock timestamp. The C24-R2 contract
+    is fail-closed: when no trustworthy exact-head binding
+    is available, the SUPERSEDED row is written without
+    ``superseded_at`` and outdated-thread resurrection
+    fails closed.
+    """
+    return ""
 
 
 __all__ = [

@@ -1,7 +1,7 @@
 """Closure VII tests:
 
 §2 - EXPECTED vs OBSERVED static scope (no env injection)
-§3 - All 17 acceptance-critical modules compared (no silent skip)
+§3 - All acceptance-critical modules compared (no silent skip)
 §4 - prelaunch_head is the binding head (not produced/pushed)
 §5 - Canonical cooldown parser
 §6 - canonical active worker determination
@@ -53,7 +53,8 @@ def _stub_github_api(monkeypatch, tmp_path):
     monkeypatch.setenv("AED_HERMES_BIN", str(stub_hermes))
 
     # Write a supervisor-owned acceptance_runtime_identity
-    # artifact with bindings for all 17 modules so the
+    # artifact with bindings for every acceptance-critical
+    # module so the
     # Closure IX §6 evidence generator has the supervisor
     # bindings it requires.
     from pathlib import Path as _P
@@ -61,12 +62,14 @@ def _stub_github_api(monkeypatch, tmp_path):
     _modules = [
         ("supervisor.py", "autocoder_supervisor.supervisor"),
         ("_directive_prompt.py", "autocoder_supervisor._directive_prompt"),
+        ("worker_auth_preflight.py", "autocoder_supervisor.worker_auth_preflight"),
         ("worker_session.py", "autocoder_supervisor.worker_session"),
         ("aed_worker_wrapper.py", "autocoder_supervisor.aed_worker_wrapper"),
         ("directive_bridge.py", "autocoder_supervisor.directive_bridge"),
         ("provenance_maintenance.py", "autocoder_supervisor.provenance_maintenance"),
         ("hermes_fingerprint.py", "autocoder_supervisor.hermes_fingerprint"),
         ("orchestration_state_root.py", "autocoder_supervisor.orchestration_state_root"),
+        ("orchestration_bootstrap.py", "autocoder_supervisor.orchestration_bootstrap"),
         ("relay_wiring.py", "autocoder_supervisor.relay_wiring"),
         ("config.py", "autocoder_supervisor.config"),
         ("contracts.py", "autocoder_supervisor.contracts"),
@@ -384,27 +387,29 @@ class TestStaticScopeObservedVsExpected:
 
 
 # ---------------------------------------------------------------------------
-# §3 - All 17 acceptance-critical modules compared
+# §3 - All acceptance-critical modules compared
 # ---------------------------------------------------------------------------
 
 
 class TestAcceptanceRuntimeComparison:
-    """Closure VII §3: every one of the 17 acceptance-
-    critical modules MUST be in the runtime_file_records.
+    """Closure VII §3: every acceptance-critical module
+    MUST be in the runtime_file_records.
     No silent skip when source or deployed path is
     outside the repo_root.
     """
 
-    def test_inventory_has_17_modules(self):
+    def test_inventory_has_expected_modules(self):
         """Round-785 P1: push_gate.py was added to the
-        acceptance runtime inventory (now 18 modules) to
+        acceptance runtime inventory (then 18 modules) to
         ensure the supervisor-side validator that gates
         worker pushes is included in runtime_files_missing
-        accounting and in _ACCEPTANCE_RUNTIME_BINDINGS."""
+        accounting and in _ACCEPTANCE_RUNTIME_BINDINGS.
+        C24 adds orchestration_bootstrap.py, bringing the
+        acceptance-critical inventory to 19 modules."""
         from autocoder_supervisor.hermes_fingerprint import (
             ACCEPTANCE_RUNTIME_INVENTORY,
         )
-        assert len(ACCEPTANCE_RUNTIME_INVENTORY) == 18
+        assert len(ACCEPTANCE_RUNTIME_INVENTORY) == 20
 
     def test_runtime_records_have_required_fields(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (
@@ -442,7 +447,7 @@ class TestAcceptanceRuntimeComparison:
             pr_number=5,
             branch="feat/review-repair-relay-v1",
         )
-        assert ev["acceptance_runtime_compared_count"] == 18
+        assert ev["acceptance_runtime_compared_count"] == 20
 
     def test_runtime_files_missing_empty(self, tmp_path):
         from autocoder_supervisor.hermes_fingerprint import (

@@ -31,7 +31,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 #: Strict lowercase hex SHA-1/256 pattern. Used to validate
 #: rebind targets and any other 40-or-64-char head SHA.
@@ -111,7 +111,7 @@ from .orchestration_state_root import OrchestrationRootError, OrchestrationRootM
 
 
 # Closure IX §6: the production supervisor MUST
-# resolve the canonical binding for ALL 17 acceptance
+# resolve the canonical binding for every acceptance-critical
 # modules INSIDE its own process. For each, the binding
 # is either:
 #   A. LOADED_MODULE: the module object is already loaded
@@ -122,11 +122,13 @@ _ACCEPTANCE_RUNTIME_BINDINGS = [
     ("supervisor.py", "autocoder_supervisor.supervisor"),
     ("_directive_prompt.py", "autocoder_supervisor._directive_prompt"),
     ("worker_session.py", "autocoder_supervisor.worker_session"),
+    ("worker_auth_preflight.py", "autocoder_supervisor.worker_auth_preflight"),
     ("aed_worker_wrapper.py", "autocoder_supervisor.aed_worker_wrapper"),
     ("directive_bridge.py", "autocoder_supervisor.directive_bridge"),
     ("provenance_maintenance.py", "autocoder_supervisor.provenance_maintenance"),
     ("hermes_fingerprint.py", "autocoder_supervisor.hermes_fingerprint"),
     ("orchestration_state_root.py", "autocoder_supervisor.orchestration_state_root"),
+    ("orchestration_bootstrap.py", "autocoder_supervisor.orchestration_bootstrap"),
     ("relay_wiring.py", "autocoder_supervisor.relay_wiring"),
     ("config.py", "autocoder_supervisor.config"),
     ("contracts.py", "autocoder_supervisor.contracts"),
@@ -524,6 +526,7 @@ def _apply_config(cfg: SupervisorConfig) -> dict[str, Any]:
         "AUTHORITATIVE_HEAD": os.environ.get(
             "AED_AUTHORITATIVE_HEAD", ""
         ),
+        "REQUIRED_CHECK_NAMES": list(cfg.required_check_names),
         # Cadence / cooldowns
         "HEARTBEAT_SECS": cfg.heartbeat_seconds,
         "RESUME_COOLDOWN_SECS": cfg.cooldown_seconds,
@@ -754,9 +757,18 @@ def _reconcile_orchestration_state_root_at_boot() -> str:
     """
     from .orchestration_state_root import (
         OrchestrationRootError,
+        OrchestrationRootMissing,
+        OrchestrationRootUnverified,
         persist_orchestration_state_root,
         resolve_orchestration_state_root,
     )
+    env_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
+    expected_run_id = None
+    if not env_root:
+        try:
+            expected_run_id = read_run_state().get("last_bound_run_id")
+        except OrchestrationRootError:
+            expected_run_id = None
     # (b) already persisted? Then the resolver returns it
     # without touching the disk and the supervisor stays
     # in steady-state. We do NOT need to call persist
@@ -765,57 +777,156 @@ def _reconcile_orchestration_state_root_at_boot() -> str:
         existing = resolve_orchestration_state_root(
             run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
             expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_run_id=expected_run_id,
             expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
         )
         if existing:
+            if env_root:
+                # Round-C24-R2 / CodeRabbit pass-2: the resolver
+                # verified the root, but this re-read of
+                # ``run_context.json`` is a separate disk access. A
+                # concurrent removal or truncation between the two
+                # steps raised OSError / json.JSONDecodeError out of
+                # this function and aborted supervisor boot (the
+                # caller has no handler). Fail closed to the same
+                # "no orch state root at boot" contract instead.
+                try:
+                    context_payload = json.loads(
+                        (Path(existing) / "run_context.json").read_text(
+                            encoding="utf-8"
+                        )
+                    )
+                except (OSError, ValueError) as exc:
+                    log(
+                        "error",
+                        "round-C24: verified orchestration root became "
+                        "unreadable during re-persist; failing closed",
+                        error=str(exc)[:300],
+                    )
+                    return ""
+                persist_orchestration_state_root(
+                    state_root=existing,
+                    run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+                    repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
+                    repo_name=str(REPO_NAME),  # type: ignore[name-defined]
+                    run_id=str(context_payload.get("run_id") or ""),
+                    pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+                )
             return existing
-    except OrchestrationRootError:
-        # (c) no recorded root AND the env var is unset.
-        # Nothing to persist yet — defer until the operator
-        # sets ``AED_ORCHESTRATION_STATE_ROOT`` explicitly.
+    except OrchestrationRootUnverified:
+        # The resolver positively identified an
+        # orchestration_state_root field in RUN_STATE but
+        # could NOT verify the underlying root (corrupt /
+        # missing run_context.json / mismatched repo /
+        # mismatched PR / mismatched run_id). Round-C24 /
+        # Defect 1 fail-closed: refuse to silently
+        # overwrite. The supervisor routes to BLOCKED /
+        # escalation.
+        log(
+            "error",
+            "round-C24: existing orchestration_state_root did "
+            "NOT verify; refusing to bootstrap a different "
+            "root. Operator intervention required.",
+        )
+        return ""
+    except OrchestrationRootMissing:
+        # (c) no recorded root AND no env var is set —
+        # nothing to persist yet. Fall through to the
+        # round-C24 bootstrap branch below.
         pass
     # (c) env var is set but the supervisor hasn't
     # recorded it yet. Persist the env-var value into
     # RUN_STATE so subsequent boots and the relay
     # subprocess see the same canonical binding.
-    env_root = os.environ.get("AED_ORCHESTRATION_STATE_ROOT")
-    if not env_root:
+    # An explicit root was already positively verified and persisted
+    # above. Reaching this branch with it still set means verification
+    # failed, so fail closed instead of attempting another binding.
+    if env_root:
         return ""
+    # (d) Round-C24 / Defect 1: bootstrap a fresh orchestration
+    # state root when no env var is set AND no persisted
+    # RUN_STATE["orchestration_state_root"] exists AND no
+    # positively-verified root is reachable on disk. The
+    # bootstrap step preserves the round-28 invariant: it does
+    # NOT silently substitute STATE_DIR for the orch root;
+    # instead it allocates a deliberate
+    # ``<STATE_DIR.parent>/orchestration_runs/<run_id>/``
+    # directory, creates the canonical run_context.json +
+    # state.json + relay state files, persists the concrete
+    # path into RUN_STATE, and positively verifies the new
+    # root via the canonical resolver. The caller (the
+    # supervisor's main boot path) MUST hold the singleton
+    # lock before invoking this branch; concurrent bootstrap
+    # is impossible by construction.
     try:
-        persist_orchestration_state_root(
-            state_root=str(env_root),
-            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+        from .orchestration_bootstrap import (
+            bootstrap_orchestration_state_root,
+        )
+        # Round-C24-R1 / P1-B: the orchestrator-root parent
+        # MUST live at a HOST-GLOBAL location keyed on the
+        # canonical (repo, PR) — not derived from the
+        # supervisor's STATE_DIR. Two supervisors with
+        # different STATE_DIRs must converge on the same
+        # allocation root. The default
+        # ``$TMPDIR/autodev-orchestration-runs/<repo>/<repo>/pr-<n>/``
+        # is host-global so the convergence is automatic;
+        # operators may override via
+        # ``AED_ORCHESTRATION_ROOT_PARENT``.
+        import tempfile as _tempfile_root
+        bootstrap_parent = (
+            Path(_tempfile_root.gettempdir())
+            / "autodev-orchestration-runs"
+        )
+        bootstrap_root = bootstrap_orchestration_state_root(
+            state_dir=Path(STATE_DIR),  # type: ignore[name-defined]
+            state_root_parent=bootstrap_parent,
             repo_owner=str(REPO_OWNER),  # type: ignore[name-defined]
             repo_name=str(REPO_NAME),  # type: ignore[name-defined]
-            run_id=str(
-                globals().get("RUN_ID")  # type: ignore[name-defined]
-                or f"PR-{PR_NUMBER}"  # type: ignore[name-defined]
-            ),
             pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+            branch=str(
+                globals().get("FEATURE_BRANCH")
+                or os.environ.get("AED_BRANCH")
+                or ""
+            ),
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            current_authorized_head=str(
+                globals().get("AUTHORITATIVE_HEAD")
+                or ""
+            ),
+            authorized_base_sha=str(
+                globals().get("AUTHORIZED_BASE_SHA")
+                or ""
+            ),
+            local_checkout=Path(REPO_DIR),  # type: ignore[name-defined]
+            base_branch=os.environ.get("AED_BASE_BRANCH", "main"),
+            required_ci_jobs=tuple(
+                globals().get("REQUIRED_CHECK_NAMES") or ()
+            ),
+            implementation_worker_command=tuple(
+                globals().get("WORKER_COMMAND_TEMPLATE") or ("true",)
+            ),
         )
         log(
             "info",
-            "round-275 wired orchestration_state_root into RUN_STATE "
-            "from AED_ORCHESTRATION_STATE_ROOT",
-            state_root=env_root,
+            "round-C24 bootstrap allocated orchestration state root",
+            state_root=bootstrap_root,
         )
-        return str(env_root)
+        return bootstrap_root
     except OrchestrationRootError as exc:
         log(
             "warning",
-            "round-275 persist_orchestration_state_root failed; "
-            "supervisor continues with in-memory state_root",
-            state_root=env_root,
-            error=str(exc),
+            "round-C24 bootstrap refused to allocate orchestration "
+            "state root; supervisor continues without orch root "
+            "(same fail-closed behaviour as round-275)",
+            error=str(exc)[:300],
         )
         return ""
     except Exception as exc:  # noqa: BLE001
         log(
             "warning",
-            "round-275 persist_orchestration_state_root raised "
-            "unexpected exception",
-            state_root=env_root,
-            error=str(exc)[:200],
+            "round-C24 bootstrap raised unexpected exception; "
+            "supervisor continues without orch root",
+            error=str(exc)[:300],
         )
         return ""
 
@@ -2663,6 +2774,193 @@ def _git_show_blob(head, path):
             return None
         return h.stdout.decode("utf-8", errors="replace").strip() or None
     except (OSError, _sp.SubprocessError, _sp.TimeoutExpired):
+        return None
+
+
+def _git_superseding_repair_committed_at(
+    original_commit_oid: Optional[str],
+    current_head: Optional[str],
+) -> Optional[int]:
+    """Return the Unix committer timestamp of the FIRST commit on
+    ``current_head`` that is a strict descendant of
+    ``original_commit_oid`` — i.e. the head-changing repair commit
+    that made the original review anchor stale.
+
+    Used by the C22-R1 finding collector to bind follow-up
+    eligibility to the SUPERSEDING REPAIR boundary rather than
+    the first-comment timestamp. A reviewer follow-up that
+    post-dates this timestamp is, by construction, evidence the
+    reviewer posted AFTER the repair that already addressed the
+    original concern.
+
+    Returns ``None`` when:
+
+    - ``original_commit_oid`` is falsy / unparseable
+    - ``current_head`` is falsy / unparseable
+    - the commit graph lookup fails (timeout, non-zero exit, no
+      output, the original commit is not an ancestor of current
+      head, etc.)
+
+    A ``None`` return is the C22-R1 fail-closed signal: when the
+    repair boundary cannot be established, the relay must NOT
+    resurrect the thread (otherwise an already-addressed
+    historical review would be silently re-opened).
+    """
+    if not isinstance(original_commit_oid, str) or not original_commit_oid:
+        return None
+    if not isinstance(current_head, str) or not current_head:
+        return None
+    if not (REPO_DIR and Path(REPO_DIR).exists()):  # type: ignore[name-defined]
+        return None
+    try:
+        import subprocess as _sp
+        # ``--reverse`` plus ``| head -1`` gives the EARLIEST
+        # commit after the anchor. ``%ct`` is the committer
+        # timestamp in Unix seconds. ``--ancestry-path`` keeps
+        # only commits reachable from HEAD that descend from the
+        # anchor (excludes side branches and merges that don't
+        # touch the linear PR-branch history).
+        # If ``original_commit_oid`` is not an ancestor of
+        # ``current_head`` (e.g. the thread anchor was rebased
+        # away), git log returns no commits and we return None.
+        r = _sp.run(
+            [
+                "git", "-C", str(REPO_DIR),  # type: ignore[name-defined]
+                "log",
+                "--reverse",
+                "--ancestry-path",
+                "--pretty=format:%ct",
+                f"{original_commit_oid}..{current_head}",
+            ],
+            capture_output=True, timeout=5.0, text=True,
+        )
+        if r.returncode != 0:
+            return None
+        # Round-C24-R2 / CodeRabbit pass-2: ``git log`` exits 0 with
+        # EMPTY stdout when the anchor is not an ancestor of the
+        # current head (rebased-away thread anchor). Indexing
+        # ``splitlines()[0]`` there raised IndexError, which is NOT
+        # in the except tuple below, so it propagated out of this
+        # helper and crashed the documented must-not-raise
+        # ``capture_live_snapshot`` on every heartbeat. Guard the
+        # empty case explicitly and keep the None fail-closed
+        # contract.
+        lines = (r.stdout or "").splitlines()
+        if not lines:
+            return None
+        first_line = lines[0].strip()
+        if not first_line:
+            return None
+        return int(first_line)
+    except (OSError, _sp.SubprocessError, _sp.TimeoutExpired,
+            ValueError, IndexError):
+        return None
+
+
+def _superseded_repair_transition_for_thread(
+    *,
+    thread_id: str,
+) -> Optional[dict]:
+    """Round-C22R2/P1: look up the durable FindingLedger's
+    ``superseded_repair_transition`` record for ``thread:<tid>``
+    and return it for snapshot stamping.
+
+    Returns ``None`` when:
+
+      - ``thread_id`` is empty / malformed;
+      - the orchestrator state root cannot be resolved
+        (no ``AED_ORCHESTRATION_STATE_ROOT``, no
+        ``RUN_STATE['orchestration_state_root']`` entry);
+      - the durable ledger has no SUPERSEDED row for the
+        prior finding identity (the thread has not been
+        superseded by any worker push yet — a normal
+        first-time-seen state);
+      - any read or parse error occurs.
+
+    The helper NEVER raises; every failure path returns
+    ``None`` so ``capture_live_snapshot`` keeps its canonical
+    "must not raise" contract. The audit's contract is fail-
+    closed: when this helper returns None the C22-R2
+    eligibility helper in the relay rejects any follow-up as
+    ineligible.
+    """
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    # Resolve the orchestrator state root. The supervisor
+    # already exposes ``resolve_orchestration_state_root``;
+    # we defer the import to avoid a circular dependency at
+    # module load time.
+    try:
+        from .orchestration_state_root import (
+            OrchestrationRootError,
+            resolve_orchestration_state_root,
+        )
+        from autocoder_orchestration.store import StateStore
+        from autocoder_orchestration.review_repair_relay import (
+            FindingLedger,
+        )
+    except ImportError:
+        return None
+    try:
+        state_root = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+    except OrchestrationRootError:
+        return None
+    except Exception:
+        return None
+    if not state_root:
+        return None
+    try:
+        store = StateStore(state_root=state_root)
+    except Exception:
+        return None
+    finding_id = f"thread:{thread_id}"
+    # The ledger's ``superseded_repair_transition`` walks the
+    # entire ``finding_ledger.jsonl`` (per-state-root, NOT
+    # per-head) looking for SUPERSEDED rows for this
+    # finding_id. The constructor's ``head_sha`` is only
+    # consulted when writing NEW entries; the helper is
+    # read-only, so we pass a placeholder hex string. Any
+    # 40/64-char lowercase hex value satisfies the
+    # constructor's validation; the canonical PR head is
+    # preferred for diagnostic consistency.
+    try:
+        # ``read_journal`` is invoked via
+        # ``FindingLedger.superseded_repair_transition``; the
+        # ledger constructor validates ``head_sha`` shape and
+        # raises when the value is malformed.
+        from autocoder_orchestration.context import (
+            RunContext as _RC,
+        )
+        try:
+            _ctx = _RC.from_dict(
+                store.read_optional("run_context.json") or {}
+            )
+        except Exception:
+            _ctx = None
+        _ledger_head = (
+            getattr(_ctx, "current_authorized_head", None)
+            if _ctx is not None
+            else None
+        )
+        if not isinstance(_ledger_head, str) or not _HEX_SHA_RE.match(
+            _ledger_head
+        ):
+            _ledger_head = "a" * 40  # placeholder; the
+            # ledger only uses this when WRITING new
+            # entries, which this helper never does.
+        ledger = FindingLedger(
+            store,
+            head_sha=_ledger_head,
+        )
+        # ``FindingLedger.superseded_repair_transition`` is
+        # read-only; it does not raise on a missing finding
+        # (returns ``None``).
+        return ledger.superseded_repair_transition(finding_id)
+    except Exception:
         return None
 
 
@@ -6003,6 +6301,12 @@ def reconcile_orphaned_worker_attempts(*, work_dir=None) -> int:
                 finding_ids=tuple(_d.get("finding_ids") or ()),
                 directive_digest=_d.get("directive_digest", ""),
                 directive_path=_d.get("directive_path", ""),
+                # Round-C22R2/P1: relay directive UUID that drove
+                # this worker push; recorded on the ledger's
+                # SUPERSEDED row so the snapshot's C22-R2
+                # eligibility helper can recover the
+                # authoritative repair transition by finding ID.
+                directive_id=_d.get("directive_id"),
                 prelaunch_head=_d.get("prelaunch_head", ""),
                 expected_branch=_d.get("expected_branch", "feat/review-repair-relay-v1"),
                 pid=int(_pid) if _pid else 0,
@@ -8177,6 +8481,81 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             attempt_id=attempt_id_prefix,
         )
         return None
+    # Round-C24-R2 / P1 worker auth preflight: verify the
+    # worker's environment has authenticated repo write
+    # capability BEFORE spawning the subprocess. The
+    # previous behaviour launched a worker that returned
+    # ``WORKER_EXECUTION_FAILED`` halfway through because
+    # the worker shell had no auth. The preflight is
+    # non-mutating and emits only boolean diagnostics.
+    # ``AED_SKIP_IDENTITY_GUARD`` is the existing test
+    # affordance; the production supervisor never sets it.
+    if (
+        os.environ.get("AED_SKIP_WORKER_AUTH_PREFLIGHT") != "1"
+        and os.environ.get("AED_SKIP_IDENTITY_GUARD") != "1"
+    ):
+        # Round-C24-R2R3 / fail-closed import guard: the lazy import
+        # is handled SEPARATELY from the preflight call. Two prior
+        # defects lived here:
+        #
+        #   1. (pass-1) import + call shared one ``try`` whose
+        #      ``except`` clause evaluated ``WorkerRepoAuthUnavailable``
+        #      — a failed import left that name unbound and replaced
+        #      the ImportError with a NameError.
+        #   2. (pass-2) the ImportError handler logged-and-continued
+        #      with ``preflight_or_raise = None``, which silently
+        #      DISABLED the production auth gate: a worker could
+        #      launch without any positive repo-write verification.
+        #
+        # The C24-R2 contract is: worker auth cannot be positively
+        # verified → the worker MUST NOT launch. An unavailable
+        # preflight module is not permission to skip the gate. The
+        # ONLY legal bypass remains the explicit non-production
+        # environment escape hatch checked above.
+        try:
+            from .worker_auth_preflight import (
+                preflight_or_raise,
+                WorkerRepoAuthUnavailable,
+            )
+        except ImportError as exc:
+            log(
+                "error",
+                "WORKER_REPO_AUTH_PREFLIGHT_UNAVAILABLE: refusing "
+                "worker launch; worker repo-write authorization "
+                "cannot be positively verified. Set "
+                "AED_SKIP_WORKER_AUTH_PREFLIGHT=1 ONLY in "
+                "non-production tests.",
+                error=str(exc)[:200],
+            )
+            try:
+                stdout_fh.close()
+                stderr_fh.close()
+            except Exception:
+                pass
+            return None
+        # The import succeeded above, so ``WorkerRepoAuthUnavailable``
+        # is guaranteed bound here (no ImportError→NameError
+        # conversion is possible in standalone/synthetic-package
+        # launch mode).
+        try:
+            preflight_or_raise(
+                repo_dir=Path(REPO_DIR),  # type: ignore[name-defined]
+            )
+        except WorkerRepoAuthUnavailable as exc:
+            log(
+                "warning",
+                "WORKER_REPO_AUTH_UNAVAILABLE: preflight failed; "
+                "refusing to launch a worker that would fail "
+                "halfway through. Set AED_SKIP_WORKER_AUTH_PREFLIGHT=1 "
+                "ONLY in non-production tests.",
+                error=str(exc)[:400],
+            )
+            try:
+                stdout_fh.close()
+                stderr_fh.close()
+            except Exception:
+                pass
+            return None
     try:
         proc = subprocess.Popen(
             cmd,
@@ -8321,6 +8700,12 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             finding_ids=(),
             directive_digest=directive_digest,
             directive_path=directive_path,
+            # Round-C22R2/P1: record the directive UUID on the
+            # worker attempt so ``mark_head_advanced_public`` can
+            # forward it to ``loop.mark_head_advanced(...)`` and
+            # the SUPERSEDED row in the finding ledger carries
+            # the authoritative repair-transition provenance.
+            directive_id=directive_id,
             prelaunch_head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
             expected_branch=expected_branch,
             pid=proc.pid,
@@ -8675,7 +9060,285 @@ def mark_review_request_superseded(
         )
 
 
-def post_review_request(provider: str, head_sha: str) -> bool:
+def _parse_review_request_marker(body: str):
+    """Parse an AutoDev review-request marker from a
+    comment body. Returns the canonical
+    ``(provider, head_sha, request_id)`` tuple or ``None``
+    when the body does not carry a well-formed marker.
+
+    Marker shape (Round-C24 / Defect 7):
+
+      <!-- autodev-review-request:v1:<provider>:<full_head_sha>:<request_id> -->
+
+    The FULL head SHA is required (40 or 64 lowercase hex
+    chars); a 12-char prefix is rejected because it cannot
+    uniquely identify the head. The audit's P1 finding
+    identified the 12-char-prefix marker as the root cause
+    of the four-request duplicate observed live.
+    """
+    import re as _re
+    if not isinstance(body, str):
+        return None
+    match = _re.search(
+        r"<!--\s*autodev-review-request:v1:"
+        r"(?P<provider>[A-Za-z0-9_\-]+):"
+        r"(?P<head>[0-9a-f]{40}|[0-9a-f]{64}):"
+        r"(?P<rid>req-[A-Za-z0-9._-]+)"
+        r"\s*-->",
+        body,
+    )
+    if match is None:
+        return None
+    return (
+        match.group("provider"),
+        match.group("head"),
+        match.group("rid"),
+    )
+
+
+def _pr_already_has_pending_request(*, provider: str, head_sha: str) -> bool:
+    """Round-C24 / Defect 7: cross-run idempotency authority.
+
+    Query GitHub for the live PR's issue comments and check
+    whether ANY comment carries a valid AutoDev marker that
+    pairs ``provider`` + ``head_sha``. When such a marker
+    exists the supervisor must NOT post another comment for
+    the same provider/head pair.
+
+    Returns True when a marker for ``provider`` / ``head_sha``
+    is found in the live PR's issue comments, False
+    otherwise. The function never raises; transport
+    failures return False so the caller falls through to
+    the fresh-post path and the supervisor continues to
+    operate.
+    """
+    if not provider or not head_sha:
+        return False
+    try:
+        import json as _json
+        import subprocess as _subprocess
+        proc = _subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments",  # type: ignore[name-defined]
+                "--paginate",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    if proc.returncode != 0:
+        return False
+    try:
+        comments = _json.loads(proc.stdout or "[]")
+    except _json.JSONDecodeError:
+        return False
+    if not isinstance(comments, list):
+        return False
+    for c in comments:
+        body = c.get("body") if isinstance(c, dict) else None
+        parsed = _parse_review_request_marker(body or "")
+        if parsed is None:
+            continue
+        marker_provider, marker_head, _marker_rid = parsed
+        if (
+            marker_provider == provider
+            and marker_head == head_sha
+        ):
+            return True
+    return False
+
+
+def _adopt_existing_marker(
+    *,
+    provider: str,
+    head_sha: str,
+    writer,
+) -> Optional[str]:
+    """Round-C24 / Defect 7: locate the existing AutoDev
+    marker on the live PR for ``provider`` + ``head_sha``
+    and persist the discovered ``request_id`` into the
+    local supervisor ledger so the per-head cap / cooldown
+    machinery sees a coherent local record.
+
+    The function chooses the most-recent marker (by
+    ``created_at``) when multiple historical duplicates
+    already exist. Multiple historical duplicates MUST NOT
+    produce another post; this is exactly the live-1C
+    defect the audit flagged.
+    """
+    import datetime as _dt
+    import json as _json
+    import subprocess as _subprocess
+    if not provider or not head_sha:
+        return None
+    try:
+        proc = _subprocess.run(
+            [
+                "gh",
+                "api",
+                f"repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments",  # type: ignore[name-defined]
+                "--paginate",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        comments = _json.loads(proc.stdout or "[]")
+    except _json.JSONDecodeError:
+        return None
+    if not isinstance(comments, list):
+        return None
+    matches = []
+    for c in comments:
+        if not isinstance(c, dict):
+            continue
+        body = c.get("body") or ""
+        parsed = _parse_review_request_marker(body)
+        if parsed is None:
+            continue
+        marker_provider, marker_head, marker_rid = parsed
+        if (
+            marker_provider == provider
+            and marker_head == head_sha
+        ):
+            created_at = c.get("created_at") or ""
+            remote_comment_id = str(c.get("id") or "")
+            remote_comment_url = (
+                c.get("html_url") or c.get("url") or ""
+            )
+            matches.append(
+                (
+                    created_at,
+                    marker_rid,
+                    remote_comment_id,
+                    remote_comment_url,
+                )
+            )
+    if not matches:
+        return None
+    # Most-recent first; deterministic tiebreaker on rid.
+    matches.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    chosen_created_at, chosen_rid, chosen_id, chosen_url = matches[0]
+    # Persist the discovered record locally so the per-head
+    # cap / cooldown machinery treats this request as
+    # in-flight. We promote it to REQUEST_SENT because the
+    # comment is already on the live PR.
+    try:
+        writer(
+            provider,
+            head_sha,
+            {
+                "actor": "round_c24_marker_adoption",
+                "lifecycle": "REQUEST_SENT",
+                "request_head": head_sha,
+                "request_id": chosen_rid,
+                "requested_at": chosen_created_at or now_iso(),
+                "sent_at": chosen_created_at or now_iso(),
+                "marker": (
+                    f"<!-- autodev-review-request:v1:"
+                    f"{provider}:{head_sha}:{chosen_rid} -->"
+                ),
+                "remote_comment_id": chosen_id,
+                "remote_comment_url": chosen_url,
+                "adopted_from": "live_pr_marker_reconciliation",
+            },
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    return chosen_rid
+
+
+def _fetch_and_adopt_global_request_marker(
+    *, provider: str, head_sha: str,
+) -> str:
+    """Return ``found``, ``missing``, or ``error`` for GitHub marker state.
+
+    A found marker is adopted into the local ledger. GitHub transport or
+    pagination failure is an error and fails closed; it must never authorize
+    a speculative duplicate post.
+    """
+    token = get_github_token() or ""
+    if not token:
+        return "error"
+    matches: List[dict] = []
+    for page in range(1, 11):
+        comments = github_get(
+            f"/repos/{REPO_OWNER}/{REPO_NAME}/issues/{PR_NUMBER}/comments"  # type: ignore[name-defined]
+            f"?per_page=100&page={page}",
+            token,
+        )
+        if comments is None or not isinstance(comments, list):
+            return "error"
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            parsed = _parse_review_request_marker(comment.get("body") or "")
+            if parsed and parsed[0] == provider and parsed[1] == head_sha:
+                matches.append({
+                    "request_id": parsed[2],
+                    "id": str(comment.get("id") or ""),
+                    "url": comment.get("html_url") or comment.get("url") or "",
+                    "created_at": comment.get("created_at") or "",
+                })
+        if len(comments) < 100:
+            break
+    else:
+        return "error"
+    if not matches:
+        return "missing"
+    matches.sort(key=lambda item: (item["created_at"], item["id"], item["request_id"]))
+    chosen = matches[0]
+    write_review_request(
+        provider=provider,
+        head_sha=head_sha,
+        record={
+            "actor": "round_c24_marker_adoption",
+            "lifecycle": "REQUEST_SENT",
+            "request_head": head_sha,
+            "request_id": chosen["request_id"],
+            "requested_at": chosen["created_at"] or now_iso(),
+            "sent_at": chosen["created_at"] or now_iso(),
+            "marker": (
+                f"<!-- autodev-review-request:v1:{provider}:"
+                f"{head_sha}:{chosen['request_id']} -->"
+            ),
+            "remote_comment_id": chosen["id"],
+            "remote_comment_url": chosen["url"],
+            "adopted_from": "live_pr_marker_reconciliation",
+            "historical_duplicate_count": max(0, len(matches) - 1),
+            "historical_duplicate_request_ids": [
+                item["request_id"] for item in matches[1:]
+            ],
+        },
+    )
+    return "found"
+
+
+def _global_review_request_lock(provider: str, head_sha: str) -> int:
+    """Acquire the host-global provider/head mutation lock."""
+    import hashlib as _hashlib
+    import tempfile as _tempfile
+    lock_root = Path(_tempfile.gettempdir()) / "autodev-review-request-locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    identity = (
+        f"{REPO_OWNER}/{REPO_NAME}#{PR_NUMBER}:{provider}:{head_sha}"  # type: ignore[name-defined]
+    )
+    digest = _hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    fd = os.open(str(lock_root / f"{digest}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _post_review_request_locked(provider: str, head_sha: str) -> bool:
     """Round-44 C12 + Round-54/C22 §4: send the provider review
     request ONLY after re-verifying the live PR head matches
     the requested exact head.
@@ -8726,6 +9389,11 @@ def post_review_request(provider: str, head_sha: str) -> bool:
             provider=provider,
         )
         return False
+    existing_local = read_review_request(provider, head_sha)
+    if existing_local and existing_local.get("lifecycle") in (
+        "REQUEST_SENT", "ACKNOWLEDGED", "REVIEW_COMPLETE",
+    ):
+        return False
     handle = cfg["trigger_handle"]
     live_head = fetch_live_pr_head_now()
     if not live_head:
@@ -8761,10 +9429,57 @@ def post_review_request(provider: str, head_sha: str) -> bool:
     # by a stable identifier that survives process death.
     import uuid as _uuid
     _request_id = f"req-{_uuid.uuid4().hex[:16]}"
+    # Round-C24 / Defect 7: the marker MUST carry the FULL
+    # head SHA (not a 12-char prefix) so a different
+    # supervisor lifetime with a different state directory
+    # can still match this request when it scans the live PR
+    # for cross-run idempotency. The audit explicitly
+    # identified this as the trigger for the four-request
+    # duplicate defect observed live on PR #9 in Trial 1C.
     _marker = (
         f"<!-- autodev-review-request:v1:"
-        f"{provider}:{live_head[:12]}:{_request_id} -->"
+        f"{provider}:{live_head}:{_request_id} -->"
     )
+    # Round-C24 / Defect 7: BEFORE persisting REQUEST_INTENT
+    # and BEFORE any remote mutation, scan the live PR's
+    # issue comments for an existing AutoDev marker that
+    # already pairs ``provider`` + ``live_head``. If one is
+    # found, adopt the discovered ``request_id`` into the
+    # local ledger (so the per-head cap / cooldown remain
+    # consistent across supervisor lifetimes) and DO NOT
+    # post a duplicate comment. This makes the per-head
+    # request idempotency a property of the PR itself,
+    # not of the supervisor's local state directory.
+    marker_state = _fetch_and_adopt_global_request_marker(
+        provider=provider, head_sha=live_head
+    )
+    if marker_state == "found":
+        log(
+            "info",
+            "post_review_request: adopted existing AutoDev marker; "
+            "no duplicate posted",
+            provider=provider,
+            head=live_head[:12],
+        )
+        return False
+    if marker_state == "error":
+        log(
+            "warning",
+            "post_review_request: GitHub marker inventory unavailable; "
+            "failing closed to avoid a cross-run duplicate",
+            provider=provider,
+            head=live_head[:12],
+        )
+        return False
+    previous = read_review_request(provider, live_head)
+    if previous and previous.get("lifecycle") == "REQUEST_INTENT":
+        prior_id = str(previous.get("request_id") or "unknown")
+        history = REVIEW_REQUESTS_DIR / (  # type: ignore[name-defined]
+            f"{provider}__{live_head}__{prior_id}.intent.json"
+        )
+        archived = dict(previous)
+        archived["retry_archived_at"] = now_iso()
+        write_json(history, archived)
     # Step 2: persist REQUEST_INTENT bound to the EXACT live head.
     try:
         write_review_request(  # type: ignore[name-defined]
@@ -8877,6 +9592,15 @@ def post_review_request(provider: str, head_sha: str) -> bool:
         remote_comment_id=_remote_comment_id,
     )
     return True
+
+
+def post_review_request(provider: str, head_sha: str) -> bool:
+    """Serialize and reconcile the canonical ``trigger_handle`` mutation."""
+    fd = _global_review_request_lock(provider, head_sha)
+    try:
+        return _post_review_request_locked(provider, head_sha)
+    finally:
+        os.close(fd)
 
 
 def reconcile_provider_request_request_sent(
@@ -9200,12 +9924,11 @@ def schedule_codex_request_on_stable_head(
     cfg = PROVIDERS.get("codex")
     if not cfg:
         return False
-    # Idempotency: any existing REQUEST_INTENT / REQUEST_SENT
-    # for codex on this head short-circuits to keep
-    # policy honest.
+    # Successful external requests short-circuit. REQUEST_INTENT is
+    # retryable after the quota/cooldown gates below because it proves
+    # only that a pre-mutation write occurred.
     existing = read_review_request("codex", live_head)  # type: ignore[name-defined]
     if existing and existing.get("lifecycle") in (
-        "REQUEST_INTENT",
         "REQUEST_SENT",
         "ACKNOWLEDGED",
         "REVIEW_COMPLETE",
@@ -11201,6 +11924,28 @@ def safe_github_get(path: str, token: str) -> Optional[Any]:
     return github_get(path, token)
 
 
+# Round-C22R1/P2-C: per-thread comment pagination cap. A thread
+# with more than this many comments is treated as too noisy to
+# paginate fully; the snapshot marks ``comment_pagination_failed``
+# so the readiness gate can fail closed.
+_C22R1_THREAD_COMMENT_PAGES_CAP = 12  # 12 pages * 25 = 300 comments
+
+# Round-C22R1/P2-C: per-thread comment pagination query (the
+# thread-level ``comments`` connection requires the ``node(id:)``
+# alias, not ``reviewThread(id:)`` — see the round-54 in-process
+# transport). Used by the post-processing pagination pass to
+# fetch additional pages AFTER the inline first page.
+_C22R1_THREAD_COMMENT_QUERY = (
+    "query($nodeId: ID!, $cursor: String) "
+    "{ node(id: $nodeId) "
+    "{ ... on PullRequestReviewThread "
+    "{ comments(first: 25, after: $cursor) "
+    "{ pageInfo { hasNextPage endCursor } "
+    "nodes { databaseId body author { login } "
+    "createdAt updatedAt path line commit { oid } } } } } }"
+)
+
+
 def capture_live_snapshot(rs: dict, token: str) -> dict:
     snap = {
         "captured_at": now_iso(),
@@ -11221,6 +11966,23 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
         # current inline review comments per provider.
         "provider_surfaces": {},
         "review_comments": [],
+        # Round-C22R1/P1-B: production operator-identity set.
+        # The relay's C22 resurrection rule (R1) relies on this
+        # field. Built below from: PR author login + GitHub
+        # ``viewer`` login + every known provider bot_login +
+        # automation actors. The fallback (github-actions
+        # defaults) is intentionally narrow — it only exists for
+        # unit-test fixtures and offline runs.
+        "operator_logins": [],
+        # Round-C22R1/P2-C: per-thread pagination status. The
+        # paginator is invoked below for every thread; the snap
+        # records the aggregate so the relay's readiness gate
+        # can fail closed when ANY thread's pagination did not
+        # exhaust. (An incomplete inventory at this granularity
+        # can otherwise recreate the original false-readiness
+        # defect.)
+        "review_thread_pagination_complete": True,
+        "review_thread_pagination_failed": False,
     }
     pr = safe_github_get(
         f"/repos/{REPO_OWNER}/{REPO_NAME}/pulls/{PR_NUMBER}",  # type: ignore[name-defined]
@@ -11232,6 +11994,71 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             snap["head_sha"] == AUTHORITATIVE_HEAD  # type: ignore[name-defined]
         )
         snap["mergeable"] = pr.get("mergeable")
+    # Round-C22R1/P1-B: capture PR author login (the most
+    # authoritative operator-identity candidate). The REST
+    # ``/repos/.../pulls/{n}`` payload already exposes
+    # ``user.login``; we record it here so the operator-logins
+    # builder below can include it without an extra query.
+    _pr_user = pr.get("user") if isinstance(pr, dict) else None
+    _pr_author_login = (
+        _pr_user.get("login") if isinstance(_pr_user, dict) else None
+    )
+    # Round-C22R1/P1-B: capture the GitHub authenticated viewer
+    # login (i.e. the account that ran this snapshot capture).
+    # One extra ``viewer { login }`` GraphQL round-trip per
+    # snapshot is acceptable; we cache the value in the snap so
+    # the operator-logins builder below reads it directly.
+    _viewer_login: Optional[str] = None
+    try:
+        _viewer_data = _github_graphql(  # type: ignore[name-defined]
+            "query { viewer { login } }",
+            {},
+        )
+        if isinstance(_viewer_data, dict):
+            _viewer_obj = _viewer_data.get("viewer")
+            if isinstance(_viewer_obj, dict):
+                _viewer_login = _viewer_obj.get("login")
+    except Exception:
+        _viewer_login = None
+    # Round-C22R1/P1-B: build the production operator identity
+    # set. The C22 R1 rule excludes operator accounts from being
+    # treated as reviewer follow-ups; the canonical operator
+    # identity sources for THIS run are:
+    #
+    #   1. the PR author (``pr.user.login`` from REST)
+    #   2. the GitHub authenticated viewer running this snapshot
+    #   3. the canonical repo owner login (``REPO_OWNER``)
+    #
+    # Automation actors (``github-actions`` and friends) are
+    # recorded separately because they are common operator
+    # explanations but should not be conflated with the
+    # human-authorised operator set.
+    #
+    # ``set()`` deduplicates and ``str(...)`` defends against
+    # ``None`` (and other falsy) entries from any of the
+    # sources. The set is sorted into a stable list so the snap
+    # payload is deterministic for downstream snapshot
+    # fingerprinting and equality checks.
+    _automation_logins = ["github-actions", "github-actions[bot]"]
+    _operator_set: set = set()
+    for _src in (
+        _pr_author_login,
+        _viewer_login,
+        REPO_OWNER,  # type: ignore[name-defined]
+        *_automation_logins,
+    ):
+        if isinstance(_src, str) and _src.strip():
+            _operator_set.add(_src.strip())
+    snap["operator_logins"] = sorted(_operator_set)
+    # Round-C22R1/P1-B: stamp the underlying sources so the
+    # relay + audit can verify which identities populated the
+    # set (and detect fallback usage in production).
+    snap["operator_identity_sources"] = {
+        "pr_author_login": _pr_author_login,
+        "viewer_login": _viewer_login,
+        "repo_owner": REPO_OWNER,  # type: ignore[name-defined]
+        "automation_logins": sorted(_automation_logins),
+    }
     revs = safe_github_get(
         # Round-37: per_page=100 (was 20). GitHub caps each page
         # at 100, and PR #5 has accumulated 60+ reviews, so the
@@ -11366,8 +12193,24 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             "{ reviewThreads(first: 100, after: $cursor) "
             "{ pageInfo { hasNextPage endCursor } "
             "nodes { id isResolved isOutdated path "
-            "comments(first: 25) { nodes { "
-            "body author { login } databaseId "
+            # Round-C22/C22: capture ``comments.first``'s timestamps
+            # and per-comment author so the relay's finding
+            # collector can identify NEWER non-operator follow-up
+            # replies in outdated threads. ``createdAt`` is the
+            # strongest durable binding evidence (GitHub does NOT
+            # re-bind ``commit`` when a thread goes outdated, so
+            # timestamp ordering inside the same thread is what
+            # distinguishes a follow-up that survived a repair
+            # from a follow-up that pre-dates it).
+            # Round-C22R1/P2-C: also expose the inner ``comments``
+            # connection's ``pageInfo`` so the per-thread
+            # pagination pass knows whether more replies exist
+            # beyond the first page. A >25-comment thread with a
+            # qualifying follow-up beyond page 1 must NOT be
+            # silently treated as clean.
+            "comments(first: 25) { pageInfo { hasNextPage endCursor } "
+            "nodes { "
+            "body author { login } databaseId createdAt updatedAt "
             "path line commit { oid } } } } } } } }"
         )
         payload = json.dumps({
@@ -11452,6 +12295,24 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                 comments_obj.get("nodes", [])
                 if isinstance(comments_obj, dict) else []
             )
+            # Round-C22R1/P2-C: capture the first-page
+            # ``pageInfo`` so the post-processing pagination
+            # pass knows whether more replies exist beyond the
+            # inline first page. ``_comments_has_next`` /
+            # ``_comments_end_cursor`` are transient fields —
+            # stripped before the snap is serialized.
+            _comments_page_info = (
+                comments_obj.get("pageInfo")
+                if isinstance(comments_obj, dict) else None
+            )
+            _inline_has_next = bool(
+                _comments_page_info.get("hasNextPage")
+                if isinstance(_comments_page_info, dict) else False
+            )
+            _inline_end_cursor = (
+                _comments_page_info.get("endCursor")
+                if isinstance(_comments_page_info, dict) else None
+            )
             first_comment: dict = {}
             if comments_nodes and isinstance(comments_nodes[0], dict):
                 first_comment = comments_nodes[0]
@@ -11483,17 +12344,45 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             # carried forward on stale provider evidence. Capture
             # each non-first comment as a reply entry with its
             # ``databaseId`` (stable GraphQL id) and full body.
-            # ``updatedAt`` is not selected by this query, so the
-            # reply falls back to ``""`` — both sides of the
-            # fingerprint therefore hash it consistently.
+            # Round-C22/C22: the C22 resurrection helper also needs
+            # ``createdAt`` + ``author`` per reply so it can apply
+            # the strict R1 (non-operator author) and R2
+            # (strictly-later ``createdAt`` than the first comment)
+            # eligibility rules.
             reply_entries: list[dict] = []
             for reply_node in comments_nodes[1:]:
                 if not isinstance(reply_node, dict):
                     continue
+                _reply_author_obj = reply_node.get("author")
+                _reply_author_login = (
+                    _reply_author_obj.get("login")
+                    if isinstance(_reply_author_obj, dict) else None
+                )
+                # Round-C24-R2 / §5: capture the reply's own
+                # ``commit { oid }`` — GitHub's live diff-position
+                # anchor for this comment. This is the exact-head
+                # identity evidence the relay's resurrection helper
+                # compares against the ledger's
+                # ``superseded_by_head``. The field was already
+                # selected by the GraphQL query but previously
+                # dropped here, which made the exact-head contract
+                # unreachable in production.
+                _reply_commit_obj = reply_node.get("commit")
+                _reply_commit_oid = (
+                    _reply_commit_obj.get("oid")
+                    if isinstance(_reply_commit_obj, dict) else None
+                )
                 reply_entries.append({
                     "id": str(reply_node.get("databaseId") or ""),
-                    "updatedAt": "",
+                    "updatedAt": (
+                        reply_node.get("updatedAt") or ""
+                    ),
+                    "createdAt": (
+                        reply_node.get("createdAt") or ""
+                    ),
                     "body": reply_node.get("body") or "",
+                    "author": _reply_author_login,
+                    "commit_id": _reply_commit_oid,
                 })
             all_threads.append((
                 node_id,
@@ -11512,12 +12401,34 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
                     # fingerprint is sensitive to the first
                     # comment's identity.
                     "top_id": str(first_comment.get("databaseId") or ""),
+                    # Round-C22/C22: capture the first comment's
+                    # ``createdAt`` and ``updatedAt`` so the relay's
+                    # C22 resurrection helper can compute the
+                    # strictly-later-timestamp eligibility rule. The
+                    # snapshot previously dropped these timestamps;
+                    # restoring them here is the minimal evidence
+                    # needed to identify a NEW reviewer follow-up in
+                    # an outdated thread.
+                    "top_createdAt": (
+                        first_comment.get("createdAt") or ""
+                    ),
+                    "top_updatedAt": (
+                        first_comment.get("updatedAt") or ""
+                    ),
                     # Round-1064 P1#1: per-thread replies captured
                     # here are re-emitted by
                     # ``_snapshot_provider_thread`` so the
                     # durable thread-proof fingerprint changes
                     # whenever a new reply is observed.
                     "replies": reply_entries,
+                    # Round-C22R1/P2-C: transit-only fields
+                    # carrying the first-page ``pageInfo`` so the
+                    # post-processing pagination pass knows
+                    # whether more replies exist beyond the
+                    # inline first page. The post-pass strips
+                    # these before the snap is serialized.
+                    "_comments_has_next": _inline_has_next,
+                    "_comments_end_cursor": _inline_end_cursor,
                 },
             ))
         page_info_obj = threads.get("pageInfo")
@@ -11539,6 +12450,218 @@ def capture_live_snapshot(rs: dict, token: str) -> dict:
             pagination_failed = True
             break
         cursor = pinfo.get("endCursor")
+    # Round-C22R1/P2-C: per-thread comment pagination. The inline
+    # loop above captured the first 25 comments of each thread
+    # along with ``pageInfo``; this pass walks any subsequent
+    # pages so a >25-comment thread with a qualifying follow-up
+    # beyond page 1 is not silently truncated. The bounded cap
+    # (``_C22R1_THREAD_COMMENT_PAGES_CAP``) fails closed: when
+    # the cap is exhausted before ``hasNextPage == False``, the
+    # aggregate pagination flag is marked failed and the snap
+    # records the truncated thread ids.
+    truncated_thread_ids: List[str] = []
+    for _ti, (_tid, _resolved, _outdated, _evidence) in enumerate(all_threads):
+        if not _tid:
+            continue
+        # The inline loop stashed the first-page ``hasNextPage``/
+        # ``endCursor`` on ``_evidence`` (see the comment-field
+        # addition below). If the inline capture saw
+        # ``hasNextPage == False``, the first page is complete
+        # and the per-thread paginator can be skipped.
+        _inline_has_next = bool(_evidence.get("_comments_has_next"))
+        _inline_end_cursor = _evidence.get("_comments_end_cursor") or None
+        if not _inline_has_next:
+            # No further pages to walk; only do the repair-
+            # boundary computation for outdated threads.
+            if _outdated:
+                _anchor_oid = _evidence.get("commit_oid")
+                _current_head_sha = snap.get("head_sha")
+                _evidence["superseding_repair_committed_at"] = (
+                    _git_superseding_repair_committed_at(
+                        _anchor_oid,
+                        _current_head_sha,
+                    )
+                )
+                # Round-C22R2/P1: durable FindingLedger lookup.
+                # This is the AUTHORITATIVE repair-transition
+                # evidence the C22-R2 eligibility helper reads;
+                # the C22-R1 git-ancestry field above is
+                # diagnostic provenance only.
+                # Round-C24-R2: ``superseded_by_head`` is exact-head
+                # IDENTITY evidence and is stamped whenever present;
+                # ``superseded_at`` is OPTIONAL supplemental TIME
+                # evidence (production rows legitimately omit it).
+                # Stamping ``superseded_by_head=None`` here would
+                # strand the identity branch of the eligibility
+                # helper, so it is always forwarded.
+                _durable = _superseded_repair_transition_for_thread(
+                    thread_id=_tid,
+                )
+                if _durable is not None:
+                    _evidence["superseded_by_head"] = _durable.get(
+                        "superseded_by_head"
+                    )
+                    _evidence["superseded_at"] = _durable.get(
+                        "superseded_at"
+                    )
+                    if _durable.get("directive_id"):
+                        _evidence["superseded_directive_id"] = (
+                            _durable["directive_id"]
+                        )
+            # Strip the inline-only pagination hints before the
+            # snap is serialized (they were transit fields, not
+            # part of the durable schema).
+            _evidence.pop("_comments_has_next", None)
+            _evidence.pop("_comments_end_cursor", None)
+            continue
+        # Walk additional pages until ``hasNextPage == False``
+        # or the safety cap is exhausted.
+        _cursor = _inline_end_cursor
+        _extra_replies: List[dict] = []
+        _pagination_failed = False
+        for _ in range(_C22R1_THREAD_COMMENT_PAGES_CAP):
+            _data = _github_graphql(  # type: ignore[name-defined]
+                _C22R1_THREAD_COMMENT_QUERY,
+                {"nodeId": _tid, "cursor": _cursor},
+            )
+            if not isinstance(_data, dict):
+                _pagination_failed = True
+                break
+            _node = _data.get("node")
+            if not isinstance(_node, dict):
+                _pagination_failed = True
+                break
+            _comments = _node.get("comments")
+            if not isinstance(_comments, dict):
+                _pagination_failed = True
+                break
+            for n in (_comments.get("nodes") or []):
+                if not isinstance(n, dict):
+                    continue
+                _reply_author_obj = n.get("author")
+                _reply_author_login = (
+                    _reply_author_obj.get("login")
+                    if isinstance(_reply_author_obj, dict) else None
+                )
+                # Round-C24-R2 / §5: preserve the reply's own
+                # ``commit { oid }`` through pagination too. The
+                # exact-head identity evidence must survive the
+                # >25-comment pagination pass identically to the
+                # first page, otherwise a qualifying follow-up
+                # beyond page 1 would lose its binding.
+                _n_commit_obj = n.get("commit")
+                _n_commit_oid = (
+                    _n_commit_obj.get("oid")
+                    if isinstance(_n_commit_obj, dict) else None
+                )
+                _extra_replies.append({
+                    "id": str(n.get("databaseId") or ""),
+                    "updatedAt": (n.get("updatedAt") or ""),
+                    "createdAt": (n.get("createdAt") or ""),
+                    "body": n.get("body") or "",
+                    "author": _reply_author_login,
+                    "commit_id": _n_commit_oid,
+                })
+            _page_info = _comments.get("pageInfo")
+            if not isinstance(_page_info, dict):
+                _pagination_failed = True
+                break
+            if not _page_info.get("hasNextPage"):
+                _cursor = None
+                break
+            _cursor = _page_info.get("endCursor")
+            if not _cursor:
+                _pagination_failed = True
+                break
+        else:
+            # The ``for/else`` fires only if the loop ran to
+            # completion (cap exhausted before
+            # ``hasNextPage == False``).
+            _pagination_failed = True
+        if _pagination_failed:
+            snap["review_thread_pagination_complete"] = False
+            snap["review_thread_pagination_failed"] = True
+            truncated_thread_ids.append(_tid)
+            _evidence.pop("_comments_has_next", None)
+            _evidence.pop("_comments_end_cursor", None)
+            continue
+        if _extra_replies:
+            # Concatenate the extra replies to the inline first-
+            # page replies. The inline first-page replies
+            # captured only ``comments_nodes[1:]`` (i.e. excludes
+            # the first comment which is the thread anchor);
+            # ``_extra_replies`` already excludes the first
+            # comment on every page (each page's first node is
+            # the cursor anchor, NOT a new reply).
+            existing = list(_evidence.get("replies") or [])
+            _evidence["replies"] = existing + _extra_replies
+            # ``comment_count`` already counts the first
+            # comment + inline replies; we ADD the extra replies.
+            existing_count = int(_evidence.get("comment_count") or 1)
+            _evidence["comment_count"] = existing_count + len(_extra_replies)
+        # Round-C22R2/P1: prefer the durable FindingLedger's
+        # ``superseded_repair_transition`` record over the
+        # C22-R1 git-ancestry-derived boundary. The audit
+        # explicitly rejected git-ancestry as the
+        # authoritative evidence (an unrelated docs commit
+        # between the original anchor and the actual repair
+        # is still a descendant of the anchor). The
+        # supervisor plumbs the per-run orchestration state
+        # root and looks up ``thread:<tid>`` on the durable
+        # ledger. When the ledger has no record (e.g. this
+        # is the first time the thread has been seen) the
+        # rule fails closed via the C22-R2 eligibility
+        # helper; the snapshot records ``None`` and the
+        # helper rejects any follow-up as ineligible.
+        #
+        # The C22-R1 git-ancestry field is still stamped on
+        # the snapshot for diagnostic provenance — its value
+        # is no longer consulted by the eligibility helper.
+        if _outdated:
+            _anchor_oid = _evidence.get("commit_oid")
+            _current_head_sha = snap.get("head_sha")
+            _evidence["superseding_repair_committed_at"] = (
+                _git_superseding_repair_committed_at(
+                    _anchor_oid,
+                    _current_head_sha,
+                )
+            )
+            # Durable ledger lookup. Fail-closed: a missing
+            # or malformed ``state_root`` (e.g. when the
+            # supervisor runs against a fixture or before
+            # the orchestrator is initialised) does NOT
+            # propagate as a hard exception; the
+            # ``superseded_at`` field stays None and the
+            # C22-R2 helper rejects any follow-up. This
+            # preserves the canonical
+            # ``capture_live_snapshot`` "must not raise"
+            # contract.
+            # Round-C24-R2: ``superseded_by_head`` is exact-head
+            # IDENTITY evidence and is stamped whenever present;
+            # ``superseded_at`` is OPTIONAL supplemental TIME
+            # evidence (production rows legitimately omit it).
+            _durable = _superseded_repair_transition_for_thread(
+                thread_id=_tid,
+            )
+            if _durable is not None:
+                _evidence["superseded_by_head"] = _durable.get(
+                    "superseded_by_head"
+                )
+                _evidence["superseded_at"] = _durable.get(
+                    "superseded_at"
+                )
+                # Carry the directive_id into the snap as
+                # diagnostic provenance so downstream
+                # consumers can correlate the resurrection
+                # back to the directive that drove the head
+                # advance.
+                if _durable.get("directive_id"):
+                    _evidence["superseded_directive_id"] = (
+                        _durable["directive_id"]
+                    )
+        _evidence.pop("_comments_has_next", None)
+        _evidence.pop("_comments_end_cursor", None)
+    snap["truncated_thread_ids"] = truncated_thread_ids
     snap["review_threads"] = {
         tid: {
             "resolved": r,
@@ -12015,6 +13138,275 @@ def any_required_provider_in_progress(snap: dict) -> bool:
     return False
 
 
+def _evaluate_c23_required_blockers(
+    snap: dict, head_sha: str,
+) -> List[Dict[str, str]]:
+    """Round-C23 readiness gate helper.
+
+    Returns the list of required-reviewer blockers that
+    disqualify the snapshot from qualification. A blocker is
+    a provider whose plan is NOT_NEEDED-FAIL (anything other
+    than ``NOT_NEEDED``) AND whose policy marks it as
+    required. The caller (``evaluate_readiness``) renders
+    this list into the ``required_reviewer_pending`` reason.
+
+    The plan values that block readiness are:
+
+    - ``REQUEST``: AutoDev has just dispatched a review
+      request for this provider; the request is in flight
+      (the durable ledger record is REQUEST_INTENT /
+      REQUEST_SENT / ACKNOWLEDGED). The required reviewer's
+      terminal evidence is not yet on the current head, so
+      readiness must wait.
+    - ``WAITING_FOR_AUTO``: the provider may auto-run on
+      the next push (grace period not yet expired) or an
+      earlier request is within its cooldown window.
+    - ``BLOCK``: budget exhausted, policy disallows
+      trigger, or ``max_requests_per_head`` reached. The
+      canonical fail-closed state.
+
+    ``NOT_NEEDED`` is the only non-blocking action; it
+    means the provider has fresh exact-head evidence and no
+    further work is required.
+
+    The planner pre-stamps ``snap["reviewer_plan"]`` on every
+    snapshot. When the planner is unavailable (test fixtures,
+    legacy callers) the snapshot has no ``reviewer_plan``
+    field and this function returns ``[]`` (no blockers).
+    """
+    if not isinstance(snap, dict):
+        return []
+    plan = snap.get("reviewer_plan")
+    if not isinstance(plan, dict):
+        return []
+    blockers: List[Dict[str, str]] = []
+    for provider, entry in plan.items():
+        if not isinstance(entry, dict):
+            continue
+        action = entry.get("action")
+        if action == "NOT_NEEDED":
+            continue
+        # Round-C24-R2 / CodeRabbit CR-006: only REQUIRED providers
+        # block qualification. The planner stamps the phase-resolved
+        # required flag on every plan entry; an optional provider's
+        # WAITING_FOR_AUTO / BLOCK is informational and must never
+        # stall readiness (the docstring contract this gate had
+        # dropped).
+        if entry.get("required") is False:
+            continue
+        blockers.append({
+            "provider": str(provider),
+            "action": str(action),
+            "reason": str(entry.get("reason") or ""),
+        })
+    return blockers
+
+
+def apply_reviewer_plan(
+    snap: dict,
+    *,
+    head_sha: Optional[str] = None,
+    ledger_path: Optional["Path"] = None,
+    post_review_request_fn=None,
+) -> Dict[str, Any]:
+    """Round-C23 heartbeat helper: compute the per-provider
+    trigger plan for the current head, apply REQUEST actions
+    through ``post_review_request`` (when provided), and
+    stamp the result on ``snap["reviewer_plan"]`` so
+    ``evaluate_readiness`` can fail-closed when a required
+    reviewer is missing or stalled.
+
+    The helper is intentionally a thin orchestration layer
+    on top of :class:`ReviewerPolicy` and
+    :func:`plan_reviewer_actions`. It does not call
+    ``post_review_request`` itself when the caller has not
+    supplied a ``post_review_request_fn``; test fixtures use
+    this mode to verify planner decisions without exercising
+    the supervisor's canonical review-request seam.
+
+    Returns the applied plan (same shape that
+    ``plan_reviewer_actions`` returns) so callers can log /
+    emit metrics without re-reading the snapshot.
+    """
+    from autocoder_supervisor.reviewer_policy import (
+        ReviewerPolicy,
+        load_policies_from_providers,
+        plan_reviewer_actions,
+    )
+    if not isinstance(snap, dict):
+        return {}
+    head = head_sha or snap.get("head_sha")
+    if not isinstance(head, str) or not head:
+        snap["reviewer_plan"] = {}
+        return {}
+    # Round-C23R1: resolve the phase from the per-run
+    # ``state.json`` journal (durable signal: ``control_plane.repair_pushed``
+    # entries). The default is ``PHASE_INITIAL_HEAD``; the
+    # supervisor's heartbeat loop passes the live
+    # orchestrator state root so production deployments
+    # see the correct phase on every slice.
+    from autocoder_supervisor.reviewer_policy import (
+        PHASE_INITIAL_HEAD,
+        resolve_phase as _resolve_phase,
+    )
+    state_root_path = None
+    try:
+        from .orchestration_state_root import (
+            resolve_orchestration_state_root,
+        )
+        state_root_path = resolve_orchestration_state_root(
+            run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
+            expected_repo=f"{REPO_OWNER}/{REPO_NAME}",  # type: ignore[name-defined]
+            expected_pr_number=int(PR_NUMBER),  # type: ignore[name-defined]
+        )
+        if not isinstance(state_root_path, str):
+            state_root_path = None
+    except Exception:
+        state_root_path = None
+    # Round-C24 / Defect 6: load superseded records BEFORE
+    # resolving phase so the documented fallback path
+    # (``has_any_superseded_request``) is available. The
+    # audit's P1 finding showed the prior ordering loaded
+    # the records only AFTER phase resolution, so a repair
+    # head whose ``state.json`` was unreadable / legacy
+    # resolved ``INITIAL_HEAD`` and CodeRabbit was
+    # incorrectly re-required.
+    superseded_records: List[dict] = []
+    if REVIEW_REQUESTS_DIR is not None:  # type: ignore[name-defined]
+        try:
+            for p in Path(REVIEW_REQUESTS_DIR).glob(  # type: ignore[name-defined]
+                "*.superseded.json"
+            ):
+                try:
+                    candidate = json.loads(p.read_text())
+                    if not isinstance(candidate, dict):
+                        continue
+                    stale_head = candidate.get("stale_head")
+                    next_head = candidate.get("superseded_by_head")
+                    if (
+                        candidate.get("lifecycle") != "SUPERSEDED"
+                        or not isinstance(candidate.get("provider"), str)
+                        or not isinstance(stale_head, str)
+                        or not _HEX_SHA_RE.match(stale_head)
+                        or not isinstance(next_head, str)
+                        or not _HEX_SHA_RE.match(next_head)
+                    ):
+                        continue
+                    superseded_records.append(candidate)
+                except Exception:
+                    continue
+        except Exception:
+            superseded_records = []
+    phase = _resolve_phase(
+        state_root=(
+            Path(state_root_path) if state_root_path else None
+        ),
+        # The audit requires this fallback to fire when the
+        # journal is unreadable or legacy. A malformed
+        # superseded record (parse error / schema drift)
+        # must NOT itself force the phase to REPAIR_HEAD;
+        # we only count records that passed the canonical schema and
+        # full-SHA binding checks above.
+        has_any_superseded_request=bool(superseded_records),
+    )
+    # The C23 directive fixes the per-provider
+    # ``required`` / ``auto_trigger`` semantics for this
+    # repository (codex MUST be required; sourcery is
+    # optional; coderabbit is required + initial-only
+    # budget). Override the loader's
+    # ``required_for_final_merge`` inheritance so the C23
+    # contract is not silently weakened by the existing
+    # round-32 ``PROVIDERS`` schema.
+    c23_overrides = {
+        "codex": {
+            "required": True,
+            "auto_trigger": True,
+            "max_requests_per_head": 1,
+        },
+        "sourcery": {
+            "required": False,
+            "auto_trigger": False,
+            "max_requests_per_head": 0,
+        },
+        "coderabbit": {
+            "required": True,
+            "auto_trigger": True,
+            "budget_per_pr": 1,
+            "max_requests_per_head": 1,
+        },
+    }
+    policies = load_policies_from_providers(
+        PROVIDERS,  # type: ignore[name-defined]
+        overrides=c23_overrides,
+    )
+    if not policies:
+        # No provider config: skip C23 (legacy behaviour
+        # preserved).
+        snap["reviewer_plan"] = {}
+        return {}
+    # ``superseded_records`` was already loaded BEFORE phase
+    # resolution (Round-C24 / Defect 6). Reuse the same list
+    # here for ``plan_reviewer_actions``'s per-head cap
+    # accounting so the two reads are consistent.
+    ledger = ledger_path
+    if ledger is None and REVIEW_REQUESTS_DIR is not None:  # type: ignore[name-defined]
+        ledger = Path(REVIEW_REQUESTS_DIR)  # type: ignore[name-defined]
+    plan = plan_reviewer_actions(
+        head_sha=head,
+        snap=snap,
+        policies=policies,
+        ledger_path=ledger,
+        superseded_records=superseded_records,
+        phase=phase,
+    )
+    # Apply REQUEST actions through the canonical
+    # review-request seam. We only fire requests for the
+    # FIRST occurrence per supervisor slice — the planner's
+    # dedup rules (``max_requests_per_head`` + cooldown)
+    # already gate the duplicate-trigger path.
+    dispatched: Dict[str, bool] = {}
+    for provider, plan_entry in plan.items():
+        if plan_entry.action != "REQUEST":
+            continue
+        if post_review_request_fn is None:
+            # Caller does not want to actually trigger; the
+            # plan records REQUEST but ``dispatched`` stays
+            # ``False`` so test fixtures can distinguish.
+            continue
+        try:
+            ok = bool(
+                post_review_request_fn(provider=provider, head_sha=head)
+            )
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            log(
+                "warning",
+                "apply_reviewer_plan: post_review_request raised",
+                provider=provider,
+                error=str(exc)[:200],
+            )
+        dispatched[provider] = ok
+    # Stamp the plan on the snapshot for ``evaluate_readiness``
+    # and audit consumers. The dict form is JSON-serialisable
+    # so the supervisor's existing audit ledger can store it.
+    #
+    # Round-C24 / Defect 5: ``dict(plan_entry.__dict__)`` is a
+    # shallow conversion. ``FreshnessResult`` is a frozen
+    # dataclass; ``json.dumps`` rejects it with
+    # ``TypeError: Object of type FreshnessResult is not JSON
+    # serializable``. ``dataclasses.asdict`` recursively
+    # converts every nested dataclass to a plain dict so the
+    # snapshot is JSON-native end-to-end.
+    import dataclasses as _dataclasses
+    snap["reviewer_plan"] = {
+        provider: _dataclasses.asdict(plan_entry)
+        for provider, plan_entry in plan.items()
+    }
+    for provider, ok in dispatched.items():
+        snap["reviewer_plan"][provider]["dispatched"] = ok
+    return snap["reviewer_plan"]
+
+
 def evaluate_readiness(
     snap: dict, head: Optional[str] = None,
 ) -> dict:
@@ -12034,6 +13426,47 @@ def evaluate_readiness(
             "reason": "thread_pagination_failed",
             "pagination_complete": snap.get(
                 "review_threads_pagination_complete"
+            ),
+        }
+    # Round-C22R2/P2: inner per-thread comments/replies
+    # pagination failure also blocks readiness. The
+    # singular ``review_thread_pagination_failed`` flag
+    # is set by ``capture_live_snapshot``'s post-processing
+    # pass when ANY thread's per-thread ``comments``
+    # connection could not be walked to completion (cap
+    # exhausted before ``hasNextPage == False``, or
+    # transport error). When this flag fires, a qualifying
+    # reviewer follow-up on a >25-comment thread can be
+    # missing from the snapshot's ``review_threads.replies``
+    # list, and the relay's eligibility rule cannot
+    # evaluate it. The same fail-closed reasoning that
+    # applies to the outer thread-list pagination applies
+    # here: incomplete inventory MUST NOT be classified as
+    # clean. The legacy plural flag above covers the outer
+    # pagination; this branch covers the inner pagination.
+    if snap.get("review_thread_pagination_failed"):
+        return {
+            "ready": False,
+            "reason": "inner_thread_pagination_failed",
+            "pagination_complete": snap.get(
+                "review_thread_pagination_complete"
+            ),
+            "truncated_thread_ids": list(
+                snap.get("truncated_thread_ids") or []
+            ),
+        }
+    # Round-C22R2/P2: a non-empty ``truncated_thread_ids``
+    # list with the failure flag unset (e.g. a partial
+    # transport error that did not increment the boolean)
+    # still signals an incomplete inventory. The readiness
+    # gate fails closed so the relay cannot promote
+    # readiness on a partial reply inventory.
+    if snap.get("truncated_thread_ids"):
+        return {
+            "ready": False,
+            "reason": "inner_thread_pagination_truncated",
+            "truncated_thread_ids": list(
+                snap.get("truncated_thread_ids") or []
             ),
         }
     # Round-117 P1: fail closed when provider surface
@@ -12091,6 +13524,36 @@ def evaluate_readiness(
         return {
             "ready": False,
             "reason": "required_provider_in_progress",
+        }
+    # Round-C23: per-provider exact-head freshness. A
+    # required reviewer that is missing or anchored to a
+    # prior head MUST block qualification; AutoDev may have
+    # issued a request, but the reviewer evidence is not yet
+    # present on the current head. The plan is stamped on
+    # the snapshot by ``apply_reviewer_plan`` (the supervisor
+    # heartbeat loop's pre-readiness pass); when the planner
+    # is not available this branch is a no-op (the snapshot's
+    # ``reviewer_plan`` field is optional).
+    _c23_required_blockers = _evaluate_c23_required_blockers(
+        snap, h,
+    )
+    # Round-C24-R1 / P1-C: fail-closed when the planner raised
+    # or did not stamp the snapshot. ``reviewer_plan_failed``
+    # is set by the readiness callers when ``apply_reviewer_plan``
+    # raised (or the snapshot has no ``reviewer_plan`` field
+    # at all). Production readiness MUST NOT promote without
+    # a successful plan.
+    if snap.get("reviewer_plan_failed"):
+        return {
+            "ready": False,
+            "reason": "reviewer_plan_failed_or_missing",
+            "blockers": _c23_required_blockers,
+        }
+    if _c23_required_blockers:
+        return {
+            "ready": False,
+            "reason": "required_reviewer_pending",
+            "required_reviewer_blockers": _c23_required_blockers,
         }
     if ci_state == CI_POLICY_NO_REQUIRED_CHECKS:
         return {
@@ -12814,6 +14277,51 @@ def active_repair_quiet_window(
             head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
         )
         return "escalation"
+    # Round-C24-R1 / P1-C: the C23 reviewer plan MUST be
+    # applied to the snapshot BEFORE ``evaluate_readiness``
+    # runs. Without this, a head can enter PROVISIONAL_READY
+    # while:
+    #   - a required Codex review is missing;
+    #   - a Codex request is still in flight;
+    #   - the planner raised an exception.
+    # The audit's P1-C finding identified this false-readiness
+    # window. The plan stamps ``snap_b["reviewer_plan"]`` and
+    # dispatches REQUEST actions. ``evaluate_readiness`` then
+    # inspects the stamped plan and fails closed when any
+    # required provider is missing / pending / REQUEST.
+    try:
+        apply_reviewer_plan(
+            snap_b,
+            head_sha=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+            post_review_request_fn=post_review_request,  # type: ignore[name-defined]
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Fail-closed: if the planner raises, the readiness
+        # gate MUST NOT promote. The caller (the heartbeat
+        # loop) treats the qualifying interval as
+        # interrupted and the next round re-attempts. We log
+        # and explicitly do NOT call ``enter_readiness``.
+        log(
+            "error",
+            "active_repair_quiet_window: apply_reviewer_plan raised; "
+            "refusing to evaluate readiness",
+            error=str(exc)[:200],
+            head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+        )
+        return None
+    # Also fail-closed when the planner produced no plan at
+    # all (defensive: catch the case where
+    # ``apply_reviewer_plan`` returned normally but the
+    # snapshot has no ``reviewer_plan`` field — a missing
+    # plan MUST block readiness, not silently allow it).
+    if not snap_b.get("reviewer_plan"):
+        log(
+            "warning",
+            "active_repair_quiet_window: reviewer plan missing after "
+            "apply_reviewer_plan; refusing to evaluate readiness",
+            head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+        )
+        return None
     result = evaluate_readiness(
         snap_b, AUTHORITATIVE_HEAD  # type: ignore[name-defined]
     )
@@ -15947,6 +17455,41 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             elif cur_state in READINESS_STATES:
                 snap_now = capture_live_snapshot(rs, token or "")
+                # Round-C23: stamp the reviewer plan on the
+                # snapshot BEFORE the readiness gate so a
+                # missing required reviewer blocks
+                # qualification. The plan applies REQUEST
+                # actions through the canonical
+                # ``post_review_request`` seam when one is
+                # available; production callers supply the
+                # real seam, test fixtures supply None.
+                try:
+                    apply_reviewer_plan(
+                        snap_now,
+                        head_sha=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                        post_review_request_fn=post_review_request,  # type: ignore[name-defined]
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # Round-C24-R1 / P1-C: fail-closed. If the
+                    # planner raises, the readiness gate MUST
+                    # NOT promote. The audit's P1-C finding
+                    # identified this fail-open window.
+                    log(
+                        "error",
+                        "READINESS_STATES branch: apply_reviewer_plan raised; "
+                        "refusing to evaluate readiness",
+                        error=str(exc)[:200],
+                        head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                    )
+                    snap_now["reviewer_plan_failed"] = True
+                if not snap_now.get("reviewer_plan"):
+                    log(
+                        "warning",
+                        "READINESS_STATES branch: reviewer plan missing; "
+                        "refusing to evaluate readiness",
+                        head=AUTHORITATIVE_HEAD,  # type: ignore[name-defined]
+                    )
+                    snap_now["reviewer_plan_failed"] = True
                 reasons = snapshot_differs(
                     read_snapshot("A"), snap_now,
                     AUTHORITATIVE_HEAD,  # type: ignore[name-defined]

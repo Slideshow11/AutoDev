@@ -283,6 +283,28 @@ class WorkerAttemptRecord:
     github_head_verified: bool
     terminal_reason: Optional[str]
     extra: dict[str, Any] = field(default_factory=dict)
+    # Round-C24-R1 / P1-A: authoritative push-success
+    # timestamp captured by the supervisor's canonical
+    # ``gh pr view`` fetch at the moment it positively
+    # verifies ``pushed_commit_sha == live_head``. This
+    # is ``head.repo.pushed_at`` from GitHub's PR payload;
+    # it is the actual git-push event time and is
+    # trustworthy (the worker result envelope's
+    # ``completed_at`` is NOT the push time and must
+    # never be used as a substitute). Optional for
+    # backward compatibility (default ``None``).
+    push_succeeded_at: Optional[str] = None
+    # Round-C22R2/P1: optional relay directive UUID that drove
+    # the worker push. The supervisor's
+    # ``mark_head_advanced_public`` reads this and passes it
+    # to ``loop.mark_head_advanced(directive_id=...)`` so the
+    # SUPERSEDED rows of the finding ledger carry the
+    # authoritative repair-transition provenance. Optional
+    # (with default ``None``) so existing serialized attempt
+    # records without this field continue to parse via
+    # ``from_dict``. Placed after every non-default field so
+    # the dataclass field-order contract is preserved.
+    directive_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         d = asdict(self)
