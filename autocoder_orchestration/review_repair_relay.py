@@ -1507,6 +1507,27 @@ def _c22_is_followup_eligible(
     # inference that the audit invalidated in §1
     # (repo.pushed_at is the repo-level, not the PR-branch,
     # push time).
+    # Round-C24-R2 / CodeRabbit CR-002: R3 is evaluated BEFORE the
+    # exact-head binding branch. A status marker bound to the new
+    # head (e.g. a "Walkthrough" reply whose ``commit_id`` equals
+    # ``superseding_head``) must NOT resurrect an outdated thread;
+    # the previous ordering returned True from the exact-head branch
+    # before the actionable-body check ran (false-positive
+    # resurrection path).
+    # R3: actionable body — not a status marker.
+    body = str(followup.get("body") or "")
+    if not _is_actionable_provider_comment(body):
+        return False
+    # Round-C24-R2 / P1-A: exact-head follow-up binding.
+    # When the follow-up evidence is bound to the new
+    # superseding head (``commit_id`` or
+    # ``original_commit_id`` equals ``superseding_head``),
+    # the follow-up is provably post-repair regardless of
+    # the wall-clock timestamp. The audit's preferred
+    # exact-head identity contract replaces the wall-clock
+    # inference that the audit invalidated in §1
+    # (repo.pushed_at is the repo-level, not the PR-branch,
+    # push time).
     if superseding_head:
         cmt = (
             followup.get("commit_id")
@@ -1524,10 +1545,6 @@ def _c22_is_followup_eligible(
             else:
                 return False
     if followup_ts <= repair_transition_ts:
-        return False
-    # R3: actionable body — not a status marker.
-    body = str(followup.get("body") or "")
-    if not _is_actionable_provider_comment(body):
         return False
     return True
 

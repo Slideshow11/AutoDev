@@ -136,13 +136,13 @@
     },
     {
       "destination_path": "autocoder_supervisor/supervisor.py",
-      "destination_sha256": "31d5bea2bb2413225019a72cd0972f53e432bbb6ce299dcc6b573e25f57028de",
-      "destination_size_bytes": 728589,
+      "destination_sha256": "f288ce57b70a82ef454cbaa9be8a37f885e3ef469129da3ff36a78ec4e3a962a",
+      "destination_size_bytes": 729009,
       "source_path": "scripts/local/autocoder_supervisor/supervisor.py",
       "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
       "source_size_bytes": 86428,
       "transformation_classification": "path_only",
-      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null). | Round-C24-R1: bootstrap initial state to QUALIFYING_READINESS, host-global bootstrap lock, P1-A push_succeeded_at capture, P1-C reviewer-plan fail-closed."
+      "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null). | Round-C24-R1: bootstrap initial state to QUALIFYING_READINESS, host-global bootstrap lock, P1-A push_succeeded_at capture, P1-C reviewer-plan fail-closed. Round-C24-R2 CodeRabbit independent review: _evaluate_c23_required_blockers filters on the phase-resolved required flag; apply_reviewer_plan stamps required into ReviewerTriggerPlan."
     },
     {
       "destination_path": "autocoder_supervisor/validate.py",
@@ -442,5 +442,5 @@
     "merge_method": "squash",
     "schema": "autocoder.pr417.merge_terminal_evidence.v1"
   },
-  "updated_at_utc": "2026-08-07T03:28:00Z"
+  "updated_at_utc": "2026-08-21T04:08:31Z"
 }

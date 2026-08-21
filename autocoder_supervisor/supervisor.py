@@ -13075,6 +13075,14 @@ def _evaluate_c23_required_blockers(
         action = entry.get("action")
         if action == "NOT_NEEDED":
             continue
+        # Round-C24-R2 / CodeRabbit CR-006: only REQUIRED providers
+        # block qualification. The planner stamps the phase-resolved
+        # required flag on every plan entry; an optional provider's
+        # WAITING_FOR_AUTO / BLOCK is informational and must never
+        # stall readiness (the docstring contract this gate had
+        # dropped).
+        if entry.get("required") is False:
+            continue
         blockers.append({
             "provider": str(provider),
             "action": str(action),

@@ -745,9 +745,20 @@ def check_provider_freshness(
     head_sha: str,
     ledger_path: Optional[Path] = None,
     now: Optional[float] = None,
+    required_override: Optional[bool] = None,
 ) -> FreshnessResult:
     """Round-C23 freshness check for one provider on the
     current exact head.
+
+    ``required_override`` (Round-C24-R2 / CodeRabbit CR-003 fix):
+    when provided, it replaces ``policy.required`` for every
+    freshness decision in this call. The planner resolves the
+    PHASE-aware required flag via ``policy.value_for_phase`` and
+    passes it here; reading the legacy scalar directly would let a
+    deployment with ``required=False`` +
+    ``phase_required={INITIAL_HEAD: True}`` be classified
+    ``OPTIONAL_STALE`` on the initial head, producing a spurious
+    ``NOT_NEEDED`` before any phase-aware logic runs (fail-open).
 
     Returns a :class:`FreshnessResult` whose ``state`` is one of
     the ``FRESHNESS_*`` constants.
@@ -773,10 +784,20 @@ def check_provider_freshness(
        AutoDev should request one.
     """
     now_ts = float(now) if now is not None else time.time()
+    # Round-C24-R2 / CodeRabbit CR-003: the effective required flag
+    # is the phase-resolved value supplied by the planner (which
+    # resolves ``policy.value_for_phase("required", phase)``); when
+    # no override is supplied (direct callers / legacy tests) fall
+    # back to the legacy scalar.
+    required_now = (
+        bool(required_override)
+        if required_override is not None
+        else bool(policy.required)
+    )
     if not isinstance(head_sha, str) or not head_sha:
         return FreshnessResult(
             provider=provider,
-            state=FRESHNESS_PENDING if policy.required else FRESHNESS_OPTIONAL_STALE,
+            state=FRESHNESS_PENDING if required_now else FRESHNESS_OPTIONAL_STALE,
             reason="missing_head_sha",
         )
     # Read the canonical ``snap["providers"]`` block first.
@@ -833,7 +854,7 @@ def check_provider_freshness(
         # STALE only when the policy requires exact-head
         # binding.
         if record.get("kind") == "formal_review_unbound":
-            if policy.required:
+            if required_now:
                 return FreshnessResult(
                     provider=provider,
                     state=FRESHNESS_STALE,
@@ -895,7 +916,7 @@ def check_provider_freshness(
                 reason="request_in_flight_grace_elapsed",
             )
     # No provider evidence, no in-flight request.
-    if policy.required:
+    if required_now:
         # Required providers missing fresh exact-head evidence
         # return PENDING so the planner knows to issue a
         # request (subject to grace + budget).
@@ -942,6 +963,12 @@ class ReviewerTriggerPlan:
     last_lifecycle: Optional[str] = None
     request_id: Optional[str] = None
     freshness: Optional[FreshnessResult] = None
+    # Round-C24-R2 / CodeRabbit CR-006: the phase-resolved required
+    # flag, stamped by the planner so the readiness gate can filter
+    # optional providers out of the required-reviewer blockers.
+    # Survives ``dataclasses.asdict`` so the stamped snapshot plan
+    # carries it into ``_evaluate_c23_required_blockers``.
+    required: bool = False
 
 
 def _count_active_request_records(
@@ -996,8 +1023,14 @@ def _count_active_request_records(
         if not isinstance(s, dict):
             continue
         s_provider = s.get("provider")
+        # Round-C24-R2 / CodeRabbit CR-004: the supervisor persists
+        # superseded records with the head under ``stale_head``
+        # (see supervisor._persist_superseded_record). Accept it as
+        # the primary key; keep ``superseded_head`` / ``head_sha`` as
+        # compatibility aliases for older fixtures.
         s_head = (
-            s.get("superseded_head")
+            s.get("stale_head")
+            or s.get("superseded_head")
             or s.get("head_sha")
             or ""
         )
@@ -1122,6 +1155,14 @@ def plan_reviewer_actions(
     Defect B fix).
     """
     superseded = list(superseded_records or [])
+    # Round-C24-R2 / CodeRabbit CR-005: resolve the wall clock once
+    # so the cooldown branch is ACTIVE in production. The supervisor's
+    # ``apply_reviewer_plan`` calls this planner without ``now``; the
+    # previous code skipped the cooldown entirely in that case, letting
+    # a failed remote mutation re-issue REQUEST on every heartbeat
+    # slice (duplicate-request risk). Mirrors
+    # check_provider_freshness' default.
+    now_ts = float(now) if now is not None else time.time()
     plans: Dict[str, ReviewerTriggerPlan] = {}
     for provider, policy in policies.items():
         # Round-C23R1: phase-aware resolution of the four
@@ -1154,6 +1195,13 @@ def plan_reviewer_actions(
             head_sha=head_sha,
             ledger_path=ledger_path,
             now=now,
+            # Round-C24-R2 / CodeRabbit CR-003: keep the freshness
+            # decision phase-aware. Reading the legacy scalar here
+            # let ``required=False`` +
+            # ``phase_required={INITIAL_HEAD: True}`` deployments be
+            # classified OPTIONAL_STALE and short-circuit to
+            # NOT_NEEDED before any phase-aware logic ran.
+            required_override=required,
         )
         # 1. Fresh -> NOT_NEEDED. The freshness contract is
         # exact-head-only; an exact-head review (priority
@@ -1164,6 +1212,7 @@ def plan_reviewer_actions(
                 action="NOT_NEEDED",
                 reason="fresh_exact_head_review",
                 freshness=freshness,
+                required=required,
             )
             continue
         # 2. BLOCKED_BUDGET → honor phase-resolved ``required`` +
@@ -1185,6 +1234,7 @@ def plan_reviewer_actions(
                     action="NOT_NEEDED",
                     reason="optional_provider_paused_acceptable",
                     freshness=freshness,
+                    required=required,
                 )
                 continue
             plans[provider] = ReviewerTriggerPlan(
@@ -1192,15 +1242,28 @@ def plan_reviewer_actions(
                 action="BLOCK",
                 reason="provider_paused_quota",
                 freshness=freshness,
+                required=required,
             )
             continue
         # 3. Optional + OPTIONAL_STALE -> NOT_NEEDED.
+        #    Round-C24-R2: preserve the finer-grained diagnostic
+        #    reason when the phase explicitly disables this
+        #    provider (budget/max-per-head == 0); the generic
+        #    stale-acceptable reason otherwise. The ACTION is
+        #    identical in all three cases.
         if freshness.state == FRESHNESS_OPTIONAL_STALE:
+            if budget_per_pr == 0:
+                _stale_reason = "phase_disabled_optional_provider"
+            elif max_per_head == 0:
+                _stale_reason = "phase_per_head_disabled_optional_provider"
+            else:
+                _stale_reason = "optional_provider_stale_acceptable"
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
                 action="NOT_NEEDED",
-                reason="optional_provider_stale_acceptable",
+                reason=_stale_reason,
                 freshness=freshness,
+                required=required,
             )
             continue
         # 4. STALE on a required provider -> REQUEST.
@@ -1238,6 +1301,7 @@ def plan_reviewer_actions(
                     action="NOT_NEEDED",
                     reason="phase_disabled_optional_provider",
                     freshness=freshness,
+                    required=required,
                 )
                 continue
             # ``required=True`` with ``budget_per_pr=0`` is
@@ -1248,6 +1312,7 @@ def plan_reviewer_actions(
                 action="BLOCK",
                 reason="phase_required_with_zero_budget",
                 freshness=freshness,
+                required=required,
             )
             continue
         if max_per_head == 0:
@@ -1261,6 +1326,7 @@ def plan_reviewer_actions(
                     action="NOT_NEEDED",
                     reason="phase_per_head_disabled_optional_provider",
                     freshness=freshness,
+                    required=required,
                 )
                 continue
             plans[provider] = ReviewerTriggerPlan(
@@ -1268,6 +1334,7 @@ def plan_reviewer_actions(
                 action="BLOCK",
                 reason="phase_per_head_disabled_required_provider",
                 freshness=freshness,
+                required=required,
             )
             continue
         # Per-head dedup: ``max_per_head`` caps how many
@@ -1285,6 +1352,7 @@ def plan_reviewer_actions(
                 last_lifecycle=last_lifecycle,
                 request_id=request_id,
                 freshness=freshness,
+                required=required,
             )
             continue
         # Lifetime budget: ``budget_per_pr`` (None = unlimited).
@@ -1301,6 +1369,7 @@ def plan_reviewer_actions(
                 last_lifecycle=last_lifecycle,
                 request_id=request_id,
                 freshness=freshness,
+                required=required,
             )
             continue
         # Cooldown: reject immediate retries when the last
@@ -1310,8 +1379,7 @@ def plan_reviewer_actions(
         if (
             last_ts is not None
             and policy.request_cooldown_seconds > 0
-            and now is not None
-            and (now - last_ts) < policy.request_cooldown_seconds
+            and (now_ts - last_ts) < policy.request_cooldown_seconds
         ):
             plans[provider] = ReviewerTriggerPlan(
                 provider=provider,
@@ -1321,6 +1389,7 @@ def plan_reviewer_actions(
                 last_lifecycle=last_lifecycle,
                 request_id=request_id,
                 freshness=freshness,
+                required=required,
             )
             continue
         # 6. The provider may be triggered (auto_trigger)
@@ -1333,6 +1402,7 @@ def plan_reviewer_actions(
                 ),
                 reason="policy_disallows_auto_trigger",
                 freshness=freshness,
+                required=required,
             )
             continue
         # 7. Optional + pending/stale: don't request, but also
@@ -1343,6 +1413,7 @@ def plan_reviewer_actions(
                 action="NOT_NEEDED",
                 reason="optional_provider_no_trigger",
                 freshness=freshness,
+                required=required,
             )
             continue
         # 8. Required + STALE/PENDING + auto_trigger: REQUEST.
@@ -1358,6 +1429,7 @@ def plan_reviewer_actions(
             last_lifecycle=last_lifecycle,
             request_id=request_id,
             freshness=freshness,
+            required=required,
         )
     return plans
 

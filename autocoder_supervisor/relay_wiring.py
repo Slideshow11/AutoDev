@@ -516,7 +516,22 @@ def mark_head_advanced_public(
     from .orchestration_state_root import (
         resolve_orchestration_state_root,
     )
-    from .supervisor import RUN_STATE  # type: ignore[name-defined]
+    from .supervisor import (  # type: ignore[name-defined]
+        PR_NUMBER,
+        REPO_NAME,
+        REPO_OWNER,
+        RUN_STATE,
+    )
+
+    # Round-C24-R2 / CodeRabbit CR-001 fix: this module previously
+    # referenced ``REPO_OWNER`` / ``REPO_NAME`` / ``PR_NUMBER`` without
+    # defining or importing them. The resulting NameError escaped the
+    # narrow ``(AttributeError, TypeError, ValueError)`` handler below,
+    # so every verified repair push failed to record
+    # ``report_repair_pushed`` and the controller never advanced
+    # REPAIRING_REVIEW_FINDINGS -> AWAITING_CI. Import the canonical
+    # supervisor globals explicitly so the authoritative pushed_at
+    # fetch can execute on the normal path.
 
     # Round-36: validate positive worker-attempt provenance BEFORE
     # touching the controller state machine. Without this check a

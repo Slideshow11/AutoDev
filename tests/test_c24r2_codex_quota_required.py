@@ -186,6 +186,10 @@ class TestReadinessBlockedByRequiredCodex:
                     action="BLOCK",
                     reason="provider_paused_quota",
                     freshness=plan["codex"].freshness,
+                    # Round-C24-R2: the readiness gate filters
+                    # blockers on the phase-resolved required flag;
+                    # Codex is REQUIRED in this scenario.
+                    required=True,
                 ),
             ),
         }
