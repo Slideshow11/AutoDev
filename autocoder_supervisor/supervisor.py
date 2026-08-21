@@ -782,11 +782,28 @@ def _reconcile_orchestration_state_root_at_boot() -> str:
         )
         if existing:
             if env_root:
-                context_payload = json.loads(
-                    (Path(existing) / "run_context.json").read_text(
-                        encoding="utf-8"
+                # Round-C24-R2 / CodeRabbit pass-2: the resolver
+                # verified the root, but this re-read of
+                # ``run_context.json`` is a separate disk access. A
+                # concurrent removal or truncation between the two
+                # steps raised OSError / json.JSONDecodeError out of
+                # this function and aborted supervisor boot (the
+                # caller has no handler). Fail closed to the same
+                # "no orch state root at boot" contract instead.
+                try:
+                    context_payload = json.loads(
+                        (Path(existing) / "run_context.json").read_text(
+                            encoding="utf-8"
+                        )
                     )
-                )
+                except (OSError, ValueError) as exc:
+                    log(
+                        "error",
+                        "round-C24: verified orchestration root became "
+                        "unreadable during re-persist; failing closed",
+                        error=str(exc)[:300],
+                    )
+                    return ""
                 persist_orchestration_state_root(
                     state_root=existing,
                     run_state_path=Path(RUN_STATE),  # type: ignore[name-defined]
@@ -2819,11 +2836,24 @@ def _git_superseding_repair_committed_at(
         )
         if r.returncode != 0:
             return None
-        first_line = (r.stdout or "").splitlines()[0].strip()
+        # Round-C24-R2 / CodeRabbit pass-2: ``git log`` exits 0 with
+        # EMPTY stdout when the anchor is not an ancestor of the
+        # current head (rebased-away thread anchor). Indexing
+        # ``splitlines()[0]`` there raised IndexError, which is NOT
+        # in the except tuple below, so it propagated out of this
+        # helper and crashed the documented must-not-raise
+        # ``capture_live_snapshot`` on every heartbeat. Guard the
+        # empty case explicitly and keep the None fail-closed
+        # contract.
+        lines = (r.stdout or "").splitlines()
+        if not lines:
+            return None
+        first_line = lines[0].strip()
         if not first_line:
             return None
         return int(first_line)
-    except (OSError, _sp.SubprocessError, _sp.TimeoutExpired, ValueError):
+    except (OSError, _sp.SubprocessError, _sp.TimeoutExpired,
+            ValueError, IndexError):
         return None
 
 
@@ -8464,12 +8494,32 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         os.environ.get("AED_SKIP_WORKER_AUTH_PREFLIGHT") != "1"
         and os.environ.get("AED_SKIP_IDENTITY_GUARD") != "1"
     ):
+        # Round-C24-R2 / CodeRabbit pass-2: guard the lazy import
+        # separately from the preflight call. Previously both lived
+        # in one ``try`` whose ``except`` clause evaluated
+        # ``WorkerRepoAuthUnavailable`` — a name the failed import
+        # never bound, so an ImportError (standalone launch mode,
+        # ``autocoder_supervisor`` absent from ``sys.path``) was
+        # replaced by a NameError that aborted ``launch_worker``.
         try:
             from .worker_auth_preflight import (
                 preflight_or_raise,
                 WorkerRepoAuthUnavailable,
             )
-            preflight_or_raise(repo_dir=Path(REPO_DIR))  # type: ignore[name-defined]
+        except ImportError as exc:
+            log(
+                "warning",
+                "worker_auth_preflight unavailable; skipping "
+                "preflight (module not importable)",
+                error=str(exc)[:200],
+            )
+            preflight_or_raise = None
+            WorkerRepoAuthUnavailable = ()
+        try:
+            if preflight_or_raise is not None:
+                preflight_or_raise(
+                    repo_dir=Path(REPO_DIR),  # type: ignore[name-defined]
+                )
         except WorkerRepoAuthUnavailable as exc:
             log(
                 "warning",
