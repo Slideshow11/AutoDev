@@ -525,6 +525,10 @@ def snapshot_env(monkeypatch, tmp_path: Path):
         os.chmod(p, 0o600)
 
     monkeypatch.setattr(sup, "STATE_DIR", state_dir)
+    # Round-C24-R2R3 residual hygiene: ``sup.log`` mkdirs/writes
+    # through SUPERVISOR_HOME; without this patch the fixture's
+    # logging leaks into the real supervisor home.
+    monkeypatch.setattr(sup, "SUPERVISOR_HOME", tmp_path)
     monkeypatch.setattr(sup, "RUN_STATE", run_state_path)
     monkeypatch.setattr(sup, "UNCONSUMED_EVENTS_PATH",
                         state_dir / "unconsumed_events.json")

@@ -7467,9 +7467,9 @@
         "destination_path": "autocoder_supervisor/supervisor.py",
         "transformation_classification": "path_only",
         "source_sha256": "11d738e8656961b5c17f4a75294352c8ee8574af1357c0ab82529d8c29d7f45a",
-        "destination_sha256": "71647b371a716aaaa8fba494a909fe880ccfc46ffc9c9ac375f8ca523747a176",
+        "destination_sha256": "e15ba3c74b0e8b258f07a339edc438332f49758c5e070509230a4a0b99a64d92",
         "source_size_bytes": 86428,
-        "destination_size_bytes": 733665,
+        "destination_size_bytes": 734644,
         "transformation_explanation": "Path re-pointed to standalone layout. Round-14 (this audit) extended launch_worker with try/except guards around build_resume_prompt and the configured worker_command template substitution, returning None on invalid templates. Round-15 added a null-data guard for the GraphQL review-threads pagination loop so the supervisor does not crash on a partial GraphQL response (data=null). | Round-C24-R1: bootstrap initial state to QUALIFYING_READINESS, host-global bootstrap lock, P1-A push_succeeded_at capture, P1-C reviewer-plan fail-closed. Round-C24-R2 CodeRabbit independent review: _evaluate_c23_required_blockers filters on the phase-resolved required flag; apply_reviewer_plan stamps required into ReviewerTriggerPlan."
       },
       {

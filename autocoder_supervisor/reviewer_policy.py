@@ -968,7 +968,16 @@ class ReviewerTriggerPlan:
     # optional providers out of the required-reviewer blockers.
     # Survives ``dataclasses.asdict`` so the stamped snapshot plan
     # carries it into ``_evaluate_c23_required_blockers``.
-    required: bool = False
+    # Round-C24-R2R3 / fail-closed default: ``required`` defaults to
+    # TRUE. The readiness gate skips only entries explicitly marked
+    # ``required=False``, so an unstamped plan (a future producer
+    # forgetting the flag) degrades to REQUIRED and blocks
+    # qualification instead of silently downgrading a required
+    # reviewer to an optional one. Optional providers (Sourcery,
+    # CodeRabbit on repair heads) MUST construct with
+    # ``required=False`` explicitly; the production planner stamps
+    # the phase-resolved value on every branch either way.
+    required: bool = True
 
 
 def _count_active_request_records(

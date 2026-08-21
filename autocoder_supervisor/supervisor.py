@@ -8494,13 +8494,24 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
         os.environ.get("AED_SKIP_WORKER_AUTH_PREFLIGHT") != "1"
         and os.environ.get("AED_SKIP_IDENTITY_GUARD") != "1"
     ):
-        # Round-C24-R2 / CodeRabbit pass-2: guard the lazy import
-        # separately from the preflight call. Previously both lived
-        # in one ``try`` whose ``except`` clause evaluated
-        # ``WorkerRepoAuthUnavailable`` — a name the failed import
-        # never bound, so an ImportError (standalone launch mode,
-        # ``autocoder_supervisor`` absent from ``sys.path``) was
-        # replaced by a NameError that aborted ``launch_worker``.
+        # Round-C24-R2R3 / fail-closed import guard: the lazy import
+        # is handled SEPARATELY from the preflight call. Two prior
+        # defects lived here:
+        #
+        #   1. (pass-1) import + call shared one ``try`` whose
+        #      ``except`` clause evaluated ``WorkerRepoAuthUnavailable``
+        #      — a failed import left that name unbound and replaced
+        #      the ImportError with a NameError.
+        #   2. (pass-2) the ImportError handler logged-and-continued
+        #      with ``preflight_or_raise = None``, which silently
+        #      DISABLED the production auth gate: a worker could
+        #      launch without any positive repo-write verification.
+        #
+        # The C24-R2 contract is: worker auth cannot be positively
+        # verified → the worker MUST NOT launch. An unavailable
+        # preflight module is not permission to skip the gate. The
+        # ONLY legal bypass remains the explicit non-production
+        # environment escape hatch checked above.
         try:
             from .worker_auth_preflight import (
                 preflight_or_raise,
@@ -8508,18 +8519,28 @@ def launch_worker(rs: dict, live: dict) -> Optional[dict]:
             )
         except ImportError as exc:
             log(
-                "warning",
-                "worker_auth_preflight unavailable; skipping "
-                "preflight (module not importable)",
+                "error",
+                "WORKER_REPO_AUTH_PREFLIGHT_UNAVAILABLE: refusing "
+                "worker launch; worker repo-write authorization "
+                "cannot be positively verified. Set "
+                "AED_SKIP_WORKER_AUTH_PREFLIGHT=1 ONLY in "
+                "non-production tests.",
                 error=str(exc)[:200],
             )
-            preflight_or_raise = None
-            WorkerRepoAuthUnavailable = ()
+            try:
+                stdout_fh.close()
+                stderr_fh.close()
+            except Exception:
+                pass
+            return None
+        # The import succeeded above, so ``WorkerRepoAuthUnavailable``
+        # is guaranteed bound here (no ImportError→NameError
+        # conversion is possible in standalone/synthetic-package
+        # launch mode).
         try:
-            if preflight_or_raise is not None:
-                preflight_or_raise(
-                    repo_dir=Path(REPO_DIR),  # type: ignore[name-defined]
-                )
+            preflight_or_raise(
+                repo_dir=Path(REPO_DIR),  # type: ignore[name-defined]
+            )
         except WorkerRepoAuthUnavailable as exc:
             log(
                 "warning",
